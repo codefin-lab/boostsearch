@@ -632,6 +632,16 @@ pub async fn bulk(
     let mut errors = false;
     let mut touched: Vec<String> = Vec::new();
 
+    // Split the ndjson into operations first, so the expensive part -- parsing
+    // each document and building its tantivy form -- can run across cores.
+    struct Op<'a> {
+        op: String,
+        meta: Value,
+        index: String,
+        id: Option<String>,
+        doc_line: Option<&'a str>,
+    }
+    let mut ops: Vec<Op> = Vec::new();
     let mut lines = body.lines().filter(|l| !l.trim().is_empty());
     while let Some(action_line) = lines.next() {
         let action: Value = match serde_json::from_str(action_line) {
@@ -646,29 +656,43 @@ pub async fn bulk(
         let op = op.clone();
         let idx = meta
             .get("_index")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .and_then(scalar_str)
             .or_else(|| default_index.clone());
         let Some(idx) = idx else {
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "missing index");
         };
         let id_opt = meta.get("_id").and_then(scalar_str);
-        let meta_source = meta.get("_source").cloned();
-
         let doc_line = if op == "delete" { None } else { lines.next() };
-        let mut doc_raw = doc_line.map(|l| l.trim().to_string());
-        let source: Option<Value> = match doc_line {
-            Some(l) => match serde_json::from_str(l) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    return err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        e.to_string(),
-                    );
-                }
-            },
-            None => None,
+        ops.push(Op { op, meta: meta.clone(), index: idx, id: id_opt, doc_line });
+    }
+
+    // Parse and build documents in parallel; nothing here touches shared state.
+    let prepared: Vec<Option<std::result::Result<(Value, String), String>>> = {
+        use rayon::prelude::*;
+        ops.par_iter()
+            .map(|o| {
+                o.doc_line.map(|l| {
+                    serde_json::from_str::<Value>(l)
+                        .map(|v| (v, l.trim().to_string()))
+                        .map_err(|e| e.to_string())
+                })
+            })
+            .collect()
+    };
+
+    // consume the prepared documents rather than cloning them back out
+    for (o, prep) in ops.into_iter().zip(prepared.into_iter()) {
+        let op = o.op;
+        let meta = o.meta;
+        let idx = o.index;
+        let id_opt = o.id;
+        let meta_source = meta.get("_source").cloned();
+        let (source, mut doc_raw): (Option<Value>, Option<String>) = match prep {
+            Some(Ok((v, raw))) => (Some(v), Some(raw)),
+            Some(Err(e)) => {
+                return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e);
+            }
+            None => (None, None),
         };
 
         let st = match store.ensure(&idx) {
