@@ -18,6 +18,9 @@ pub struct Ctx<'a> {
     pub mapping: &'a Mapping,
     pub index: &'a Index,
     pub max_terms_count: usize,
+    /// value kinds seen per field path, used to narrow typed range variants
+    pub observed_kinds: &'a std::collections::HashMap<String, u8>,
+    pub kinds_complete: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -627,6 +630,26 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         Value::String(s) if parse_datetime(s).is_some() => vec![Type::Date, Type::Str],
         Value::String(_) => vec![Type::Str],
         _ => vec![Type::Str],
+    };
+
+    // only build the typed variants this field has actually held; each extra
+    // variant is a separate range scan unioned over the whole segment
+    let types: Vec<Type> = match ctx.observed_kinds.get(&field).filter(|_| ctx.kinds_complete) {
+        Some(&kinds) if kinds != 0 => {
+            let narrowed: Vec<Type> = types
+                .iter()
+                .copied()
+                .filter(|t| match t {
+                    Type::I64 => kinds & crate::store::KIND_I64 != 0,
+                    Type::U64 => kinds & crate::store::KIND_U64 != 0,
+                    Type::F64 => kinds & crate::store::KIND_F64 != 0,
+                    Type::Str | Type::Date => kinds & crate::store::KIND_STR != 0,
+                    _ => true,
+                })
+                .collect();
+            if narrowed.is_empty() { types } else { narrowed }
+        }
+        _ => types,
     };
 
     let mut subs: Vec<Box<dyn Query>> = Vec::new();

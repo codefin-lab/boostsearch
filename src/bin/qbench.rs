@@ -26,6 +26,10 @@ fn main() -> anyhow::Result<()> {
             "aggs": {"avg_ms": {"avg": {"field": "response_ms"}}, "p_size": {"stats": {"field": "size"}}}}}})),
         ("sort_paged", json!({"query": {"match_all": {}}, "sort": [{"size": "desc"}], "size": 10, "from": 100})),
         ("count_only", json!({"query": {"match_all": {}}, "size": 0})),
+        // same selectivity, but an explicit float bound narrows the range to a
+        // single typed variant instead of the I64/U64/F64 union
+        ("range_int_bound", json!({"query": {"range": {"response_ms": {"gte": 20}}}, "size": 10})),
+        ("range_float_bound", json!({"query": {"range": {"response_ms": {"gte": 20.0001}}}, "size": 10})),
     ];
 
     let params = std::collections::HashMap::new();

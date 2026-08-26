@@ -25,6 +25,13 @@ pub struct Fields {
 /// flushes. Without a cap, a large bulk load holds every document twice.
 pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
+/// Value-kind bits recorded per field path.
+pub const KIND_I64: u8 = 1;
+pub const KIND_U64: u8 = 2;
+pub const KIND_F64: u8 = 4;
+pub const KIND_STR: u8 = 8;
+pub const KIND_BOOL: u8 = 16;
+
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
 
@@ -106,6 +113,54 @@ impl Mapping {
     }
 }
 
+/// Record the value kinds present under each path.
+///
+/// Runs on every document, so it reuses one path buffer and only allocates when
+/// a path is seen for the first time.
+fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
+    match v {
+        Value::Object(o) => {
+            let base = path.len();
+            for (k, child) in o {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                observe_kinds(child, path, out);
+                path.truncate(base);
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                observe_kinds(x, path, out);
+            }
+        }
+        leaf if !path.is_empty() => {
+            let bit = match leaf {
+                Value::String(_) => KIND_STR,
+                Value::Bool(_) => KIND_BOOL,
+                Value::Number(n) => {
+                    if n.is_f64() && n.as_i64().is_none() && n.as_u64().is_none() {
+                        KIND_F64
+                    } else if n.as_i64().is_some() {
+                        KIND_I64
+                    } else {
+                        KIND_U64
+                    }
+                }
+                _ => return,
+            };
+            match out.get_mut(path.as_str()) {
+                Some(seen) => *seen |= bit,
+                None => {
+                    out.insert(path.clone(), bit);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, String>) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
@@ -161,15 +216,39 @@ pub struct IdxState {
     pub dynamic_types: HashMap<String, String>,
     /// hashes of document shapes already folded into `dynamic_types`
     pub seen_shapes: std::collections::HashSet<u64>,
+    /// Which value kinds each field path has actually held. Lets a range query
+    /// skip the typed variants that cannot possibly match anything.
+    pub observed_kinds: HashMap<String, u8>,
+    /// True only when `observed_kinds` covers every document in the index. An
+    /// index written before kinds were tracked has partial information, and
+    /// narrowing a range with it would silently drop matches.
+    pub kinds_complete: bool,
+    kind_path_buf: String,
+    /// where this index lives on disk, if it is persisted
+    pub path: Option<PathBuf>,
     /// False while the id table is still being rebuilt after a reopen. Until it
     /// flips, an unknown id has to be checked against the index itself.
     pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IdxState {
+    /// Persist the learned field information next to the index so a reopen does
+    /// not lose dynamic mappings or the range-narrowing kinds.
+    pub fn save_meta(&self) {
+        let Some(path) = &self.path else { return };
+        let meta = serde_json::json!({
+            "name": self.name,
+            "body": {"mappings": self.mapping.raw, "settings": self.settings},
+            "dynamic_types": self.dynamic_types,
+            "observed_kinds": self.observed_kinds,
+        });
+        let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
+    }
+
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
         self.writer.commit()?;
+        self.save_meta();
         self.reader.reload()?;
         self.realtime.reload()?;
         self.pending.clear();
@@ -329,6 +408,12 @@ impl IdxState {
     /// Bulk loads send the same shape over and over, so remember which shapes
     /// have been walked and skip the walk for repeats.
     pub fn observe(&mut self, source: &Value) {
+        // kinds are always tracked: two documents can share a shape and still
+        // differ in value type, and a missed kind means missed hits
+        let mut path = std::mem::take(&mut self.kind_path_buf);
+        path.clear();
+        observe_kinds(source, &mut path, &mut self.observed_kinds);
+        self.kind_path_buf = path;
         if let Some(obj) = source.as_object() {
             let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
             for k in obj.keys() {
@@ -454,11 +539,27 @@ impl Store {
             };
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let learned = (
+                meta.get("dynamic_types").cloned(),
+                meta.get("observed_kinds").cloned(),
+            );
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
                     // waits on a full scan of every document.
                     if let Some(st) = store.get(name) {
+                        {
+                            let mut g = st.write();
+                            if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok()) {
+                                g.dynamic_types = v;
+                            }
+                            match learned.1.and_then(|v| serde_json::from_value(v).ok()) {
+                                Some(v) => g.observed_kinds = v,
+                                // no kinds recorded: treat what we learn from
+                                // here on as partial and never narrow with it
+                                None => g.kinds_complete = false,
+                            }
+                        }
                         let (reader, id_field, flag) = {
                             let g = st.read();
                             (g.realtime.clone(), g.fields.id, g.ids_loaded.clone())
@@ -545,7 +646,11 @@ impl Store {
                     path.join("_meta.json"),
                     serde_json::json!({"name": name, "body": body}).to_string(),
                 )?;
-                self.open_index(name, body, path)
+                self.open_index(name, body, path.clone())?;
+                if let Some(st) = self.get(name) {
+                    st.write().path = Some(path);
+                }
+                Ok(())
             }
             None => self.open_index_in_ram(name, body),
         }
@@ -555,7 +660,11 @@ impl Store {
         let (schema, fields) = build_schema();
         let dir = MmapDirectory::open(&path)?;
         let index = Index::open_or_create(dir, schema)?;
-        self.finish_open(name, body, index, fields)
+        self.finish_open(name, body, index, fields)?;
+        if let Some(st) = self.get(name) {
+            st.write().path = Some(path);
+        }
+        Ok(())
     }
 
     fn open_index_in_ram(&self, name: &str, body: &Value) -> Result<()> {
@@ -627,6 +736,10 @@ impl Store {
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
+            observed_kinds: HashMap::new(),
+            kinds_complete: true,
+            kind_path_buf: String::new(),
+            path: None,
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
