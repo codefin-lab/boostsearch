@@ -402,7 +402,7 @@ pub fn write_doc_raw(
             format!("[{id}]: version conflict, document already exists"),
         ));
     }
-    let (version, seq) = st.bump(id, true);
+    let (version, seq) = st.bump(id, true, existed);
     st.observe(&source);
     // deleting is only needed when something is actually there to replace;
     // a bulk load of new documents should not queue a delete per document
@@ -431,7 +431,7 @@ pub fn write_doc_raw(
 
 pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let existed = exists_doc(st, id);
-    let (version, seq) = st.bump(id, false);
+    let (version, seq) = st.bump(id, false, existed);
     if existed {
         st.writer.delete_term(Term::from_field_text(st.fields.id, id));
         st.note_pending(id, None);

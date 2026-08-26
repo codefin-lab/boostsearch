@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tantivy::schema::*;
 use std::path::{Path as FsPath, PathBuf};
@@ -31,6 +32,38 @@ pub const KIND_U64: u8 = 2;
 pub const KIND_F64: u8 = 4;
 pub const KIND_STR: u8 = 8;
 pub const KIND_BOOL: u8 = 16;
+
+/// Ids are already hashed into 64 bits before they reach the set, so the set
+/// itself does not need to hash again.
+#[derive(Default)]
+pub struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v;
+    }
+}
+
+pub fn id_fingerprint(id: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    // final mix so short ids spread across the whole 64-bit space
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h
+}
 
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
@@ -193,9 +226,14 @@ pub struct IdxState {
     pub mapping: Mapping,
     pub settings: Value,
     pub aliases: Vec<String>,
-    /// Version and liveness per document id. Keeping liveness here means an
-    /// existence check is a map lookup rather than a search per indexed document.
+    /// Exact record for ids that need one: anything updated past version 1, and
+    /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
+    /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
+    /// false negatives), so the common "is this a new document?" question costs
+    /// one hash. A hit is confirmed against the index, which only happens for
+    /// ids that really were written before.
+    pub live_ids: std::collections::HashSet<u64, BuildHasherDefault<IdHasher>>,
     /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
     /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
     pub pending: HashMap<String, Option<String>>,
@@ -271,14 +309,32 @@ impl IdxState {
     }
 
     /// Next version for a document id, and the sequence number of the write.
-    pub fn bump(&mut self, id: &str, live: bool) -> (u64, u64) {
-        let m = self
-            .versions
-            .entry(id.to_string())
-            .or_insert(DocMeta { version: 0, live: false });
-        m.version += 1;
-        m.live = live;
-        let version = m.version;
+    ///
+    /// `existed` must be the answer the caller already got from `is_live`, so a
+    /// write cannot decide "updated" and "version 1" from two different sources
+    /// while the id table is still loading.
+    pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
+        let fp = id_fingerprint(id);
+        let known = existed || self.versions.contains_key(id);
+        let version = if known {
+            let m = self
+                .versions
+                .entry(id.to_string())
+                .or_insert(DocMeta { version: 1, live: true });
+            m.version += 1;
+            m.live = live;
+            m.version
+        } else {
+            // brand new: version 1 needs no exact entry, only the fingerprint
+            1
+        };
+        if live {
+            self.live_ids.insert(fp);
+        } else {
+            // a tombstone is recorded exactly; removing the fingerprint could
+            // take a colliding id's liveness with it
+            self.versions.insert(id.to_string(), DocMeta { version, live: false });
+        }
         let seq = self.seq_no;
         self.seq_no += 1;
         (version, seq)
@@ -295,12 +351,15 @@ impl IdxState {
             Some(None) => false,
             None => match self.versions.get(id) {
                 Some(m) => m.live,
-                // the table is authoritative once loaded; while it is still
-                // filling in after a reopen, fall back to asking the index
-                None if !self.ids_loaded.load(std::sync::atomic::Ordering::Relaxed) => {
-                    self.lookup_id(id)
+                None => {
+                    if !self.ids_loaded.load(std::sync::atomic::Ordering::Relaxed) {
+                        // table still filling in after a reopen
+                        return self.lookup_id(id);
+                    }
+                    // a fingerprint miss is authoritative; a hit is confirmed
+                    // against the index, since fingerprints can collide
+                    self.live_ids.contains(&id_fingerprint(id)) && self.lookup_id(id)
                 }
-                None => false,
             },
         }
     }
@@ -316,8 +375,8 @@ impl IdxState {
 
     /// Scan the committed index for live document ids. Runs off the write lock
     /// so a reopen does not stall startup.
-    pub fn scan_ids(reader: &IndexReader, id_field: Field) -> HashMap<String, DocMeta> {
-        let mut out = HashMap::new();
+    pub fn scan_ids(reader: &IndexReader, id_field: Field) -> Vec<u64> {
+        let mut out = Vec::new();
         let searcher = reader.searcher();
         for seg in searcher.segment_readers() {
             let Ok(Some(col)) = seg.fast_fields().str("_id") else { continue };
@@ -331,7 +390,7 @@ impl IdxState {
                 buf.clear();
                 if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
                     if let Ok(id) = std::str::from_utf8(&buf) {
-                        out.insert(id.to_string(), DocMeta { version: 1, live: true });
+                        out.push(id_fingerprint(id));
                     }
                 }
             }
@@ -341,32 +400,11 @@ impl IdxState {
     }
 
     /// Merge a scan result in without overwriting anything written since.
-    pub fn absorb_ids(&mut self, scanned: HashMap<String, DocMeta>) {
-        for (id, meta) in scanned {
-            self.versions.entry(id).or_insert(meta);
+    pub fn absorb_ids(&mut self, scanned: Vec<u64>) {
+        for fp in scanned {
+            self.live_ids.insert(fp);
         }
         self.ids_loaded.store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    #[allow(dead_code)]
-    pub fn reload_ids(&mut self) {
-        let searcher = self.realtime.searcher();
-        for reader in searcher.segment_readers() {
-            let Ok(Some(col)) = reader.fast_fields().str("_id") else { continue };
-            let alive = reader.alive_bitset();
-            for doc in 0..reader.max_doc() {
-                if alive.map(|a| !a.is_alive(doc)).unwrap_or(false) {
-                    continue;
-                }
-                let Some(ord) = col.term_ords(doc).next() else { continue };
-                let mut buf = Vec::new();
-                if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
-                    if let Ok(id) = String::from_utf8(buf) {
-                        self.versions.insert(id, DocMeta { version: 1, live: true });
-                    }
-                }
-            }
-        }
     }
 
     /// Settings echoed back by GET _settings, including the defaults the
@@ -727,6 +765,7 @@ impl Store {
             settings,
             aliases,
             versions: HashMap::new(),
+            live_ids: Default::default(),
             pending: HashMap::new(),
             pending_bytes: 0,
             realtime,
