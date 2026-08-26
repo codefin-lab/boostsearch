@@ -354,7 +354,9 @@ impl tantivy::collector::Collector for SortCollector {
                 _ => None,
             })
             .collect();
-        let single_numeric = self.sources.len() == 1
+        // OBSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
+        let single_numeric = std::env::var("OBSEARCH_NO_BLOCK_SORT").is_err()
+            && self.sources.len() == 1
             && matches!(self.sources[0], SortSource::Column { ref mode, .. } if mode.is_none())
             && columns
                 .first()

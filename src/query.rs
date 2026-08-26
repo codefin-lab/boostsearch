@@ -634,7 +634,9 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 
     // only build the typed variants this field has actually held; each extra
     // variant is a separate range scan unioned over the whole segment
-    let types: Vec<Type> = match ctx.observed_kinds.get(&field).filter(|_| ctx.kinds_complete) {
+    // OBSEARCH_NO_KIND_NARROW=1 disables the narrowing, for A/B runs
+    let narrowing_on = ctx.kinds_complete && std::env::var("OBSEARCH_NO_KIND_NARROW").is_err();
+    let types: Vec<Type> = match ctx.observed_kinds.get(&field).filter(|_| narrowing_on) {
         Some(&kinds) if kinds != 0 => {
             let narrowed: Vec<Type> = types
                 .iter()
