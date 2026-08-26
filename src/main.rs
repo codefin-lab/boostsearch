@@ -4,6 +4,7 @@
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
 
 mod api;
+mod blockstats;
 mod search;
 mod query;
 mod source;

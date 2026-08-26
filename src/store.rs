@@ -32,6 +32,9 @@ pub const KIND_U64: u8 = 2;
 pub const KIND_F64: u8 = 4;
 pub const KIND_STR: u8 = 8;
 pub const KIND_BOOL: u8 = 16;
+/// A string that parses as a date: tantivy indexes it as a date, not as text,
+/// so a range over it must address the date column and not the string one.
+pub const KIND_DATE: u8 = 32;
 
 /// Ids are already hashed into 64 bits before they reach the set, so the set
 /// itself does not need to hash again.
@@ -170,7 +173,9 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
         }
         leaf if !path.is_empty() => {
             let bit = match leaf {
-                Value::String(_) => KIND_STR,
+                Value::String(s) => {
+                    if crate::query::parse_datetime(s).is_some() { KIND_DATE } else { KIND_STR }
+                }
                 Value::Bool(_) => KIND_BOOL,
                 Value::Number(n) => {
                     if n.is_f64() && n.as_i64().is_none() && n.as_u64().is_none() {
@@ -264,6 +269,8 @@ pub struct IdxState {
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
+    /// per-segment block statistics, built on demand
+    pub stats: Arc<crate::blockstats::StatsCache>,
     /// False while the id table is still being rebuilt after a reopen. Until it
     /// flips, an unknown id has to be checked against the index itself.
     pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
@@ -779,6 +786,7 @@ impl Store {
             kinds_complete: true,
             kind_path_buf: String::new(),
             path: None,
+            stats: Arc::new(crate::blockstats::StatsCache::default()),
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));

@@ -21,6 +21,7 @@ pub struct Ctx<'a> {
     /// value kinds seen per field path, used to narrow typed range variants
     pub observed_kinds: &'a std::collections::HashMap<String, u8>,
     pub kinds_complete: bool,
+    pub stats: &'a std::sync::Arc<crate::blockstats::StatsCache>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -645,7 +646,8 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                     Type::I64 => kinds & crate::store::KIND_I64 != 0,
                     Type::U64 => kinds & crate::store::KIND_U64 != 0,
                     Type::F64 => kinds & crate::store::KIND_F64 != 0,
-                    Type::Str | Type::Date => kinds & crate::store::KIND_STR != 0,
+                    Type::Str => kinds & crate::store::KIND_STR != 0,
+                    Type::Date => kinds & crate::store::KIND_DATE != 0,
                     _ => true,
                 })
                 .collect();
@@ -654,8 +656,10 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         _ => types,
     };
 
+    // A single numeric type means block statistics can drive the scan, which
+    // lets whole runs of documents be skipped instead of compared one by one.
     let mut subs: Vec<Box<dyn Query>> = Vec::new();
-    for t in types {
+    for t in types.iter().copied() {
         let lo = bound_term(f, &path, lower.as_ref(), t, true);
         let hi = bound_term(f, &path, upper.as_ref(), t, false);
         if matches!(lo, Bound::Unbounded) && matches!(hi, Bound::Unbounded) {
@@ -663,13 +667,96 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         subs.push(Box::new(RangeQuery::new(lo, hi)));
     }
-    match subs.len() {
-        0 => Ok(Box::new(EmptyQuery)),
-        1 => Ok(subs.into_iter().next().unwrap()),
-        _ => Ok(Box::new(BooleanQuery::new(
+    let general: Box<dyn Query> = match subs.len() {
+        0 => Box::new(EmptyQuery),
+        1 => subs.into_iter().next().unwrap(),
+        _ => Box::new(BooleanQuery::new(
             subs.into_iter().map(|s| (Occur::Should, s)).collect(),
-        ))),
+        )),
+    };
+
+    // A single numeric type means block statistics can drive the scan. The query
+    // itself decides per search whether that actually beats the general path.
+    if types.len() == 1 && std::env::var("OBSEARCH_NO_BLOCK_RANGE").is_err() {
+        if let Some(q) =
+            block_range_query(ctx, &field, types[0], lower.as_ref(), upper.as_ref(), &general)
+        {
+            return Ok(q);
+        }
     }
+    Ok(general)
+}
+
+/// Encode a range bound into the column's monotonic u64 space.
+///
+/// Returns `None` whenever the bound cannot be represented exactly -- an
+/// exclusive float bound, say -- so the caller falls back to the general path
+/// rather than answering a slightly different question.
+fn u64_bound(
+    ty: Type,
+    b: Option<&(Value, bool)>,
+    is_lower: bool,
+) -> Option<u64> {
+    use tantivy::columnar::MonotonicallyMappableToU64;
+    let Some((v, inclusive)) = b else {
+        return Some(if is_lower { u64::MIN } else { u64::MAX });
+    };
+    let step = |x: u64| -> Option<u64> {
+        if *inclusive {
+            Some(x)
+        } else if is_lower {
+            x.checked_add(1)
+        } else {
+            x.checked_sub(1)
+        }
+    };
+    match (ty, v) {
+        (Type::I64, Value::Number(n)) => step(MonotonicallyMappableToU64::to_u64(n.as_i64()?)),
+        (Type::U64, Value::Number(n)) => step(n.as_u64()?),
+        (Type::F64, Value::Number(n)) => {
+            // stepping a float bound would change which values qualify
+            if !*inclusive {
+                return None;
+            }
+            Some(MonotonicallyMappableToU64::to_u64(n.as_f64()?))
+        }
+        (Type::Date, Value::String(s)) => {
+            let dt = parse_datetime(s)?;
+            step(MonotonicallyMappableToU64::to_u64(dt))
+        }
+        _ => None,
+    }
+}
+
+fn block_range_query(
+    ctx: &Ctx,
+    field: &str,
+    ty: Type,
+    lower: Option<&(Value, bool)>,
+    upper: Option<&(Value, bool)>,
+    general: &Box<dyn Query>,
+) -> Option<Box<dyn Query>> {
+    use tantivy::columnar::ColumnType;
+    let column_type = match ty {
+        Type::I64 => ColumnType::I64,
+        Type::U64 => ColumnType::U64,
+        Type::F64 => ColumnType::F64,
+        Type::Date => ColumnType::DateTime,
+        _ => return None,
+    };
+    let lo = u64_bound(ty, lower, true)?;
+    let hi = u64_bound(ty, upper, false)?;
+    if lo > hi {
+        return Some(Box::new(EmptyQuery));
+    }
+    Some(Box::new(crate::blockstats::BlockRangeQuery {
+        column: ctx.column_name(field, false),
+        column_type,
+        lo,
+        hi,
+        cache: ctx.stats.clone(),
+        fallback: general.box_clone().into(),
+    }))
 }
 
 fn is_numeric_type(t: Option<&str>) -> bool {

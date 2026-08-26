@@ -758,6 +758,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tantivy",
+ "tantivy-common",
  "tantivy-fst",
  "tokio",
  "tracing",
