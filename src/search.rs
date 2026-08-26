@@ -122,6 +122,22 @@ struct SortColumns {
     per_segment: Vec<(Option<tantivy::columnar::StrColumn>, Option<tantivy::columnar::Column<u64>>, Option<tantivy::columnar::ColumnType>)>,
 }
 
+/// Decode one raw columnar u64 into the value its column type really holds.
+fn decode_col_value(raw: u64, ty: tantivy::columnar::ColumnType) -> Option<SortValue> {
+    use tantivy::columnar::ColumnType;
+    match ty {
+        ColumnType::I64 | ColumnType::DateTime => Some(SortValue::I64(
+            tantivy::columnar::MonotonicallyMappableToU64::from_u64(raw),
+        )),
+        ColumnType::F64 => Some(SortValue::F64(
+            <f64 as tantivy::columnar::MonotonicallyMappableToU64>::from_u64(raw),
+        )),
+        ColumnType::U64 => Some(SortValue::U64(raw)),
+        ColumnType::Bool => Some(SortValue::I64(raw as i64)),
+        ColumnType::Str | ColumnType::Bytes | ColumnType::IpAddr => None,
+    }
+}
+
 impl SortColumns {
     /// Open the readers for a single segment.
     fn for_segment(reader: &tantivy::SegmentReader, column: &str) -> SortColumns {
@@ -297,6 +313,9 @@ struct SortSegmentCollector {
     /// The worst candidate currently kept. A document whose leading sort value
     /// cannot beat it is dropped before anything is allocated for it.
     cutoff: Option<SortValue>,
+    /// Set when the whole sort is one numeric column, which lets a block of
+    /// documents be read from the columnar in one call instead of one at a time.
+    block: Option<tantivy::columnar::ColumnBlockAccessor<u64>>,
 }
 
 fn cmp_sorted(a: &[SortValue], b: &[SortValue], desc: &[bool]) -> Ordering {
@@ -327,7 +346,7 @@ impl tantivy::collector::Collector for SortCollector {
         segment_ord: u32,
         reader: &tantivy::SegmentReader,
     ) -> tantivy::Result<Self::Child> {
-        let columns = self
+        let columns: Vec<Option<SortColumns>> = self
             .sources
             .iter()
             .map(|src| match src {
@@ -335,6 +354,23 @@ impl tantivy::collector::Collector for SortCollector {
                 _ => None,
             })
             .collect();
+        // OBSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
+        let single_numeric = std::env::var("OBSEARCH_NO_BLOCK_SORT").is_err()
+            && self.sources.len() == 1
+            && matches!(self.sources[0], SortSource::Column { ref mode, .. } if mode.is_none())
+            && columns
+                .first()
+                .and_then(|c| c.as_ref())
+                .map(|c| {
+                    let (str_col, num, _) = &c.per_segment[0];
+                    // a multi-valued column would yield several rows per doc,
+                    // which the block path has no way to reduce
+                    num.as_ref()
+                        .map(|n| n.index.get_cardinality().is_full())
+                        .unwrap_or(false)
+                        && str_col.is_none()
+                })
+                .unwrap_or(false);
         Ok(SortSegmentCollector {
             segment_ord,
             sources: self.sources.clone(),
@@ -343,6 +379,7 @@ impl tantivy::collector::Collector for SortCollector {
             limit: self.limit,
             buf: Vec::with_capacity(self.limit.saturating_mul(4).max(512).min(4096)),
             cutoff: None,
+            block: if single_numeric { Some(Default::default()) } else { None },
         })
     }
 
@@ -385,6 +422,45 @@ impl SortSegmentCollector {
 
 impl tantivy::collector::SegmentCollector for SortSegmentCollector {
     type Fruit = Vec<Cand>;
+
+    /// Vectorised path: for a single numeric sort key the whole block of
+    /// matching documents is pulled out of the columnar in one call.
+    fn collect_block(&mut self, docs: &[tantivy::DocId]) {
+        if self.block.is_none() {
+            for &d in docs {
+                self.collect(d, 0.0);
+            }
+            return;
+        }
+        let (col, ty) = {
+            let sc = self.columns[0].as_ref().unwrap();
+            let (_, num, ty) = &sc.per_segment[0];
+            (num.clone().unwrap(), ty.unwrap())
+        };
+        let mut block = self.block.take().unwrap();
+        block.fetch_block(docs, &col);
+        let desc = self.desc[0];
+        for (doc, raw) in block.iter_docid_vals(docs, &col) {
+            let Some(v) = decode_col_value(raw, ty) else { continue };
+            if let Some(cut) = &self.cutoff {
+                let ord = v.cmp_asc(cut);
+                let ord = if desc { ord.reverse() } else { ord };
+                if ord == Ordering::Greater {
+                    continue;
+                }
+            }
+            self.buf.push(Cand {
+                shard: 0,
+                addr: DocAddress::new(self.segment_ord, doc),
+                score: 1.0,
+                sort: vec![v],
+            });
+            if self.limit > 0 && self.buf.len() >= self.limit.saturating_mul(4).max(512) {
+                self.prune();
+            }
+        }
+        self.block = Some(block);
+    }
 
     fn collect(&mut self, doc: tantivy::DocId, score: tantivy::Score) {
         let first = self.read_key(0, doc, score);
@@ -1063,11 +1139,6 @@ pub fn run(
     };
 
     let started = std::time::Instant::now();
-    let trace = std::env::var("OBSEARCH_TRACE_SEARCH").is_ok();
-    let mut t_build = std::time::Duration::ZERO;
-    let mut t_exec = std::time::Duration::ZERO;
-    let mut t_agg = std::time::Duration::ZERO;
-    let mut t_fetch = std::time::Duration::ZERO;
     let page_want = from + size;
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
@@ -1098,8 +1169,9 @@ pub fn run(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
         };
-        let _tb = std::time::Instant::now();
         let q: Box<dyn tantivy::query::Query> = match &query_json {
             Some(qj) => match crate::query::build(&ctx, qj) {
                 Ok(q) => q,
@@ -1114,7 +1186,6 @@ pub fn run(
             None => Box::new(tantivy::query::AllQuery),
         };
 
-        t_build += _tb.elapsed();
         let searcher = g.reader.searcher();
 
         // aggregations, when asked for, run over the same query
@@ -1140,7 +1211,6 @@ pub fn run(
         }
 
         let want = page_want;
-        let _te = std::time::Instant::now();
         let (count, shard_cands): (usize, Vec<Cand>) = if sort_keys.is_empty() {
             let collector = (Count, TopDocs::with_limit(want.max(1)).order_by_score());
             match searcher.search(&q, &collector) {
@@ -1191,14 +1261,12 @@ pub fn run(
                 }
             }
         };
-        t_exec += _te.elapsed();
         total += count as u64;
         if count == 0 {
             empty_shards += 1;
         }
         cands.extend(shard_cands);
 
-        let _tg = std::time::Instant::now();
         if let Some(a) = this_agg {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
@@ -1222,7 +1290,6 @@ pub fn run(
             }
         }
 
-        t_agg += _tg.elapsed();
         searchers.push((g.name.clone(), searcher, st.clone()));
     }
 
@@ -1236,7 +1303,6 @@ pub fn run(
     };
 
     // now, and only now, read stored fields -- for at most `size` documents
-    let _tf = std::time::Instant::now();
     let mut all_hits: Vec<Hit> = Vec::new();
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
@@ -1253,13 +1319,6 @@ pub fn run(
         });
     }
 
-    t_fetch += _tf.elapsed();
-    if trace {
-        eprintln!(
-            "search total={:?} build={:?} exec={:?} agg={:?} fetch={:?}",
-            started.elapsed(), t_build, t_exec, t_agg, t_fetch
-        );
-    }
     let page: Vec<Value> = all_hits
         .into_iter()
         .map(|h| {
@@ -1608,10 +1667,11 @@ fn filtered_count(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
-        t_build += _tb.elapsed();
         let searcher = g.reader.searcher();
         total += searcher
             .search(&q, &Count)

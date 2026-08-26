@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tantivy::schema::*;
 use std::path::{Path as FsPath, PathBuf};
@@ -24,6 +25,45 @@ pub struct Fields {
 /// How much un-refreshed document source may sit in memory before the writer
 /// flushes. Without a cap, a large bulk load holds every document twice.
 pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// Value-kind bits recorded per field path.
+pub const KIND_I64: u8 = 1;
+pub const KIND_U64: u8 = 2;
+pub const KIND_F64: u8 = 4;
+pub const KIND_STR: u8 = 8;
+pub const KIND_BOOL: u8 = 16;
+
+/// Ids are already hashed into 64 bits before they reach the set, so the set
+/// itself does not need to hash again.
+#[derive(Default)]
+pub struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v;
+    }
+}
+
+pub fn id_fingerprint(id: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    // final mix so short ids spread across the whole 64-bit space
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h
+}
 
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
@@ -106,6 +146,54 @@ impl Mapping {
     }
 }
 
+/// Record the value kinds present under each path.
+///
+/// Runs on every document, so it reuses one path buffer and only allocates when
+/// a path is seen for the first time.
+fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
+    match v {
+        Value::Object(o) => {
+            let base = path.len();
+            for (k, child) in o {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                observe_kinds(child, path, out);
+                path.truncate(base);
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                observe_kinds(x, path, out);
+            }
+        }
+        leaf if !path.is_empty() => {
+            let bit = match leaf {
+                Value::String(_) => KIND_STR,
+                Value::Bool(_) => KIND_BOOL,
+                Value::Number(n) => {
+                    if n.is_f64() && n.as_i64().is_none() && n.as_u64().is_none() {
+                        KIND_F64
+                    } else if n.as_i64().is_some() {
+                        KIND_I64
+                    } else {
+                        KIND_U64
+                    }
+                }
+                _ => return,
+            };
+            match out.get_mut(path.as_str()) {
+                Some(seen) => *seen |= bit,
+                None => {
+                    out.insert(path.clone(), bit);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, String>) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
@@ -138,9 +226,14 @@ pub struct IdxState {
     pub mapping: Mapping,
     pub settings: Value,
     pub aliases: Vec<String>,
-    /// Version and liveness per document id. Keeping liveness here means an
-    /// existence check is a map lookup rather than a search per indexed document.
+    /// Exact record for ids that need one: anything updated past version 1, and
+    /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
+    /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
+    /// false negatives), so the common "is this a new document?" question costs
+    /// one hash. A hit is confirmed against the index, which only happens for
+    /// ids that really were written before.
+    pub live_ids: std::collections::HashSet<u64, BuildHasherDefault<IdHasher>>,
     /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
     /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
     pub pending: HashMap<String, Option<String>>,
@@ -161,12 +254,39 @@ pub struct IdxState {
     pub dynamic_types: HashMap<String, String>,
     /// hashes of document shapes already folded into `dynamic_types`
     pub seen_shapes: std::collections::HashSet<u64>,
+    /// Which value kinds each field path has actually held. Lets a range query
+    /// skip the typed variants that cannot possibly match anything.
+    pub observed_kinds: HashMap<String, u8>,
+    /// True only when `observed_kinds` covers every document in the index. An
+    /// index written before kinds were tracked has partial information, and
+    /// narrowing a range with it would silently drop matches.
+    pub kinds_complete: bool,
+    kind_path_buf: String,
+    /// where this index lives on disk, if it is persisted
+    pub path: Option<PathBuf>,
+    /// False while the id table is still being rebuilt after a reopen. Until it
+    /// flips, an unknown id has to be checked against the index itself.
+    pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IdxState {
+    /// Persist the learned field information next to the index so a reopen does
+    /// not lose dynamic mappings or the range-narrowing kinds.
+    pub fn save_meta(&self) {
+        let Some(path) = &self.path else { return };
+        let meta = serde_json::json!({
+            "name": self.name,
+            "body": {"mappings": self.mapping.raw, "settings": self.settings},
+            "dynamic_types": self.dynamic_types,
+            "observed_kinds": self.observed_kinds,
+        });
+        let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
+    }
+
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
         self.writer.commit()?;
+        self.save_meta();
         self.reader.reload()?;
         self.realtime.reload()?;
         self.pending.clear();
@@ -189,14 +309,32 @@ impl IdxState {
     }
 
     /// Next version for a document id, and the sequence number of the write.
-    pub fn bump(&mut self, id: &str, live: bool) -> (u64, u64) {
-        let m = self
-            .versions
-            .entry(id.to_string())
-            .or_insert(DocMeta { version: 0, live: false });
-        m.version += 1;
-        m.live = live;
-        let version = m.version;
+    ///
+    /// `existed` must be the answer the caller already got from `is_live`, so a
+    /// write cannot decide "updated" and "version 1" from two different sources
+    /// while the id table is still loading.
+    pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
+        let fp = id_fingerprint(id);
+        let known = existed || self.versions.contains_key(id);
+        let version = if known {
+            let m = self
+                .versions
+                .entry(id.to_string())
+                .or_insert(DocMeta { version: 1, live: true });
+            m.version += 1;
+            m.live = live;
+            m.version
+        } else {
+            // brand new: version 1 needs no exact entry, only the fingerprint
+            1
+        };
+        if live {
+            self.live_ids.insert(fp);
+        } else {
+            // a tombstone is recorded exactly; removing the fingerprint could
+            // take a colliding id's liveness with it
+            self.versions.insert(id.to_string(), DocMeta { version, live: false });
+        }
         let seq = self.seq_no;
         self.seq_no += 1;
         (version, seq)
@@ -211,30 +349,62 @@ impl IdxState {
         match self.pending.get(id) {
             Some(Some(_)) => true,
             Some(None) => false,
-            None => self.versions.get(id).map(|m| m.live).unwrap_or(false),
+            None => match self.versions.get(id) {
+                Some(m) => m.live,
+                None => {
+                    if !self.ids_loaded.load(std::sync::atomic::Ordering::Relaxed) {
+                        // table still filling in after a reopen
+                        return self.lookup_id(id);
+                    }
+                    // a fingerprint miss is authoritative; a hit is confirmed
+                    // against the index, since fingerprints can collide
+                    self.live_ids.contains(&id_fingerprint(id)) && self.lookup_id(id)
+                }
+            },
         }
     }
 
-    /// Rebuild the id table from the committed index. Needed after reopening a
-    /// persisted index, where the in-memory table starts empty.
-    pub fn reload_ids(&mut self) {
+    fn lookup_id(&self, id: &str) -> bool {
         let searcher = self.realtime.searcher();
-        for reader in searcher.segment_readers() {
-            let Ok(Some(col)) = reader.fast_fields().str("_id") else { continue };
-            let alive = reader.alive_bitset();
-            for doc in 0..reader.max_doc() {
+        let q = tantivy::query::TermQuery::new(
+            Term::from_field_text(self.fields.id, id),
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        searcher.search(&q, &tantivy::collector::Count).map(|c| c > 0).unwrap_or(false)
+    }
+
+    /// Scan the committed index for live document ids. Runs off the write lock
+    /// so a reopen does not stall startup.
+    pub fn scan_ids(reader: &IndexReader, id_field: Field) -> Vec<u64> {
+        let mut out = Vec::new();
+        let searcher = reader.searcher();
+        for seg in searcher.segment_readers() {
+            let Ok(Some(col)) = seg.fast_fields().str("_id") else { continue };
+            let alive = seg.alive_bitset();
+            let mut buf = Vec::new();
+            for doc in 0..seg.max_doc() {
                 if alive.map(|a| !a.is_alive(doc)).unwrap_or(false) {
                     continue;
                 }
                 let Some(ord) = col.term_ords(doc).next() else { continue };
-                let mut buf = Vec::new();
+                buf.clear();
                 if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
-                    if let Ok(id) = String::from_utf8(buf) {
-                        self.versions.insert(id, DocMeta { version: 1, live: true });
+                    if let Ok(id) = std::str::from_utf8(&buf) {
+                        out.push(id_fingerprint(id));
                     }
                 }
             }
         }
+        let _ = id_field;
+        out
+    }
+
+    /// Merge a scan result in without overwriting anything written since.
+    pub fn absorb_ids(&mut self, scanned: Vec<u64>) {
+        for fp in scanned {
+            self.live_ids.insert(fp);
+        }
+        self.ids_loaded.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Settings echoed back by GET _settings, including the defaults the
@@ -276,6 +446,12 @@ impl IdxState {
     /// Bulk loads send the same shape over and over, so remember which shapes
     /// have been walked and skip the walk for repeats.
     pub fn observe(&mut self, source: &Value) {
+        // kinds are always tracked: two documents can share a shape and still
+        // differ in value type, and a missed kind means missed hits
+        let mut path = std::mem::take(&mut self.kind_path_buf);
+        path.clear();
+        observe_kinds(source, &mut path, &mut self.observed_kinds);
+        self.kind_path_buf = path;
         if let Some(obj) = source.as_object() {
             let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
             for k in obj.keys() {
@@ -401,10 +577,37 @@ impl Store {
             };
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let learned = (
+                meta.get("dynamic_types").cloned(),
+                meta.get("observed_kinds").cloned(),
+            );
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
+                    // Rebuild the id table in the background: startup no longer
+                    // waits on a full scan of every document.
                     if let Some(st) = store.get(name) {
-                        st.write().reload_ids();
+                        {
+                            let mut g = st.write();
+                            if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok()) {
+                                g.dynamic_types = v;
+                            }
+                            match learned.1.and_then(|v| serde_json::from_value(v).ok()) {
+                                Some(v) => g.observed_kinds = v,
+                                // no kinds recorded: treat what we learn from
+                                // here on as partial and never narrow with it
+                                None => g.kinds_complete = false,
+                            }
+                        }
+                        let (reader, id_field, flag) = {
+                            let g = st.read();
+                            (g.realtime.clone(), g.fields.id, g.ids_loaded.clone())
+                        };
+                        flag.store(false, std::sync::atomic::Ordering::Release);
+                        let st2 = st.clone();
+                        std::thread::spawn(move || {
+                            let scanned = IdxState::scan_ids(&reader, id_field);
+                            st2.write().absorb_ids(scanned);
+                        });
                     }
                 }
                 Err(e) => tracing::warn!("could not reopen index {name}: {e}"),
@@ -481,7 +684,11 @@ impl Store {
                     path.join("_meta.json"),
                     serde_json::json!({"name": name, "body": body}).to_string(),
                 )?;
-                self.open_index(name, body, path)
+                self.open_index(name, body, path.clone())?;
+                if let Some(st) = self.get(name) {
+                    st.write().path = Some(path);
+                }
+                Ok(())
             }
             None => self.open_index_in_ram(name, body),
         }
@@ -491,7 +698,11 @@ impl Store {
         let (schema, fields) = build_schema();
         let dir = MmapDirectory::open(&path)?;
         let index = Index::open_or_create(dir, schema)?;
-        self.finish_open(name, body, index, fields)
+        self.finish_open(name, body, index, fields)?;
+        if let Some(st) = self.get(name) {
+            st.write().path = Some(path);
+        }
+        Ok(())
     }
 
     fn open_index_in_ram(&self, name: &str, body: &Value) -> Result<()> {
@@ -554,6 +765,7 @@ impl Store {
             settings,
             aliases,
             versions: HashMap::new(),
+            live_ids: Default::default(),
             pending: HashMap::new(),
             pending_bytes: 0,
             realtime,
@@ -563,6 +775,11 @@ impl Store {
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
+            observed_kinds: HashMap::new(),
+            kinds_complete: true,
+            kind_path_buf: String::new(),
+            path: None,
+            ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())

@@ -14,18 +14,24 @@
 ใช้ corpus เดียวกัน (200,000 http-log docs / 53 MB, seed คงที่) และ query mix เดียวกัน
 **รันฝั่งละ 5 รอบ รายงานค่ามัธยฐานพร้อมช่วง min-max**
 
-## ผล (หลังรอบ optimize)
+## ผล (ล่าสุด — หลังรอบ parallel indexing + id fingerprints)
 
-| | obsearch | OpenSearch 3.1.0 | ผู้ชนะ |
+วัดฝั่งละ 5 รอบในเซสชันเดียวกัน มัธยฐาน `[min-max]`
+
+| | obsearch | OpenSearch 3.1.0 | |
 |---|---:|---:|---|
-| index docs/s | 60,124 `[57.6k-61.8k]` | **68,929** `[65.0k-70.3k]` | OpenSearch **+15%** |
-| memory (MB) | **431** `[225-473]` | 1,352 `[1337-1412]` | obsearch **น้อยกว่า 3.1 เท่า** |
-| qps c=1 | 443 `[388-512]` | 432 `[339-509]` | เสมอ |
-| p50 c=1 | 2.06 ms `[1.78-2.47]` | 2.14 ms `[1.81-2.67]` | เสมอ |
-| p99 c=1 | 4.51 ms `[4.29-5.19]` | 4.07 ms `[3.77-5.68]` | เสมอ (ช่วงทับกัน) |
-| qps c=8 | 1,702 `[1593-1728]` | 1,639 `[1589-1754]` | เสมอ |
-| p50 c=8 | 4.40 ms `[4.27-4.62]` | 4.56 ms `[4.24-4.61]` | เสมอ |
-| p99 c=8 | 7.43 ms `[7.14-8.14]` | 7.06 ms `[6.33-8.91]` | เสมอ (ช่วงทับกัน) |
+| **memory (MB)** | **295** `[193-362]` | 1,381 `[1305-1423]` | obsearch **4.7 เท่า** |
+| qps c=1 | **516** `[484-634]` | 387 `[355-437]` | obsearch **+33%** |
+| p50 c=1 | **1.78 ms** `[1.37-2.05]` | 2.45 ms `[2.15-2.69]` | obsearch **−27%** |
+| p99 c=1 | **3.17 ms** `[3.01-3.80]` | 4.45 ms `[3.56-4.86]` | obsearch **−29%** |
+| qps c=8 | **1,808** `[1763-1827]` | 1,596 `[1548-1665]` | obsearch **+13%** |
+| p50 c=8 | **4.21 ms** `[4.12-4.31]` | 4.63 ms `[4.49-4.83]` | obsearch **−9%** |
+| p99 c=8 | 7.26 ms `[6.52-8.30]` | 6.98 ms `[6.60-10.34]` | เสมอ (ช่วงทับกัน) |
+| index docs/s | 71,999 `[51.7k-75.9k]` | 73,161 `[69.6k-73.6k]` | เสมอ (ช่วงทับกัน) |
+| cold start (200k docs) | **13-638 ms** | ~6.3 s | obsearch |
+| RSS ที่ 2M docs | **29-46 MB** | — | — |
+
+**ชนะทุกตัวชี้วัด ยกเว้น p99 c=8 กับ indexing ที่เสมอ**
 
 ### ที่ขยับจากรอบก่อน
 
@@ -191,3 +197,158 @@ tantivy รองรับ `RangeQuery` บน JSON field เฉพาะเม�
   และลดการจัดสรรใน item response
 - **`range_numeric` p50 2.74 vs 2.11** — tantivy ใช้ range บน fast field
   ขณะที่ Lucene ใช้ BKD points ที่ skip ได้ เป็นความต่างเชิง data structure
+
+---
+
+# ภาคผนวก 2: รอบ storage / execution / startup
+
+## วัดก่อนเลือกทำ
+
+ก่อนแตะอะไร ตรวจว่า tantivy มีอะไรให้แล้วบ้าง (`tantivy-columnar 0.7`):
+
+| ที่ขอ | สถานะ |
+|---|---|
+| bitpacking | **มีแล้ว** — `CodecType::Bitpacked` เลือกอัตโนมัติ |
+| dictionary encoding | **มีแล้ว** — sstable term dict + term ordinals |
+| block stats | **มีบางส่วน** — `BlockwiseLinear` เก็บพารามิเตอร์ต่อบล็อก 512 ค่า, มี column-level min/max/GCD แต่ไม่มี per-block min/max สำหรับ skip |
+| batch/vectorized access | **มีแล้วแต่เราไม่ได้ใช้** — `ColumnBlockAccessor::fetch_block` |
+| bloom filter | ไม่มี |
+
+⇒ เขียน columnar format เองคือทำซ้ำของที่มี ช่องว่างจริงคือ **เราไม่ได้ใช้ block accessor**
+
+จากนั้นวัดว่า query path เสียเวลาตรงไหน (instrument แล้วถอดออก):
+
+| ขั้น | % ของเวลา server-side |
+|---|---:|
+| execution | **84.3%** |
+| aggregation | 9.9% |
+| fetch `_source` | 3.9% |
+| **build query จาก JSON** | **0.5%** |
+
+⇒ **query-plan cache แทบไม่ได้อะไร** (0.5%) ตัดทิ้งจากแผน
+⇒ server-side ทั้งหมดแค่ ~0.42 ms/query จาก wall ~2 ms ⇒ **~75% ของ latency คือ HTTP + client**
+ไม่ใช่ engine — งาน execution จึงต้องวัดที่ CPU/query ไม่ใช่ที่ wall clock
+
+## ที่ทำ
+
+### 1. Vectorized fast-field reads (`collect_block`)
+tantivy เรียก `collect_block(&[DocId])` เมื่อไม่ต้องใช้คะแนน แต่เราใช้ default
+ที่วนเรียก `collect()` ทีละ doc เปลี่ยนเป็นดึงทั้งบล็อกจาก columnar ครั้งเดียวด้วย
+`ColumnBlockAccessor` — กันไว้เฉพาะ sort key เดียวบน column ตัวเลข **แบบค่าเดียวต่อ doc**
+(หลายค่าต่อ doc บล็อกจะคืนหลายแถวและลดค่าไม่ได้)
+
+### 2. Narrow typed range variants
+`range` เดิมสร้าง `RangeQuery` หนึ่งตัวต่อชนิดที่เป็นไปได้ (I64/U64/F64) แล้ว union กัน
+⇒ สอง scan ที่ไม่มีวันแมตช์อะไรเลย พิสูจน์ด้วยการยิง query เดียวกันด้วย bound
+ที่เป็น int (3 variants) เทียบ float (1 variant): **559 vs 278 µs**
+
+แก้โดยจำว่าแต่ละ field path เคยเก็บค่าชนิดไหนบ้าง (bitmask) แล้วสร้างเฉพาะ variant
+ที่มีทางแมตช์ เก็บลง `_meta.json` ให้รอด restart
+
+**กับดักที่เจอ:** เดิม `observe` ข้ามเอกสารที่ shape ซ้ำ แต่ shape ดูแค่ชื่อ key
+ไม่ดูชนิดค่า ⇒ ต้องเดินทุกเอกสาร ทำให้ observe แพงขึ้น 0.15 → 1.19 µs/doc (indexing ตก 23%)
+ต้นเหตุคือ `format!("{prefix}.{k}")` สร้าง String ต่อ field ต่อ doc
+เปลี่ยนเป็น buffer ที่ใช้ซ้ำและ allocate เฉพาะตอนเจอ path ใหม่ ⇒ 0.34 µs/doc
+
+**ความถูกต้อง:** index ที่เขียนไว้ก่อนมีฟีเจอร์นี้จะมีข้อมูลชนิดไม่ครบ
+การ narrow ด้วยข้อมูลไม่ครบจะทำให้ผลหาย จึงมี flag `kinds_complete`
+ที่เป็น false เมื่อ `_meta.json` ไม่มี `observed_kinds` และจะไม่ narrow เลย
+
+### 3. Startup: lazy id table
+เดิม reopen ต้อง scan `_id` ของทุกเอกสารก่อนรับ traffic วัดแล้วเป็น **99% ของ startup**
+(1,433-2,062 ms เทียบกับ 14-18 ms ถ้าข้าม) ย้ายไปทำใน background thread นอก write lock
+ระหว่างนั้น `is_live()` ถามดัชนีโดยตรงแทน
+
+⇒ cold start กับ index 200k docs: **1,433-2,062 ms → 13-638 ms**
+
+## ผล (A/B ใน build เดียว ข้อมูลชุดเดียว)
+
+`OBSEARCH_NO_BLOCK_SORT=1` และ `OBSEARCH_NO_KIND_NARROW=1` ปิดทีละตัวได้
+
+| query | ปิดทั้งคู่ | เปิดทั้งคู่ | เปลี่ยน |
+|---|---:|---:|---:|
+| sort_paged | 4,898 µs | 414 µs | **−92%** |
+| range_numeric | 485 µs | 253 µs | **−48%** |
+| bool_filter | 639 µs | 398 µs | **−38%** |
+| count_only | 211 µs | 151 µs | −28% |
+| term_numeric | 104 µs | 95 µs | −9% |
+| match_all | 224 µs | 210 µs | −6% |
+| agg_terms | 359 µs | 378 µs | +5% (noise, ไม่แตะ path นี้) |
+| agg_date_hist | 374 µs | 411 µs | +10% (noise) |
+| **รวม** | **8,112 µs** | **3,118 µs** | **−62%** |
+
+ที่ปลายทาง (ผ่าน HTTP) เห็นผลชัดที่ concurrency สูงซึ่ง CPU เป็นคอขวดจริง:
+qps c=8 **1,702 → 1,826**, p99 c=8 **7.43 → 6.70 ms** ส่วนที่ c=1 แทบไม่ขยับ
+เพราะ HTTP ครองเวลาอยู่แล้ว — ตรงกับที่วัดไว้ตั้งแต่ต้น
+
+## ที่ยังไม่ได้ทำ และเหตุผล
+
+| รายการ | สถานะ |
+|---|---|
+| custom columnar layout / bitpacking / dictionary encoding | tantivy ทำแล้ว — เขียนเองคือ fork `tantivy-columnar` |
+| per-block min/max สำหรับ skip, bloom filter | ยังไม่มีใน tantivy เป็นงานระดับแก้ crate ต้นน้ำ |
+| cost-based planner | ต้องมี execution path ทางเลือกให้เลือกก่อน ตอนนี้มีทางเดียว |
+| operator fusion / selection bitmap | tantivy fuse ผ่าน scorer composition อยู่แล้ว |
+| query-plan cache | **วัดแล้วว่าไม่คุ้ม** — build query = 0.5% ของเวลา |
+| block cache / postings cache | mmap + page cache ของ OS ทำหน้าที่นี้อยู่ |
+| async WAL, adaptive merge scheduler | ยังไม่ได้แตะ |
+| zero-copy JSON parsing | ยังไม่ได้ทำ — วัดไว้ที่ 189 ms (8.8% ของ indexing) |
+| distributed / scatter-gather | ยังเป็น single node |
+
+---
+
+# ภาคผนวก 3: ปิดช่องว่าง indexing และไล่ memory
+
+## 1. Parallel document preparation
+
+ครึ่งที่แพงที่สุดของ bulk — parse เอกสารและสร้าง tantivy document — **ไม่แตะ shared state เลย**
+และ `IndexWriter::add_document` รับ `&self` อยู่แล้ว จึงแยกเป็นสองเฟส:
+เฟสขนาน (parse + `make_doc`) ด้วย rayon แล้วเฟสเรียงลำดับ (version, add_document, response)
+
+| | ก่อน | หลัง |
+|---|---:|---:|
+| native | ~60,000 docs/s | **~102,000 docs/s** |
+| ใน Docker | 59,276 docs/s | **77,190 docs/s** |
+
+**ผิดพลาดรอบแรก:** เวอร์ชันแรกดึงผลจากเฟสขนานออกมาด้วย `clone()` ทั้ง `Value` และ
+ข้อความ source ⇒ native เร็วขึ้นเพราะมี core ว่างกลบไว้ แต่ **ใน Docker ที่แย่ง CPU กลับช้าลง**
+(59.3k → 55.0k) แก้เป็น consume ค่าออกมาแทน clone ⇒ 77.2k
+
+บทเรียน: วัดในสภาพที่จะใช้จริง อย่าวัดแต่บนเครื่องว่าง
+
+## 2. Id table → fingerprints
+
+วัดองค์ประกอบ RSS ที่ 2M docs:
+
+| | |
+|---|---:|
+| หลัง boot | 24 MB |
+| หลังโหลด id table 2M | **118 MB** ← +94 MB |
+| หลัง 30 sorted searches | 126 MB |
+
+**75% ของ RSS คือ id table** และโตเชิงเส้น — ที่ 100M docs จะเป็น ~4.7 GB
+
+เปลี่ยนเป็น:
+- `live_ids: HashSet<u64>` เก็บ fingerprint 64-bit ของ id — **miss คือคำตอบสุดท้าย**
+  (ไม่มี false negative) ⇒ คำถาม "เอกสารนี้ใหม่ไหม" ที่เกิดทุกครั้งที่ index เสียแค่ hash เดียว
+- **hit ต้องยืนยันกับดัชนีจริง** เพราะ fingerprint ชนกันได้ ⇒ ยังเป๊ะ 100%
+  และ workload แบบ append-only ไม่เคยเข้าเส้นทางนี้เลย
+- เก็บ record เป๊ะเฉพาะเอกสารที่ version > 1 และ tombstone
+  (ลบ fingerprint ตรง ๆ ไม่ได้ เพราะอาจพา id ที่ชนกันหายไปด้วย)
+
+⇒ **RSS ที่ 2M docs: 126 MB → 29-46 MB**
+
+**บั๊กที่เจอตอนตรวจ:** เขียนทับ id เดิมแล้วได้ `result: updated` แต่ `version: 1`
+เพราะ `is_live()` ตอบจากดัชนี (ระหว่างที่ id table ยังโหลดอยู่เบื้องหลัง) ส่วน `bump()`
+ตัดสินเองจาก fingerprint set ที่ยังว่าง ⇒ สองแหล่งไม่ตรงกัน
+แก้โดยให้ `bump()` รับคำตอบที่ caller คำนวณไว้แล้ว
+
+## 3. เหลืออะไรให้ทำอีก (เรียงตามหลักฐาน)
+
+| งาน | หลักฐาน | ประเมิน |
+|---|---|---|
+| **columnar sidecar block-stats** | วัดแล้ว **40 เท่า** บน time-range ที่ 2M docs ([รายละเอียด](columnar-experiment.md)) | ~400-600 LOC |
+| **aggregation** | ตอนนี้เป็นตัวกิน CPU อันดับหนึ่งแล้ว: `agg_nested` 5,921 µs, `agg_date_hist` 3,924 µs ที่ 2M docs | ยังไม่ได้ profile |
+| **zero-copy JSON parsing** | วัดไว้ 189 ms = 8.8% ของ indexing | เปลี่ยนไป simd-json/sonic-rs |
+| dual-view `_dyn`/`_raw` | 0.88 µs/doc — **ตัดไม่ได้** เพราะ RangeQuery บน JSON ต้องมี fast field | เชิงโครงสร้าง |
+| HTTP layer | 27% ของเวลา bulk, 75% ของ latency query | ทั้งสองฝั่งจ่ายเท่ากัน |

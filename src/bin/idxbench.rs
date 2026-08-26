@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
     for (i, doc) in docs.iter().enumerate() {
         let id = format!("{i}");
         let t = Instant::now();
-        g.bump(&id, true);
+        g.bump(&id, true, false);
         t_bump += t.elapsed();
 
         let t = Instant::now();

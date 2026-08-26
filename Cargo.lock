@@ -753,6 +753,7 @@ dependencies = [
  "anyhow",
  "axum",
  "parking_lot",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
