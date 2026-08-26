@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         t_makedoc += t.elapsed();
 
         let t = Instant::now();
-        g.writer.add_document(d)?;
+        g.writer()?.add_document(d)?;
         t_add += t.elapsed();
 
         let t = Instant::now();

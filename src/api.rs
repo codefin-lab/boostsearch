@@ -408,12 +408,25 @@ pub fn write_doc_raw(
     // a bulk load of new documents should not queue a delete per document
     if existed {
         let term = Term::from_field_text(st.fields.id, id);
-        st.writer.delete_term(term);
+        if let Ok(w) = st.writer() {
+            w.delete_term(term);
+        }
     }
     let raw = raw.unwrap_or_else(|| source.to_string());
     let doc = make_doc(&st.fields, id, source, &raw);
-    if let Err(e) = st.writer.add_document(doc) {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
+    match st.writer() {
+        Ok(w) => {
+            if let Err(e) = w.add_document(doc) {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "index_exception",
+                    e.to_string(),
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
+        }
     }
     st.note_pending(id, Some(raw));
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -433,7 +446,10 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     if existed {
-        st.writer.delete_term(Term::from_field_text(st.fields.id, id));
+        let term = Term::from_field_text(st.fields.id, id);
+        if let Ok(w) = st.writer() {
+            w.delete_term(term);
+        }
         st.note_pending(id, None);
     }
     let body = json!({
@@ -1504,7 +1520,11 @@ pub async fn force_merge(
             // merge the whole set down in one step; tantivy handles the rest
             let take = ids.len() - max_segments + 1;
             let batch: Vec<_> = ids.into_iter().take(take).collect();
-            if g.writer.merge(&batch).wait().is_err() {
+            let merged = match g.writer() {
+                Ok(w) => w.merge(&batch).wait().is_ok(),
+                Err(_) => false,
+            };
+            if !merged {
                 break;
             }
             let _ = g.refresh();

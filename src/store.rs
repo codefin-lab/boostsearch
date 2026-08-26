@@ -225,7 +225,14 @@ pub struct DocMeta {
 pub struct IdxState {
     pub name: String,
     pub index: Index,
-    pub writer: IndexWriter,
+    /// Created on first write. An index that is only read -- or has not been
+    /// written to since startup -- should not hold indexing threads or an arena.
+    writer: Option<IndexWriter>,
+    writer_threads: usize,
+    writer_budget: usize,
+    /// When this index was last written to. A writer holds indexing threads and
+    /// an arena, so an index that has gone quiet should not keep one.
+    last_write: std::time::Instant,
     pub reader: IndexReader,
     pub fields: Fields,
     pub mapping: Mapping,
@@ -292,7 +299,10 @@ impl IdxState {
 
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
-        self.writer.commit()?;
+        // nothing was ever written, so there is nothing to commit
+        if let Some(w) = self.writer.as_mut() {
+            w.commit()?;
+        }
         self.save_meta();
         self.reader.reload()?;
         self.realtime.reload()?;
@@ -307,12 +317,47 @@ impl IdxState {
         self.pending_bytes += id.len() + source.as_ref().map(|s| s.len()).unwrap_or(0) + 48;
         self.pending.insert(id.to_string(), source);
         if self.pending_bytes > PENDING_BUDGET_BYTES {
-            if self.writer.commit().is_ok() {
+            let committed = self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
+            if committed {
                 let _ = self.realtime.reload();
                 self.pending.clear();
                 self.pending_bytes = 0;
             }
         }
+    }
+
+    /// The writer, created on demand.
+    pub fn writer(&mut self) -> Result<&mut IndexWriter> {
+        self.last_write = std::time::Instant::now();
+        if self.writer.is_none() {
+            self.writer = Some(
+                self.index
+                    .writer_with_num_threads(self.writer_threads.max(1), self.writer_budget)?,
+            );
+        }
+        Ok(self.writer.as_mut().unwrap())
+    }
+
+    /// Give back the indexing threads and arena if this index has gone quiet.
+    /// Everything written is already committed, so the writer is only a cache.
+    pub fn release_idle_writer(&mut self, idle_for: std::time::Duration) -> bool {
+        if self.writer.is_none()
+            || !self.pending.is_empty()
+            || self.last_write.elapsed() < idle_for
+        {
+            return false;
+        }
+        if let Some(mut w) = self.writer.take() {
+            if w.commit().is_err() {
+                // could not flush cleanly: keep it rather than lose the writes
+                self.writer = Some(w);
+                return false;
+            }
+            let _ = w.wait_merging_threads();
+        }
+        let _ = self.reader.reload();
+        let _ = self.realtime.reload();
+        true
     }
 
     /// Next version for a document id, and the sequence number of the write.
@@ -546,6 +591,22 @@ pub struct Store {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
     /// where index data lives; `None` keeps everything in RAM
     data_dir: Option<PathBuf>,
+    /// One search thread pool for the whole process. Giving each index its own
+    /// costs a pool per index, which is invisible with one index and ruinous
+    /// with hundreds.
+    executor: tantivy::Executor,
+}
+
+fn shared_executor() -> tantivy::Executor {
+    let threads = std::env::var("OBSEARCH_SEARCH_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    if threads <= 1 {
+        return tantivy::Executor::single_thread();
+    }
+    tantivy::Executor::multi_thread(threads, "obsearch-search-")
+        .unwrap_or_else(|_| tantivy::Executor::single_thread())
 }
 
 /// Index names are not path-safe, so each one gets a stable encoded directory.
@@ -561,8 +622,39 @@ fn dir_name(index: &str) -> String {
 }
 
 impl Store {
+    /// Periodically hand back indexing resources for indices that have gone
+    /// quiet. With one index this is invisible; with hundreds it is the
+    /// difference between 13 MB per index and nothing.
+    fn start_writer_reaper(&self) {
+        let idle_secs: u64 = std::env::var("OBSEARCH_WRITER_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        if idle_secs == 0 {
+            return;
+        }
+        let store = self.clone();
+        std::thread::spawn(move || {
+            let idle = std::time::Duration::from_secs(idle_secs);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(idle_secs.max(1) / 2 + 1));
+                for name in store.names() {
+                    if let Some(st) = store.get(&name) {
+                        st.write().release_idle_writer(idle);
+                    }
+                }
+            }
+        });
+    }
+
     pub fn new() -> Store {
-        Store { inner: Arc::new(RwLock::new(HashMap::new())), data_dir: None }
+        let store = Store {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            data_dir: None,
+            executor: shared_executor(),
+        };
+        store.start_writer_reaper();
+        store
     }
 
     /// Back indices with mmapped files under `dir`, and reopen whatever is
@@ -571,7 +663,11 @@ impl Store {
     pub fn on_disk(dir: impl AsRef<FsPath>) -> Result<Store> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
-        let store = Store { inner: Arc::new(RwLock::new(HashMap::new())), data_dir: Some(dir.clone()) };
+        let store = Store {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            data_dir: Some(dir.clone()),
+            executor: shared_executor(),
+        };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -620,6 +716,7 @@ impl Store {
                 Err(e) => tracing::warn!("could not reopen index {name}: {e}"),
             }
         }
+        store.start_writer_reaper();
         Ok(store)
     }
 
@@ -725,30 +822,19 @@ impl Store {
         mut index: Index,
         fields: Fields,
     ) -> Result<()> {
-        // Fanning one query across segments cuts single-stream latency, but it
-        // oversubscribes the CPU once many queries run at once. Tunable.
-        match std::env::var("OBSEARCH_SEARCH_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
-            Some(0) => {}
-            Some(n) => {
-                let _ = index.set_multithread_executor(n);
-            }
-            None => {
-                let _ = index.set_default_multithread_executor();
-            }
-        }
+        index.set_executor(self.executor.clone());
         // one arena per indexing thread; a bigger budget means fewer segment
         // flushes and less merging, at the cost of resident memory
-        let budget: usize = std::env::var("OBSEARCH_WRITER_BUDGET_MB")
+        let writer_budget: usize = std::env::var("OBSEARCH_WRITER_BUDGET_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64)
             * 1024
             * 1024;
-        let threads: usize = std::env::var("OBSEARCH_WRITER_THREADS")
+        let writer_threads: usize = std::env::var("OBSEARCH_WRITER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
-        let writer = index.writer_with_num_threads(threads.max(1), budget)?;
         let reader = index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
         let realtime =
             index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
@@ -765,7 +851,10 @@ impl Store {
         let st = IdxState {
             name: name.to_string(),
             index,
-            writer,
+            writer: None,
+            writer_threads,
+            writer_budget,
+            last_write: std::time::Instant::now(),
             reader,
             fields,
             mapping,
