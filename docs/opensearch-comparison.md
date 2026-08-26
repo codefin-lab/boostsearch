@@ -14,18 +14,21 @@
 ใช้ corpus เดียวกัน (200,000 http-log docs / 53 MB, seed คงที่) และ query mix เดียวกัน
 **รันฝั่งละ 5 รอบ รายงานค่ามัธยฐานพร้อมช่วง min-max**
 
-## ผล (หลังรอบ optimize)
+## ผล (หลังรอบ storage/execution)
 
-| | obsearch | OpenSearch 3.1.0 | ผู้ชนะ |
+วัดฝั่งละ 5 รอบในเซสชันเดียวกัน รายงานมัธยฐานพร้อมช่วง min-max
+
+| | obsearch | OpenSearch 3.1.0 | |
 |---|---:|---:|---|
-| index docs/s | 60,124 `[57.6k-61.8k]` | **68,929** `[65.0k-70.3k]` | OpenSearch **+15%** |
-| memory (MB) | **431** `[225-473]` | 1,352 `[1337-1412]` | obsearch **น้อยกว่า 3.1 เท่า** |
-| qps c=1 | 443 `[388-512]` | 432 `[339-509]` | เสมอ |
-| p50 c=1 | 2.06 ms `[1.78-2.47]` | 2.14 ms `[1.81-2.67]` | เสมอ |
-| p99 c=1 | 4.51 ms `[4.29-5.19]` | 4.07 ms `[3.77-5.68]` | เสมอ (ช่วงทับกัน) |
-| qps c=8 | 1,702 `[1593-1728]` | 1,639 `[1589-1754]` | เสมอ |
-| p50 c=8 | 4.40 ms `[4.27-4.62]` | 4.56 ms `[4.24-4.61]` | เสมอ |
-| p99 c=8 | 7.43 ms `[7.14-8.14]` | 7.06 ms `[6.33-8.91]` | เสมอ (ช่วงทับกัน) |
+| index docs/s | 59,276 `[57.5k-60.0k]` | **70,449** `[57.7k-70.8k]` | OpenSearch +19% |
+| memory (MB) | **369** `[208-491]` | 1,134 `[1076-1187]` | obsearch **น้อยกว่า 3.1 เท่า** |
+| qps c=1 | **424** `[405-426]` | 360 `[278-408]` | obsearch +18% |
+| p50 c=1 | **2.26 ms** `[2.22-2.35]` | 2.62 ms `[2.30-3.45]` | obsearch |
+| p99 c=1 | **3.69 ms** `[3.41-4.23]` | 4.09 ms `[3.68-5.33]` | เสมอ (ช่วงทับกัน) |
+| qps c=8 | **1,826** `[1668-1864]` | 1,608 `[1399-1668]` | obsearch **+14%** |
+| p50 c=8 | **4.18 ms** `[4.02-4.45]` | 4.64 ms `[4.35-5.32]` | obsearch |
+| p99 c=8 | **6.70 ms** `[6.16-7.60]` | 7.83 ms `[6.58-15.16]` | obsearch |
+| cold start (200k docs) | **13-638 ms** | ~6.3 s (restart container) | obsearch |
 
 ### ที่ขยับจากรอบก่อน
 
@@ -191,3 +194,100 @@ tantivy รองรับ `RangeQuery` บน JSON field เฉพาะเม�
   และลดการจัดสรรใน item response
 - **`range_numeric` p50 2.74 vs 2.11** — tantivy ใช้ range บน fast field
   ขณะที่ Lucene ใช้ BKD points ที่ skip ได้ เป็นความต่างเชิง data structure
+
+---
+
+# ภาคผนวก 2: รอบ storage / execution / startup
+
+## วัดก่อนเลือกทำ
+
+ก่อนแตะอะไร ตรวจว่า tantivy มีอะไรให้แล้วบ้าง (`tantivy-columnar 0.7`):
+
+| ที่ขอ | สถานะ |
+|---|---|
+| bitpacking | **มีแล้ว** — `CodecType::Bitpacked` เลือกอัตโนมัติ |
+| dictionary encoding | **มีแล้ว** — sstable term dict + term ordinals |
+| block stats | **มีบางส่วน** — `BlockwiseLinear` เก็บพารามิเตอร์ต่อบล็อก 512 ค่า, มี column-level min/max/GCD แต่ไม่มี per-block min/max สำหรับ skip |
+| batch/vectorized access | **มีแล้วแต่เราไม่ได้ใช้** — `ColumnBlockAccessor::fetch_block` |
+| bloom filter | ไม่มี |
+
+⇒ เขียน columnar format เองคือทำซ้ำของที่มี ช่องว่างจริงคือ **เราไม่ได้ใช้ block accessor**
+
+จากนั้นวัดว่า query path เสียเวลาตรงไหน (instrument แล้วถอดออก):
+
+| ขั้น | % ของเวลา server-side |
+|---|---:|
+| execution | **84.3%** |
+| aggregation | 9.9% |
+| fetch `_source` | 3.9% |
+| **build query จาก JSON** | **0.5%** |
+
+⇒ **query-plan cache แทบไม่ได้อะไร** (0.5%) ตัดทิ้งจากแผน
+⇒ server-side ทั้งหมดแค่ ~0.42 ms/query จาก wall ~2 ms ⇒ **~75% ของ latency คือ HTTP + client**
+ไม่ใช่ engine — งาน execution จึงต้องวัดที่ CPU/query ไม่ใช่ที่ wall clock
+
+## ที่ทำ
+
+### 1. Vectorized fast-field reads (`collect_block`)
+tantivy เรียก `collect_block(&[DocId])` เมื่อไม่ต้องใช้คะแนน แต่เราใช้ default
+ที่วนเรียก `collect()` ทีละ doc เปลี่ยนเป็นดึงทั้งบล็อกจาก columnar ครั้งเดียวด้วย
+`ColumnBlockAccessor` — กันไว้เฉพาะ sort key เดียวบน column ตัวเลข **แบบค่าเดียวต่อ doc**
+(หลายค่าต่อ doc บล็อกจะคืนหลายแถวและลดค่าไม่ได้)
+
+### 2. Narrow typed range variants
+`range` เดิมสร้าง `RangeQuery` หนึ่งตัวต่อชนิดที่เป็นไปได้ (I64/U64/F64) แล้ว union กัน
+⇒ สอง scan ที่ไม่มีวันแมตช์อะไรเลย พิสูจน์ด้วยการยิง query เดียวกันด้วย bound
+ที่เป็น int (3 variants) เทียบ float (1 variant): **559 vs 278 µs**
+
+แก้โดยจำว่าแต่ละ field path เคยเก็บค่าชนิดไหนบ้าง (bitmask) แล้วสร้างเฉพาะ variant
+ที่มีทางแมตช์ เก็บลง `_meta.json` ให้รอด restart
+
+**กับดักที่เจอ:** เดิม `observe` ข้ามเอกสารที่ shape ซ้ำ แต่ shape ดูแค่ชื่อ key
+ไม่ดูชนิดค่า ⇒ ต้องเดินทุกเอกสาร ทำให้ observe แพงขึ้น 0.15 → 1.19 µs/doc (indexing ตก 23%)
+ต้นเหตุคือ `format!("{prefix}.{k}")` สร้าง String ต่อ field ต่อ doc
+เปลี่ยนเป็น buffer ที่ใช้ซ้ำและ allocate เฉพาะตอนเจอ path ใหม่ ⇒ 0.34 µs/doc
+
+**ความถูกต้อง:** index ที่เขียนไว้ก่อนมีฟีเจอร์นี้จะมีข้อมูลชนิดไม่ครบ
+การ narrow ด้วยข้อมูลไม่ครบจะทำให้ผลหาย จึงมี flag `kinds_complete`
+ที่เป็น false เมื่อ `_meta.json` ไม่มี `observed_kinds` และจะไม่ narrow เลย
+
+### 3. Startup: lazy id table
+เดิม reopen ต้อง scan `_id` ของทุกเอกสารก่อนรับ traffic วัดแล้วเป็น **99% ของ startup**
+(1,433-2,062 ms เทียบกับ 14-18 ms ถ้าข้าม) ย้ายไปทำใน background thread นอก write lock
+ระหว่างนั้น `is_live()` ถามดัชนีโดยตรงแทน
+
+⇒ cold start กับ index 200k docs: **1,433-2,062 ms → 13-638 ms**
+
+## ผล (A/B ใน build เดียว ข้อมูลชุดเดียว)
+
+`OBSEARCH_NO_BLOCK_SORT=1` และ `OBSEARCH_NO_KIND_NARROW=1` ปิดทีละตัวได้
+
+| query | ปิดทั้งคู่ | เปิดทั้งคู่ | เปลี่ยน |
+|---|---:|---:|---:|
+| sort_paged | 4,898 µs | 414 µs | **−92%** |
+| range_numeric | 485 µs | 253 µs | **−48%** |
+| bool_filter | 639 µs | 398 µs | **−38%** |
+| count_only | 211 µs | 151 µs | −28% |
+| term_numeric | 104 µs | 95 µs | −9% |
+| match_all | 224 µs | 210 µs | −6% |
+| agg_terms | 359 µs | 378 µs | +5% (noise, ไม่แตะ path นี้) |
+| agg_date_hist | 374 µs | 411 µs | +10% (noise) |
+| **รวม** | **8,112 µs** | **3,118 µs** | **−62%** |
+
+ที่ปลายทาง (ผ่าน HTTP) เห็นผลชัดที่ concurrency สูงซึ่ง CPU เป็นคอขวดจริง:
+qps c=8 **1,702 → 1,826**, p99 c=8 **7.43 → 6.70 ms** ส่วนที่ c=1 แทบไม่ขยับ
+เพราะ HTTP ครองเวลาอยู่แล้ว — ตรงกับที่วัดไว้ตั้งแต่ต้น
+
+## ที่ยังไม่ได้ทำ และเหตุผล
+
+| รายการ | สถานะ |
+|---|---|
+| custom columnar layout / bitpacking / dictionary encoding | tantivy ทำแล้ว — เขียนเองคือ fork `tantivy-columnar` |
+| per-block min/max สำหรับ skip, bloom filter | ยังไม่มีใน tantivy เป็นงานระดับแก้ crate ต้นน้ำ |
+| cost-based planner | ต้องมี execution path ทางเลือกให้เลือกก่อน ตอนนี้มีทางเดียว |
+| operator fusion / selection bitmap | tantivy fuse ผ่าน scorer composition อยู่แล้ว |
+| query-plan cache | **วัดแล้วว่าไม่คุ้ม** — build query = 0.5% ของเวลา |
+| block cache / postings cache | mmap + page cache ของ OS ทำหน้าที่นี้อยู่ |
+| async WAL, adaptive merge scheduler | ยังไม่ได้แตะ |
+| zero-copy JSON parsing | ยังไม่ได้ทำ — วัดไว้ที่ 189 ms (8.8% ของ indexing) |
+| distributed / scatter-gather | ยังเป็น single node |
