@@ -1,0 +1,5815 @@
+[
+ {
+  "file": "bulk/100_error_traces.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 2
+  },
+  "asserts": 10,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/10_basic.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 6,
+   "count": 3,
+   "headers": 1,
+   "indices.create": 4,
+   "indices.get": 2,
+   "indices.put_alias": 2
+  },
+  "asserts": 34,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "headers",
+   "indices.get",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "bulk/110_bulk_adaptive_shard_select.yml",
+  "area": "bulk",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 2,
+   "search": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/20_list_of_strings.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 1,
+   "count": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/30_big_string.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 1,
+   "count": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/40_source.yml",
+  "area": "bulk",
+  "apis": {
+   "index": 3,
+   "bulk": 4
+  },
+  "asserts": 9,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/50_refresh.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 3,
+   "count": 3
+  },
+  "asserts": 3,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "bulk/80_cas.yml",
+  "area": "bulk",
+  "apis": {},
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "bulk/90_pipeline.yml",
+  "area": "bulk",
+  "apis": {
+   "bulk": 1,
+   "count": 1
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "cat.aliases/10_basic.yml",
+  "area": "cat.aliases",
+  "apis": {
+   "cat.aliases": 11,
+   "indices.create": 11,
+   "indices.put_alias": 9,
+   "indices.close": 1
+  },
+  "asserts": 15,
+  "sections": 9,
+  "phase1": false,
+  "blockers": [
+   "cat.aliases",
+   "indices.close",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "cat.aliases/20_headers.yml",
+  "area": "cat.aliases",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_alias": 1,
+   "headers": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "headers",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "cat.aliases/30_json.yml",
+  "area": "cat.aliases",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_alias": 1,
+   "cat.aliases": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cat.aliases",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "cat.aliases/40_hidden.yml",
+  "area": "cat.aliases",
+  "apis": {
+   "indices.create": 3,
+   "cat.aliases": 5
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cat.aliases"
+  ]
+ },
+ {
+  "file": "cat.allocation/10_basic.yml",
+  "area": "cat.allocation",
+  "apis": {
+   "cat.allocation": 8,
+   "indices.create": 1
+  },
+  "asserts": 10,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "cat.allocation"
+  ]
+ },
+ {
+  "file": "cat.cluster_manager/10_basic.yml",
+  "area": "cat.cluster_manager",
+  "apis": {
+   "cat.cluster_manager": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cat.cluster_manager"
+  ]
+ },
+ {
+  "file": "cat.count/10_basic.yml",
+  "area": "cat.count",
+  "apis": {
+   "cat.count": 4,
+   "index": 2
+  },
+  "asserts": 6,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.count"
+  ]
+ },
+ {
+  "file": "cat.fielddata/10_basic.yml",
+  "area": "cat.fielddata",
+  "apis": {
+   "cat.fielddata": 4,
+   "indices.create": 1,
+   "index": 1,
+   "search": 1
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.fielddata"
+  ]
+ },
+ {
+  "file": "cat.health/10_basic.yml",
+  "area": "cat.health",
+  "apis": {
+   "cat.health": 3
+  },
+  "asserts": 4,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cat.health"
+  ]
+ },
+ {
+  "file": "cat.indices/10_basic.yml",
+  "area": "cat.indices",
+  "apis": {
+   "indices.create": 11,
+   "cat.indices": 9,
+   "indices.close": 2,
+   "cluster.health": 1
+  },
+  "asserts": 12,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "cat.indices",
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cat.indices/20_hidden.yml",
+  "area": "cat.indices",
+  "apis": {
+   "indices.create": 5,
+   "cat.indices": 8
+  },
+  "asserts": 12,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "cat.indices"
+  ]
+ },
+ {
+  "file": "cat.nodeattrs/10_basic.yml",
+  "area": "cat.nodeattrs",
+  "apis": {
+   "cat.nodeattrs": 3
+  },
+  "asserts": 7,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.nodeattrs"
+  ]
+ },
+ {
+  "file": "cat.nodes/10_basic.yml",
+  "area": "cat.nodes",
+  "apis": {
+   "cat.nodes": 10
+  },
+  "asserts": 11,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cat.nodes"
+  ]
+ },
+ {
+  "file": "cat.plugins/10_basic.yml",
+  "area": "cat.plugins",
+  "apis": {
+   "cat.plugins": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cat.plugins"
+  ]
+ },
+ {
+  "file": "cat.recovery/10_basic.yml",
+  "area": "cat.recovery",
+  "apis": {
+   "index": 1,
+   "cat.recovery": 4,
+   "indices.create": 1,
+   "indices.close": 1,
+   "cluster.health": 1
+  },
+  "asserts": 6,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.recovery",
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cat.repositories/10_basic.yml",
+  "area": "cat.repositories",
+  "apis": {
+   "cat.repositories": 3,
+   "snapshot.create_repository": 4
+  },
+  "asserts": 5,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cat.repositories",
+   "snapshot.create_repository"
+  ]
+ },
+ {
+  "file": "cat.segments/10_basic.yml",
+  "area": "cat.segments",
+  "apis": {
+   "cat.segments": 5,
+   "indices.create": 6,
+   "index": 5,
+   "cluster.health": 1,
+   "indices.close": 1
+  },
+  "asserts": 7,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cat.segments",
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cat.shards/10_basic.yml",
+  "area": "cat.shards",
+  "apis": {
+   "cat.shards": 11,
+   "indices.create": 7,
+   "index": 1
+  },
+  "asserts": 14,
+  "sections": 8,
+  "phase1": false,
+  "blockers": [
+   "cat.shards"
+  ]
+ },
+ {
+  "file": "cat.snapshots/10_basic.yml",
+  "area": "cat.snapshots",
+  "apis": {
+   "cat.snapshots": 3,
+   "snapshot.create_repository": 1,
+   "indices.create": 2,
+   "cluster.health": 1,
+   "snapshot.create": 2
+  },
+  "asserts": 3,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.snapshots",
+   "cluster.health",
+   "snapshot.create",
+   "snapshot.create_repository"
+  ]
+ },
+ {
+  "file": "cat.tasks/10_basic.yml",
+  "area": "cat.tasks",
+  "apis": {
+   "cat.tasks": 2
+  },
+  "asserts": 3,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.tasks"
+  ]
+ },
+ {
+  "file": "cat.templates/10_basic.yml",
+  "area": "cat.templates",
+  "apis": {
+   "cat.templates": 7,
+   "indices.put_template": 10,
+   "cluster.put_component_template": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 12,
+  "sections": 8,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cat.templates",
+   "cluster.put_component_template",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "cat.thread_pool/10_basic.yml",
+  "area": "cat.thread_pool",
+  "apis": {
+   "cat.thread_pool": 8
+  },
+  "asserts": 11,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cat.thread_pool"
+  ]
+ },
+ {
+  "file": "cluster.allocation_explain/10_basic.yml",
+  "area": "cluster.allocation_explain",
+  "apis": {
+   "indices.create": 3,
+   "cluster.allocation_explain": 3,
+   "cluster.health": 2,
+   "indices.close": 1
+  },
+  "asserts": 29,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.allocation_explain",
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cluster.component_template/10_basic.yml",
+  "area": "cluster.component_template",
+  "apis": {
+   "cluster.put_component_template": 1,
+   "cluster.get_component_template": 2,
+   "cluster.delete_component_template": 1
+  },
+  "asserts": 7,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.delete_component_template",
+   "cluster.get_component_template",
+   "cluster.put_component_template"
+  ]
+ },
+ {
+  "file": "cluster.health/10_basic.yml",
+  "area": "cluster.health",
+  "apis": {
+   "indices.create": 7,
+   "cluster.health": 15,
+   "indices.close": 1
+  },
+  "asserts": 58,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cluster.health/20_request_timeout.yml",
+  "area": "cluster.health",
+  "apis": {
+   "cluster.health": 2
+  },
+  "asserts": 20,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "cluster.health/30_indices_options.yml",
+  "area": "cluster.health",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 6,
+   "indices.close": 1
+  },
+  "asserts": 20,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cluster.pending_tasks/10_basic.yml",
+  "area": "cluster.pending_tasks",
+  "apis": {
+   "cluster.pending_tasks": 1
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.pending_tasks"
+  ]
+ },
+ {
+  "file": "cluster.put_settings/10_basic.yml",
+  "area": "cluster.put_settings",
+  "apis": {
+   "cluster.put_settings": 4,
+   "cluster.get_settings": 4
+  },
+  "asserts": 9,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.get_settings",
+   "cluster.put_settings"
+  ]
+ },
+ {
+  "file": "cluster.remote_info/10_info.yml",
+  "area": "cluster.remote_info",
+  "apis": {},
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "cluster.reroute/10_basic.yml",
+  "area": "cluster.reroute",
+  "apis": {},
+  "asserts": 3,
+  "sections": 1,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "cluster.reroute/11_explain.yml",
+  "area": "cluster.reroute",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "cluster.reroute": 2,
+   "nodes.info": 1
+  },
+  "asserts": 7,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "cluster.reroute",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "cluster.reroute/20_response_filtering.yml",
+  "area": "cluster.reroute",
+  "apis": {
+   "cluster.reroute": 2
+  },
+  "asserts": 5,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.reroute"
+  ]
+ },
+ {
+  "file": "cluster.state/10_basic.yml",
+  "area": "cluster.state",
+  "apis": {
+   "cluster.state": 1
+  },
+  "asserts": 6,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.state"
+  ]
+ },
+ {
+  "file": "cluster.state/20_filtering.yml",
+  "area": "cluster.state",
+  "apis": {
+   "index": 4,
+   "cluster.state": 12,
+   "indices.put_settings": 2
+  },
+  "asserts": 56,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "cluster.state",
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "cluster.state/30_expand_wildcards.yml",
+  "area": "cluster.state",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 1,
+   "indices.close": 1,
+   "cluster.state": 7
+  },
+  "asserts": 8,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "cluster.state",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "cluster.stats/10_basic.yml",
+  "area": "cluster.stats",
+  "apis": {},
+  "asserts": 62,
+  "sections": 4,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "cluster.voting_config_exclusions/10_basic.yml",
+  "area": "cluster.voting_config_exclusions",
+  "apis": {
+   "cluster.post_voting_config_exclusions": 5
+  },
+  "asserts": 9,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "cluster.post_voting_config_exclusions"
+  ]
+ },
+ {
+  "file": "count/10_basic.yml",
+  "area": "count",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "count": 5
+  },
+  "asserts": 4,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "count/20_query_string.yml",
+  "area": "count",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "count": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "create/10_with_id.yml",
+  "area": "create",
+  "apis": {},
+  "asserts": 7,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "create/15_without_id.yml",
+  "area": "create",
+  "apis": {},
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "create/35_external_version.yml",
+  "area": "create",
+  "apis": {},
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "create/40_routing.yml",
+  "area": "create",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "create/60_refresh.yml",
+  "area": "create",
+  "apis": {},
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "create/70_nested.yml",
+  "area": "create",
+  "apis": {
+   "indices.create": 1,
+   "create": 2
+  },
+  "asserts": 1,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "delete/10_basic.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/11_shard_header.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 7,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/12_result.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/20_cas.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/25_external_version.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/26_external_gte_version.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/30_routing.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/50_refresh.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 11,
+  "sections": 2,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "delete/60_missing.yml",
+  "area": "delete",
+  "apis": {},
+  "asserts": 0,
+  "sections": 1,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "exists/10_basic.yml",
+  "area": "exists",
+  "apis": {
+   "exists": 3,
+   "index": 1
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "exists/40_routing.yml",
+  "area": "exists",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "exists/60_realtime_refresh.yml",
+  "area": "exists",
+  "apis": {},
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "exists/70_defaults.yml",
+  "area": "exists",
+  "apis": {
+   "index": 1,
+   "exists": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "explain/10_basic.yml",
+  "area": "explain",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "explain": 3
+  },
+  "asserts": 8,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "explain"
+  ]
+ },
+ {
+  "file": "explain/20_source_filtering.yml",
+  "area": "explain",
+  "apis": {
+   "index": 1,
+   "indices.refresh": 1
+  },
+  "asserts": 14,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "explain/30_query_string.yml",
+  "area": "explain",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "explain": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "explain"
+  ]
+ },
+ {
+  "file": "field_caps/10_basic.yml",
+  "area": "field_caps",
+  "apis": {
+   "indices.create": 4,
+   "field_caps": 7
+  },
+  "asserts": 141,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "field_caps/20_meta.yml",
+  "area": "field_caps",
+  "apis": {
+   "indices.create": 3,
+   "field_caps": 4
+  },
+  "asserts": 7,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "field_caps/30_filter.yml",
+  "area": "field_caps",
+  "apis": {
+   "indices.create": 3,
+   "index": 5,
+   "indices.refresh": 1,
+   "field_caps": 5
+  },
+  "asserts": 26,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "field_caps/40_disable_objects.yml",
+  "area": "field_caps",
+  "apis": {
+   "indices.create": 3,
+   "index": 4,
+   "indices.refresh": 3,
+   "field_caps": 3
+  },
+  "asserts": 9,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/10_basic.yml",
+  "area": "get",
+  "apis": {
+   "index": 1,
+   "get": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/15_default_values.yml",
+  "area": "get",
+  "apis": {
+   "index": 1,
+   "get": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/20_stored_fields.yml",
+  "area": "get",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "get": 3
+  },
+  "asserts": 10,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/40_routing.yml",
+  "area": "get",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "get/50_with_headers.yml",
+  "area": "get",
+  "apis": {
+   "index": 1,
+   "headers": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "headers"
+  ]
+ },
+ {
+  "file": "get/60_realtime_refresh.yml",
+  "area": "get",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "get/70_source_filtering.yml",
+  "area": "get",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "get": 1
+  },
+  "asserts": 18,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/80_missing.yml",
+  "area": "get",
+  "apis": {
+   "get": 2
+  },
+  "asserts": 0,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get/90_versions.yml",
+  "area": "get",
+  "apis": {},
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "get_source/10_basic.yml",
+  "area": "get_source",
+  "apis": {
+   "index": 1,
+   "get_source": 2
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get_source/15_default_values.yml",
+  "area": "get_source",
+  "apis": {
+   "index": 1,
+   "get_source": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get_source/40_routing.yml",
+  "area": "get_source",
+  "apis": {},
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "get_source/60_realtime_refresh.yml",
+  "area": "get_source",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "get_source/70_source_filtering.yml",
+  "area": "get_source",
+  "apis": {
+   "index": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get_source/80_missing.yml",
+  "area": "get_source",
+  "apis": {
+   "get_source": 2
+  },
+  "asserts": 0,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "get_source/85_source_missing.yml",
+  "area": "get_source",
+  "apis": {
+   "get_source": 2
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/100_partial_flat_object.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "indices.get_mapping": 1,
+   "search": 32
+  },
+  "asserts": 71,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/105_partial_flat_object_nested.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "indices.get_mapping": 1,
+   "search": 29
+  },
+  "asserts": 66,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/10_with_id.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 7,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/110_strict_allow_templates.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "get": 1
+  },
+  "asserts": 11,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/111_false_allow_templates.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "get": 1,
+   "indices.get_mapping": 1
+  },
+  "asserts": 12,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/115_constant_keyword.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 2,
+   "index": 3,
+   "indices.refresh": 2,
+   "indices.get_mapping": 1,
+   "search": 16,
+   "indices.delete": 2
+  },
+  "asserts": 22,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/120_field_name.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 3
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/12_result.yml",
+  "area": "index",
+  "apis": {
+   "index": 2
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/15_without_id.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/20_optype.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/30_cas.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/35_external_version.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/36_external_gte_version.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/40_routing.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/60_refresh.yml",
+  "area": "index",
+  "apis": {},
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "index/70_require_alias.yml",
+  "area": "index",
+  "apis": {
+   "index": 2,
+   "indices.get": 1,
+   "indices.create": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.get"
+  ]
+ },
+ {
+  "file": "index/80_geo_point.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 2,
+   "search": 4
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/90_flat_object.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 2,
+   "index": 6,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "search": 38,
+   "indices.get_mapping": 1
+  },
+  "asserts": 84,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/90_unsigned_long.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 1,
+   "search": 2
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/91_flat_object_null_value.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "index": 19,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "indices.get_mapping": 1,
+   "search": 6
+  },
+  "asserts": 28,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "index/92_flat_object_support_doc_values.yml",
+  "area": "index",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "indices.delete": 1,
+   "search": 35
+  },
+  "asserts": 68,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.analyze/10_analyze.yml",
+  "area": "indices.analyze",
+  "apis": {
+   "indices.analyze": 5,
+   "indices.create": 1
+  },
+  "asserts": 22,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "indices.analyze"
+  ]
+ },
+ {
+  "file": "indices.analyze/20_analyze_limit.yml",
+  "area": "indices.analyze",
+  "apis": {
+   "indices.create": 1,
+   "indices.analyze": 3
+  },
+  "asserts": 4,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "indices.analyze"
+  ]
+ },
+ {
+  "file": "indices.blocks/10_basic.yml",
+  "area": "indices.blocks",
+  "apis": {
+   "indices.create": 1,
+   "indices.add_block": 1,
+   "index": 1,
+   "search": 1,
+   "indices.put_settings": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.add_block",
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.clear_cache/10_basic.yml",
+  "area": "indices.clear_cache",
+  "apis": {
+   "indices.clear_cache": 2
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "indices.clear_cache"
+  ]
+ },
+ {
+  "file": "indices.clone/10_basic.yml",
+  "area": "indices.clone",
+  "apis": {
+   "indices.create": 1,
+   "index": 3,
+   "indices.put_settings": 4,
+   "cluster.health": 4,
+   "allowed_warnings": 2,
+   "get": 4,
+   "indices.clone": 4
+  },
+  "asserts": 12,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.clone",
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.clone/20_source_mapping.yml",
+  "area": "indices.clone",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.put_template": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "indices.clone/30_copy_settings.yml",
+  "area": "indices.clone",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 2,
+   "allowed_warnings": 1,
+   "indices.get_settings": 1
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.clone/40_wait_for_completion.yml",
+  "area": "indices.clone",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "get": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 1,
+   "indices.clone": 1,
+   "tasks.get": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.clone",
+   "indices.put_settings",
+   "nodes.info",
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "indices.create/10_basic.yml",
+  "area": "indices.create",
+  "apis": {
+   "indices.create": 9,
+   "indices.get_mapping": 1,
+   "indices.get_settings": 1,
+   "indices.get_alias": 2,
+   "cluster.state": 2
+  },
+  "asserts": 15,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "cluster.state",
+   "indices.get_alias"
+  ]
+ },
+ {
+  "file": "indices.delete/10_basic.yml",
+  "area": "indices.delete",
+  "apis": {
+   "indices.create": 2,
+   "indices.delete": 8,
+   "indices.get": 8
+  },
+  "asserts": 16,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "indices.get"
+  ]
+ },
+ {
+  "file": "indices.delete_alias/10_basic.yml",
+  "area": "indices.delete_alias",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_alias": 1,
+   "indices.get_alias": 2,
+   "indices.delete_alias": 1
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.delete_alias",
+   "indices.get_alias",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.delete_alias/all_path_options.yml",
+  "area": "indices.delete_alias",
+  "apis": {
+   "indices.create": 3,
+   "indices.put_alias": 2,
+   "indices.get_alias": 16,
+   "indices.delete_alias": 11
+  },
+  "asserts": 35,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "indices.delete_alias",
+   "indices.get_alias",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.delete_index_template/10_basic.yml",
+  "area": "indices.delete_index_template",
+  "apis": {
+   "allowed_warnings": 3,
+   "indices.delete_data_stream": 2,
+   "indices.delete_index_template": 5,
+   "indices.create_data_stream": 2
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.create_data_stream",
+   "indices.delete_data_stream",
+   "indices.delete_index_template"
+  ]
+ },
+ {
+  "file": "indices.exists/10_basic.yml",
+  "area": "indices.exists",
+  "apis": {
+   "indices.exists": 3,
+   "indices.create": 1
+  },
+  "asserts": 3,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.exists/20_read_only_index.yml",
+  "area": "indices.exists",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_settings": 2,
+   "indices.exists": 2
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.exists_alias/10_basic.yml",
+  "area": "indices.exists_alias",
+  "apis": {
+   "indices.exists_alias": 5,
+   "indices.create": 1,
+   "indices.put_alias": 1
+  },
+  "asserts": 5,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.exists_alias",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.exists_template/10_basic.yml",
+  "area": "indices.exists_template",
+  "apis": {
+   "indices.delete_template": 1,
+   "indices.exists_template": 2,
+   "indices.put_template": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 3,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.delete_template",
+   "indices.exists_template",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "indices.flush/10_basic.yml",
+  "area": "indices.flush",
+  "apis": {
+   "indices.create": 2,
+   "indices.flush": 3,
+   "index": 1
+  },
+  "asserts": 6,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.flush"
+  ]
+ },
+ {
+  "file": "indices.forcemerge/10_basic.yml",
+  "area": "indices.forcemerge",
+  "apis": {
+   "indices.create": 3,
+   "indices.forcemerge": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 1,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.forcemerge"
+  ]
+ },
+ {
+  "file": "indices.forcemerge/20_wait_for_completion.yml",
+  "area": "indices.forcemerge",
+  "apis": {
+   "indices.create": 1,
+   "node_selector": 2,
+   "tasks.get": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 8,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "node_selector",
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "indices.get/10_basic.yml",
+  "area": "indices.get",
+  "apis": {
+   "indices.create": 3,
+   "indices.close": 1,
+   "cluster.health": 1,
+   "indices.get": 11
+  },
+  "asserts": 21,
+  "sections": 12,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.get"
+  ]
+ },
+ {
+  "file": "indices.get_alias/10_basic.yml",
+  "area": "indices.get_alias",
+  "apis": {
+   "indices.create": 8,
+   "indices.get_alias": 23,
+   "indices.close": 1
+  },
+  "asserts": 78,
+  "sections": 23,
+  "phase1": false,
+  "blockers": [
+   "indices.close",
+   "indices.get_alias"
+  ]
+ },
+ {
+  "file": "indices.get_alias/20_empty.yml",
+  "area": "indices.get_alias",
+  "apis": {
+   "indices.create": 2
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_alias/30_wildcards.yml",
+  "area": "indices.get_alias",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_alias": 9
+  },
+  "asserts": 47,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "indices.get_alias"
+  ]
+ },
+ {
+  "file": "indices.get_field_mapping/10_basic.yml",
+  "area": "indices.get_field_mapping",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_field_mapping": 4
+  },
+  "asserts": 6,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "indices.get_field_mapping"
+  ]
+ },
+ {
+  "file": "indices.get_field_mapping/20_missing_field.yml",
+  "area": "indices.get_field_mapping",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_field_mapping": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.get_field_mapping"
+  ]
+ },
+ {
+  "file": "indices.get_field_mapping/40_missing_index.yml",
+  "area": "indices.get_field_mapping",
+  "apis": {
+   "indices.get_field_mapping": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.get_field_mapping"
+  ]
+ },
+ {
+  "file": "indices.get_field_mapping/50_field_wildcards.yml",
+  "area": "indices.get_field_mapping",
+  "apis": {
+   "indices.create": 2,
+   "indices.get_field_mapping": 7
+  },
+  "asserts": 33,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "indices.get_field_mapping"
+  ]
+ },
+ {
+  "file": "indices.get_index_template/10_basic.yml",
+  "area": "indices.get_index_template",
+  "apis": {
+   "allowed_warnings": 2,
+   "indices.get_index_template": 2
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.get_index_template"
+  ]
+ },
+ {
+  "file": "indices.get_index_template/20_get_missing.yml",
+  "area": "indices.get_index_template",
+  "apis": {
+   "indices.delete_index_template": 1,
+   "indices.get_index_template": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.delete_index_template",
+   "indices.get_index_template"
+  ]
+ },
+ {
+  "file": "indices.get_mapping/10_basic.yml",
+  "area": "indices.get_mapping",
+  "apis": {
+   "indices.create": 2
+  },
+  "asserts": 13,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_mapping/30_missing_index.yml",
+  "area": "indices.get_mapping",
+  "apis": {
+   "indices.get_mapping": 4
+  },
+  "asserts": 1,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_mapping/40_aliases.yml",
+  "area": "indices.get_mapping",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_alias": 1,
+   "indices.get_mapping": 1
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.get_mapping/50_wildcard_expansion.yml",
+  "area": "indices.get_mapping",
+  "apis": {
+   "indices.create": 4,
+   "cluster.health": 2,
+   "indices.close": 1
+  },
+  "asserts": 12,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close"
+  ]
+ },
+ {
+  "file": "indices.get_mapping/60_empty.yml",
+  "area": "indices.get_mapping",
+  "apis": {
+   "indices.create": 2
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_settings/10_basic.yml",
+  "area": "indices.get_settings",
+  "apis": {
+   "indices.create": 2
+  },
+  "asserts": 43,
+  "sections": 13,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_settings/20_aliases.yml",
+  "area": "indices.get_settings",
+  "apis": {
+   "indices.create": 1,
+   "indices.put_alias": 1,
+   "indices.get_settings": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.get_settings/30_defaults.yml",
+  "area": "indices.get_settings",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_settings": 2
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_settings/40_number_of_routing_shards.yml",
+  "area": "indices.get_settings",
+  "apis": {
+   "indices.create": 2,
+   "indices.get_settings": 2
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.get_template/10_basic.yml",
+  "area": "indices.get_template",
+  "apis": {
+   "indices.put_template": 3,
+   "indices.get_template": 3,
+   "allowed_warnings": 1
+  },
+  "asserts": 10,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.get_template",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "indices.get_template/20_get_missing.yml",
+  "area": "indices.get_template",
+  "apis": {
+   "indices.delete_template": 1,
+   "indices.get_template": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.delete_template",
+   "indices.get_template"
+  ]
+ },
+ {
+  "file": "indices.open/10_basic.yml",
+  "area": "indices.open",
+  "apis": {
+   "indices.create": 6,
+   "cluster.health": 2,
+   "indices.close": 4,
+   "search": 2,
+   "indices.open": 2
+  },
+  "asserts": 14,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.open"
+  ]
+ },
+ {
+  "file": "indices.open/20_multiple_indices.yml",
+  "area": "indices.open",
+  "apis": {
+   "indices.create": 3,
+   "cluster.health": 4,
+   "indices.close": 3,
+   "search": 6,
+   "indices.open": 3
+  },
+  "asserts": 6,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.open"
+  ]
+ },
+ {
+  "file": "indices.open/30_wait_for_completion.yml",
+  "area": "indices.open",
+  "apis": {
+   "indices.create": 1,
+   "indices.close": 1,
+   "indices.open": 1,
+   "tasks.get": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.close",
+   "indices.open",
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "indices.put_alias/10_basic.yml",
+  "area": "indices.put_alias",
+  "apis": {
+   "indices.create": 14,
+   "indices.exists_alias": 2,
+   "indices.put_alias": 18,
+   "indices.get_alias": 16
+  },
+  "asserts": 18,
+  "sections": 11,
+  "phase1": false,
+  "blockers": [
+   "indices.exists_alias",
+   "indices.get_alias",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.put_alias/all_path_options.yml",
+  "area": "indices.put_alias",
+  "apis": {
+   "indices.create": 3,
+   "indices.put_alias": 7,
+   "indices.get_alias": 5
+  },
+  "asserts": 15,
+  "sections": 7,
+  "phase1": false,
+  "blockers": [
+   "indices.get_alias",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "indices.put_index_template/10_basic.yml",
+  "area": "indices.put_index_template",
+  "apis": {
+   "allowed_warnings": 5,
+   "indices.get_index_template": 5,
+   "indices.put_index_template": 2,
+   "indices.delete_index_template": 2
+  },
+  "asserts": 16,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.delete_index_template",
+   "indices.get_index_template",
+   "indices.put_index_template"
+  ]
+ },
+ {
+  "file": "indices.put_index_template/15_composition.yml",
+  "area": "indices.put_index_template",
+  "apis": {
+   "cluster.put_component_template": 6,
+   "allowed_warnings": 6,
+   "indices.create": 5,
+   "indices.get": 5
+  },
+  "asserts": 23,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.put_component_template",
+   "indices.get"
+  ]
+ },
+ {
+  "file": "indices.put_mapping/10_basic.yml",
+  "area": "indices.put_mapping",
+  "apis": {
+   "indices.create": 5,
+   "indices.put_mapping": 5,
+   "indices.get_mapping": 3,
+   "node_selector": 1
+  },
+  "asserts": 13,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "node_selector"
+  ]
+ },
+ {
+  "file": "indices.put_mapping/all_path_options.yml",
+  "area": "indices.put_mapping",
+  "apis": {
+   "indices.create": 3,
+   "indices.put_mapping": 10
+  },
+  "asserts": 32,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.put_settings/10_basic.yml",
+  "area": "indices.put_settings",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_settings": 6,
+   "indices.put_settings": 6,
+   "indices.close": 1,
+   "indices.open": 1
+  },
+  "asserts": 10,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "indices.close",
+   "indices.open",
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.put_settings/11_reset.yml",
+  "area": "indices.put_settings",
+  "apis": {
+   "indices.create": 1,
+   "indices.get_settings": 2,
+   "indices.put_settings": 1
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.put_settings/all_path_options.yml",
+  "area": "indices.put_settings",
+  "apis": {
+   "indices.create": 3,
+   "indices.put_settings": 7
+  },
+  "asserts": 18,
+  "sections": 5,
+  "phase1": false,
+  "blockers": [
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "indices.put_template/10_basic.yml",
+  "area": "indices.put_template",
+  "apis": {
+   "indices.put_template": 12,
+   "indices.get_template": 11,
+   "indices.delete_template": 1
+  },
+  "asserts": 26,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "indices.delete_template",
+   "indices.get_template",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "indices.recovery/10_basic.yml",
+  "area": "indices.recovery",
+  "apis": {
+   "indices.create": 5,
+   "cluster.health": 5,
+   "indices.recovery": 5,
+   "indices.close": 1
+  },
+  "asserts": 45,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.recovery"
+  ]
+ },
+ {
+  "file": "indices.refresh/10_basic.yml",
+  "area": "indices.refresh",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 1,
+   "indices.refresh": 3
+  },
+  "asserts": 9,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "indices.resolve_index/10_basic_resolve_index.yml",
+  "area": "indices.resolve_index",
+  "apis": {
+   "indices.create": 3,
+   "indices.close": 1,
+   "indices.resolve_index": 2
+  },
+  "asserts": 37,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "indices.close",
+   "indices.resolve_index"
+  ]
+ },
+ {
+  "file": "indices.rollover/10_basic.yml",
+  "area": "indices.rollover",
+  "apis": {
+   "indices.create": 4,
+   "index": 2,
+   "get": 1,
+   "indices.rollover": 5,
+   "indices.exists": 1,
+   "search": 1
+  },
+  "asserts": 16,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "indices.rollover"
+  ]
+ },
+ {
+  "file": "indices.rollover/20_max_doc_condition.yml",
+  "area": "indices.rollover",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "indices.rollover": 2
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.rollover"
+  ]
+ },
+ {
+  "file": "indices.rollover/30_max_size_condition.yml",
+  "area": "indices.rollover",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.rollover": 3
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.rollover"
+  ]
+ },
+ {
+  "file": "indices.rollover/40_mapping.yml",
+  "area": "indices.rollover",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "indices.rollover": 1
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.rollover"
+  ]
+ },
+ {
+  "file": "indices.segments/10_basic.yml",
+  "area": "indices.segments",
+  "apis": {
+   "indices.segments": 5,
+   "indices.create": 2,
+   "index": 2,
+   "cluster.health": 1,
+   "indices.close": 1
+  },
+  "asserts": 6,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.segments"
+  ]
+ },
+ {
+  "file": "indices.shard_stores/10_basic.yml",
+  "area": "indices.shard_stores",
+  "apis": {
+   "indices.shard_stores": 4,
+   "indices.create": 3,
+   "index": 3,
+   "cluster.health": 2
+  },
+  "asserts": 5,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.shard_stores"
+  ]
+ },
+ {
+  "file": "indices.shrink/10_basic.yml",
+  "area": "indices.shrink",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "indices.put_settings": 4,
+   "cluster.health": 4,
+   "allowed_warnings": 1,
+   "get": 2,
+   "indices.shrink": 4
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.shrink",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.shrink/20_source_mapping.yml",
+  "area": "indices.shrink",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "indices.put_template": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.put_template",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.shrink/30_copy_settings.yml",
+  "area": "indices.shrink",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 3,
+   "indices.shrink": 1,
+   "indices.get_settings": 2,
+   "allowed_warnings": 2
+  },
+  "asserts": 9,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.shrink",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.shrink/40_max_shard_size.yml",
+  "area": "indices.shrink",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "get": 2,
+   "indices.put_settings": 1,
+   "cluster.health": 2,
+   "allowed_warnings": 1,
+   "indices.get_settings": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.shrink/50_wait_for_completion.yml",
+  "area": "indices.shrink",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "get": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 1,
+   "indices.shrink": 1,
+   "tasks.get": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.shrink",
+   "nodes.info",
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "indices.simulate_index_template/10_basic.yml",
+  "area": "indices.simulate_index_template",
+  "apis": {
+   "indices.put_index_template": 2,
+   "indices.simulate_index_template": 4,
+   "cluster.put_component_template": 1,
+   "allowed_warnings": 3,
+   "indices.put_template": 1
+  },
+  "asserts": 19,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.put_component_template",
+   "indices.put_index_template",
+   "indices.put_template",
+   "indices.simulate_index_template"
+  ]
+ },
+ {
+  "file": "indices.simulate_template/10_basic.yml",
+  "area": "indices.simulate_template",
+  "apis": {
+   "indices.put_index_template": 3,
+   "indices.simulate_template": 4,
+   "cluster.put_component_template": 2,
+   "indices.put_template": 1,
+   "allowed_warnings": 2
+  },
+  "asserts": 24,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.put_component_template",
+   "indices.put_index_template",
+   "indices.put_template",
+   "indices.simulate_template"
+  ]
+ },
+ {
+  "file": "indices.sort/10_basic.yml",
+  "area": "indices.sort",
+  "apis": {
+   "indices.create": 4,
+   "index": 12,
+   "indices.refresh": 4,
+   "search": 6,
+   "indices.forcemerge": 1
+  },
+  "asserts": 30,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "indices.forcemerge"
+  ]
+ },
+ {
+  "file": "indices.split/10_basic.yml",
+  "area": "indices.split",
+  "apis": {
+   "indices.create": 2,
+   "index": 6,
+   "indices.put_settings": 5,
+   "cluster.health": 6,
+   "allowed_warnings": 4,
+   "get": 7,
+   "indices.split": 4
+  },
+  "asserts": 21,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.split"
+  ]
+ },
+ {
+  "file": "indices.split/20_source_mapping.yml",
+  "area": "indices.split",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.put_template": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.put_template"
+  ]
+ },
+ {
+  "file": "indices.split/30_copy_settings.yml",
+  "area": "indices.split",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 3,
+   "indices.split": 1,
+   "indices.get_settings": 2,
+   "allowed_warnings": 2
+  },
+  "asserts": 9,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.split",
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "indices.split/40_wait_for_completion.yml",
+  "area": "indices.split",
+  "apis": {
+   "nodes.info": 1,
+   "indices.create": 1,
+   "index": 1,
+   "get": 1,
+   "indices.put_settings": 1,
+   "cluster.health": 1,
+   "indices.split": 1,
+   "tasks.get": 1,
+   "allowed_warnings": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.put_settings",
+   "indices.split",
+   "nodes.info",
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "indices.stats/10_index.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 2,
+   "index": 2,
+   "indices.stats": 1
+  },
+  "asserts": 33,
+  "sections": 8,
+  "phase1": false,
+  "blockers": [
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "indices.stats/11_metric.yml",
+  "area": "indices.stats",
+  "apis": {
+   "index": 2
+  },
+  "asserts": 107,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.stats/12_level.yml",
+  "area": "indices.stats",
+  "apis": {
+   "index": 2
+  },
+  "asserts": 29,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.stats/13_fields.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "index": 2,
+   "search": 3
+  },
+  "asserts": 112,
+  "sections": 23,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "indices.stats/14_groups.yml",
+  "area": "indices.stats",
+  "apis": {
+   "index": 1,
+   "search": 1
+  },
+  "asserts": 16,
+  "sections": 8,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "indices.stats/20_translog.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 3,
+   "indices.flush": 3,
+   "indices.stats": 6,
+   "index": 3,
+   "allowed_warnings": 2,
+   "indices.put_settings": 2,
+   "indices.close": 1
+  },
+  "asserts": 14,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "cluster.health",
+   "indices.close",
+   "indices.flush",
+   "indices.put_settings",
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "indices.stats/30_segments.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "indices.stats": 4,
+   "index": 1,
+   "indices.flush": 1,
+   "indices.close": 1
+  },
+  "asserts": 5,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.flush",
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "indices.stats/40_updates_on_refresh.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "index": 3
+  },
+  "asserts": 6,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "indices.stats/50_noop_update.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "update": 1,
+   "indices.stats": 2,
+   "bulk": 1
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "indices.stats/60_include_both_time_and_gettime_in_stats.yml",
+  "area": "indices.stats",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "indices.stats": 1
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "indices.update_aliases/10_basic.yml",
+  "area": "indices.update_aliases",
+  "apis": {
+   "indices.create": 3,
+   "indices.exists_alias": 18,
+   "indices.update_aliases": 5,
+   "indices.get_alias": 2
+  },
+  "asserts": 21,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "indices.exists_alias",
+   "indices.get_alias",
+   "indices.update_aliases"
+  ]
+ },
+ {
+  "file": "indices.update_aliases/20_routing.yml",
+  "area": "indices.update_aliases",
+  "apis": {
+   "indices.create": 1,
+   "indices.update_aliases": 7,
+   "indices.get_alias": 7
+  },
+  "asserts": 7,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "indices.get_alias",
+   "indices.update_aliases"
+  ]
+ },
+ {
+  "file": "indices.update_aliases/30_remove_index_and_replace_with_alias.yml",
+  "area": "indices.update_aliases",
+  "apis": {
+   "indices.create": 2,
+   "indices.update_aliases": 1,
+   "indices.exists_alias": 2,
+   "indices.get": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.exists_alias",
+   "indices.get",
+   "indices.update_aliases"
+  ]
+ },
+ {
+  "file": "indices.update_aliases/40_remove_with_must_exist.yml",
+  "area": "indices.update_aliases",
+  "apis": {
+   "indices.create": 4,
+   "indices.exists_alias": 4,
+   "indices.update_aliases": 8
+  },
+  "asserts": 6,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "indices.exists_alias",
+   "indices.update_aliases"
+  ]
+ },
+ {
+  "file": "indices.upgrade/10_basic.yml",
+  "area": "indices.upgrade",
+  "apis": {
+   "indices.create": 3,
+   "indices.upgrade": 5
+  },
+  "asserts": 6,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "indices.upgrade"
+  ]
+ },
+ {
+  "file": "indices.validate_query/10_basic.yml",
+  "area": "indices.validate_query",
+  "apis": {
+   "indices.create": 1,
+   "indices.validate_query": 8
+  },
+  "asserts": 16,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "indices.validate_query"
+  ]
+ },
+ {
+  "file": "indices.validate_query/20_query_string.yml",
+  "area": "indices.validate_query",
+  "apis": {
+   "indices.create": 1,
+   "indices.validate_query": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.validate_query"
+  ]
+ },
+ {
+  "file": "indices.validate_query/20_query_string_field_match_only_text.yml",
+  "area": "indices.validate_query",
+  "apis": {
+   "indices.create": 1,
+   "indices.validate_query": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.validate_query"
+  ]
+ },
+ {
+  "file": "info/10_info.yml",
+  "area": "info",
+  "apis": {
+   "info": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "info"
+  ]
+ },
+ {
+  "file": "info/20_lucene_version.yml",
+  "area": "info",
+  "apis": {
+   "info": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "info"
+  ]
+ },
+ {
+  "file": "ingest/10_basic.yml",
+  "area": "ingest",
+  "apis": {
+   "ingest.put_pipeline": 9,
+   "ingest.get_pipeline": 8,
+   "ingest.delete_pipeline": 2
+  },
+  "asserts": 16,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "ingest.delete_pipeline",
+   "ingest.get_pipeline",
+   "ingest.put_pipeline"
+  ]
+ },
+ {
+  "file": "mget/10_basic.yml",
+  "area": "mget",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "mget": 1
+  },
+  "asserts": 11,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/12_non_existent_index.yml",
+  "area": "mget",
+  "apis": {
+   "index": 1,
+   "mget": 2
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/13_missing_metadata.yml",
+  "area": "mget",
+  "apis": {
+   "index": 1,
+   "mget": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/14_alias_to_multiple_indices.yml",
+  "area": "mget",
+  "apis": {
+   "bulk": 1,
+   "indices.put_alias": 2,
+   "mget": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "mget/15_ids.yml",
+  "area": "mget",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "mget": 4
+  },
+  "asserts": 18,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/17_default_index.yml",
+  "area": "mget",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "mget": 1
+  },
+  "asserts": 11,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/20_stored_fields.yml",
+  "area": "mget",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "mget": 4
+  },
+  "asserts": 32,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/40_routing.yml",
+  "area": "mget",
+  "apis": {},
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "mget/60_realtime_refresh.yml",
+  "area": "mget",
+  "apis": {},
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "mget/70_source_filtering.yml",
+  "area": "mget",
+  "apis": {
+   "index": 2,
+   "mget": 9
+  },
+  "asserts": 19,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/80_deprecated.yml",
+  "area": "mget",
+  "apis": {
+   "index": 2,
+   "mget": 2
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mget/90_error_traces.yml",
+  "area": "mget",
+  "apis": {
+   "mget": 2
+  },
+  "asserts": 12,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mlt/10_basic.yml",
+  "area": "mlt",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "cluster.health": 1,
+   "search": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "mlt/20_docs.yml",
+  "area": "mlt",
+  "apis": {
+   "indices.create": 1,
+   "index": 3,
+   "cluster.health": 1,
+   "search": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "mlt/30_unlike.yml",
+  "area": "mlt",
+  "apis": {
+   "indices.create": 1,
+   "index": 3,
+   "cluster.health": 1,
+   "search": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "msearch/10_basic.yml",
+  "area": "msearch",
+  "apis": {
+   "index": 4,
+   "msearch": 5
+  },
+  "asserts": 26,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "msearch/11_status.yml",
+  "area": "msearch",
+  "apis": {
+   "indices.create": 1,
+   "msearch": 1
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "msearch/20_typed_keys.yml",
+  "area": "msearch",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 1,
+   "msearch": 2
+  },
+  "asserts": 20,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "msearch/30_error_traces.yml",
+  "area": "msearch",
+  "apis": {
+   "msearch": 2
+  },
+  "asserts": 14,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "mtermvectors/10_basic.yml",
+  "area": "mtermvectors",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "mtermvectors": 3
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "mtermvectors"
+  ]
+ },
+ {
+  "file": "mtermvectors/20_deprecated.yml",
+  "area": "mtermvectors",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "mtermvectors": 2
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "mtermvectors"
+  ]
+ },
+ {
+  "file": "mtermvectors/30_error_traces.yml",
+  "area": "mtermvectors",
+  "apis": {
+   "mtermvectors": 2
+  },
+  "asserts": 12,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "mtermvectors"
+  ]
+ },
+ {
+  "file": "nodes.info/10_basic.yml",
+  "area": "nodes.info",
+  "apis": {
+   "node_selector": 1
+  },
+  "asserts": 15,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "node_selector"
+  ]
+ },
+ {
+  "file": "nodes.info/20_transport.yml",
+  "area": "nodes.info",
+  "apis": {
+   "nodes.info": 1
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "nodes.info/30_settings.yml",
+  "area": "nodes.info",
+  "apis": {
+   "nodes.info": 2
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "nodes.info/40_aggs.yml",
+  "area": "nodes.info",
+  "apis": {
+   "nodes.info": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "nodes.info/50_nodes_total_indexing_buffer_format.yml",
+  "area": "nodes.info",
+  "apis": {
+   "nodes.info": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info"
+  ]
+ },
+ {
+  "file": "nodes.reload_secure_settings/10_basic.yml",
+  "area": "nodes.reload_secure_settings",
+  "apis": {
+   "nodes.reload_secure_settings": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.reload_secure_settings"
+  ]
+ },
+ {
+  "file": "nodes.reload_secure_settings/11_no_password.yml",
+  "area": "nodes.reload_secure_settings",
+  "apis": {},
+  "asserts": 4,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "nodes.stats/10_basic.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.stats": 3
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "nodes.stats/11_indices_metrics.yml",
+  "area": "nodes.stats",
+  "apis": {},
+  "asserts": 154,
+  "sections": 8,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "nodes.stats/20_response_filtering.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.stats": 11
+  },
+  "asserts": 116,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "nodes.stats/30_discovery.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.info": 1,
+   "nodes.stats": 2
+  },
+  "asserts": 23,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info",
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "nodes.stats/40_store_stats.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.info": 1,
+   "nodes.stats": 1
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.info",
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "nodes.stats/50_indexing_pressure.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.stats": 2
+  },
+  "asserts": 16,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "nodes.stats/60_transport_stats.yml",
+  "area": "nodes.stats",
+  "apis": {
+   "nodes.stats": 1
+  },
+  "asserts": 9,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "nodes.stats"
+  ]
+ },
+ {
+  "file": "ping/10_ping.yml",
+  "area": "ping",
+  "apis": {
+   "ping": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "ping"
+  ]
+ },
+ {
+  "file": "pit/10_basic.yml",
+  "area": "pit",
+  "apis": {
+   "indices.create": 2,
+   "index": 5,
+   "create_pit": 2,
+   "search": 3,
+   "delete_pit": 1
+  },
+  "asserts": 22,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "create_pit",
+   "delete_pit"
+  ]
+ },
+ {
+  "file": "range/10_basic.yml",
+  "area": "range",
+  "apis": {
+   "indices.create": 1,
+   "index": 22,
+   "search": 35
+  },
+  "asserts": 35,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "scripts/20_get_script_context.yml",
+  "area": "scripts",
+  "apis": {},
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "scripts/25_get_script_languages.yml",
+  "area": "scripts",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "scroll/10_basic.yml",
+  "area": "scroll",
+  "apis": {
+   "indices.create": 7,
+   "index": 13,
+   "search": 7,
+   "scroll": 8,
+   "clear_scroll": 4
+  },
+  "asserts": 42,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "clear_scroll",
+   "scroll"
+  ]
+ },
+ {
+  "file": "scroll/10_basic_timeseries.yml",
+  "area": "scroll",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 5,
+   "search": 1,
+   "scroll": 6,
+   "clear_scroll": 1
+  },
+  "asserts": 15,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "clear_scroll",
+   "scroll"
+  ]
+ },
+ {
+  "file": "scroll/11_clear.yml",
+  "area": "scroll",
+  "apis": {
+   "indices.create": 3,
+   "index": 3,
+   "search": 3,
+   "clear_scroll": 6,
+   "scroll": 3
+  },
+  "asserts": 3,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "clear_scroll",
+   "scroll"
+  ]
+ },
+ {
+  "file": "scroll/12_slices.yml",
+  "area": "scroll",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "search": 4,
+   "scroll": 2,
+   "clear_scroll": 3,
+   "indices.put_settings": 1
+  },
+  "asserts": 15,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "clear_scroll",
+   "indices.put_settings",
+   "scroll"
+  ]
+ },
+ {
+  "file": "scroll/20_keep_alive.yml",
+  "area": "scroll",
+  "apis": {
+   "cluster.put_settings": 2,
+   "index": 2,
+   "search": 2,
+   "scroll": 1
+  },
+  "asserts": 3,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.put_settings",
+   "scroll"
+  ]
+ },
+ {
+  "file": "search/100_stored_fields.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 3
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/10_source_filtering.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "search": 19,
+   "warnings": 4,
+   "allowed_warnings": 1
+  },
+  "asserts": 50,
+  "sections": 25,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "warnings"
+  ]
+ },
+ {
+  "file": "search/110_field_collapsing.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 4,
+   "index": 14,
+   "indices.refresh": 2,
+   "count": 7,
+   "search": 37,
+   "indices.put_settings": 2
+  },
+  "asserts": 282,
+  "sections": 16,
+  "phase1": false,
+  "blockers": [
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "search/115_multiple_field_collapsing.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 4
+  },
+  "asserts": 32,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/120_batch_reduce_size.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "search": 2,
+   "index": 3
+  },
+  "asserts": 9,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/140_pre_filter_search_shards.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "search": 8,
+   "index": 3
+  },
+  "asserts": 38,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/150_rewrite_on_coordinator.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "index": 4,
+   "allowed_warnings": 2
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings"
+  ]
+ },
+ {
+  "file": "search/160_exists_query.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 4,
+   "headers": 6,
+   "index": 3,
+   "indices.refresh": 1,
+   "search": 70
+  },
+  "asserts": 69,
+  "sections": 69,
+  "phase1": false,
+  "blockers": [
+   "headers"
+  ]
+ },
+ {
+  "file": "search/160_exists_query_match_only_text.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "headers": 3,
+   "index": 2,
+   "indices.refresh": 1,
+   "search": 3
+  },
+  "asserts": 3,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "headers"
+  ]
+ },
+ {
+  "file": "search/170_terms_query.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 4
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/171_terms_lookup_query.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 3,
+   "bulk": 2,
+   "search": 9
+  },
+  "asserts": 11,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search/180_locale_dependent_mapping.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 2
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/190_index_prefix_search.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "indices.refresh": 1,
+   "search": 8
+  },
+  "asserts": 18,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/200_ignore_malformed.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "index": 4,
+   "search": 5
+  },
+  "asserts": 7,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/200_index_phrase_search.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 4
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/200_phrase_search_field_match_only_text.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 4
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/20_default_values.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "index": 2,
+   "indices.refresh": 1,
+   "search": 5
+  },
+  "asserts": 9,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/210_rescore_explain.yml",
+  "area": "search",
+  "apis": {
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 7,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/220_total_hits_object.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "index": 7,
+   "indices.refresh": 1,
+   "search": 10
+  },
+  "asserts": 13,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/230_interval_query.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 31,
+   "allowed_warnings": 4
+  },
+  "asserts": 79,
+  "sections": 34,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings"
+  ]
+ },
+ {
+  "file": "search/240_date_nanos.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "bulk": 5,
+   "search": 6
+  },
+  "asserts": 59,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/250_distance_feature.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1
+  },
+  "asserts": 12,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/260_sort_double.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 66,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/260_sort_geopoint.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "search": 2
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/260_sort_long.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 66,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/260_sort_mixed.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 8,
+   "bulk": 3,
+   "search": 5
+  },
+  "asserts": 36,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/260_sort_unsigned_long.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 90,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/270_wildcard_fieldtype_queries.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "index": 17,
+   "indices.get_mapping": 1,
+   "search": 33,
+   "indices.refresh": 1,
+   "indices.delete": 1
+  },
+  "asserts": 60,
+  "sections": 19,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/300_sequence_numbers.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "indices.refresh": 1,
+   "search": 3
+  },
+  "asserts": 6,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/30_limits.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "search": 9
+  },
+  "asserts": 2,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/310_match_bool_prefix.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "search": 16
+  },
+  "asserts": 67,
+  "sections": 15,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/310_match_bool_prefix_field_match_only_text.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "search": 13
+  },
+  "asserts": 28,
+  "sections": 12,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/320_disallow_queries.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "cluster.put_settings": 2,
+   "cluster.get_settings": 1,
+   "search": 7
+  },
+  "asserts": 2,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.get_settings",
+   "cluster.put_settings"
+  ]
+ },
+ {
+  "file": "search/320_disallow_queries_field_match_only_text.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "cluster.put_settings": 2,
+   "cluster.get_settings": 1,
+   "search": 7
+  },
+  "asserts": 2,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.get_settings",
+   "cluster.put_settings"
+  ]
+ },
+ {
+  "file": "search/330_distributed_sort.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "index": 3,
+   "search": 4
+  },
+  "asserts": 29,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/330_fetch_fields.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 7,
+   "index": 8,
+   "indices.refresh": 5,
+   "search": 9
+  },
+  "asserts": 22,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/340_doc_values_field.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 3,
+   "bulk": 3,
+   "search": 120
+  },
+  "asserts": 120,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/350_matched_queries.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 4,
+   "bulk": 4,
+   "search": 4
+  },
+  "asserts": 18,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/360_from_and_size.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "search": 6
+  },
+  "asserts": 2,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/370_approximate_range.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 3
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/380_bitmap_filtering.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 2,
+   "cluster.health": 1,
+   "search": 4
+  },
+  "asserts": 20,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search/381_bitmap_filtering_long.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 2,
+   "cluster.health": 1,
+   "search": 2
+  },
+  "asserts": 10,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search/390_search_as_you_type.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "search": 3
+  },
+  "asserts": 5,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/400_combined_fields.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 4,
+   "indices.refresh": 1,
+   "search": 2
+  },
+  "asserts": 9,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/400_max_score.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "indices.refresh": 1,
+   "indices.delete": 1,
+   "search": 8,
+   "indices.put_settings": 2
+  },
+  "asserts": 24,
+  "sections": 4,
+  "phase1": false,
+  "blockers": [
+   "indices.put_settings"
+  ]
+ },
+ {
+  "file": "search/40_indices_boost.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 2,
+   "indices.put_alias": 2,
+   "index": 2,
+   "indices.refresh": 1,
+   "allowed_warnings": 2,
+   "search": 10
+  },
+  "asserts": 33,
+  "sections": 5,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings",
+   "indices.put_alias"
+  ]
+ },
+ {
+  "file": "search/50_multi_match.yml",
+  "area": "search",
+  "apis": {
+   "index": 3,
+   "search": 2
+  },
+  "asserts": 6,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/60_query_string.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 5
+  },
+  "asserts": 5,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/61_query_string_field_alias.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 2
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/70_response_filtering.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "indices.refresh": 1,
+   "search": 7,
+   "bulk": 1,
+   "count": 1
+  },
+  "asserts": 55,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/80_indices_options.yml",
+  "area": "search",
+  "apis": {
+   "search": 8,
+   "indices.create": 1,
+   "indices.close": 1
+  },
+  "asserts": 3,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "indices.close"
+  ]
+ },
+ {
+  "file": "search/90_search_after.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 6,
+   "index": 3,
+   "indices.refresh": 1,
+   "search": 32,
+   "bulk": 8
+  },
+  "asserts": 229,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/95_search_after_shard_doc.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "bulk": 1,
+   "search": 5,
+   "create_pit": 1,
+   "delete_pit": 1
+  },
+  "asserts": 36,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "create_pit",
+   "delete_pit"
+  ]
+ },
+ {
+  "file": "search/issue4895.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 1
+  },
+  "asserts": 0,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search/issue9606.yml",
+  "area": "search",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 2
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/100_avg_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 7
+  },
+  "asserts": 22,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/100_avg_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 22,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/10_histogram.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 9,
+   "cluster.health": 1,
+   "index": 12,
+   "search": 14,
+   "bulk": 9,
+   "indices.put_mapping": 1
+  },
+  "asserts": 122,
+  "sections": 11,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search.aggregation/110_max_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 7
+  },
+  "asserts": 22,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/110_max_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 22,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/120_min_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 7
+  },
+  "asserts": 22,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/120_min_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 22,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/130_sum_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 7
+  },
+  "asserts": 22,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/130_sum_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 22,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/140_value_count_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 25,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/140_value_count_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 25,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/150_stats_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 53,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/150_stats_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 53,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/160_extended_stats_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 9
+  },
+  "asserts": 110,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/160_extended_stats_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 7
+  },
+  "asserts": 112,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/170_cardinality_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 11
+  },
+  "asserts": 64,
+  "sections": 9,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/170_cardinality_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 11
+  },
+  "asserts": 64,
+  "sections": 9,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/180_percentiles_tdigest_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "node_selector": 8,
+   "search": 7
+  },
+  "asserts": 118,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "node_selector"
+  ]
+ },
+ {
+  "file": "search.aggregation/180_percentiles_tdigest_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "node_selector": 14
+  },
+  "asserts": 180,
+  "sections": 13,
+  "phase1": false,
+  "blockers": [
+   "node_selector"
+  ]
+ },
+ {
+  "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 2,
+   "search": 17,
+   "index": 1
+  },
+  "asserts": 112,
+  "sections": 9,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 2,
+   "search": 9
+  },
+  "asserts": 102,
+  "sections": 7,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/200_top_hits_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "index": 3,
+   "search": 3
+  },
+  "asserts": 31,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/20_terms.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 4,
+   "cluster.health": 1,
+   "index": 56,
+   "search": 37,
+   "indices.put_mapping": 3,
+   "indices.stats": 2,
+   "bulk": 5,
+   "indices.forcemerge": 1
+  },
+  "asserts": 234,
+  "sections": 25,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.forcemerge",
+   "indices.stats"
+  ]
+ },
+ {
+  "file": "search.aggregation/220_filters_bucket.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 10
+  },
+  "asserts": 45,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/220_filters_bucket_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 8
+  },
+  "asserts": 45,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/230_composite.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 8,
+   "index": 14,
+   "indices.refresh": 1,
+   "search": 28,
+   "allowed_warnings": 2,
+   "bulk": 1
+  },
+  "asserts": 175,
+  "sections": 23,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings"
+  ]
+ },
+ {
+  "file": "search.aggregation/230_composite_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 3,
+   "index": 8,
+   "indices.refresh": 1,
+   "search": 7
+  },
+  "asserts": 67,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/240_max_buckets.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "index": 8,
+   "indices.refresh": 1,
+   "cluster.put_settings": 3,
+   "search": 2
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "cluster.put_settings"
+  ]
+ },
+ {
+  "file": "search.aggregation/250_moving_fn.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "search": 2,
+   "allowed_warnings": 1
+  },
+  "asserts": 0,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "allowed_warnings"
+  ]
+ },
+ {
+  "file": "search.aggregation/260_weighted_avg.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/260_weighted_avg_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/270_median_absolute_deviation_metric.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 6
+  },
+  "asserts": 14,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 4
+  },
+  "asserts": 14,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/280_rare_terms.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 1,
+   "index": 22,
+   "search": 16,
+   "bulk": 1
+  },
+  "asserts": 61,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search.aggregation/300_pipeline.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 2,
+   "search": 5
+  },
+  "asserts": 21,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/30_sig_terms.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "index": 9,
+   "indices.refresh": 1,
+   "search": 7
+  },
+  "asserts": 13,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/30_sig_terms_field_match_only_text.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "index": 7,
+   "indices.refresh": 1,
+   "search": 2
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/310_date_agg_per_day_of_week.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "indices.refresh": 1,
+   "search": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/320_missing.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 4
+  },
+  "asserts": 12,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/330_auto_date_histogram.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 2,
+   "search": 4
+  },
+  "asserts": 28,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/340_geo_distance.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 2
+  },
+  "asserts": 20,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/350_variable_width_histogram.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/360_date_histogram.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "bulk": 3,
+   "search": 3
+  },
+  "asserts": 19,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/370_multi_terms.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "cluster.health": 1,
+   "bulk": 17,
+   "search": 18,
+   "indices.put_mapping": 1
+  },
+  "asserts": 178,
+  "sections": 16,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search.aggregation/380_doc_count_field.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 2,
+   "search": 5
+  },
+  "asserts": 36,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/400_inner_hits.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 6,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/40_range.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 3,
+   "cluster.health": 1,
+   "index": 21,
+   "search": 16,
+   "bulk": 3,
+   "indices.put_mapping": 1
+  },
+  "asserts": 167,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "cluster.health"
+  ]
+ },
+ {
+  "file": "search.aggregation/410_nested_aggs.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "indices.delete": 1,
+   "search": 2
+  },
+  "asserts": 16,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/50_filter.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "search": 4,
+   "bulk": 2
+  },
+  "asserts": 27,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/60_empty.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "index": 3,
+   "search": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/70_adjacency_matrix.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 2,
+   "search": 2,
+   "node_selector": 1
+  },
+  "asserts": 24,
+  "sections": 2,
+  "phase1": false,
+  "blockers": [
+   "node_selector"
+  ]
+ },
+ {
+  "file": "search.aggregation/80_typed_keys.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 13
+  },
+  "asserts": 20,
+  "sections": 12,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/80_typed_keys_unsigned.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 13
+  },
+  "asserts": 20,
+  "sections": 12,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/90_sig_text.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "index": 14,
+   "indices.refresh": 2,
+   "search": 4
+  },
+  "asserts": 8,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.aggregation/90_sig_text_field_match_only_text.yml",
+  "area": "search.aggregation",
+  "apis": {
+   "indices.create": 2,
+   "index": 14,
+   "indices.refresh": 2,
+   "search": 4
+  },
+  "asserts": 8,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.backpressure/10_basic.yml",
+  "area": "search.backpressure",
+  "apis": {
+   "cluster.put_settings": 27,
+   "cluster.get_settings": 21
+  },
+  "asserts": 46,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "cluster.get_settings",
+   "cluster.put_settings"
+  ]
+ },
+ {
+  "file": "search.highlight/10_unified.yml",
+  "area": "search.highlight",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "search": 2
+  },
+  "asserts": 4,
+  "sections": 1,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.highlight/20_fvh.yml",
+  "area": "search.highlight",
+  "apis": {
+   "indices.create": 1,
+   "index": 2,
+   "search": 3
+  },
+  "asserts": 8,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.highlight/30_max_analyzed_offset.yml",
+  "area": "search.highlight",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "search": 6
+  },
+  "asserts": 6,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.highlight/40_keyword_ignore.yml",
+  "area": "search.highlight",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 2
+  },
+  "asserts": 4,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.inner_hits/10_basic.yml",
+  "area": "search.inner_hits",
+  "apis": {
+   "indices.create": 2,
+   "index": 4,
+   "search": 5
+  },
+  "asserts": 31,
+  "sections": 3,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.inner_hits/20_highlighting.yml",
+  "area": "search.inner_hits",
+  "apis": {
+   "indices.create": 2,
+   "index": 2,
+   "search": 3
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.inner_hits/20_highlighting_field_match_only_text.yml",
+  "area": "search.inner_hits",
+  "apis": {
+   "indices.create": 2,
+   "index": 2,
+   "search": 3
+  },
+  "asserts": 7,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search.profile/10_fetch_phase.yml",
+  "area": "search.profile",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 4
+  },
+  "asserts": 69,
+  "sections": 2,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "search_pipeline/10_basic.yml",
+  "area": "search_pipeline",
+  "apis": {
+   "search_pipeline.put": 9,
+   "search_pipeline.get": 8,
+   "search_pipeline.delete": 2
+  },
+  "asserts": 16,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "search_pipeline.delete",
+   "search_pipeline.get",
+   "search_pipeline.put"
+  ]
+ },
+ {
+  "file": "search_shards/10_basic.yml",
+  "area": "search_shards",
+  "apis": {
+   "indices.create": 2,
+   "search_shards": 7
+  },
+  "asserts": 35,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "search_shards"
+  ]
+ },
+ {
+  "file": "search_shards/10_basic_field_match_only_field.yml",
+  "area": "search_shards",
+  "apis": {
+   "indices.create": 1,
+   "search_shards": 6
+  },
+  "asserts": 34,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "search_shards"
+  ]
+ },
+ {
+  "file": "search_shards/20_slice.yml",
+  "area": "search_shards",
+  "apis": {
+   "indices.create": 1,
+   "search_shards": 6
+  },
+  "asserts": 23,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "search_shards"
+  ]
+ },
+ {
+  "file": "snapshot.clone/10_basic.yml",
+  "area": "snapshot.clone",
+  "apis": {
+   "snapshot.create_repository": 1,
+   "indices.create": 2,
+   "snapshot.create": 1,
+   "snapshot.clone": 1,
+   "snapshot.delete": 1
+  },
+  "asserts": 2,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "snapshot.clone",
+   "snapshot.create",
+   "snapshot.create_repository",
+   "snapshot.delete"
+  ]
+ },
+ {
+  "file": "snapshot.create/10_basic.yml",
+  "area": "snapshot.create",
+  "apis": {
+   "snapshot.create_repository": 1,
+   "indices.create": 1,
+   "snapshot.create": 4,
+   "snapshot.delete": 3,
+   "snapshot.cleanup_repository": 3
+  },
+  "asserts": 21,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "snapshot.cleanup_repository",
+   "snapshot.create",
+   "snapshot.create_repository",
+   "snapshot.delete"
+  ]
+ },
+ {
+  "file": "snapshot.get/10_basic.yml",
+  "area": "snapshot.get",
+  "apis": {
+   "snapshot.create_repository": 1,
+   "indices.create": 4,
+   "snapshot.create": 5,
+   "snapshot.get": 7,
+   "snapshot.delete": 5
+  },
+  "asserts": 23,
+  "sections": 6,
+  "phase1": false,
+  "blockers": [
+   "snapshot.create",
+   "snapshot.create_repository",
+   "snapshot.delete",
+   "snapshot.get"
+  ]
+ },
+ {
+  "file": "snapshot.get_repository/10_basic.yml",
+  "area": "snapshot.get_repository",
+  "apis": {
+   "snapshot.create_repository": 2,
+   "snapshot.get_repository": 3,
+   "snapshot.verify_repository": 2
+  },
+  "asserts": 8,
+  "sections": 5,
+  "phase1": false,
+  "blockers": [
+   "snapshot.create_repository",
+   "snapshot.get_repository",
+   "snapshot.verify_repository"
+  ]
+ },
+ {
+  "file": "snapshot.restore/10_basic.yml",
+  "area": "snapshot.restore",
+  "apis": {
+   "snapshot.create_repository": 1,
+   "indices.create": 1,
+   "cluster.health": 1,
+   "snapshot.create": 1,
+   "indices.close": 1,
+   "snapshot.restore": 1,
+   "indices.recovery": 1
+  },
+  "asserts": 12,
+  "sections": 1,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "indices.close",
+   "indices.recovery",
+   "snapshot.create",
+   "snapshot.create_repository",
+   "snapshot.restore"
+  ]
+ },
+ {
+  "file": "snapshot.status/10_basic.yml",
+  "area": "snapshot.status",
+  "apis": {
+   "snapshot.create_repository": 1,
+   "indices.create": 1,
+   "snapshot.create": 1,
+   "snapshot.status": 3
+  },
+  "asserts": 10,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "snapshot.create",
+   "snapshot.create_repository",
+   "snapshot.status"
+  ]
+ },
+ {
+  "file": "suggest/10_basic.yml",
+  "area": "suggest",
+  "apis": {
+   "index": 1,
+   "search": 1
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "suggest/20_completion.yml",
+  "area": "suggest",
+  "apis": {
+   "indices.create": 1,
+   "index": 12,
+   "search": 10
+  },
+  "asserts": 39,
+  "sections": 6,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "suggest/30_context.yml",
+  "area": "suggest",
+  "apis": {
+   "indices.create": 1,
+   "index": 13,
+   "search": 12
+  },
+  "asserts": 23,
+  "sections": 5,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "suggest/40_typed_keys.yml",
+  "area": "suggest",
+  "apis": {
+   "indices.create": 1,
+   "bulk": 1,
+   "search": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "suggest/50_completion_with_multi_fields.yml",
+  "area": "suggest",
+  "apis": {
+   "indices.create": 5,
+   "index": 10,
+   "search": 6
+  },
+  "asserts": 14,
+  "sections": 4,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "tasks.cancel/10_basic.yml",
+  "area": "tasks.cancel",
+  "apis": {
+   "tasks.cancel": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "tasks.cancel"
+  ]
+ },
+ {
+  "file": "tasks.get/10_basic.yml",
+  "area": "tasks.get",
+  "apis": {
+   "tasks.get": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "tasks.get"
+  ]
+ },
+ {
+  "file": "tasks.list/10_basic.yml",
+  "area": "tasks.list",
+  "apis": {
+   "tasks.list": 4
+  },
+  "asserts": 21,
+  "sections": 3,
+  "phase1": false,
+  "blockers": [
+   "tasks.list"
+  ]
+ },
+ {
+  "file": "termvectors/10_basic.yml",
+  "area": "termvectors",
+  "apis": {
+   "indices.create": 1,
+   "index": 1,
+   "termvectors": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "termvectors"
+  ]
+ },
+ {
+  "file": "termvectors/20_issue7121.yml",
+  "area": "termvectors",
+  "apis": {
+   "indices.create": 1,
+   "cluster.health": 1,
+   "index": 1,
+   "termvectors": 1
+  },
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "cluster.health",
+   "termvectors"
+  ]
+ },
+ {
+  "file": "termvectors/30_realtime.yml",
+  "area": "termvectors",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "update/10_doc.yml",
+  "area": "update",
+  "apis": {
+   "index": 1,
+   "update": 1,
+   "get": 1
+  },
+  "asserts": 7,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/11_shard_header.yml",
+  "area": "update",
+  "apis": {},
+  "asserts": 7,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "update/12_result.yml",
+  "area": "update",
+  "apis": {
+   "update": 4
+  },
+  "asserts": 8,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/13_legacy_doc.yml",
+  "area": "update",
+  "apis": {
+   "index": 1,
+   "update": 1,
+   "get": 1
+  },
+  "asserts": 7,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/16_noop.yml",
+  "area": "update",
+  "apis": {
+   "index": 1,
+   "update": 2
+  },
+  "asserts": 12,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/20_doc_upsert.yml",
+  "area": "update",
+  "apis": {
+   "update": 2,
+   "get": 2
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/22_doc_as_upsert.yml",
+  "area": "update",
+  "apis": {
+   "update": 2,
+   "get": 2
+  },
+  "asserts": 4,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/35_if_seq_no.yml",
+  "area": "update",
+  "apis": {},
+  "asserts": 3,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "update/40_routing.yml",
+  "area": "update",
+  "apis": {},
+  "asserts": 2,
+  "sections": 0,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "update/60_refresh.yml",
+  "area": "update",
+  "apis": {},
+  "asserts": 10,
+  "sections": 2,
+  "phase1": false,
+  "blockers": []
+ },
+ {
+  "file": "update/80_source_filtering.yml",
+  "area": "update",
+  "apis": {
+   "update": 1
+  },
+  "asserts": 2,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/85_fields_meta.yml",
+  "area": "update",
+  "apis": {
+   "indices.create": 1,
+   "update": 1,
+   "get": 1
+  },
+  "asserts": 1,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/90_error.yml",
+  "area": "update",
+  "apis": {
+   "update": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": true,
+  "blockers": []
+ },
+ {
+  "file": "update/95_require_alias.yml",
+  "area": "update",
+  "apis": {
+   "update": 2,
+   "indices.get": 1,
+   "indices.create": 1
+  },
+  "asserts": 0,
+  "sections": 0,
+  "phase1": false,
+  "blockers": [
+   "indices.get"
+  ]
+ },
+ {
+  "file": "wlm_stats/10_basic.yml",
+  "area": "wlm_stats",
+  "apis": {
+   "wlm_stats_list": 11
+  },
+  "asserts": 16,
+  "sections": 10,
+  "phase1": false,
+  "blockers": [
+   "wlm_stats_list"
+  ]
+ }
+]

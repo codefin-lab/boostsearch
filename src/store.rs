@@ -1,0 +1,621 @@
+//! Index registry: one tantivy index per OpenSearch index, plus its mapping.
+
+use anyhow::{Result, anyhow};
+use parking_lot::RwLock;
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use tantivy::schema::*;
+use std::path::{Path as FsPath, PathBuf};
+use tantivy::directory::MmapDirectory;
+use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
+
+/// Field roles in the fixed schema shared by every index.
+#[derive(Clone, Copy)]
+pub struct Fields {
+    pub id: Field,
+    pub source: Field,
+    /// analysed JSON view -- backs `text` fields and numerics
+    pub dynamic: Field,
+    /// raw (untokenised) JSON view -- backs `keyword` fields, sorts and term aggs
+    pub raw: Field,
+}
+
+/// How much un-refreshed document source may sit in memory before the writer
+/// flushes. Without a cap, a large bulk load holds every document twice.
+pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+pub const DYN: &str = "_dyn";
+pub const RAW: &str = "_raw";
+
+pub fn build_schema() -> (Schema, Fields) {
+    let mut sb = Schema::builder();
+    let id = sb.add_text_field("_id", STRING | STORED | FAST);
+    let source = sb.add_text_field("_source", STORED);
+    let dynamic = sb.add_json_field(
+        DYN,
+        JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("default")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        ),
+    );
+    // `_raw` keeps its own fast fields: tantivy's RangeQuery over a JSON field
+    // only works on fast fields, so dropping them here breaks every range query
+    // that resolves to the untokenised view. Measured: removing them buys ~5% of
+    // the write path, which is not worth the semantics.
+    let raw = sb.add_json_field(
+        RAW,
+        JsonObjectOptions::default().set_fast(Some("raw")).set_expand_dots_enabled().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
+    (sb.build(), Fields { id, source, dynamic, raw })
+}
+
+/// Declared field types, flattened to dotted paths (`user.name` -> `keyword`).
+#[derive(Default, Clone, Debug)]
+pub struct Mapping {
+    pub types: HashMap<String, String>,
+    /// the mapping body exactly as the user sent it, for GET _mapping
+    pub raw: Value,
+}
+
+impl Mapping {
+    pub fn from_body(body: &Value) -> Mapping {
+        let mut types = HashMap::new();
+        if let Some(props) = body.get("properties").and_then(|p| p.as_object()) {
+            flatten_props(props, "", &mut types);
+        }
+        Mapping { types, raw: body.clone() }
+    }
+
+    pub fn type_of(&self, field: &str) -> Option<&str> {
+        self.types.get(field).map(|s| s.as_str())
+    }
+
+    /// PUT _mapping is additive: new properties layer onto the old ones, and
+    /// top-level knobs like `dynamic` are replaced.
+    pub fn merge(&mut self, body: &Value) {
+        if !self.raw.is_object() {
+            self.raw = serde_json::json!({});
+        }
+        let Some(incoming) = body.as_object() else { return };
+        for (key, val) in incoming {
+            if key == "properties" {
+                if let Some(props) = val.as_object() {
+                    flatten_props(props, "", &mut self.types);
+                    let slot = self
+                        .raw
+                        .as_object_mut()
+                        .unwrap()
+                        .entry("properties")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(existing) = slot.as_object_mut() {
+                        for (k, v) in props {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            } else {
+                self.raw.as_object_mut().unwrap().insert(key.clone(), val.clone());
+            }
+        }
+    }
+}
+
+fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, String>) {
+    for (name, def) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
+            flatten_props(sub, &path, out);
+            continue;
+        }
+        if let Some(t) = def.get("type").and_then(|t| t.as_str()) {
+            out.insert(path.clone(), t.to_string());
+        }
+        // multi-fields: `title.keyword`
+        if let Some(subs) = def.get("fields").and_then(|f| f.as_object()) {
+            flatten_props(subs, &path, out);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DocMeta {
+    pub version: u64,
+    pub live: bool,
+}
+
+pub struct IdxState {
+    pub name: String,
+    pub index: Index,
+    pub writer: IndexWriter,
+    pub reader: IndexReader,
+    pub fields: Fields,
+    pub mapping: Mapping,
+    pub settings: Value,
+    pub aliases: Vec<String>,
+    /// Version and liveness per document id. Keeping liveness here means an
+    /// existence check is a map lookup rather than a search per indexed document.
+    pub versions: HashMap<String, DocMeta>,
+    /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
+    /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
+    pub pending: HashMap<String, Option<String>>,
+    pub pending_bytes: usize,
+    /// A second reader that IS advanced when the buffer is flushed, so GET stays
+    /// realtime while search still only moves on an explicit refresh.
+    pub realtime: IndexReader,
+    pub seq_no: u64,
+    /// number of searches served, reported by _stats. Atomic so counting a
+    /// search never needs a write lock -- taking one here would deadlock any
+    /// caller that already holds the read guard.
+    pub search_count: std::sync::atomic::AtomicU64,
+    /// misses recorded for `request_cache=true` searches, reported by _stats
+    pub request_cache_miss: std::sync::atomic::AtomicU64,
+    pub auto_id: u64,
+    /// field paths seen in indexed documents, with the type OpenSearch's
+    /// dynamic mapping would have given them. Explicit mappings win over these.
+    pub dynamic_types: HashMap<String, String>,
+    /// hashes of document shapes already folded into `dynamic_types`
+    pub seen_shapes: std::collections::HashSet<u64>,
+}
+
+impl IdxState {
+    /// Make everything written so far visible to search.
+    pub fn refresh(&mut self) -> Result<()> {
+        self.writer.commit()?;
+        self.reader.reload()?;
+        self.realtime.reload()?;
+        self.pending.clear();
+        self.pending_bytes = 0;
+        Ok(())
+    }
+
+    /// Bound how much un-refreshed source we hold in memory. Flushing advances
+    /// only the realtime reader, so search visibility is unchanged.
+    pub fn note_pending(&mut self, id: &str, source: Option<String>) {
+        self.pending_bytes += id.len() + source.as_ref().map(|s| s.len()).unwrap_or(0) + 48;
+        self.pending.insert(id.to_string(), source);
+        if self.pending_bytes > PENDING_BUDGET_BYTES {
+            if self.writer.commit().is_ok() {
+                let _ = self.realtime.reload();
+                self.pending.clear();
+                self.pending_bytes = 0;
+            }
+        }
+    }
+
+    /// Next version for a document id, and the sequence number of the write.
+    pub fn bump(&mut self, id: &str, live: bool) -> (u64, u64) {
+        let m = self
+            .versions
+            .entry(id.to_string())
+            .or_insert(DocMeta { version: 0, live: false });
+        m.version += 1;
+        m.live = live;
+        let version = m.version;
+        let seq = self.seq_no;
+        self.seq_no += 1;
+        (version, seq)
+    }
+
+    pub fn version_of(&self, id: &str) -> u64 {
+        self.versions.get(id).map(|m| m.version).unwrap_or(1)
+    }
+
+    /// Is there a live document under this id?
+    pub fn is_live(&self, id: &str) -> bool {
+        match self.pending.get(id) {
+            Some(Some(_)) => true,
+            Some(None) => false,
+            None => self.versions.get(id).map(|m| m.live).unwrap_or(false),
+        }
+    }
+
+    /// Rebuild the id table from the committed index. Needed after reopening a
+    /// persisted index, where the in-memory table starts empty.
+    pub fn reload_ids(&mut self) {
+        let searcher = self.realtime.searcher();
+        for reader in searcher.segment_readers() {
+            let Ok(Some(col)) = reader.fast_fields().str("_id") else { continue };
+            let alive = reader.alive_bitset();
+            for doc in 0..reader.max_doc() {
+                if alive.map(|a| !a.is_alive(doc)).unwrap_or(false) {
+                    continue;
+                }
+                let Some(ord) = col.term_ords(doc).next() else { continue };
+                let mut buf = Vec::new();
+                if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
+                    if let Ok(id) = String::from_utf8(buf) {
+                        self.versions.insert(id, DocMeta { version: 1, live: true });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Settings echoed back by GET _settings, including the defaults the
+    /// YAML suite asserts on.
+    pub fn effective_settings(&self) -> Value {
+        let mut idx = serde_json::json!({
+            "number_of_shards": "1",
+            "number_of_replicas": "1",
+            "provided_name": self.name,
+        });
+        // settings arrive either nested under `index` or flat, and OpenSearch
+        // always echoes the values back as strings
+        fn put(idx: &mut Value, k: &str, v: &Value) {
+            let k = k.trim_start_matches("index.");
+            idx[k] = match v {
+                Value::String(_) => v.clone(),
+                Value::Null => return,
+                other => Value::String(other.to_string()),
+            };
+        }
+        if let Some(user) = self.settings.as_object() {
+            for (k, v) in user {
+                if k == "index" {
+                    if let Some(nested) = v.as_object() {
+                        for (k2, v2) in nested {
+                            put(&mut idx, k2, v2);
+                        }
+                    }
+                } else {
+                    put(&mut idx, k, v);
+                }
+            }
+        }
+        serde_json::json!({ "index": idx })
+    }
+
+    /// Record the dynamic types a document contributes.
+    ///
+    /// Bulk loads send the same shape over and over, so remember which shapes
+    /// have been walked and skip the walk for repeats.
+    pub fn observe(&mut self, source: &Value) {
+        if let Some(obj) = source.as_object() {
+            let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
+            for k in obj.keys() {
+                for b in k.as_bytes() {
+                    sig ^= *b as u64;
+                    sig = sig.wrapping_mul(0x1000_0000_01b3);
+                }
+                sig ^= 0xff;
+            }
+            if !self.seen_shapes.insert(sig) {
+                return;
+            }
+        }
+        self.observe_inner(source)
+    }
+
+    fn observe_inner(&mut self, source: &Value) {
+        fn walk(v: &Value, prefix: &str, out: &mut HashMap<String, String>) {
+            match v {
+                Value::Object(o) => {
+                    for (k, child) in o {
+                        let path =
+                            if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                        walk(child, &path, out);
+                    }
+                }
+                Value::Array(a) => {
+                    for x in a {
+                        walk(x, prefix, out);
+                    }
+                }
+                leaf if !prefix.is_empty() => {
+                    let kind = match leaf {
+                        Value::String(s) => {
+                            if crate::query::parse_datetime(s).is_some() { "date" } else { "text" }
+                        }
+                        Value::Bool(_) => "boolean",
+                        Value::Number(n) if n.is_f64() && n.as_i64().is_none() => "float",
+                        Value::Number(_) => "long",
+                        _ => return,
+                    };
+                    out.entry(prefix.to_string()).or_insert_with(|| kind.to_string());
+                }
+                _ => {}
+            }
+        }
+        walk(source, "", &mut self.dynamic_types);
+    }
+
+    /// Every field path known for this index, explicit mappings taking priority.
+    pub fn all_field_types(&self) -> Vec<(String, String)> {
+        let mut out: HashMap<String, String> = self.dynamic_types.clone();
+        for (k, v) in &self.mapping.types {
+            out.insert(k.clone(), v.clone());
+        }
+        let mut v: Vec<(String, String)> = out.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// Look a setting up by dotted name, accepting the flat or nested form.
+    pub fn setting(&self, key: &str) -> Option<String> {
+        let settings = self.effective_settings();
+        let flat = settings.pointer(&format!("/index/{key}"));
+        let nested = settings.pointer(&format!("/index/{}", key.replace('.', "/")));
+        flat.or(nested).map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+    }
+
+    /// `index.max_terms_count` caps how many terms a `terms` query may carry.
+    pub fn max_terms_count(&self) -> usize {
+        self.setting("max_terms_count").and_then(|v| v.parse().ok()).unwrap_or(65_536)
+    }
+
+    pub fn next_auto_id(&mut self) -> String {
+        self.auto_id += 1;
+        format!("auto-{:016x}", self.auto_id)
+    }
+}
+
+#[derive(Clone)]
+pub struct Store {
+    inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
+    /// where index data lives; `None` keeps everything in RAM
+    data_dir: Option<PathBuf>,
+}
+
+/// Index names are not path-safe, so each one gets a stable encoded directory.
+fn dir_name(index: &str) -> String {
+    let mut out = String::new();
+    for b in index.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02x}")),
+        }
+    }
+    out
+}
+
+impl Store {
+    pub fn new() -> Store {
+        Store { inner: Arc::new(RwLock::new(HashMap::new())), data_dir: None }
+    }
+
+    /// Back indices with mmapped files under `dir`, and reopen whatever is
+    /// already there. Keeps the index out of process memory: the OS page cache
+    /// holds it instead, and it survives a restart.
+    pub fn on_disk(dir: impl AsRef<FsPath>) -> Result<Store> {
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir)?;
+        let store = Store { inner: Arc::new(RwLock::new(HashMap::new())), data_dir: Some(dir.clone()) };
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let meta_path = entry.path().join("_meta.json");
+            let Ok(raw) = std::fs::read_to_string(&meta_path) else { continue };
+            let Ok(meta): std::result::Result<Value, _> = serde_json::from_str(&raw) else {
+                continue;
+            };
+            let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
+            let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
+            match store.open_index(name, &body, entry.path()) {
+                Ok(()) => {
+                    if let Some(st) = store.get(name) {
+                        st.write().reload_ids();
+                    }
+                }
+                Err(e) => tracing::warn!("could not reopen index {name}: {e}"),
+            }
+        }
+        Ok(store)
+    }
+
+    fn index_path(&self, name: &str) -> Option<PathBuf> {
+        self.data_dir.as_ref().map(|d| d.join(dir_name(name)))
+    }
+
+    pub fn exists(&self, name: &str) -> bool {
+        self.inner.read().contains_key(name)
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.inner.read().keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<RwLock<IdxState>>> {
+        if let Some(s) = self.inner.read().get(name) {
+            return Some(s.clone());
+        }
+        // alias lookup
+        let guard = self.inner.read();
+        for st in guard.values() {
+            if st.read().aliases.iter().any(|a| a == name) {
+                return Some(st.clone());
+            }
+        }
+        None
+    }
+
+    /// Resolve an index expression (`test`, `test*`, `_all`, `a,b`) to concrete indices.
+    pub fn resolve(&self, expr: &str) -> Vec<String> {
+        if expr.is_empty() || expr == "_all" || expr == "*" {
+            return self.names();
+        }
+        let mut out = Vec::new();
+        for part in expr.split(',') {
+            let part = part.trim();
+            if part.contains('*') {
+                let re = wildcard_to_regex(part);
+                for n in self.names() {
+                    if re.is_match(&n) && !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+            } else if self.exists(part) {
+                if !out.contains(&part.to_string()) {
+                    out.push(part.to_string());
+                }
+            } else if let Some(st) = self.get(part) {
+                let n = st.read().name.clone();
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn create(&self, name: &str, body: &Value) -> Result<()> {
+        if self.exists(name) {
+            return Err(anyhow!("resource_already_exists_exception"));
+        }
+        match self.index_path(name) {
+            Some(path) => {
+                std::fs::create_dir_all(&path)?;
+                std::fs::write(
+                    path.join("_meta.json"),
+                    serde_json::json!({"name": name, "body": body}).to_string(),
+                )?;
+                self.open_index(name, body, path)
+            }
+            None => self.open_index_in_ram(name, body),
+        }
+    }
+
+    fn open_index(&self, name: &str, body: &Value, path: PathBuf) -> Result<()> {
+        let (schema, fields) = build_schema();
+        let dir = MmapDirectory::open(&path)?;
+        let index = Index::open_or_create(dir, schema)?;
+        self.finish_open(name, body, index, fields)
+    }
+
+    fn open_index_in_ram(&self, name: &str, body: &Value) -> Result<()> {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        self.finish_open(name, body, index, fields)
+    }
+
+    fn finish_open(
+        &self,
+        name: &str,
+        body: &Value,
+        mut index: Index,
+        fields: Fields,
+    ) -> Result<()> {
+        // Fanning one query across segments cuts single-stream latency, but it
+        // oversubscribes the CPU once many queries run at once. Tunable.
+        match std::env::var("OBSEARCH_SEARCH_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            Some(0) => {}
+            Some(n) => {
+                let _ = index.set_multithread_executor(n);
+            }
+            None => {
+                let _ = index.set_default_multithread_executor();
+            }
+        }
+        // one arena per indexing thread; a bigger budget means fewer segment
+        // flushes and less merging, at the cost of resident memory
+        let budget: usize = std::env::var("OBSEARCH_WRITER_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64)
+            * 1024
+            * 1024;
+        let threads: usize = std::env::var("OBSEARCH_WRITER_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let writer = index.writer_with_num_threads(threads.max(1), budget)?;
+        let reader = index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
+        let realtime =
+            index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
+        let mapping = body
+            .get("mappings")
+            .map(Mapping::from_body)
+            .unwrap_or_else(|| Mapping { types: HashMap::new(), raw: serde_json::json!({}) });
+        let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let aliases = body
+            .get("aliases")
+            .and_then(|a| a.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        let st = IdxState {
+            name: name.to_string(),
+            index,
+            writer,
+            reader,
+            fields,
+            mapping,
+            settings,
+            aliases,
+            versions: HashMap::new(),
+            pending: HashMap::new(),
+            pending_bytes: 0,
+            realtime,
+            seq_no: 0,
+            search_count: std::sync::atomic::AtomicU64::new(0),
+            request_cache_miss: std::sync::atomic::AtomicU64::new(0),
+            auto_id: 0,
+            dynamic_types: HashMap::new(),
+            seen_shapes: std::collections::HashSet::new(),
+        };
+        self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
+        Ok(())
+    }
+
+    /// Auto-create on first write, the way OpenSearch does.
+    pub fn ensure(&self, name: &str) -> Result<Arc<RwLock<IdxState>>> {
+        if let Some(s) = self.get(name) {
+            return Ok(s);
+        }
+        self.create(name, &serde_json::json!({}))?;
+        self.get(name).ok_or_else(|| anyhow!("index vanished"))
+    }
+
+    pub fn delete(&self, name: &str) -> bool {
+        let targets = self.resolve(name);
+        let mut guard = self.inner.write();
+        let mut any = false;
+        for t in targets {
+            any |= guard.remove(&t).is_some();
+            if let Some(path) = self.index_path(&t) {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+        any
+    }
+}
+
+pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
+    let mut s = String::from("^");
+    for c in pat.chars() {
+        match c {
+            '*' => s.push_str(".*"),
+            '?' => s.push('.'),
+            c => s.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    s.push('$');
+    regex::Regex::new(&s).unwrap_or_else(|_| regex::Regex::new("^$").unwrap())
+}
+
+/// Convert a JSON document into a tantivy document with both views plus `_source`.
+/// Build the tantivy document. Takes the source by value so the JSON tree is
+/// moved into the first view instead of deep-copied for both.
+pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str) -> TantivyDocument {
+    let mut d = TantivyDocument::default();
+    d.add_text(fields.id, id);
+    d.add_text(fields.source, raw);
+    if let Value::Object(obj) = source {
+        let converted: BTreeMap<String, OwnedValue> =
+            obj.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect();
+        d.add_object(fields.dynamic, converted.clone());
+        d.add_object(fields.raw, converted);
+    }
+    d
+}
