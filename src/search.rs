@@ -1063,11 +1063,6 @@ pub fn run(
     };
 
     let started = std::time::Instant::now();
-    let trace = std::env::var("OBSEARCH_TRACE_SEARCH").is_ok();
-    let mut t_build = std::time::Duration::ZERO;
-    let mut t_exec = std::time::Duration::ZERO;
-    let mut t_agg = std::time::Duration::ZERO;
-    let mut t_fetch = std::time::Duration::ZERO;
     let page_want = from + size;
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
@@ -1099,7 +1094,6 @@ pub fn run(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
         };
-        let _tb = std::time::Instant::now();
         let q: Box<dyn tantivy::query::Query> = match &query_json {
             Some(qj) => match crate::query::build(&ctx, qj) {
                 Ok(q) => q,
@@ -1114,7 +1108,6 @@ pub fn run(
             None => Box::new(tantivy::query::AllQuery),
         };
 
-        t_build += _tb.elapsed();
         let searcher = g.reader.searcher();
 
         // aggregations, when asked for, run over the same query
@@ -1140,7 +1133,6 @@ pub fn run(
         }
 
         let want = page_want;
-        let _te = std::time::Instant::now();
         let (count, shard_cands): (usize, Vec<Cand>) = if sort_keys.is_empty() {
             let collector = (Count, TopDocs::with_limit(want.max(1)).order_by_score());
             match searcher.search(&q, &collector) {
@@ -1191,14 +1183,12 @@ pub fn run(
                 }
             }
         };
-        t_exec += _te.elapsed();
         total += count as u64;
         if count == 0 {
             empty_shards += 1;
         }
         cands.extend(shard_cands);
 
-        let _tg = std::time::Instant::now();
         if let Some(a) = this_agg {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
@@ -1222,7 +1212,6 @@ pub fn run(
             }
         }
 
-        t_agg += _tg.elapsed();
         searchers.push((g.name.clone(), searcher, st.clone()));
     }
 
@@ -1236,7 +1225,6 @@ pub fn run(
     };
 
     // now, and only now, read stored fields -- for at most `size` documents
-    let _tf = std::time::Instant::now();
     let mut all_hits: Vec<Hit> = Vec::new();
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
@@ -1253,13 +1241,6 @@ pub fn run(
         });
     }
 
-    t_fetch += _tf.elapsed();
-    if trace {
-        eprintln!(
-            "search total={:?} build={:?} exec={:?} agg={:?} fetch={:?}",
-            started.elapsed(), t_build, t_exec, t_agg, t_fetch
-        );
-    }
     let page: Vec<Value> = all_hits
         .into_iter()
         .map(|h| {
@@ -1611,7 +1592,6 @@ fn filtered_count(
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
-        t_build += _tb.elapsed();
         let searcher = g.reader.searcher();
         total += searcher
             .search(&q, &Count)

@@ -161,6 +161,9 @@ pub struct IdxState {
     pub dynamic_types: HashMap<String, String>,
     /// hashes of document shapes already folded into `dynamic_types`
     pub seen_shapes: std::collections::HashSet<u64>,
+    /// False while the id table is still being rebuilt after a reopen. Until it
+    /// flips, an unknown id has to be checked against the index itself.
+    pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IdxState {
@@ -211,12 +214,62 @@ impl IdxState {
         match self.pending.get(id) {
             Some(Some(_)) => true,
             Some(None) => false,
-            None => self.versions.get(id).map(|m| m.live).unwrap_or(false),
+            None => match self.versions.get(id) {
+                Some(m) => m.live,
+                // the table is authoritative once loaded; while it is still
+                // filling in after a reopen, fall back to asking the index
+                None if !self.ids_loaded.load(std::sync::atomic::Ordering::Relaxed) => {
+                    self.lookup_id(id)
+                }
+                None => false,
+            },
         }
     }
 
-    /// Rebuild the id table from the committed index. Needed after reopening a
-    /// persisted index, where the in-memory table starts empty.
+    fn lookup_id(&self, id: &str) -> bool {
+        let searcher = self.realtime.searcher();
+        let q = tantivy::query::TermQuery::new(
+            Term::from_field_text(self.fields.id, id),
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        searcher.search(&q, &tantivy::collector::Count).map(|c| c > 0).unwrap_or(false)
+    }
+
+    /// Scan the committed index for live document ids. Runs off the write lock
+    /// so a reopen does not stall startup.
+    pub fn scan_ids(reader: &IndexReader, id_field: Field) -> HashMap<String, DocMeta> {
+        let mut out = HashMap::new();
+        let searcher = reader.searcher();
+        for seg in searcher.segment_readers() {
+            let Ok(Some(col)) = seg.fast_fields().str("_id") else { continue };
+            let alive = seg.alive_bitset();
+            let mut buf = Vec::new();
+            for doc in 0..seg.max_doc() {
+                if alive.map(|a| !a.is_alive(doc)).unwrap_or(false) {
+                    continue;
+                }
+                let Some(ord) = col.term_ords(doc).next() else { continue };
+                buf.clear();
+                if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
+                    if let Ok(id) = std::str::from_utf8(&buf) {
+                        out.insert(id.to_string(), DocMeta { version: 1, live: true });
+                    }
+                }
+            }
+        }
+        let _ = id_field;
+        out
+    }
+
+    /// Merge a scan result in without overwriting anything written since.
+    pub fn absorb_ids(&mut self, scanned: HashMap<String, DocMeta>) {
+        for (id, meta) in scanned {
+            self.versions.entry(id).or_insert(meta);
+        }
+        self.ids_loaded.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[allow(dead_code)]
     pub fn reload_ids(&mut self) {
         let searcher = self.realtime.searcher();
         for reader in searcher.segment_readers() {
@@ -403,8 +456,19 @@ impl Store {
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
+                    // Rebuild the id table in the background: startup no longer
+                    // waits on a full scan of every document.
                     if let Some(st) = store.get(name) {
-                        st.write().reload_ids();
+                        let (reader, id_field, flag) = {
+                            let g = st.read();
+                            (g.realtime.clone(), g.fields.id, g.ids_loaded.clone())
+                        };
+                        flag.store(false, std::sync::atomic::Ordering::Release);
+                        let st2 = st.clone();
+                        std::thread::spawn(move || {
+                            let scanned = IdxState::scan_ids(&reader, id_field);
+                            st2.write().absorb_ids(scanned);
+                        });
                     }
                 }
                 Err(e) => tracing::warn!("could not reopen index {name}: {e}"),
@@ -563,6 +627,7 @@ impl Store {
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
+            ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())
