@@ -14,21 +14,24 @@
 ใช้ corpus เดียวกัน (200,000 http-log docs / 53 MB, seed คงที่) และ query mix เดียวกัน
 **รันฝั่งละ 5 รอบ รายงานค่ามัธยฐานพร้อมช่วง min-max**
 
-## ผล (หลังรอบ storage/execution)
+## ผล (ล่าสุด — หลังรอบ parallel indexing + id fingerprints)
 
-วัดฝั่งละ 5 รอบในเซสชันเดียวกัน รายงานมัธยฐานพร้อมช่วง min-max
+วัดฝั่งละ 5 รอบในเซสชันเดียวกัน มัธยฐาน `[min-max]`
 
 | | obsearch | OpenSearch 3.1.0 | |
 |---|---:|---:|---|
-| index docs/s | 59,276 `[57.5k-60.0k]` | **70,449** `[57.7k-70.8k]` | OpenSearch +19% |
-| memory (MB) | **369** `[208-491]` | 1,134 `[1076-1187]` | obsearch **น้อยกว่า 3.1 เท่า** |
-| qps c=1 | **424** `[405-426]` | 360 `[278-408]` | obsearch +18% |
-| p50 c=1 | **2.26 ms** `[2.22-2.35]` | 2.62 ms `[2.30-3.45]` | obsearch |
-| p99 c=1 | **3.69 ms** `[3.41-4.23]` | 4.09 ms `[3.68-5.33]` | เสมอ (ช่วงทับกัน) |
-| qps c=8 | **1,826** `[1668-1864]` | 1,608 `[1399-1668]` | obsearch **+14%** |
-| p50 c=8 | **4.18 ms** `[4.02-4.45]` | 4.64 ms `[4.35-5.32]` | obsearch |
-| p99 c=8 | **6.70 ms** `[6.16-7.60]` | 7.83 ms `[6.58-15.16]` | obsearch |
-| cold start (200k docs) | **13-638 ms** | ~6.3 s (restart container) | obsearch |
+| **memory (MB)** | **295** `[193-362]` | 1,381 `[1305-1423]` | obsearch **4.7 เท่า** |
+| qps c=1 | **516** `[484-634]` | 387 `[355-437]` | obsearch **+33%** |
+| p50 c=1 | **1.78 ms** `[1.37-2.05]` | 2.45 ms `[2.15-2.69]` | obsearch **−27%** |
+| p99 c=1 | **3.17 ms** `[3.01-3.80]` | 4.45 ms `[3.56-4.86]` | obsearch **−29%** |
+| qps c=8 | **1,808** `[1763-1827]` | 1,596 `[1548-1665]` | obsearch **+13%** |
+| p50 c=8 | **4.21 ms** `[4.12-4.31]` | 4.63 ms `[4.49-4.83]` | obsearch **−9%** |
+| p99 c=8 | 7.26 ms `[6.52-8.30]` | 6.98 ms `[6.60-10.34]` | เสมอ (ช่วงทับกัน) |
+| index docs/s | 71,999 `[51.7k-75.9k]` | 73,161 `[69.6k-73.6k]` | เสมอ (ช่วงทับกัน) |
+| cold start (200k docs) | **13-638 ms** | ~6.3 s | obsearch |
+| RSS ที่ 2M docs | **29-46 MB** | — | — |
+
+**ชนะทุกตัวชี้วัด ยกเว้น p99 c=8 กับ indexing ที่เสมอ**
 
 ### ที่ขยับจากรอบก่อน
 
@@ -291,3 +294,61 @@ qps c=8 **1,702 → 1,826**, p99 c=8 **7.43 → 6.70 ms** ส่วนที่ 
 | async WAL, adaptive merge scheduler | ยังไม่ได้แตะ |
 | zero-copy JSON parsing | ยังไม่ได้ทำ — วัดไว้ที่ 189 ms (8.8% ของ indexing) |
 | distributed / scatter-gather | ยังเป็น single node |
+
+---
+
+# ภาคผนวก 3: ปิดช่องว่าง indexing และไล่ memory
+
+## 1. Parallel document preparation
+
+ครึ่งที่แพงที่สุดของ bulk — parse เอกสารและสร้าง tantivy document — **ไม่แตะ shared state เลย**
+และ `IndexWriter::add_document` รับ `&self` อยู่แล้ว จึงแยกเป็นสองเฟส:
+เฟสขนาน (parse + `make_doc`) ด้วย rayon แล้วเฟสเรียงลำดับ (version, add_document, response)
+
+| | ก่อน | หลัง |
+|---|---:|---:|
+| native | ~60,000 docs/s | **~102,000 docs/s** |
+| ใน Docker | 59,276 docs/s | **77,190 docs/s** |
+
+**ผิดพลาดรอบแรก:** เวอร์ชันแรกดึงผลจากเฟสขนานออกมาด้วย `clone()` ทั้ง `Value` และ
+ข้อความ source ⇒ native เร็วขึ้นเพราะมี core ว่างกลบไว้ แต่ **ใน Docker ที่แย่ง CPU กลับช้าลง**
+(59.3k → 55.0k) แก้เป็น consume ค่าออกมาแทน clone ⇒ 77.2k
+
+บทเรียน: วัดในสภาพที่จะใช้จริง อย่าวัดแต่บนเครื่องว่าง
+
+## 2. Id table → fingerprints
+
+วัดองค์ประกอบ RSS ที่ 2M docs:
+
+| | |
+|---|---:|
+| หลัง boot | 24 MB |
+| หลังโหลด id table 2M | **118 MB** ← +94 MB |
+| หลัง 30 sorted searches | 126 MB |
+
+**75% ของ RSS คือ id table** และโตเชิงเส้น — ที่ 100M docs จะเป็น ~4.7 GB
+
+เปลี่ยนเป็น:
+- `live_ids: HashSet<u64>` เก็บ fingerprint 64-bit ของ id — **miss คือคำตอบสุดท้าย**
+  (ไม่มี false negative) ⇒ คำถาม "เอกสารนี้ใหม่ไหม" ที่เกิดทุกครั้งที่ index เสียแค่ hash เดียว
+- **hit ต้องยืนยันกับดัชนีจริง** เพราะ fingerprint ชนกันได้ ⇒ ยังเป๊ะ 100%
+  และ workload แบบ append-only ไม่เคยเข้าเส้นทางนี้เลย
+- เก็บ record เป๊ะเฉพาะเอกสารที่ version > 1 และ tombstone
+  (ลบ fingerprint ตรง ๆ ไม่ได้ เพราะอาจพา id ที่ชนกันหายไปด้วย)
+
+⇒ **RSS ที่ 2M docs: 126 MB → 29-46 MB**
+
+**บั๊กที่เจอตอนตรวจ:** เขียนทับ id เดิมแล้วได้ `result: updated` แต่ `version: 1`
+เพราะ `is_live()` ตอบจากดัชนี (ระหว่างที่ id table ยังโหลดอยู่เบื้องหลัง) ส่วน `bump()`
+ตัดสินเองจาก fingerprint set ที่ยังว่าง ⇒ สองแหล่งไม่ตรงกัน
+แก้โดยให้ `bump()` รับคำตอบที่ caller คำนวณไว้แล้ว
+
+## 3. เหลืออะไรให้ทำอีก (เรียงตามหลักฐาน)
+
+| งาน | หลักฐาน | ประเมิน |
+|---|---|---|
+| **columnar sidecar block-stats** | วัดแล้ว **40 เท่า** บน time-range ที่ 2M docs ([รายละเอียด](columnar-experiment.md)) | ~400-600 LOC |
+| **aggregation** | ตอนนี้เป็นตัวกิน CPU อันดับหนึ่งแล้ว: `agg_nested` 5,921 µs, `agg_date_hist` 3,924 µs ที่ 2M docs | ยังไม่ได้ profile |
+| **zero-copy JSON parsing** | วัดไว้ 189 ms = 8.8% ของ indexing | เปลี่ยนไป simd-json/sonic-rs |
+| dual-view `_dyn`/`_raw` | 0.88 µs/doc — **ตัดไม่ได้** เพราะ RangeQuery บน JSON ต้องมี fast field | เชิงโครงสร้าง |
+| HTTP layer | 27% ของเวลา bulk, 75% ของ latency query | ทั้งสองฝั่งจ่ายเท่ากัน |
