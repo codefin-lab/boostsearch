@@ -751,13 +751,26 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // `_raw` carries both the untokenised strings and the numerics,
                 // so it is the right column for every agg except one over an
                 // explicitly analysed text field.
-                // `_raw` carries both the untokenised strings and the numerics,
-                // so it is the right column for every agg except one over an
-                // explicitly analysed text field.
+                let base = f.strip_suffix(".keyword").unwrap_or(f);
+                // Both views carry the numerics, but resolving a purely numeric
+                // path is measurably cheaper on `_dyn` -- `_raw` also holds a
+                // string column for every path, which the lookup has to consider.
+                // Strings must stay on `_raw`, whose values are untokenised.
+                let numeric_only = std::env::var("OBSEARCH_NO_NUMERIC_DYN_AGG").is_err()
+                    && ctx
+                    .observed_kinds
+                    .get(base)
+                    .map(|k| {
+                        *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0
+                    })
+                    .unwrap_or(false);
                 let analyzed = matches!(ctx.view(f, false), View::Dyn)
                     && ctx.mapping.type_of(f).is_some();
-                let prefix = if analyzed { crate::store::DYN } else { crate::store::RAW };
-                let base = f.strip_suffix(".keyword").unwrap_or(f);
+                let prefix = if analyzed || numeric_only {
+                    crate::store::DYN
+                } else {
+                    crate::store::RAW
+                };
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }

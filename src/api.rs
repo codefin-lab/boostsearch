@@ -1463,6 +1463,56 @@ pub async fn update_doc(
     (status, axum::Json(body_out)).into_response()
 }
 
+// --------------------------------------------------------------- force merge
+
+/// `_forcemerge` collapses segments. Fewer segments means less per-segment setup
+/// on every search, which matters most for aggregations: each one opens columns
+/// and builds its own intermediate result per segment before they are merged.
+pub async fn force_merge(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
+    let targets = store.resolve(&expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" {
+        return no_such_index(&expr);
+    }
+    let max_segments: usize = p
+        .get("max_num_segments")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    for name in targets {
+        let Some(st) = store.get(&name) else { continue };
+        let mut g = st.write();
+        if g.refresh().is_err() {
+            continue;
+        }
+        loop {
+            let ids: Vec<tantivy::index::SegmentId> = g
+                .index
+                .searchable_segment_metas()
+                .unwrap_or_default()
+                .iter()
+                .map(|m| m.id())
+                .collect();
+            if ids.len() <= max_segments {
+                break;
+            }
+            // merge the whole set down in one step; tantivy handles the rest
+            let take = ids.len() - max_segments + 1;
+            let batch: Vec<_> = ids.into_iter().take(take).collect();
+            if g.writer.merge(&batch).wait().is_err() {
+                break;
+            }
+            let _ = g.refresh();
+        }
+    }
+    respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
+}
+
 // --------------------------------------------------------------------- stats
 
 fn index_stats(st: &IdxState) -> Value {
