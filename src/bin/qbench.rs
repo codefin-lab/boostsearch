@@ -28,6 +28,15 @@ fn main() -> anyhow::Result<()> {
         ("count_only", json!({"query": {"match_all": {}}, "size": 0})),
         // same selectivity, but an explicit float bound narrows the range to a
         // single typed variant instead of the I64/U64/F64 union
+        // the dominant filter in log analytics, and the one a clustered column
+        // layout would help most: the corpus timestamps are monotonic
+        ("time_range_1pct", json!({"query": {"range": {"@timestamp": {
+            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-01T01:40:00Z"}}}, "size": 10})),
+        ("time_range_25pct", json!({"query": {"range": {"@timestamp": {
+            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}}, "size": 10})),
+        ("time_range_agg", json!({"size": 0,
+            "query": {"range": {"@timestamp": {"gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}},
+            "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}})),
         ("range_int_bound", json!({"query": {"range": {"response_ms": {"gte": 20}}}, "size": 10})),
         ("range_float_bound", json!({"query": {"range": {"response_ms": {"gte": 20.0001}}}, "size": 10})),
     ];
