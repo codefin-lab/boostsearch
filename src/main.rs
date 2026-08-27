@@ -44,6 +44,10 @@ fn app(store: Store) -> Router {
         .route("/{index}/_bulk", post(api::bulk).put(api::bulk))
         // --- search ---
         .route("/_search", get(api::search).post(api::search))
+        .route("/_search/scroll", get(api::scroll).post(api::scroll).delete(api::clear_scroll))
+        .route("/_search/scroll/{id}", get(api::scroll).post(api::scroll).delete(api::clear_scroll))
+        .route("/_mapping/field/{fields}", get(api::get_field_mapping))
+        .route("/{index}/_mapping/field/{fields}", get(api::get_field_mapping))
         .route("/{index}/_search", get(api::search).post(api::search))
         .route("/_count", get(api::count).post(api::count))
         .route("/{index}/_count", get(api::count).post(api::count))

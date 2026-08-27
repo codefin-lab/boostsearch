@@ -1,0 +1,4770 @@
+{
+ "total": 1175,
+ "passed": 499,
+ "failed": 601,
+ "skipped": 75,
+ "per_file": {
+  "bulk/100_error_traces.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "bulk/10_basic.yml": {
+   "pass": 1,
+   "fail": 6,
+   "skip": 0
+  },
+  "bulk/110_bulk_adaptive_shard_select.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "bulk/20_list_of_strings.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "bulk/30_big_string.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "bulk/40_source.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "bulk/50_refresh.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "bulk/80_cas.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "cat.aliases/10_basic.yml": {
+   "pass": 6,
+   "fail": 4,
+   "skip": 0
+  },
+  "cat.aliases/20_headers.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "cat.aliases/30_json.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "cat.aliases/40_hidden.yml": {
+   "pass": 2,
+   "fail": 1,
+   "skip": 0
+  },
+  "cat.allocation/10_basic.yml": {
+   "pass": 1,
+   "fail": 7,
+   "skip": 0
+  },
+  "cat.cluster_manager/10_basic.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "cat.count/10_basic.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "cat.fielddata/10_basic.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "cat.health/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 1
+  },
+  "cat.indices/10_basic.yml": {
+   "pass": 1,
+   "fail": 6,
+   "skip": 0
+  },
+  "cat.indices/20_hidden.yml": {
+   "pass": 0,
+   "fail": 5,
+   "skip": 0
+  },
+  "cat.nodeattrs/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "cat.nodes/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 1
+  },
+  "cat.plugins/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "cat.segments/10_basic.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "cat.shards/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 7
+  },
+  "cat.tasks/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "cat.templates/10_basic.yml": {
+   "pass": 1,
+   "fail": 8,
+   "skip": 0
+  },
+  "cat.thread_pool/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "cluster.allocation_explain/10_basic.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "cluster.component_template/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "cluster.health/10_basic.yml": {
+   "pass": 6,
+   "fail": 2,
+   "skip": 0
+  },
+  "cluster.health/20_request_timeout.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "cluster.health/30_indices_options.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "cluster.pending_tasks/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "cluster.put_settings/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "cluster.remote_info/10_info.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "cluster.reroute/10_basic.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "cluster.reroute/11_explain.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 1
+  },
+  "cluster.reroute/20_response_filtering.yml": {
+   "pass": 1,
+   "fail": 2,
+   "skip": 0
+  },
+  "cluster.state/10_basic.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "cluster.state/20_filtering.yml": {
+   "pass": 0,
+   "fail": 11,
+   "skip": 0
+  },
+  "cluster.state/30_expand_wildcards.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "cluster.stats/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 2
+  },
+  "cluster.voting_config_exclusions/10_basic.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "count/10_basic.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "count/20_query_string.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "create/10_with_id.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "create/15_without_id.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "create/35_external_version.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "create/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "create/60_refresh.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "delete/10_basic.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "delete/11_shard_header.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "delete/12_result.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "delete/20_cas.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "delete/25_external_version.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "delete/26_external_gte_version.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "delete/30_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "delete/50_refresh.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "delete/60_missing.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "exists/10_basic.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "exists/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "exists/60_realtime_refresh.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "exists/70_defaults.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "explain/10_basic.yml": {
+   "pass": 2,
+   "fail": 1,
+   "skip": 0
+  },
+  "explain/20_source_filtering.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "explain/30_query_string.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "field_caps/20_meta.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "field_caps/30_filter.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/10_basic.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/15_default_values.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/20_stored_fields.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "get/50_with_headers.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "get/60_realtime_refresh.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "get/70_source_filtering.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/80_missing.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "get/90_versions.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "get_source/10_basic.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get_source/15_default_values.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get_source/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "get_source/60_realtime_refresh.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "get_source/70_source_filtering.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "get_source/80_missing.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "get_source/85_source_missing.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "index/10_with_id.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/110_strict_allow_templates.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/111_false_allow_templates.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/115_constant_keyword.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/120_field_name.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "index/12_result.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "index/15_without_id.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "index/20_optype.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "index/30_cas.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/35_external_version.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/36_external_gte_version.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/60_refresh.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "index/70_require_alias.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/90_unsigned_long.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "index/91_flat_object_null_value.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "index/92_flat_object_support_doc_values.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.analyze/10_analyze.yml": {
+   "pass": 2,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.analyze/20_analyze_limit.yml": {
+   "pass": 1,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.blocks/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.clear_cache/10_basic.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.clone/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.clone/20_source_mapping.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.clone/30_copy_settings.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "indices.clone/40_wait_for_completion.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.create/10_basic.yml": {
+   "pass": 4,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.delete/10_basic.yml": {
+   "pass": 2,
+   "fail": 6,
+   "skip": 0
+  },
+  "indices.delete_alias/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.delete_alias/all_path_options.yml": {
+   "pass": 1,
+   "fail": 9,
+   "skip": 0
+  },
+  "indices.delete_index_template/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.exists/10_basic.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.exists/20_read_only_index.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.exists_alias/10_basic.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.exists_template/10_basic.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.flush/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.forcemerge/10_basic.yml": {
+   "pass": 2,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.forcemerge/20_wait_for_completion.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 2
+  },
+  "indices.get/10_basic.yml": {
+   "pass": 7,
+   "fail": 5,
+   "skip": 0
+  },
+  "indices.get_alias/10_basic.yml": {
+   "pass": 15,
+   "fail": 8,
+   "skip": 0
+  },
+  "indices.get_alias/20_empty.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_alias/30_wildcards.yml": {
+   "pass": 2,
+   "fail": 5,
+   "skip": 0
+  },
+  "indices.get_field_mapping/10_basic.yml": {
+   "pass": 3,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.get_field_mapping/20_missing_field.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_field_mapping/40_missing_index.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_field_mapping/50_field_wildcards.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_index_template/10_basic.yml": {
+   "pass": 2,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.get_index_template/20_get_missing.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_mapping/10_basic.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_mapping/30_missing_index.yml": {
+   "pass": 4,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_mapping/40_aliases.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_mapping/50_wildcard_expansion.yml": {
+   "pass": 5,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.get_mapping/60_empty.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_settings/10_basic.yml": {
+   "pass": 13,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_settings/20_aliases.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_settings/30_defaults.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_settings/40_number_of_routing_shards.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.get_template/10_basic.yml": {
+   "pass": 1,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.get_template/20_get_missing.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.open/10_basic.yml": {
+   "pass": 3,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.open/20_multiple_indices.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.open/30_wait_for_completion.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.put_alias/10_basic.yml": {
+   "pass": 5,
+   "fail": 7,
+   "skip": 0
+  },
+  "indices.put_alias/all_path_options.yml": {
+   "pass": 4,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.put_index_template/10_basic.yml": {
+   "pass": 2,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.put_mapping/10_basic.yml": {
+   "pass": 1,
+   "fail": 3,
+   "skip": 1
+  },
+  "indices.put_mapping/all_path_options.yml": {
+   "pass": 8,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.put_settings/10_basic.yml": {
+   "pass": 3,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.put_settings/11_reset.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.put_settings/all_path_options.yml": {
+   "pass": 5,
+   "fail": 0,
+   "skip": 1
+  },
+  "indices.put_template/10_basic.yml": {
+   "pass": 3,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.recovery/10_basic.yml": {
+   "pass": 0,
+   "fail": 5,
+   "skip": 0
+  },
+  "indices.refresh/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.resolve_index/10_basic_resolve_index.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.rollover/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.rollover/20_max_doc_condition.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.rollover/30_max_size_condition.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.rollover/40_mapping.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.segments/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.shard_stores/10_basic.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "indices.shrink/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.shrink/20_source_mapping.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "indices.shrink/30_copy_settings.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.shrink/40_max_shard_size.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.shrink/50_wait_for_completion.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.simulate_index_template/10_basic.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.simulate_template/10_basic.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.split/10_basic.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "indices.split/20_source_mapping.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.split/30_copy_settings.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.split/40_wait_for_completion.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/10_index.yml": {
+   "pass": 7,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/11_metric.yml": {
+   "pass": 6,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/12_level.yml": {
+   "pass": 3,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/13_fields.yml": {
+   "pass": 2,
+   "fail": 21,
+   "skip": 0
+  },
+  "indices.stats/14_groups.yml": {
+   "pass": 2,
+   "fail": 6,
+   "skip": 0
+  },
+  "indices.stats/20_translog.yml": {
+   "pass": 2,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.stats/30_segments.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/40_updates_on_refresh.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/50_noop_update.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.stats/60_include_both_time_and_gettime_in_stats.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "indices.update_aliases/10_basic.yml": {
+   "pass": 1,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.update_aliases/20_routing.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "indices.update_aliases/30_remove_index_and_replace_with_alias.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.update_aliases/40_remove_with_must_exist.yml": {
+   "pass": 2,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.upgrade/10_basic.yml": {
+   "pass": 0,
+   "fail": 5,
+   "skip": 0
+  },
+  "indices.validate_query/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "indices.validate_query/20_query_string.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "indices.validate_query/20_query_string_field_match_only_text.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "info/10_info.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "info/20_lucene_version.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/10_basic.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/12_non_existent_index.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/13_missing_metadata.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/14_alias_to_multiple_indices.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mget/15_ids.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/17_default_index.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/20_stored_fields.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mget/60_realtime_refresh.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mget/80_deprecated.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "mget/90_error_traces.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "mlt/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mlt/20_docs.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mlt/30_unlike.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "msearch/10_basic.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "msearch/11_status.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "msearch/30_error_traces.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "mtermvectors/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mtermvectors/20_deprecated.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "mtermvectors/30_error_traces.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "nodes.info/10_basic.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 3
+  },
+  "nodes.info/20_transport.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.info/30_settings.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.info/40_aggs.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.info/50_nodes_total_indexing_buffer_format.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.reload_secure_settings/10_basic.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.reload_secure_settings/11_no_password.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.stats/10_basic.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 1
+  },
+  "nodes.stats/11_indices_metrics.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 8
+  },
+  "nodes.stats/20_response_filtering.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 2
+  },
+  "nodes.stats/30_discovery.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.stats/40_store_stats.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "nodes.stats/50_indexing_pressure.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 2
+  },
+  "nodes.stats/60_transport_stats.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "ping/10_ping.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "pit/10_basic.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "range/10_basic.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "scripts/20_get_script_context.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "scripts/25_get_script_languages.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "scroll/10_basic.yml": {
+   "pass": 2,
+   "fail": 5,
+   "skip": 0
+  },
+  "scroll/10_basic_timeseries.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "scroll/11_clear.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "scroll/12_slices.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "scroll/20_keep_alive.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search/100_stored_fields.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/10_source_filtering.yml": {
+   "pass": 17,
+   "fail": 8,
+   "skip": 0
+  },
+  "search/120_batch_reduce_size.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/140_pre_filter_search_shards.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/150_rewrite_on_coordinator.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search/160_exists_query_match_only_text.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/170_terms_query.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/171_terms_lookup_query.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search/180_locale_dependent_mapping.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "search/190_index_prefix_search.yml": {
+   "pass": 3,
+   "fail": 2,
+   "skip": 0
+  },
+  "search/200_ignore_malformed.yml": {
+   "pass": 0,
+   "fail": 6,
+   "skip": 0
+  },
+  "search/200_index_phrase_search.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/200_phrase_search_field_match_only_text.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/20_default_values.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/220_total_hits_object.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/260_sort_double.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/260_sort_long.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/260_sort_mixed.yml": {
+   "pass": 3,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/260_sort_unsigned_long.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/270_wildcard_fieldtype_queries.yml": {
+   "pass": 10,
+   "fail": 9,
+   "skip": 0
+  },
+  "search/300_sequence_numbers.yml": {
+   "pass": 1,
+   "fail": 2,
+   "skip": 0
+  },
+  "search/310_match_bool_prefix.yml": {
+   "pass": 16,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/310_match_bool_prefix_field_match_only_text.yml": {
+   "pass": 13,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/330_distributed_sort.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/330_fetch_fields.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "search/340_doc_values_field.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "search/360_from_and_size.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/370_approximate_range.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/380_bitmap_filtering.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "search/381_bitmap_filtering_long.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "search/390_search_as_you_type.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search/400_combined_fields.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/400_max_score.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "search/40_indices_boost.yml": {
+   "pass": 0,
+   "fail": 6,
+   "skip": 0
+  },
+  "search/50_multi_match.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/60_query_string.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/61_query_string_field_alias.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/70_response_filtering.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/80_indices_options.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "search/90_search_after.yml": {
+   "pass": 0,
+   "fail": 6,
+   "skip": 0
+  },
+  "search/95_search_after_shard_doc.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "search/issue4895.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search/issue9606.yml": {
+   "pass": 2,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/100_avg_metric.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/100_avg_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/10_histogram.yml": {
+   "pass": 1,
+   "fail": 10,
+   "skip": 1
+  },
+  "search.aggregation/110_max_metric.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/110_max_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/120_min_metric.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/120_min_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/130_sum_metric.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/130_sum_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/140_value_count_metric.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/140_value_count_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/150_stats_metric.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/150_stats_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/160_extended_stats_metric.yml": {
+   "pass": 8,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/160_extended_stats_metric_unsigned.yml": {
+   "pass": 7,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/170_cardinality_metric.yml": {
+   "pass": 6,
+   "fail": 4,
+   "skip": 0
+  },
+  "search.aggregation/170_cardinality_metric_unsigned.yml": {
+   "pass": 6,
+   "fail": 4,
+   "skip": 0
+  },
+  "search.aggregation/180_percentiles_tdigest_metric.yml": {
+   "pass": 1,
+   "fail": 2,
+   "skip": 8
+  },
+  "search.aggregation/180_percentiles_tdigest_metric_unsigned.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 14
+  },
+  "search.aggregation/190_percentiles_hdr_metric.yml": {
+   "pass": 1,
+   "fail": 9,
+   "skip": 0
+  },
+  "search.aggregation/190_percentiles_hdr_metric_unsigned.yml": {
+   "pass": 1,
+   "fail": 7,
+   "skip": 0
+  },
+  "search.aggregation/20_terms.yml": {
+   "pass": 12,
+   "fail": 14,
+   "skip": 0
+  },
+  "search.aggregation/220_filters_bucket.yml": {
+   "pass": 6,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/220_filters_bucket_unsigned.yml": {
+   "pass": 5,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/240_max_buckets.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search.aggregation/250_moving_fn.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "search.aggregation/260_weighted_avg.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search.aggregation/260_weighted_avg_unsigned.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search.aggregation/270_median_absolute_deviation_metric.yml": {
+   "pass": 1,
+   "fail": 4,
+   "skip": 0
+  },
+  "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "search.aggregation/280_rare_terms.yml": {
+   "pass": 0,
+   "fail": 11,
+   "skip": 0
+  },
+  "search.aggregation/310_date_agg_per_day_of_week.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "search.aggregation/320_missing.yml": {
+   "pass": 4,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/330_auto_date_histogram.yml": {
+   "pass": 0,
+   "fail": 4,
+   "skip": 0
+  },
+  "search.aggregation/350_variable_width_histogram.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search.aggregation/360_date_histogram.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "search.aggregation/370_multi_terms.yml": {
+   "pass": 0,
+   "fail": 17,
+   "skip": 0
+  },
+  "search.aggregation/380_doc_count_field.yml": {
+   "pass": 0,
+   "fail": 5,
+   "skip": 0
+  },
+  "search.aggregation/40_range.yml": {
+   "pass": 0,
+   "fail": 11,
+   "skip": 0
+  },
+  "search.aggregation/50_filter.yml": {
+   "pass": 4,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/60_empty.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "search.aggregation/70_adjacency_matrix.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 1
+  },
+  "search.backpressure/10_basic.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "search.highlight/10_unified.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "search.highlight/30_max_analyzed_offset.yml": {
+   "pass": 0,
+   "fail": 6,
+   "skip": 0
+  },
+  "search.highlight/40_keyword_ignore.yml": {
+   "pass": 0,
+   "fail": 2,
+   "skip": 0
+  },
+  "search_shards/10_basic.yml": {
+   "pass": 1,
+   "fail": 1,
+   "skip": 0
+  },
+  "search_shards/10_basic_field_match_only_field.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "search_shards/20_slice.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "suggest/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "suggest/20_completion.yml": {
+   "pass": 0,
+   "fail": 7,
+   "skip": 0
+  },
+  "suggest/40_typed_keys.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "tasks.cancel/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "tasks.list/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 3
+  },
+  "termvectors/10_basic.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "termvectors/20_issue7121.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "termvectors/30_realtime.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "update/11_shard_header.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "update/12_result.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "update/16_noop.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "update/20_doc_upsert.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "update/22_doc_as_upsert.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "update/35_if_seq_no.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "update/40_routing.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "update/60_refresh.yml": {
+   "pass": 0,
+   "fail": 3,
+   "skip": 0
+  },
+  "update/80_source_filtering.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "update/85_fields_meta.yml": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 1
+  },
+  "update/90_error.yml": {
+   "pass": 1,
+   "fail": 0,
+   "skip": 0
+  },
+  "update/95_require_alias.yml": {
+   "pass": 0,
+   "fail": 1,
+   "skip": 0
+  },
+  "wlm_stats/10_basic.yml": {
+   "pass": 0,
+   "fail": 11,
+   "skip": 0
+  }
+ },
+ "failures": [
+  {
+   "file": "bulk/100_error_traces.yml",
+   "section": "Returns a detailed error stack trace when requested",
+   "error": "match items.0.update.error.stack_trace: None !~ /.*\\[\\[index_does_not_exist_321\\]\\[0\\].*DocumentMissingException\\[\\[123\\]:.*document.*missing\\].*/"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "Empty _id",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "Empty _id with op_type create",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "empty action",
+   "error": "catch /Malformed action\\/metadata line \\[3\\], expected FIELD_NAME but found \\[END_OBJECT\\]/ did not match {\"error\": {\"type\": \"illegal_argument_exception\", \"reason\": \"malformed action\", \"root_cause\": [{\"type\": \"illegal_argument_exception\", \"reason\": \"malformed action\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "When setting require_alias flag per request",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "When setting require_alias flag",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "bulk/10_basic.yml",
+   "section": "Return item-level error when no write index defined for an alias",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "bulk/80_cas.yml",
+   "section": "Compare And Swap Sequence Numbers",
+   "error": "match errors: False != True"
+  },
+  {
+   "file": "cat.aliases/10_basic.yml",
+   "section": "Complex alias",
+   "error": "match $body: 'test_alias test * - - -\\n' !~ /^\n    test_alias          \\s+\n    test                \\s+\n    [*]                 \\s+\n    ir                  \\s+\n    sr1,sr2             \\s+\n    true                \\s+\n$/\n"
+  },
+  {
+   "file": "cat.aliases/10_basic.yml",
+   "section": "Alias name",
+   "error": "match $body: 'test_2 test - - - -\\ntest_1 test - - - -\\n' !~ /^test_1 .+ \\n$/"
+  },
+  {
+   "file": "cat.aliases/10_basic.yml",
+   "section": "Multiple alias names",
+   "error": "match $body: 'alias index\\nfoo test\\nbar test2\\nbaz test3\\n' !~ /^  alias \\s+ index \\n\n    foo   \\s+ test  \\n\n    bar   \\s+ test2\n$/\n"
+  },
+  {
+   "file": "cat.aliases/10_basic.yml",
+   "section": "Alias sorting",
+   "error": "match $body: 'other_alias other_index\\nmy_alias test_index\\ntest_alias test_index\\n' !~ /^\n    other_alias \\s+ other_index\\n\n    test_alias \\s+ test_index\\n\n    my_alias \\s+ test_index\\n\n$/\n"
+  },
+  {
+   "file": "cat.aliases/40_hidden.yml",
+   "section": "Test cat aliases output with a hidden index with a hidden alias",
+   "error": "match $body: 'test_alias test - - - -\\n' !~ /^\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "Empty cluster",
+   "error": "match $body: '' !~ /^\n  ( 0                      \\s+\n    0b                     \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    (\\d+(\\.\\d+)?[kmgt]b    \\s+)?  #no value from client nodes\n    (\\d+(\\.\\d+)?[kmgt]b    \\s+)?  #no value from client nodes\n    (\\d+                   \\s+)?  #no value from client nodes\n    [-\\w.]+                \\s+\n    \\d+(\\.\\d+){3}          \\s+\n    [-\\w.]+\n    \\n\n  )+\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "One index",
+   "error": "match $body: '' !~ /^\n  ( \\s*                          #allow leading spaces to account for right-justified text\n    \\d+                    \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)  #always should return value since we filter out non data nodes by default\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)  #always should return value since we filter out non data nodes by default\n    (\\d+                  \\s+)  #always should return value since we filter out non data nodes by default\n    [-\\w.]+                \\s+\n    \\d+(\\.\\d+){3}          \\s+\n    [-\\w.]+\n    \\n\n  )+\n  (\n    \\s*                          #allow leading spaces to account for right-justified text\n    \\d+                    \\s+\n    UNASSIGNED\n    \\n\n  )?\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "Node ID",
+   "error": "match $body: '' !~ /^\n  ( 0                      \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)?  #no value from client nodes\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)?  #no value from client nodes\n    (\\d+                  \\s+)?  #no value from client nodes\n    [-\\w.]+                \\s+\n    \\d+(\\.\\d+){3}          \\s+\n    [-\\w.]+\n    \\n\n  )\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "All Nodes",
+   "error": "match $body: '' !~ /^\n  ( \\s*                          #allow leading spaces to account for right-justified text\n    \\d+                    \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    \\d+(\\.\\d+)?[kmgt]?b    \\s+\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)?  #no value from client nodes\n    (\\d+(\\.\\d+)?[kmgt]b   \\s+)?  #no value from client nodes\n    (\\d+                  \\s+)?  #no value from client nodes\n    [-\\w.]+                \\s+\n    \\d+(\\.\\d+){3}          \\s+\n    [-\\w.]+\n    \\n\n  )+\n  (\n    \\s*                          #allow leading spaces to account for right-justified text\n    \\d+                    \\s+\n    UNASSIGNED\n    \\n\n  )?\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "Column headers",
+   "error": "match $body: 'shards disk.indices disk.used disk.avail disk.total disk.percent host ip node\\n' !~ /^  shards                  \\s+\n    disk.indices            \\s+\n    disk.used               \\s+\n    disk.avail              \\s+\n    disk.total              \\s+\n    disk.percent            \\s+\n    host                    \\s+\n    ip                      \\s+\n    node\n    \\n\n\n   ( \\s*                          #allow leading spaces to account for right-justified text\n     0                      \\s+\n     0b                     \\s+\n     \\d+(\\.\\d+)?[kmgt]?b    \\s+\n     (\\d+(\\.\\d+)?[kmgt]b   \\s+)  #always should return value since we filter out non data nodes by default\n     (\\d+(\\.\\d+)?[kmgt]b   \\s+)  #always should return value since we filter out non data nodes by default\n     (\\d+                  \\s+)  #always should return value since we filter out non data nodes by default\n     [-\\w.]+                \\s+\n     \\d+(\\.\\d+){3}          \\s+\n     [-\\w.]+\n     \\n\n   )+\n $/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "Select columns",
+   "error": "match $body: '' !~ /^\n  ( \\d*                 \\s+\n    [-\\w.]+\n    \\n\n  )+\n$/\n"
+  },
+  {
+   "file": "cat.allocation/10_basic.yml",
+   "section": "Bytes",
+   "error": "match $body: '' !~ /^\n  ( 0                   \\s+\n    0                   \\s+\n    \\d+                 \\s+\n    (\\d+                 \\s+)  #always should return value since we filter out non data nodes by default\n    (\\d+                 \\s+)  #always should return value since we filter out non data nodes by default\n    (\\d+                 \\s+)  #always should return value since we filter out non data nodes by default\n    [-\\w.]+             \\s+\n    \\d+(\\.\\d+){3}       \\s+\n    [-\\w.]+\n    \\n\n  )+\n$/\n"
+  },
+  {
+   "file": "cat.count/10_basic.yml",
+   "section": "Test cat count output",
+   "error": "match $body: 2 !~ /# count\n^  2     \\n  $/\n"
+  },
+  {
+   "file": "cat.fielddata/10_basic.yml",
+   "section": "Test cat fielddata output",
+   "error": "match $body: 'id host ip node field size\\n' !~ /^ field \\s+   size \\n\n   foo     \\s+ (\\d+(\\.\\d+)?[gmk]?b  \\n)+ $/\n"
+  },
+  {
+   "file": "cat.health/10_basic.yml",
+   "section": "Help",
+   "error": "match $body: 'epoch | | \\ntimestamp | | \\ncluster | | \\nstatus | | \\nnode.total | | \\nnode.data | | \\n' !~ /^  epoch         .+ \\n\n    timestamp     .+ \\n\n    cluster       .+ \\n\n    status        .+ \\n\n    node.total    .+ \\n\n    node.data     .+ \\n\n    discovered_cluster_manager .+ \\n\n    shards        .+ \\n\n    pri           .+ \\n\n    relo          .+ \\n\n    init          .+ \\n\n    unassign      .+ \\n\n    pending_tasks .+ \\n\n    max_task_wait_time .+ \\n\n    active_shards_percent .+ \\n\n\n$/\n"
+  },
+  {
+   "file": "cat.health/10_basic.yml",
+   "section": "Empty cluster",
+   "error": "match $body: '0 00:00:00 obsearch green 1 1\\n' !~ /^\n  ( \\d+            \\s+ # epoch\n    \\d\\d:\\d\\d:\\d\\d \\s+ # timestamp\n    \\S+            \\s+ # cluster\n    \\w+            \\s+ # status\n    \\d+            \\s+ # node.total\n    \\d+            \\s+ # node.data\n    \\w+            \\s+ # discovered_master\n    \\d+            \\s+ # shards\n    \\d+            \\s+ # pri\n    \\d+            \\s+ # relo\n    \\d+            \\s+ # init\n    \\d+            \\s+ # unassign\n    \\d+            \\s+ # pending_tasks\n    (-|\\d+(?:[.]\\d+)?m?s) \\s+ # max task waiting time\n    \\d+\\.\\d+%             # active shards percent\n    \\n\n  )+\n$/\n"
+  },
+  {
+   "file": "cat.health/10_basic.yml",
+   "section": "With ts parameter",
+   "error": "match $body: '0 00:00:00 obsearch green 1 1\\n' !~ /^\n  ( \\S+            \\s+ # cluster\n    \\w+            \\s+ # status\n    \\d+            \\s+ # node.total\n    \\d+            \\s+ # node.data\n    \\w+            \\s+ # discovered_master\n    \\d+            \\s+ # shards\n    \\d+            \\s+ # pri\n    \\d+            \\s+ # relo\n    \\d+            \\s+ # init\n    \\d+            \\s+ # unassign\n    \\d+            \\s+ # pending_tasks\n    (-|\\d+(?:[.]\\d+)?m?s) \\s+ # max task waiting time\n    \\d+\\.\\d+%             # active shards percent\n    \\n\n  )+\n$/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices output",
+   "error": "match $body: 'green open index1 _na_ 1 0 0 0\\n' !~ /^(green  \\s+\n   open   \\s+\n   index1 \\s+\n   ([a-zA-Z0-9=/_+]|[\\\\\\-]){22} \\s+\n   1      \\s+\n   0      \\s+\n   0      \\s+\n   0      \\s+\n   (\\d+|\\d+[.]\\d+)(kb|b) \\s+\n   (\\d+|\\d+[.]\\d+)(kb|b) \\s*\n )\n $/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices output for closed index",
+   "error": "match $body: 'green close index-2 _na_ 1 0 0 0\\n' !~ /^(green  \\s+\n   close   \\s+\n   index-2 \\s+\n   ([a-zA-Z0-9=/_+]|[\\\\\\-]){22} \\s+\n   3       \\s+\n   0       \\s+\n           \\s+\n           \\s+\n           \\s+\n           \\s*\n )\n $/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices using health status",
+   "error": "match $body: 'bar\\nfoo\\n' !~ /^(foo)$/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices using wildcards",
+   "error": "match $body: '\\n\\n\\n' !~ /^(foo \\n?)$/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices sort",
+   "error": "match $body: 'close bar\\nopen baz\\nopen foo\\n' !~ /^ close \\s+ bar\\n\n   open \\s+ foo\\n\n   open \\s+ baz\\n\n$/\n"
+  },
+  {
+   "file": "cat.indices/10_basic.yml",
+   "section": "Test cat indices with invalid health parameter",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "cat.indices/20_hidden.yml",
+   "section": "Test cat indices output for hidden index",
+   "error": "match $body: 'green open index1 _na_ 1 0 0 0\\n' !~ /^$/\n"
+  },
+  {
+   "file": "cat.indices/20_hidden.yml",
+   "section": "Test cat indices output for dot-hidden index and dot-prefixed pattern",
+   "error": "match $body: 'green open .index1 _na_ 1 0 0 0\\n' !~ /^$/\n"
+  },
+  {
+   "file": "cat.indices/20_hidden.yml",
+   "section": "Test cat indices output with a hidden index with a visible alias",
+   "error": "match $body: 'green open index1 _na_ 1 0 0 0\\n' !~ /^$/\n"
+  },
+  {
+   "file": "cat.indices/20_hidden.yml",
+   "section": "Test cat indices output with a hidden index with a hidden alias",
+   "error": "match $body: 'green open index1 _na_ 1 0 0 0\\n' !~ /^$/\n"
+  },
+  {
+   "file": "cat.indices/20_hidden.yml",
+   "section": "Test cat indices output with a hidden index, dot-hidden alias and dot pattern",
+   "error": "match $body: 'green open index1 _na_ 1 0 0 0\\n' !~ /^$/\n"
+  },
+  {
+   "file": "cat.nodeattrs/10_basic.yml",
+   "section": "Help",
+   "error": "match $body: 'node | | \\nhost | | \\nip | | \\nattr | | \\nvalue | | \\n' !~ /^  node   .+ \\n\n    id     .+ \\n\n    pid    .+ \\n\n    host   .+ \\n\n    ip     .+ \\n\n    port   .+ \\n\n    attr   .+ \\n\n    value  .+ \\n\n$/\n"
+  },
+  {
+   "file": "cat.nodeattrs/10_basic.yml",
+   "section": "Test cat nodes attrs output",
+   "error": "match $body: '' !~ /^#  node\\s+         host\\s+ ip\\s+                   attr\\s+     value\\s* \\n\n     (((\\S+\\s?){1,10})\\s+(\\S+)\\s+(\\d{1,3}\\.){3}\\d{1,3}\\s+(\\S+)\\s+    (\\S+)\\s* \\n)+\n$/\n"
+  },
+  {
+   "file": "cat.nodes/10_basic.yml",
+   "section": "Test cat nodes output",
+   "error": "match $body: '127.0.0.1 0 0 0 dimr * obsearch\\n' !~ /  #ip                          heap.percent        ram.percent     cpu         load_1m                load_5m                load_15m               node.role               node.roles                   cluster_manager       name\n^  ((\\d{1,3}\\.){3}\\d{1,3}  \\s+  \\d+            \\s+  \\d*         \\s+ (-)?\\d* \\s+ ((-)?\\d*(\\.\\d+)?)? \\s+ ((-)?\\d*(\\.\\d+)?)?\\s+  ((-)?\\d*(\\.\\d+)?)? \\s+ (-|[cdhilmrstvw]{1,11}) (\\s+ (-|\\w+(,\\w+)*+))? \\s+ [-*x]            \\s+  (\\S+\\s?)+     \\n)+  $/\n"
+  },
+  {
+   "file": "cat.nodes/10_basic.yml",
+   "section": "Additional disk information",
+   "error": "match $body: '\\n' !~ /^  \\s* diskAvail            \\s+ diskTotal            \\s+ diskUsed            \\s+ diskUsedPercent            \\n\n   (\\s* \\d+(\\.\\d+)?[ptgmk]?b \\s+ \\d+(\\.\\d+)?[ptgmk]?b \\s+ \\d+(\\.\\d+)?[ptgmk]?b\\s+ (100\\.00 | \\d{1,2}\\.\\d{2}) \\n)+  $/\n"
+  },
+  {
+   "file": "cat.nodes/10_basic.yml",
+   "section": "Test cat nodes output with full_id set",
+   "error": "match $body: '\\n' !~ /^(\\S{4}\\n)+$/\n"
+  },
+  {
+   "file": "cat.plugins/10_basic.yml",
+   "section": "Help",
+   "error": "match $body: 'name | | \\ncomponent | | \\nversion | | \\n' !~ /^   id          .+   \\n\n     name        .+   \\n\n     component   .+   \\n\n     version     .+   \\n\n     description .+   \\n\n$/\n"
+  },
+  {
+   "file": "cat.segments/10_basic.yml",
+   "section": "Help",
+   "error": "match $body: '' !~ /^   index        .+   \\n\n     shard        .+   \\n\n     prirep       .+   \\n\n     ip           .+   \\n\n     id           .+   \\n\n     segment      .+   \\n\n     generation   .+   \\n\n     docs.count   .+   \\n\n     docs.deleted .+   \\n\n     size         .+   \\n\n     size.memory  .+   \\n\n     committed    .+   \\n\n     searchable   .+   \\n\n     version      .+   \\n\n     compound     .+   \\n\n$/\n"
+  },
+  {
+   "file": "cat.segments/10_basic.yml",
+   "section": "Test cat segments output",
+   "error": "match $body: 'index1 0 p _0 1 0\\n' !~ /^(index1 \\s+ \\d \\s+ (p|r) \\s+ \\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3} \\s+ _\\d (\\s\\d){3} \\s+\n(\\d+|\\d+[.]\\d+)(kb|b) \\s+ \\d+ (\\s+ (false|true)){2} \\s+  \\d+\\.\\d+(\\.\\d+)? \\s+ (false|true) \\s? \\n?)$/\n"
+  },
+  {
+   "file": "cat.segments/10_basic.yml",
+   "section": "Test cat segments on closed index behaviour",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "cat.segments/10_basic.yml",
+   "section": "Test cat segments using wildcards",
+   "error": "match $body: '\\n\\n\\n' !~ /^(foo \\n?)$/\n"
+  },
+  {
+   "file": "cat.shards/10_basic.yml",
+   "section": "Test cat shards output",
+   "error": "match $body: 'index1 0 p STARTED 0 0b 127.0.0.1 obsearch\\n' !~ /^(index1 \\s+ \\d \\s+ (p|r) \\s+ ((STARTED|INITIALIZING|RELOCATING) \\s+ (\\d \\s+ (\\d+|\\d+[.]\\d+)(kb|b) \\s+)? \\d{1,3}.\\d{1,3}.\\d{1,3}.\\d{1,3} \\s+ .+|UNASSIGNED \\s+)  \\n?){10}$/\n"
+  },
+  {
+   "file": "cat.shards/10_basic.yml",
+   "section": "Test cat shards using wildcards",
+   "error": "match $body: '\\n\\n\\n' !~ /^(foo \\n?)$/\n"
+  },
+  {
+   "file": "cat.shards/10_basic.yml",
+   "section": "Test cat shards sort",
+   "error": "match $body: 'bar 1\\nfoo 0\\n' !~ /^ foo \\s+ 0\\n\n   bar \\s+ 1\\n\n$/\n"
+  },
+  {
+   "file": "cat.tasks/10_basic.yml",
+   "section": "Test cat tasks output",
+   "error": "match $body: '' !~ / # action  task_id      parent_task_id      type    start_time   timestamp            running_time  ip                                  node\n^(  \\S+\\s+  \\S+\\:\\d+\\s+  (?:\\-|\\S+\\:\\d+)\\s+  \\S+\\s+  \\d+\\s+       \\d\\d\\:\\d\\d\\:\\d\\d\\s+  \\S+\\s+        \\d{1,3}.\\d{1,3}.\\d{1,3}.\\d{1,3}\\s+  \\S+\\n)+$/\n"
+  },
+  {
+   "file": "cat.tasks/10_basic.yml",
+   "section": "Test cat tasks output with X-Opaque-Id",
+   "error": "match $body: '' !~ /TestID/"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Help",
+   "error": "match $body: '' !~ /^  name             .+   \\n\n    index_patterns   .+   \\n\n    order            .+   \\n\n    version          .+   \\n\n    composed_of      .+   \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Normal templates",
+   "error": "match $body: 'test [] 0 \\ntest_2 [] 1 \\n' !~ /\n  (^|\\n)test     \\s+\n  \\[test-\\*\\]    \\s+\n  0              \\s+\n  1              \\s+\n  (\\n|$)\n/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Filtered templates",
+   "error": "match $body: 'test [] 0 \\ntest_2 [] 1 \\nnomatch [] 2 \\n' !~ /^\n    test    \\s+\n    \\[t\\*\\] \\s+\n    0       \\s+\n    1       \\s*\n    \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Column headers",
+   "error": "match $body: 'name index_patterns order version\\ntest_2 [] 1 \\nnomatch [] 2 \\ntest [] 0 \\n' !~ /^\n   name            \\s+\n   index_patterns  \\s+\n   order           \\s+\n   version         \\s+\n   composed_of\n   \\n\n   test            \\s+\n   \\[t\\*\\]         \\s+\n   0               \\s+\n   1               \\s*\n   \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Select columns",
+   "error": "match $body: 'name index_patterns\\ntest_2 []\\nnomatch []\\ntest []\\n' !~ /^\n    name        \\s+\n    index_patterns\n    \\n\n    test        \\s+\n    \\[t\\*\\]\n    \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Sort templates",
+   "error": "match $body: 'test_2 [] \\nnomatch [] \\ntest_1 [] \\ntest [] \\n' !~ /^\n    test   \\s+ \\[t\\*\\]  \\s+   \\n\n    test_1 \\s+ \\[te\\*\\] \\s+ 1 \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Multiple template",
+   "error": "match $body: 'name index_patterns\\ntest_2 []\\nnomatch []\\ntest_1 [t*,te*]\\ntest []\\n' !~ /^\n   name         \\s+\n   index_patterns\n   \\n\n   test_1       \\s+\n   \\[t\\*,\\ te\\*\\]\n   \\n\n$/\n"
+  },
+  {
+   "file": "cat.templates/10_basic.yml",
+   "section": "Mixture of legacy and composable templates",
+   "error": "PUT /_component_template/foo -> 400: {\"error\": {\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\", \"root_cause\": [{\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "cat.thread_pool/10_basic.yml",
+   "section": "Test cat thread_pool total_wait_time output",
+   "error": "match $body: '' !~ /  #node_name     name     active     queue     rejected\n^  (\\S+       \\s+ \\S+  \\s+ \\d+    \\s+ \\d+   \\s+ \\d+      \\n)+  $/\n"
+  },
+  {
+   "file": "cat.thread_pool/10_basic.yml",
+   "section": "Test cat thread_pool total_wait_time output with concurrent search thread_pool",
+   "error": "match $body: '' !~ /  #node_name     name     active     queue     rejected\n^  (\\S+       \\s+ \\S+  \\s+ \\d+    \\s+ \\d+   \\s+ \\d+      \\n)+  $/\n"
+  },
+  {
+   "file": "cat.thread_pool/10_basic.yml",
+   "section": "Test cat thread_pool output",
+   "error": "match $body: '' !~ /  #node_name     name     active     queue     rejected\n^  (\\S+       \\s+ \\S+  \\s+ \\d+    \\s+ \\d+   \\s+ \\d+      \\n)+  $/\n"
+  },
+  {
+   "file": "cluster.allocation_explain/10_basic.yml",
+   "section": "bad cluster shard allocation explanation request",
+   "error": "expected catch [/illegal_argument_exception/] but got 200"
+  },
+  {
+   "file": "cluster.allocation_explain/10_basic.yml",
+   "section": "cluster shard allocation explanation test",
+   "error": "match current_state: None != 'started'"
+  },
+  {
+   "file": "cluster.allocation_explain/10_basic.yml",
+   "section": "cluster shard allocation explanation test with empty request",
+   "error": "match current_state: None != 'unassigned'"
+  },
+  {
+   "file": "cluster.allocation_explain/10_basic.yml",
+   "section": "Cluster shard allocation explanation test with a closed index",
+   "error": "match current_state: None != 'started'"
+  },
+  {
+   "file": "cluster.component_template/10_basic.yml",
+   "section": "Basic CRUD",
+   "error": "PUT /_component_template/test -> 400: {\"error\": {\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\", \"root_cause\": [{\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "cluster.health/10_basic.yml",
+   "section": "cluster health levels",
+   "error": "is_true indices: None"
+  },
+  {
+   "file": "cluster.health/10_basic.yml",
+   "section": "cluster health with closed index",
+   "error": "match status: 'green' != 'yellow'"
+  },
+  {
+   "file": "cluster.health/20_request_timeout.yml",
+   "section": "cluster health request timeout on waiting for nodes",
+   "error": "expected catch [request_timeout] but got 200"
+  },
+  {
+   "file": "cluster.health/20_request_timeout.yml",
+   "section": "cluster health request timeout waiting for active shards",
+   "error": "expected catch [request_timeout] but got 200"
+  },
+  {
+   "file": "cluster.health/30_indices_options.yml",
+   "section": "cluster health with expand_wildcards",
+   "error": "match active_shards: 2 != 1"
+  },
+  {
+   "file": "cluster.pending_tasks/10_basic.yml",
+   "section": "Test pending tasks",
+   "error": "is_true tasks: None"
+  },
+  {
+   "file": "cluster.pending_tasks/10_basic.yml",
+   "section": "Test pending tasks with local flag",
+   "error": "is_true tasks: None"
+  },
+  {
+   "file": "cluster.put_settings/10_basic.yml",
+   "section": "Test put and reset transient settings",
+   "error": "match transient: {} != {'cluster.routing.allocation.enable': 'none'}"
+  },
+  {
+   "file": "cluster.put_settings/10_basic.yml",
+   "section": "Test put and reset persistent settings",
+   "error": "match persistent: {} != {'cluster.routing.allocation.enable': 'none'}"
+  },
+  {
+   "file": "cluster.put_settings/10_basic.yml",
+   "section": "Test get a default settings",
+   "error": "match defaults.node.attr.testattr: None != 'test'"
+  },
+  {
+   "file": "cluster.remote_info/10_info.yml",
+   "section": "Get an empty remote info",
+   "error": "GET /_remote/info -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.reroute/11_explain.yml",
+   "section": "Explain API with empty command list",
+   "error": "match explanations: None != []"
+  },
+  {
+   "file": "cluster.reroute/20_response_filtering.yml",
+   "section": "return metadata if requested",
+   "error": "is_true state.metadata: None"
+  },
+  {
+   "file": "cluster.reroute/20_response_filtering.yml",
+   "section": "Filter the cluster reroute by cluster_manager_node only should work",
+   "error": "is_true state.cluster_manager_node: None"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by blocks should return the blocks field even if the response is empty",
+   "error": "is_true blocks: None"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by blocks should return the blocks",
+   "error": "is_true blocks: None"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by nodes only should work",
+   "error": "is_false metadata: {'cluster_uuid': '_na_', 'templates': {'test_2': {'order': 1, 'version': 2, 'index_patterns': 'test-2*', 'settings': {'number_of_shards': 1, 'number_of_replicas': 0}}, 'nomatch': {'order': 2, 'version': 1, 'index_patterns': 'tea*', 'settings': {'number_of_shards': 1, 'number_of_replicas': 0}}, 'test_1': {'order': 0, 'version': 1, 'index_patterns': ['t*', 'te*'], 'settings': {'number_of_shards': 1, 'number_of_replicas': 0}}, 'test': {'order': 0, 'index_patterns': 't*', 'settings': {'number_of_shards': 1, 'number_of_replicas': 0}}}, 'indices': {'testidx': {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'testidx'}}, 'state': 'open'}}}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by metadata only should work",
+   "error": "is_false nodes: {'node-0': {'name': 'obsearch', 'ephemeral_id': '_na_', 'transport_address': '127.0.0.1:9300', 'attributes': {}}}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by routing table only should work",
+   "error": "is_false nodes: {'node-0': {'name': 'obsearch', 'ephemeral_id': '_na_', 'transport_address': '127.0.0.1:9300', 'attributes': {}}}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by routing nodes only should work",
+   "error": "is_false nodes: {'node-0': {'name': 'obsearch', 'ephemeral_id': '_na_', 'transport_address': '127.0.0.1:9300', 'attributes': {}}}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by indices should work in routing table and metadata",
+   "error": "is_false metadata.indices.another: {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '1', 'provided_name': 'another'}}, 'state': 'open'}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state using _all for indices and metrics should work",
+   "error": "is_true blocks: None"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state by indices using wildcards should work in routing table and metadata",
+   "error": "is_false metadata.indices.testidx: {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'testidx'}}, 'state': 'open'}"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filtering the cluster state returns cluster_uuid at the top level regardless of metric filters",
+   "error": "is_true routing_table: None"
+  },
+  {
+   "file": "cluster.state/20_filtering.yml",
+   "section": "Filter the cluster state by cluster_manager_node only should work",
+   "error": "is_false master_node: 'node-0'"
+  },
+  {
+   "file": "cluster.state/30_expand_wildcards.yml",
+   "section": "Test expand_wildcards parameter on closed, open indices and both",
+   "error": "is_false metadata.indices.test_open_index: {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_open_index'}}, 'state': 'open'}"
+  },
+  {
+   "file": "cluster.state/30_expand_wildcards.yml",
+   "section": "Test ignore_unavailable parameter",
+   "error": "match metadata.indices: {'test_close_index': {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_close_index'}}, 'state': 'close'}, 'test_open_index': {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_open_index'}}, 'state': 'open'}} != {}"
+  },
+  {
+   "file": "cluster.state/30_expand_wildcards.yml",
+   "section": "Test allow_no_indices parameter",
+   "error": "match metadata.indices: {'test_close_index': {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_close_index'}}, 'state': 'close'}, 'test_open_index': {'aliases': [], 'mappings': {}, 'settings': {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_open_index'}}, 'state': 'open'}} != {}"
+  },
+  {
+   "file": "cluster.stats/10_basic.yml",
+   "section": "get cluster stats returns discovery types",
+   "error": "GET /_cluster/stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.stats/10_basic.yml",
+   "section": "get cluster stats returns packaging types",
+   "error": "GET /_cluster/stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.stats/10_basic.yml",
+   "section": "get cluster stats nodes count with both master and cluster_manager",
+   "error": "GET /_cluster/stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Get cluster state without voting config exclusions",
+   "error": "length metadata.cluster_coordination.voting_config_exclusions: missing"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Add voting config exclusion by unknown node Id",
+   "error": "POST /_cluster/voting_config_exclusions -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Add voting config exclusion by unknown node Ids",
+   "error": "POST /_cluster/voting_config_exclusions -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Add voting config exclusion by unknown node name",
+   "error": "POST /_cluster/voting_config_exclusions -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Add voting config exclusion by unknown node names",
+   "error": "POST /_cluster/voting_config_exclusions -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Throw exception when adding voting config exclusion without specifying nodes",
+   "error": "catch /Please set node identifiers correctly. One and only one of \\[node_name\\], \\[node_names\\] and \\[node_ids\\] has to be set/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "cluster.voting_config_exclusions/10_basic.yml",
+   "section": "Throw exception when adding voting config exclusion and specifying both node_ids and node_names",
+   "error": "catch /Please set node identifiers correctly. One and only one of \\[node_name\\], \\[node_names\\] and \\[node_ids\\] has to be set/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "create/15_without_id.yml",
+   "section": "Create without ID",
+   "error": "no path for [create] with params ['index']"
+  },
+  {
+   "file": "create/35_external_version.yml",
+   "section": "External version",
+   "error": "expected catch [bad_request] but got 201"
+  },
+  {
+   "file": "create/40_routing.yml",
+   "section": "Routing",
+   "error": "match _routing: None != '5'"
+  },
+  {
+   "file": "create/60_refresh.yml",
+   "section": "Refresh",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "create/60_refresh.yml",
+   "section": "When refresh url parameter is an empty string that means \"refresh immediately\"",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "create/60_refresh.yml",
+   "section": "refresh=wait_for waits until changes are visible in search",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "delete/11_shard_header.yml",
+   "section": "Delete check shard header",
+   "error": "match _shards.total: 2 != 1"
+  },
+  {
+   "file": "delete/20_cas.yml",
+   "section": "Internal version",
+   "error": "expected catch [conflict] but got 200"
+  },
+  {
+   "file": "delete/25_external_version.yml",
+   "section": "External version",
+   "error": "match _version: 1 != 5"
+  },
+  {
+   "file": "delete/26_external_gte_version.yml",
+   "section": "External GTE version",
+   "error": "match _version: 1 != 5"
+  },
+  {
+   "file": "delete/30_routing.yml",
+   "section": "Routing",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "delete/50_refresh.yml",
+   "section": "Refresh",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "delete/50_refresh.yml",
+   "section": "When refresh url parameter is an empty string that means \"refresh immediately\"",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "delete/50_refresh.yml",
+   "section": "refresh=wait_for waits until changes are visible in search",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "exists/40_routing.yml",
+   "section": "Routing",
+   "error": "is_false : True"
+  },
+  {
+   "file": "exists/60_realtime_refresh.yml",
+   "section": "Realtime Refresh",
+   "error": "is_false : True"
+  },
+  {
+   "file": "explain/10_basic.yml",
+   "section": "Explain body without query element",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "explain/30_query_string.yml",
+   "section": "explain with query_string parameters",
+   "error": "is_false matched: True"
+  },
+  {
+   "file": "get/40_routing.yml",
+   "section": "Routing",
+   "error": "match _routing: None != '5'"
+  },
+  {
+   "file": "get/60_realtime_refresh.yml",
+   "section": "Realtime Refresh",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "get/90_versions.yml",
+   "section": "Versions",
+   "error": "expected catch [conflict] but got 200"
+  },
+  {
+   "file": "get_source/40_routing.yml",
+   "section": "Routing",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "get_source/60_realtime_refresh.yml",
+   "section": "Realtime",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "index/10_with_id.yml",
+   "section": "Index with ID",
+   "error": "expected catch [bad_request] but got 201"
+  },
+  {
+   "file": "index/110_strict_allow_templates.yml",
+   "section": "Index documents with setting dynamic parameter to strict_allow_templates in the mapping of the index",
+   "error": "expected catch [/mapping set to strict_allow_templates, dynamic introduction of \\[test2\\] within \\[\\_doc\\] is not allowed/] but got 201"
+  },
+  {
+   "file": "index/111_false_allow_templates.yml",
+   "section": "Index documents with setting dynamic parameter to false_allow_templates in the mapping of the index",
+   "error": "match test_1.mappings.properties.date_timestamp.type: None != 'date'"
+  },
+  {
+   "file": "index/115_constant_keyword.yml",
+   "section": "Queries",
+   "error": "length hits.hits: 1 != 0"
+  },
+  {
+   "file": "index/30_cas.yml",
+   "section": "Compare And Swap Sequence Numbers",
+   "error": "expected catch [conflict] but got 200"
+  },
+  {
+   "file": "index/35_external_version.yml",
+   "section": "External version",
+   "error": "match _version: 1 != 0"
+  },
+  {
+   "file": "index/36_external_gte_version.yml",
+   "section": "External GTE version",
+   "error": "match _version: 1 != 0"
+  },
+  {
+   "file": "index/40_routing.yml",
+   "section": "Routing",
+   "error": "match _routing: None != '5'"
+  },
+  {
+   "file": "index/60_refresh.yml",
+   "section": "Refresh",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "index/60_refresh.yml",
+   "section": "When refresh url parameter is an empty string that means \"refresh immediately\"",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "index/60_refresh.yml",
+   "section": "refresh=wait_for waits until changes are visible in search",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "index/70_require_alias.yml",
+   "section": "Set require_alias flag",
+   "error": "expected catch [missing] but got 201"
+  },
+  {
+   "file": "index/90_unsigned_long.yml",
+   "section": "Unsigned long with decimal part test",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "index/90_unsigned_long.yml",
+   "section": "Stored unsigned long with decimal part test",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "index/91_flat_object_null_value.yml",
+   "section": "Supported queries",
+   "error": "length hits.hits: 0 != 2"
+  },
+  {
+   "file": "index/92_flat_object_support_doc_values.yml",
+   "section": "Supported queries",
+   "error": "length hits.hits: 1 != 2"
+  },
+  {
+   "file": "indices.analyze/10_analyze.yml",
+   "section": "Array text",
+   "error": "match tokens.0.token: 'foo' != 'Foo'"
+  },
+  {
+   "file": "indices.analyze/10_analyze.yml",
+   "section": "Detail response with Analyzer",
+   "error": "length detail.analyzer.tokens: missing"
+  },
+  {
+   "file": "indices.analyze/10_analyze.yml",
+   "section": "Custom filter in request",
+   "error": "length detail.tokenizer.tokens: missing"
+  },
+  {
+   "file": "indices.analyze/20_analyze_limit.yml",
+   "section": "_analyze with No. generated tokens more than index.analyze.max_token_count should fail",
+   "error": "expected catch [/The number of tokens produced by calling _analyze has exceeded the allowed maximum of \\[3\\]. This limit can be set by changing the \\[index.analyze.max_token_count\\] index level setting\\./] but got 200"
+  },
+  {
+   "file": "indices.analyze/20_analyze_limit.yml",
+   "section": "_analyze with explain with No. generated tokens more than index.analyze.max_token_count should fail",
+   "error": "expected catch [/The number of tokens produced by calling _analyze has exceeded the allowed maximum of \\[3\\]. This limit can be set by changing the \\[index.analyze.max_token_count\\] index level setting\\./] but got 200"
+  },
+  {
+   "file": "indices.blocks/10_basic.yml",
+   "section": "Basic test for index blocks",
+   "error": "PUT /test_index/_block/write -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.clone/10_basic.yml",
+   "section": "Clone index via API",
+   "error": "PUT /source/_clone/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.clone/10_basic.yml",
+   "section": "Create illegal clone indices",
+   "error": "catch /illegal_argument_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.clone/10_basic.yml",
+   "section": "Returns error if target index's metadata write is blocked",
+   "error": "catch /action_request_validation_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.clone/20_source_mapping.yml",
+   "section": "Clone index ignores target template mapping",
+   "error": "PUT /source/_clone/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.clone/40_wait_for_completion.yml",
+   "section": "Clone index with wait_for_completion",
+   "error": "PUT /source/_clone/new_cloned_index -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.create/10_basic.yml",
+   "section": "Create index with aliases",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.create/10_basic.yml",
+   "section": "Create index with write aliases",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.create/10_basic.yml",
+   "section": "Create index with invalid mappings",
+   "error": "expected catch [/illegal_argument_exception/] but got 200"
+  },
+  {
+   "file": "indices.create/10_basic.yml",
+   "section": "Create index with setting index.number_of_routing_shards to null",
+   "error": "match metadata.indices.test_index.routing_num_shards: None != 1024"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against alias",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against alias - ignore unavailable",
+   "error": "is_true index: None"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against alias -  multiple indices",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against alias -  ignore unavailable - multiple indices",
+   "error": "is_true index: None"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against wildcard matching alias - disallow no indices",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.delete/10_basic.yml",
+   "section": "Delete index against wildcard matching alias - disallow no indices - multiple indices",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.delete_alias/10_basic.yml",
+   "section": "Basic test for delete alias",
+   "error": "match testind.aliases.testali.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check setup",
+   "error": "match test_index1.aliases.alias1.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with _all index",
+   "error": "match test_index2.aliases.alias2.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with * index",
+   "error": "match test_index2.aliases.alias2.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with index list",
+   "error": "match foo.aliases.alias1.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with prefix* index",
+   "error": "match foo.aliases.alias1.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with index list and * aliases",
+   "error": "match foo.aliases.alias1.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with index list and _all aliases",
+   "error": "DELETE /test_index1,test_index2/_alias/_all -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"aliases [_all] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"aliases [_all] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with index list and wildcard aliases",
+   "error": "match foo.aliases.alias1.search_routing: None != 'routing value'"
+  },
+  {
+   "file": "indices.delete_alias/all_path_options.yml",
+   "section": "check delete with blank index and blank alias",
+   "error": "no path for [indices.delete_alias] with params ['name']"
+  },
+  {
+   "file": "indices.delete_index_template/10_basic.yml",
+   "section": "Delete index template which is not used by data stream but index pattern matches",
+   "error": "PUT /_data_stream/test-1 -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.delete_index_template/10_basic.yml",
+   "section": "Delete not using index template for data stream but index pattern matches",
+   "error": "PUT /_data_stream/test-2 -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.flush/10_basic.yml",
+   "section": "Flush stats",
+   "error": "match indices.test.primaries.flush.total: 0 != 1"
+  },
+  {
+   "file": "indices.flush/10_basic.yml",
+   "section": "Flush parameters validation",
+   "error": "expected catch [/action_request_validation_exception.+ wait_if_ongoing must be true for a force flush/] but got 200"
+  },
+  {
+   "file": "indices.forcemerge/10_basic.yml",
+   "section": "Test primary_only parameter",
+   "error": "match _shards.total: 1 != 2"
+  },
+  {
+   "file": "indices.get/10_basic.yml",
+   "section": "Get index infos with human settings should return index creation date and version in readable format",
+   "error": "is_true test_index.settings.index.creation_date_string: None"
+  },
+  {
+   "file": "indices.get/10_basic.yml",
+   "section": "Should throw error if allow_no_indices=false",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get/10_basic.yml",
+   "section": "Should return test_index_2 if expand_wildcards=open",
+   "error": "is_false test_index_3.settings: {'index': {'number_of_shards': '1', 'number_of_replicas': '0', 'provided_name': 'test_index_3'}}"
+  },
+  {
+   "file": "indices.get/10_basic.yml",
+   "section": "Should return test_index_3 if expand_wildcards=closed",
+   "error": "is_false test_index_2.settings: {'index': {'number_of_shards': '1', 'number_of_replicas': '2', 'provided_name': 'test_index_2'}}"
+  },
+  {
+   "file": "indices.get/10_basic.yml",
+   "section": "Should return an exception when querying invalid indices",
+   "error": "catch [bad_request] expected HTTP 400, got 404"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Get aliases via /_alias/_all",
+   "error": "is_false test_index_3: {'aliases': {}}"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Get aliases via /_alias/*",
+   "error": "is_false test_index_3: {'aliases': {}}"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Get all aliases via /{index}/_alias/",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Get and index with no aliases via /{index}/_alias/",
+   "error": "GET /myindex/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [myindex] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [myindex] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Non-existent alias on an existing index returns 404",
+   "error": "match error: {'type': 'aliases_not_found_exception', 'reason': 'alias [non-existent] missing', 'root_cause': [{'type': 'aliases_not_found_exception', 'reason': 'alias [non-existent] missing'}]} != 'alias [non-existent] missing'"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Existent and non-existent alias returns 404 and the existing alias",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Existent and non-existent aliases returns 404 and the existing alias",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get_alias/10_basic.yml",
+   "section": "Get alias against closed indices",
+   "error": "is_false test_index_2: {'aliases': {'test_alias': {}}}"
+  },
+  {
+   "file": "indices.get_alias/30_wildcards.yml",
+   "section": "Get aliases wildcard and simple exclusion",
+   "error": "is_false test_index.aliases.test_alias_1: {}"
+  },
+  {
+   "file": "indices.get_alias/30_wildcards.yml",
+   "section": "Get aliases and wildcard exclusion",
+   "error": "is_false test_index.aliases.test_alias_1: {}"
+  },
+  {
+   "file": "indices.get_alias/30_wildcards.yml",
+   "section": "Non-existent exclusion alias before wildcard returns 404",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get_alias/30_wildcards.yml",
+   "section": "Exclusion of non wildcarded aliases",
+   "error": "match : {'test_index': {'aliases': {'test_alias_1': {}, 'test_blias_2': {}}}} != {}"
+  },
+  {
+   "file": "indices.get_alias/30_wildcards.yml",
+   "section": "Wildcard exclusions does not trigger 404",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get_field_mapping/10_basic.yml",
+   "section": "Get field mapping with include_defaults",
+   "error": "match test_index.mappings.text.mapping.text.analyzer: None != 'default'"
+  },
+  {
+   "file": "indices.get_index_template/10_basic.yml",
+   "section": "Get index template",
+   "error": "match index_templates.0.index_template.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.get_mapping/50_wildcard_expansion.yml",
+   "section": "Get test-* with wildcard_expansion=none",
+   "error": "match : {'test-xxx': {'mappings': {'properties': {'foo': {'type': 'keyword'}}}}, 'test-xxy': {'mappings': {'properties': {'foo2': {'type': 'keyword'}}}}, 'test-xyy': {'mappings': {'properties': {'foo3': {'type': 'keyword'}}}}} != {}"
+  },
+  {
+   "file": "indices.get_mapping/50_wildcard_expansion.yml",
+   "section": "Get test-* with wildcard_expansion=none allow_no_indices=false",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.get_template/10_basic.yml",
+   "section": "Get template",
+   "error": "match test.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.get_template/10_basic.yml",
+   "section": "Get template with no mappings",
+   "error": "match test_no_mappings.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.get_template/10_basic.yml",
+   "section": "Get all templates",
+   "error": "match test.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.get_template/10_basic.yml",
+   "section": "Get template with flat settings and master timeout",
+   "error": "match test.settings: {'number_of_shards': 1, 'number_of_replicas': 0} != {'index.number_of_shards': '1', 'index.number_of_replicas': '0'}"
+  },
+  {
+   "file": "indices.open/10_basic.yml",
+   "section": "Basic test for index open/close",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.open/20_multiple_indices.yml",
+   "section": "All indices",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.open/20_multiple_indices.yml",
+   "section": "Trailing wildcard",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.open/20_multiple_indices.yml",
+   "section": "Only wildcard",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.open/30_wait_for_completion.yml",
+   "section": "Open index with wait_for_completion",
+   "error": "match task: None !~ /^.+$/"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Basic test for put alias",
+   "error": "PUT /test_index/_alias -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Can't create alias with invalid characters",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Can't create alias with the same name as an index",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Can set routing",
+   "error": "match test_index.aliases.test_alias: {'routing': 'test'} != {'index_routing': 'test', 'search_routing': 'test'}"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Index parameter supports multiple values",
+   "error": "PUT /_alias -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Index and alias in request body can override path parameters",
+   "error": "PUT /test_index_unknown/_alias/test_alias -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [test_index_unknown]\", \"index\": \"test_index_unknown\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"test_index_unknown\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index ["
+  },
+  {
+   "file": "indices.put_alias/10_basic.yml",
+   "section": "Throws exception with invalid parameters",
+   "error": "expected catch [/unknown field \\[abc\\]/] but got 200"
+  },
+  {
+   "file": "indices.put_alias/all_path_options.yml",
+   "section": "put alias per index",
+   "error": "is_false foo: {'aliases': {}}"
+  },
+  {
+   "file": "indices.put_alias/all_path_options.yml",
+   "section": "put alias prefix* index",
+   "error": "is_false foo: {'aliases': {}}"
+  },
+  {
+   "file": "indices.put_alias/all_path_options.yml",
+   "section": "put alias in list of indices",
+   "error": "is_false foo: {'aliases': {}}"
+  },
+  {
+   "file": "indices.put_index_template/10_basic.yml",
+   "section": "Put index template",
+   "error": "match index_templates.0.index_template.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.put_index_template/10_basic.yml",
+   "section": "Put multiple index templates",
+   "error": "match index_templates.0.index_template.template.settings.index: None != {'number_of_shards': '1', 'number_of_replicas': '0'}"
+  },
+  {
+   "file": "indices.put_index_template/10_basic.yml",
+   "section": "Put index template with 'create' flag",
+   "error": "match index_templates.0.index_template.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.put_mapping/10_basic.yml",
+   "section": "Test Create and update mapping",
+   "error": "match test_index.mappings.properties.subfield.properties.text3.type: None != 'text'"
+  },
+  {
+   "file": "indices.put_mapping/10_basic.yml",
+   "section": "Create index with invalid mappings",
+   "error": "expected catch [/illegal_argument_exception/] but got 200"
+  },
+  {
+   "file": "indices.put_mapping/10_basic.yml",
+   "section": "Put mappings with explicit _doc type",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "indices.put_settings/10_basic.yml",
+   "section": "Test preserve_existing settings",
+   "error": "match test-index.settings.index.number_of_replicas: '1' != '0'"
+  },
+  {
+   "file": "indices.put_template/10_basic.yml",
+   "section": "Put template",
+   "error": "match test.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.put_template/10_basic.yml",
+   "section": "Put multiple template",
+   "error": "match test.settings: {'number_of_shards': 1, 'number_of_replicas': 0} != {'index.number_of_shards': '1', 'index.number_of_replicas': '0'}"
+  },
+  {
+   "file": "indices.put_template/10_basic.yml",
+   "section": "Put template with aliases",
+   "error": "match test.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.put_template/10_basic.yml",
+   "section": "Put template create",
+   "error": "match test.index_patterns: 'test-*' != ['test-*']"
+  },
+  {
+   "file": "indices.recovery/10_basic.yml",
+   "section": "Indices recovery test",
+   "error": "match test_1.shards.0.type: None != 'EMPTY_STORE'"
+  },
+  {
+   "file": "indices.recovery/10_basic.yml",
+   "section": "Indices recovery test for closed index",
+   "error": "match test_2.shards.0.type: None != 'EXISTING_STORE'"
+  },
+  {
+   "file": "indices.recovery/10_basic.yml",
+   "section": "Indices recovery test index name not matching",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.recovery/10_basic.yml",
+   "section": "Indices recovery test, wildcard not matching any index",
+   "error": "match $body: {'acknowledged': True} != {}"
+  },
+  {
+   "file": "indices.recovery/10_basic.yml",
+   "section": "Indices recovery test with detailed parameter",
+   "error": "match test_3.shards.0.index.files.details: None != []"
+  },
+  {
+   "file": "indices.refresh/10_basic.yml",
+   "section": "Indices refresh test _all",
+   "error": "match _shards.total: 2 != 10"
+  },
+  {
+   "file": "indices.refresh/10_basic.yml",
+   "section": "Indices refresh test empty array",
+   "error": "match _shards.total: 2 != 10"
+  },
+  {
+   "file": "indices.refresh/10_basic.yml",
+   "section": "Indices refresh test no-match wildcard",
+   "error": "POST /bla*/_refresh -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [bla*]\", \"index\": \"bla*\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"bla*\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [bla*]\", \"index\": \"bla*\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.resolve_index/10_basic_resolve_index.yml",
+   "section": "Resolve index with indices and aliases",
+   "error": "GET /_resolve/index/* -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.resolve_index/10_basic_resolve_index.yml",
+   "section": "Resolve index with hidden and closed indices",
+   "error": "GET /_resolve/index/* -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/10_basic.yml",
+   "section": "Rollover index via API",
+   "error": "POST /logs_search/_rollover -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/10_basic.yml",
+   "section": "Rollover no condition matched",
+   "error": "POST /logs_search/_rollover -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/10_basic.yml",
+   "section": "Rollover with dry-run but target index exists",
+   "error": "catch /(index|resource)_already_exists_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/20_max_doc_condition.yml",
+   "section": "Max docs rollover conditions matches only primary shards",
+   "error": "POST /logs_search/_rollover -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/30_max_size_condition.yml",
+   "section": "Rollover with max_size condition",
+   "error": "POST /logs_search/_rollover -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.rollover/40_mapping.yml",
+   "section": "Typeless mapping",
+   "error": "POST /logs_search/_rollover -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.segments/10_basic.yml",
+   "section": "no segments test",
+   "error": "GET /_segments -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_segments]\", \"index\": \"_segments\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_segments\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_segments]\", \"index\": \"_seg"
+  },
+  {
+   "file": "indices.segments/10_basic.yml",
+   "section": "basic segments test",
+   "error": "GET /index1/_segments -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.segments/10_basic.yml",
+   "section": "closed segments test",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "indices.shard_stores/10_basic.yml",
+   "section": "no indices test",
+   "error": "GET /_shard_stores -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_shard_stores]\", \"index\": \"_shard_stores\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_shard_stores\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_shard_stores]\""
+  },
+  {
+   "file": "indices.shard_stores/10_basic.yml",
+   "section": "basic index test",
+   "error": "GET /index1/_shard_stores -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.shard_stores/10_basic.yml",
+   "section": "multiple indices test",
+   "error": "GET /_shard_stores -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_shard_stores]\", \"index\": \"_shard_stores\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_shard_stores\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_shard_stores]\""
+  },
+  {
+   "file": "indices.shrink/10_basic.yml",
+   "section": "Shrink index via API",
+   "error": "PUT /source/_shrink/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.shrink/10_basic.yml",
+   "section": "Returns error if target index's metadata write is blocked",
+   "error": "catch /action_request_validation_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.shrink/30_copy_settings.yml",
+   "section": "Copy settings during shrink index",
+   "error": "PUT /source/_shrink/copy-settings-target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.shrink/40_max_shard_size.yml",
+   "section": "Shrink index with max_shard_size",
+   "error": "PUT /source/_shrink/new_shrunken_index -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.shrink/50_wait_for_completion.yml",
+   "section": "Shrink index with wait_for_completion",
+   "error": "PUT /source/_shrink/new_shrunken_index -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_index_template/10_basic.yml",
+   "section": "Simulate index template without new template in the body",
+   "error": "POST /_index_template/_simulate_index/test -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_index_template/10_basic.yml",
+   "section": "Simulate index template specifying a new template",
+   "error": "PUT /_component_template/ct -> 400: {\"error\": {\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\", \"root_cause\": [{\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "indices.simulate_index_template/10_basic.yml",
+   "section": "Simulate index template with index not matching any template",
+   "error": "POST /_index_template/_simulate_index/will_not_match -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_index_template/10_basic.yml",
+   "section": "Simulate index matches overlapping legacy and composable templates",
+   "error": "POST /_index_template/_simulate_index/test -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_template/10_basic.yml",
+   "section": "Simulate template without a template in the body",
+   "error": "POST /_index_template/_simulate/my-template -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_template/10_basic.yml",
+   "section": "Simulate index template specifying a new template",
+   "error": "PUT /_component_template/ct -> 400: {\"error\": {\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\", \"root_cause\": [{\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "indices.simulate_template/10_basic.yml",
+   "section": "Simulate template matches overlapping legacy and composable templates",
+   "error": "POST /_index_template/_simulate/winning_v2_template -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.simulate_template/10_basic.yml",
+   "section": "Simulate replacing a template with a newer version",
+   "error": "PUT /_component_template/ct -> 400: {\"error\": {\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\", \"root_cause\": [{\"type\": \"action_request_validation_exception\", \"reason\": \"Validation Failed: 1: index patterns are missing;\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "indices.split/10_basic.yml",
+   "section": "Split index via API",
+   "error": "PUT /source/_split/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/10_basic.yml",
+   "section": "Split from 1 to N",
+   "error": "PUT /source_one_shard/_split/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/10_basic.yml",
+   "section": "Create illegal split indices",
+   "error": "catch /illegal_argument_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/10_basic.yml",
+   "section": "Returns error if target index's metadata write is blocked",
+   "error": "catch /action_request_validation_exception/ did not match {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/20_source_mapping.yml",
+   "section": "Split index ignores target template mapping",
+   "error": "PUT /source/_split/target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/30_copy_settings.yml",
+   "section": "Copy settings during split index",
+   "error": "PUT /source/_split/copy-settings-target -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.split/40_wait_for_completion.yml",
+   "section": "Split index with wait_for_completion",
+   "error": "PUT /source/_split/new_split_index -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "indices.stats/10_index.yml",
+   "section": "Indices stats unrecognized parameter",
+   "error": "match error.reason: 'request [/_stats/fieldata] contains unrecognized metric: [fieldata]' != 'request [/_stats/fieldata] contains unrecognized metric: [fieldata] -> did you mean [fielddata]?'"
+  },
+  {
+   "file": "indices.stats/11_metric.yml",
+   "section": "Metric - multi",
+   "error": "GET /_stats/store,get,merge -> 400: {\"error\": {\"type\": \"illegal_argument_exception\", \"reason\": \"request [/_stats/store,get,merge] contains unrecognized metric: [merge]\", \"root_cause\": [{\"type\": \"illegal_argument_exception\", \"reason\": \"request [/_stats/store,get,merge] contains unrecognized metric: [merge]\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "indices.stats/12_level.yml",
+   "section": "Level - shards",
+   "error": "is_true indices.test1.shards.0.0.commit.id: None"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - blank",
+   "error": "is_false _all.total.fielddata.fields: {'bar': {'memory_size_in_bytes': 220}, 'baz': {'memory_size_in_bytes': 220}}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - one",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - multi",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - star",
+   "error": "gt _all.total.completion.size_in_bytes: 0 vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - pattern",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - _all metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - fielddata metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - completion metric",
+   "error": "gt _all.total.completion.size_in_bytes: 0 vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fields - multi metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fielddata fields - one",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fielddata fields - pattern",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fielddata fields - all metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fielddata fields - one metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Fielddata fields - multi metric",
+   "error": "is_false _all.total.fielddata.fields.baz: {'memory_size_in_bytes': 220}"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion fields - one",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion fields - multi",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion fields - star",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion - pattern",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion - all metric",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion - one metric",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/13_fields.yml",
+   "section": "Completion - multi metric",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - blank",
+   "error": "is_false _all.total.search.groups: {'bar': {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}, 'baz': {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}}"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - one",
+   "error": "is_false _all.total.search.groups.baz: {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - pattern",
+   "error": "is_false _all.total.search.groups.baz: {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - _all metric",
+   "error": "is_false _all.total.search.groups.baz: {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - search metric",
+   "error": "is_false _all.total.search.groups.baz: {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}"
+  },
+  {
+   "file": "indices.stats/14_groups.yml",
+   "section": "Groups - multi metric",
+   "error": "is_false _all.total.search.groups.baz: {'query_total': 1, 'query_time_in_millis': 1, 'query_current': 0, 'fetch_total': 1, 'fetch_time_in_millis': 1, 'fetch_current': 0, 'scroll_total': 0, 'scroll_time_in_millis': 0, 'scroll_current': 0, 'suggest_total': 0, 'suggest_time_in_millis': 0, 'suggest_current': 0}"
+  },
+  {
+   "file": "indices.stats/20_translog.yml",
+   "section": "Translog retention",
+   "error": "gt indices.test.primaries.translog.size_in_bytes: 0 vs 0"
+  },
+  {
+   "file": "indices.stats/20_translog.yml",
+   "section": "Translog stats on closed indices",
+   "error": "match indices.test.primaries.translog.operations: 0 != 1"
+  },
+  {
+   "file": "indices.stats/30_segments.yml",
+   "section": "Segment Stats",
+   "error": "gt indices.test.primaries.segments.count: 0 vs 0"
+  },
+  {
+   "file": "indices.stats/40_updates_on_refresh.yml",
+   "section": "Completion stats",
+   "error": "gt _all.total.completion.fields.bar\\.completion.size_in_bytes: None vs 0"
+  },
+  {
+   "file": "indices.stats/50_noop_update.yml",
+   "section": "Test noop_update_total metric can be updated by both update API and bulk API",
+   "error": "match indices.test1.primaries.indexing.noop_update_total: 0 != 1"
+  },
+  {
+   "file": "indices.stats/60_include_both_time_and_gettime_in_stats.yml",
+   "section": "Test _stats API includes both time and getTime metrics with human filter",
+   "error": "is_true _all.primaries.get.time: None"
+  },
+  {
+   "file": "indices.update_aliases/10_basic.yml",
+   "section": "Basic test for aliases",
+   "error": "match test_index.aliases.test_alias: {'filter': {'ids': {'values': ['1', '2', '3']}}, 'routing': 'routing_value'} != {'filter': {'ids': {'values': ['1', '2', '3']}}, 'index_routing': 'routing_value', 'search_routing': 'routing_value'}"
+  },
+  {
+   "file": "indices.update_aliases/10_basic.yml",
+   "section": "Basic test for multiple aliases",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Index Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Search Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Index, Default Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Search, Default Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Index, Search, Default Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/20_routing.yml",
+   "section": "Numeric Routing",
+   "error": "GET /test_index/_alias -> 404: {\"error\": {\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\", \"root_cause\": [{\"type\": \"aliases_not_found_exception\", \"reason\": \"alias [test_index] missing\"}]}, \"status\": 404}"
+  },
+  {
+   "file": "indices.update_aliases/40_remove_with_must_exist.yml",
+   "section": "Throw aliases missing exception when removing non-existing alias with setting must_exist to true",
+   "error": "expected catch [/aliases \\[test_alias\\] missing/] but got 200"
+  },
+  {
+   "file": "indices.update_aliases/40_remove_with_must_exist.yml",
+   "section": "Throw aliases missing exception when all of the specified aliases are non-existing",
+   "error": "expected catch [/aliases \\[test\\_alias\\] missing/] but got 200"
+  },
+  {
+   "file": "indices.upgrade/10_basic.yml",
+   "section": "Basic test for upgrade indices",
+   "error": "match upgraded_indices.test_index.oldest_lucene_segment_version: None !~ /(\\d\\.)+\\d/"
+  },
+  {
+   "file": "indices.upgrade/10_basic.yml",
+   "section": "Upgrade indices ignore unavailable",
+   "error": "is_true upgraded_indices.test_index.upgrade_version: None"
+  },
+  {
+   "file": "indices.upgrade/10_basic.yml",
+   "section": "Upgrade indices allow no indices",
+   "error": "match _shards.total: 1 != 0"
+  },
+  {
+   "file": "indices.upgrade/10_basic.yml",
+   "section": "Upgrade indices disallow no indices",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.upgrade/10_basic.yml",
+   "section": "Upgrade indices disallow unavailable",
+   "error": "expected catch [missing] but got 200"
+  },
+  {
+   "file": "indices.validate_query/10_basic.yml",
+   "section": "Validate query api",
+   "error": "match error: None !~ /.+unknown\\squery\\s\\[invalid_query\\].+/"
+  },
+  {
+   "file": "indices.validate_query/10_basic.yml",
+   "section": "Validate body without query element",
+   "error": "is_false valid: True"
+  },
+  {
+   "file": "info/10_info.yml",
+   "section": "Info",
+   "error": "is_true cluster_uuid: None"
+  },
+  {
+   "file": "mget/14_alias_to_multiple_indices.yml",
+   "section": "Multi Get with alias that resolves to multiple indices",
+   "error": "is_false docs.1.found: True"
+  },
+  {
+   "file": "mget/40_routing.yml",
+   "section": "Routing",
+   "error": "GET /test_1/_mget -> 400: {\"error\": {\"type\": \"illegal_argument_exception\", \"reason\": \"Unsupported field [routing] used in multi get request\", \"root_cause\": [{\"type\": \"illegal_argument_exception\", \"reason\": \"Unsupported field [routing] used in multi get request\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "mget/60_realtime_refresh.yml",
+   "section": "Realtime Refresh",
+   "error": "is_false docs.0.found: True"
+  },
+  {
+   "file": "mget/90_error_traces.yml",
+   "section": "Returns a detailed error stack trace when requested",
+   "error": "match docs.0.error.stack_trace: None !~ /.*\\[index_does_not_exist_321\\].*IndexNotFoundException.*/"
+  },
+  {
+   "file": "mlt/10_basic.yml",
+   "section": "Basic mlt",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\", \"root_cause\": [{\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "mlt/20_docs.yml",
+   "section": "Basic mlt query with docs",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\", \"root_cause\": [{\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "mlt/30_unlike.yml",
+   "section": "Basic mlt query with unlike",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\", \"root_cause\": [{\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [more_like_this]\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "msearch/30_error_traces.yml",
+   "section": "Returns a detailed error stack trace when requested",
+   "error": "match responses.0.error.stack_trace: None !~ /.*\\[index_does_not_exist_321\\].*IndexNotFoundException.*/"
+  },
+  {
+   "file": "mtermvectors/10_basic.yml",
+   "section": "Basic tests for multi termvector get",
+   "error": "GET /_mtermvectors -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_mtermvectors]\", \"index\": \"_mtermvectors\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_mtermvectors\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_mtermvectors]\""
+  },
+  {
+   "file": "mtermvectors/20_deprecated.yml",
+   "section": "Deprecated camel case and _ parameters should fail in Term Vectors query",
+   "error": "catch [bad_request] expected HTTP 400, got 404"
+  },
+  {
+   "file": "mtermvectors/30_error_traces.yml",
+   "section": "Returns a detailed error stack trace when requested",
+   "error": "GET /index_does_not_exist_321/_mtermvectors -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "mtermvectors/30_error_traces.yml",
+   "section": "Skips a detailed error stack trace when requested",
+   "error": "GET /index_does_not_exist_321/_mtermvectors -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "nodes.stats/10_basic.yml",
+   "section": "Nodes stats unrecognized parameter",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "nodes.stats/11_indices_metrics.yml",
+   "section": "Metric - indexing doc_status",
+   "error": "is_true nodes.$node_id.indices.indexing: None"
+  },
+  {
+   "file": "pit/10_basic.yml",
+   "section": "Create PIT, Search with PIT ID and Delete",
+   "error": "POST /test_pit/_search/point_in_time -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "pit/10_basic.yml",
+   "section": "Delete all",
+   "error": "POST /test_pit/_search/point_in_time -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Integer range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Long range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Float range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Double range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "IP range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Date range",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "range/10_basic.yml",
+   "section": "Date range rounding",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "scripts/20_get_script_context.yml",
+   "section": "Action to get all contexts",
+   "error": "GET /_script_context -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_script_context]\", \"index\": \"_script_context\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_script_context\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_script_c"
+  },
+  {
+   "file": "scripts/25_get_script_languages.yml",
+   "section": "Action to get script languages",
+   "error": "GET /_script_language -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_script_language]\", \"index\": \"_script_language\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_script_language\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_scrip"
+  },
+  {
+   "file": "scroll/10_basic.yml",
+   "section": "Basic scroll",
+   "error": "match hits.total: 3 != 2"
+  },
+  {
+   "file": "scroll/10_basic.yml",
+   "section": "Basic scroll with 1 shard",
+   "error": "match hits.total: 3 != 2"
+  },
+  {
+   "file": "scroll/10_basic.yml",
+   "section": "Body params override query string",
+   "error": "match hits.total: 3 != 2"
+  },
+  {
+   "file": "scroll/10_basic.yml",
+   "section": "Scroll cannot used the request cache",
+   "error": "expected catch [/\\[request_cache\\] cannot be used in a scroll context/] but got 200"
+  },
+  {
+   "file": "scroll/10_basic.yml",
+   "section": "Scroll with size 0",
+   "error": "expected catch [/\\[size\\] cannot be \\[0\\] in a scroll context/] but got 200"
+  },
+  {
+   "file": "scroll/12_slices.yml",
+   "section": "Sliced scroll",
+   "error": "match hits.total: 4 != 3"
+  },
+  {
+   "file": "scroll/12_slices.yml",
+   "section": "Sliced scroll with invalid arguments",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "scroll/20_keep_alive.yml",
+   "section": "Max keep alive",
+   "error": "expected catch [/.*Keep alive for.*is too large.*/] but got 200"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "_source with an ambiguous field",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "_source_includes and _source in body",
+   "error": "match hits.hits.0._source.include.field1: None != 'v1'"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "docvalue_fields",
+   "error": "match hits.hits.0.fields.count: None != [1]"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "multiple docvalue_fields",
+   "error": "match hits.hits.0.fields.count: None != [1]"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "docvalue_fields as url param",
+   "error": "match hits.hits.0.fields.count: None != [1]"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "docvalue_fields with default format",
+   "error": "match hits.hits.0.fields.count: None != [1]"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "docvalue_fields with explicit format",
+   "error": "match hits.hits.0.fields.count: None != ['1.0']"
+  },
+  {
+   "file": "search/10_source_filtering.yml",
+   "section": "docvalue_fields - double",
+   "error": "lt hits.hits.0.fields.d.0: None vs 3.141"
+  },
+  {
+   "file": "search/150_rewrite_on_coordinator.yml",
+   "section": "Ensure that we fetch the document only once",
+   "error": "match indices.lookup_index.total.get.total: 0 != 1"
+  },
+  {
+   "file": "search/171_terms_lookup_query.yml",
+   "section": "Terms Query - Lookup by Query",
+   "error": "match hits.total: 0 != 4"
+  },
+  {
+   "file": "search/190_index_prefix_search.yml",
+   "section": "search with uppercase regex",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "search/190_index_prefix_search.yml",
+   "section": "search index prefixes with span_multi",
+   "error": "GET /test/_search -> 400: {\"error\": {\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [span_near]\", \"root_cause\": [{\"type\": \"parsing_exception\", \"reason\": \"unsupported query type [span_near]\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "Exists on _ignored",
+   "error": "length hits.hits: 0 != 3"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "Search on _ignored with term",
+   "error": "length hits.hits: 0 != 2"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "Search on _ignored with terms",
+   "error": "length hits.hits: 0 != 3"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "_ignored is returned by default",
+   "error": "length hits.hits.0._ignored: missing"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "_ignored is still returned with explicit list of stored fields",
+   "error": "is_true hits.hits.0._ignored: None"
+  },
+  {
+   "file": "search/200_ignore_malformed.yml",
+   "section": "field-level setting shall override index-level setting",
+   "error": "expected catch [/failed to parse field \\[my_date\\] of type \\[date\\]/] but got 201"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "Mappings",
+   "error": "match test1.mappings.properties.my_field.doc_values: None != True"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "term query matches exact value",
+   "error": "match hits.total.value: 0 != 1"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "term query matches lowercase-normalized value",
+   "error": "match hits.total.value: 0 != 2"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "wildcard query matches lowercase-normalized field",
+   "error": "match hits.total.value: 0 != 1"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "regexp query matches lowercase-normalized field",
+   "error": "match hits.total.value: 0 != 2"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "case insensitive query on wildcard field",
+   "error": "match hits.total.value: 1 != 2"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "case insensitive regexp query on wildcard field",
+   "error": "match hits.total.value: 1 != 2"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "wildcard query works on values contains escaped characters",
+   "error": "match hits.hits.0._id: '9' != '8'"
+  },
+  {
+   "file": "search/270_wildcard_fieldtype_queries.yml",
+   "section": "sort on doc value enabled wildcard",
+   "error": "match hits.hits.0._id: '1' != '8'"
+  },
+  {
+   "file": "search/300_sequence_numbers.yml",
+   "section": "sequence numbers are returned if requested from body",
+   "error": "match hits.hits.0._seq_no: 0 != 1"
+  },
+  {
+   "file": "search/300_sequence_numbers.yml",
+   "section": "sequence numbers are returned if requested from url",
+   "error": "match hits.hits.0._seq_no: None != 1"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test basic field retrieval",
+   "error": "match hits.hits.0.fields.keyword.0: None != 'a'"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test date formatting",
+   "error": "match hits.hits.0.fields.date.0: None != '1990/12/29'"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test disable source",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test ignore malformed",
+   "error": "match hits.hits.0.fields.integer.0: None != 42"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test disable _source loading",
+   "error": "match hits.hits.0.fields.keyword.0: None != 'a'"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test search rewrite",
+   "error": "match hits.hits.0.fields.date.0: None != '1990/12/29'"
+  },
+  {
+   "file": "search/330_fetch_fields.yml",
+   "section": "Test token count",
+   "error": "match hits.hits.0.fields.count: None != [2]"
+  },
+  {
+   "file": "search/340_doc_values_field.yml",
+   "section": "search on fields with both index and doc_values enabled",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/340_doc_values_field.yml",
+   "section": "search on fields with only index enabled",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/340_doc_values_field.yml",
+   "section": "search on fields with only doc_values enabled",
+   "error": "match hits.total: 1 != 2"
+  },
+  {
+   "file": "search/380_bitmap_filtering.yml",
+   "section": "Terms lookup on a binary field with bitmap",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/380_bitmap_filtering.yml",
+   "section": "Terms query accepting bitmap as value",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/380_bitmap_filtering.yml",
+   "section": "Boolean must bitmap filtering",
+   "error": "match hits.total: 0 != 1"
+  },
+  {
+   "file": "search/380_bitmap_filtering.yml",
+   "section": "Boolean should bitmap filtering",
+   "error": "match hits.total: 0 != 3"
+  },
+  {
+   "file": "search/381_bitmap_filtering_long.yml",
+   "section": "Terms lookup on a binary field with bitmap (long)",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/381_bitmap_filtering_long.yml",
+   "section": "Terms query accepting bitmap as value (long)",
+   "error": "match hits.total: 0 != 2"
+  },
+  {
+   "file": "search/390_search_as_you_type.yml",
+   "section": "Test search_as_you_type data type supports multi-fields",
+   "error": "match hits.total.value: 0 != 1"
+  },
+  {
+   "file": "search/400_max_score.yml",
+   "section": "Test max score with sorting on score firstly",
+   "error": "match hits.max_score: None != 1.0"
+  },
+  {
+   "file": "search/400_max_score.yml",
+   "section": "Test max score with sorting on score firstly with concurrent segment search enabled",
+   "error": "match hits.max_score: None != 1.0"
+  },
+  {
+   "file": "search/400_max_score.yml",
+   "section": "Test max score with sorting on score primarily for field collapsing",
+   "error": "length hits.hits: 2 != 1"
+  },
+  {
+   "file": "search/400_max_score.yml",
+   "section": "Test max score with sorting on score firstly primarily for field collapsing with concurrent segment search enabled",
+   "error": "length hits.hits: 2 != 1"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost using object",
+   "error": "match hits.hits.0._index: 'test_1' != 'test_2'"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost using array",
+   "error": "match hits.hits.0._index: 'test_1' != 'test_2'"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost using array with alias",
+   "error": "match hits.hits.0._index: 'test_1' != 'test_2'"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost using array with wildcard",
+   "error": "match hits.hits.0._index: 'test_1' != 'test_2'"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost using array multiple match",
+   "error": "match hits.hits.0._index: 'test_1' != 'test_2'"
+  },
+  {
+   "file": "search/40_indices_boost.yml",
+   "section": "Indices boost for nonexistent index/alias",
+   "error": "expected catch [/no such index/] but got 200"
+  },
+  {
+   "file": "search/80_indices_options.yml",
+   "section": "Missing index date math with catch",
+   "error": "catch /logstash-\\d{4}\\.\\d{2}\\.\\d{2}/ did not match {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [<logstash-{now/M}>]\", \"index\": \"<logstash-{now/M}>\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"<logstash-{now/M}>\", \""
+  },
+  {
+   "file": "search/80_indices_options.yml",
+   "section": "Missing index",
+   "error": "GET /missing_index/_search -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [missing_index]\", \"index\": \"missing_index\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"missing_index\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [missing_index]\""
+  },
+  {
+   "file": "search/80_indices_options.yml",
+   "section": "Closed index",
+   "error": "expected catch [/index_closed_exception/] but got 200"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "search with search_after parameter",
+   "error": "match hits.hits.0._id: '172' != '42'"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "date",
+   "error": "match hits.hits.0.sort: ['2019-10-21 08:30:04.828'] != [1571646604828]"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "date_nanos",
+   "error": "match hits.hits.0.sort: ['2019-10-21 08:30:04.828733'] != [1571646604828733000]"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "unsigned long",
+   "error": "match hits.hits.0._source.population: 10223372036854775800 != 15223372036854775800"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "half float",
+   "error": "match hits.hits.0._source.population: 144.4 != 194.4"
+  },
+  {
+   "file": "search/90_search_after.yml",
+   "section": "numeric skipping logic with competitive missing value",
+   "error": "match hits.hits.0._source.halffloat: 1 != None"
+  },
+  {
+   "file": "search/95_search_after_shard_doc.yml",
+   "section": "reject _shard_doc without PIT",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search/95_search_after_shard_doc.yml",
+   "section": "detect _shard_doc via FieldSortBuilder-style object without PIT",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search/95_search_after_shard_doc.yml",
+   "section": "accept _shard_doc with PIT + paginate with search_after (multi-shard)",
+   "error": "POST /sharddoc_paging/_search/point_in_time -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "Format test",
+   "error": "match aggregations.histo.buckets.0.key_as_string: None != 'Value is 0.0'"
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "Deprecated _time order",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram on range",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram on range with offset",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram with pre-epoch daylight savings time transition",
+   "error": "length aggregations.histo.buckets: 0 != 1"
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "histogram profiler",
+   "error": "length aggregations.histo.buckets: 0 != 4"
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram profiler",
+   "error": "GET /test_2/_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "histogram with hard bounds",
+   "error": "length aggregations.histo.buckets: 0 != 21"
+  },
+  {
+   "file": "search.aggregation/10_histogram.yml",
+   "section": "date_histogram profiler shows filter rewrite info",
+   "error": "GET /test_2/_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric.yml",
+   "section": "Missing field with missing param",
+   "error": "match aggregations.distinct_missing.value: 0.0 != 1"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric.yml",
+   "section": "profiler int",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric.yml",
+   "section": "profiler double",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric.yml",
+   "section": "profiler string",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric_unsigned.yml",
+   "section": "Missing field with missing param",
+   "error": "match aggregations.distinct_missing.value: 0.0 != 1"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric_unsigned.yml",
+   "section": "profiler unsigned_long",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric_unsigned.yml",
+   "section": "profiler double",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/170_cardinality_metric_unsigned.yml",
+   "section": "profiler string",
+   "error": "gt profile.shards.0.aggregations.0.breakdown.initialize: None vs 0"
+  },
+  {
+   "file": "search.aggregation/180_percentiles_tdigest_metric.yml",
+   "section": "Missing field with missing param",
+   "error": "match aggregations.percentiles_missing.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/180_percentiles_tdigest_metric.yml",
+   "section": "Invalid params test",
+   "error": "expected catch [/\\[compression\\] must be greater than or equal to 0. Found \\[-1.0\\]/] but got 200"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Basic test",
+   "error": "match aggregations.percentiles_int.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Only aggs test",
+   "error": "match aggregations.percentiles_int.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Filtered test",
+   "error": "match aggregations.percentiles_int.values.1\\.0: 50.91110157430019 != 51.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Missing field with missing param",
+   "error": "match aggregations.percentiles_missing.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Metadata test",
+   "error": "match aggregations.percentiles_int.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Invalid params test",
+   "error": "expected catch [/\\[numberOfSignificantValueDigits\\] must be between 0 and 5/] but got 200"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Explicit Percents test",
+   "error": "match aggregations.percentiles_int.values.5\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Non-keyed test",
+   "error": "match aggregations.percentiles_int.values.0.value: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric.yml",
+   "section": "Negative values test",
+   "error": "match hits.total: 5 != 4"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Basic test",
+   "error": "match aggregations.percentiles_unsigned.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Only aggs test",
+   "error": "match aggregations.percentiles_unsigned.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Filtered test",
+   "error": "match aggregations.percentiles_unsigned.values.1\\.0: 50.91110157430019 != 51.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Missing field with missing param",
+   "error": "match aggregations.percentiles_missing.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Metadata test",
+   "error": "match aggregations.percentiles_unsigned.values.1\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Explicit Percents test",
+   "error": "match aggregations.percentiles_unsigned.values.5\\.0: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/190_percentiles_hdr_metric_unsigned.yml",
+   "section": "Non-keyed test",
+   "error": "match aggregations.percentiles_unsigned.values.0.value: 1.01 != 1.0"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "IP test",
+   "error": "expected catch [request] but got 200"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Date test",
+   "error": "match aggregations.date_terms.buckets.0.key: '2016-05-03' != 1462233600000"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Partitioned string test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: invalid type: map, expected a string (regex) or an array of strings\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: invalid type: map, expected a string (regex) or a"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Partitioned integer test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: invalid type: map, expected a string (regex) or an array of strings\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: invalid type: map, expected a string (regex) or a"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Unmapped booleans",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: data did not match any variant of untagged enum Key\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: data did not match any variant of untagged enum Key\"}]}, \"status\""
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Unmapped dates",
+   "error": "match aggregations.date_terms.buckets.0.key: '2016-05-11' != 1462924800000"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Mixing longs and doubles",
+   "error": "match aggregations.number_terms.buckets.0.key: 100 != 10.0"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Mixing longs, unsigned  long and doubles",
+   "error": "match aggregations.number_terms.buckets.0.key: 100 != 10.0"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Deprecated _term order",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: 'could not find aggregation with name _term in metric sub_aggregations'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: 'could not find aggregation"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "Global ordinals are not loaded with the map execution hint",
+   "error": "match indices.test_1.total.fielddata.memory_size_in_bytes: 330 != 0"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "No field or script",
+   "error": "catch /Required one of fields \\[field, script\\], but none were specified/ did not match {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: missing field `field`\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregat"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "string profiler via global ordinals",
+   "error": "match profile.shards.0.aggregations.0.type: None != 'GlobalOrdinalsStringTermsAggregator'"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "string profiler via map",
+   "error": "match profile.shards.0.aggregations.0.type: None != 'MapStringTermsAggregator'"
+  },
+  {
+   "file": "search.aggregation/20_terms.yml",
+   "section": "numeric profiler",
+   "error": "match profile.shards.0.aggregations.0.type: None != 'NumericTermsAggregator'"
+  },
+  {
+   "file": "search.aggregation/240_max_buckets.yml",
+   "section": "Max bucket",
+   "error": "expected catch [/.*Trying to create too many buckets.*/] but got 200"
+  },
+  {
+   "file": "search.aggregation/250_moving_fn.yml",
+   "section": "Bad window",
+   "error": "expected catch [/\\[window\\] must be a positive, non-zero integer\\./] but got 200"
+  },
+  {
+   "file": "search.aggregation/250_moving_fn.yml",
+   "section": "Bad window deprecated interval",
+   "error": "expected catch [/\\[window\\] must be a positive, non-zero integer\\./] but got 200"
+  },
+  {
+   "file": "search.aggregation/250_moving_fn.yml",
+   "section": "Not under date_histo",
+   "error": "expected catch [/\\[window\\] must be a positive, non-zero integer\\./] but got 200"
+  },
+  {
+   "file": "search.aggregation/260_weighted_avg.yml",
+   "section": "Basic test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `weighted_avg`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hi"
+  },
+  {
+   "file": "search.aggregation/260_weighted_avg_unsigned.yml",
+   "section": "Basic test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `weighted_avg`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hi"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric.yml",
+   "section": "basic test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric.yml",
+   "section": "with setting compression",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric.yml",
+   "section": "no documents",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric.yml",
+   "section": "missing value",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml",
+   "section": "basic test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml",
+   "section": "with setting compression",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml",
+   "section": "no documents",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/270_median_absolute_deviation_metric_unsigned.yml",
+   "section": "missing value",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `median_absolute_deviation`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percenti"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Basic test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "IP test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Boolean test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Integer test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Date test",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Unmapped strings",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Unmapped booleans",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Unmapped dates",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "Unmapped longs",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "sub aggs",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/280_rare_terms.yml",
+   "section": "avg_bucket",
+   "error": "GET /test/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `rare_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/330_auto_date_histogram.yml",
+   "section": "basic",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `auto_date_histogram`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, "
+  },
+  {
+   "file": "search.aggregation/330_auto_date_histogram.yml",
+   "section": "avg_bucket",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `auto_date_histogram`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, "
+  },
+  {
+   "file": "search.aggregation/330_auto_date_histogram.yml",
+   "section": "profile at top level",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `auto_date_histogram`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, "
+  },
+  {
+   "file": "search.aggregation/330_auto_date_histogram.yml",
+   "section": "auto_date_histogram profile shows filter rewrite info",
+   "error": "GET /test_profile/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `auto_date_histogram`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, "
+  },
+  {
+   "file": "search.aggregation/350_variable_width_histogram.yml",
+   "section": "basic",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `variable_width_histogram`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentil"
+  },
+  {
+   "file": "search.aggregation/360_date_histogram.yml",
+   "section": "date_histogram on range with hard bounds",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/360_date_histogram.yml",
+   "section": "Date histogram aggregation w/ filter query test",
+   "error": "GET /dhisto-agg-w-query/_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"week\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument w"
+  },
+  {
+   "file": "search.aggregation/360_date_histogram.yml",
+   "section": "Date histogram aggregation w/ shared field range test",
+   "error": "GET /dhisto-agg-w-query/_search -> 400: {\"error\": {\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument was passed: '`calendar_interval` parameter \\\"month\\\" in date histogram is unsupported, only `fixed_interval` is supported'\", \"root_cause\": [{\"type\": \"aggregation_execution_exception\", \"reason\": \"An invalid argument "
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Basic test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "IP test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Boolean test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Long test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Unsigned Long test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Double test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Date test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Unmapped keywords",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "Null value",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "multiple multi_terms bucket",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "ordered by metrics",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "top 1 ordered by metrics ",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "min_doc_count",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "sum_other_doc_count",
+   "error": "GET /test_2/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "aggregate over multi-terms test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "multi_terms bucket and multiple orders test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/370_multi_terms.yml",
+   "section": "multi_terms bucket and multiple orders with size test",
+   "error": "GET /test_1/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `multi_terms`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hit"
+  },
+  {
+   "file": "search.aggregation/380_doc_count_field.yml",
+   "section": "Test numeric terms agg with doc_count",
+   "error": "match aggregations.num_terms.buckets.0.key: 500 != 100"
+  },
+  {
+   "file": "search.aggregation/380_doc_count_field.yml",
+   "section": "Test keyword terms agg with doc_count",
+   "error": "match aggregations.str_terms.buckets.0.key: 'foo' != 'abc'"
+  },
+  {
+   "file": "search.aggregation/380_doc_count_field.yml",
+   "section": "Test unmapped string terms agg with doc_count",
+   "error": "match aggregations.str_terms.buckets.0.doc_count: 2 != 11"
+  },
+  {
+   "file": "search.aggregation/380_doc_count_field.yml",
+   "section": "Test composite str_terms agg with doc_count",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: missing field `size`\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: missing field `size`\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "search.aggregation/380_doc_count_field.yml",
+   "section": "Test composite num_terms agg with doc_count",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: missing field `size`\", \"root_cause\": [{\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: missing field `size`\"}]}, \"status\": 400}"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Double range",
+   "error": "match aggregations.double_range.buckets.0.key: '*-50' != '*-50.0'"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "IP range",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `ip_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits`,"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "IP Range Key Generation",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `ip_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits`,"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "IP Range avg_bucket",
+   "error": "GET /test/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `ip_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits`,"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Date range",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `date_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Date Range Missing",
+   "error": "GET /_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `date_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Date range unmapped with children",
+   "error": "TypeError: Object of type datetime is not JSON serializable"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Unsigned long range",
+   "error": "match aggregations.unsigned_long_range.buckets.0.key: '*-50' != '*-50.0'"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Double range profiler shows filter rewrite info",
+   "error": "match aggregations.double_range.buckets.0.key: '*-50' != '*-50.0'"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Scaled Float Range Aggregation",
+   "error": "match aggregations.my_range.buckets.0.key: '*-0' != '*-0.0'"
+  },
+  {
+   "file": "search.aggregation/40_range.yml",
+   "section": "Filter query w/ aggregation test",
+   "error": "GET /range-agg-w-query/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `date_range`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `top_hits"
+  },
+  {
+   "file": "search.aggregation/70_adjacency_matrix.yml",
+   "section": "Filters intersections",
+   "error": "GET /test/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `adjacency_matrix`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `to"
+  },
+  {
+   "file": "search.aggregation/70_adjacency_matrix.yml",
+   "section": "Terms lookup",
+   "error": "GET /test/_search -> 400: {\"error\": {\"type\": \"x_content_parse_exception\", \"reason\": \"failed to parse aggregation: unknown variant `adjacency_matrix`, expected one of `range`, `histogram`, `date_histogram`, `terms`, `filter`, `composite`, `avg`, `value_count`, `max`, `min`, `stats`, `extended_stats`, `sum`, `percentiles`, `to"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test set search backpressure mode",
+   "error": "match persistent: {'search_backpressure.mode': 'monitor_only'} != {'search_backpressure': {'mode': 'monitor_only'}}"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test set invalid search backpressure mode",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test setting search backpressure cancellation settings",
+   "error": "match transient.search_backpressure.search_task.cancellation_burst: None != '11'"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test setting invalid search backpressure cancellation_rate and cancellation_ratio",
+   "error": "expected catch [/search_backpressure.search_task.cancellation_rate must be > 0/] but got 200"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test setting search backpressure node settings",
+   "error": "match transient.search_backpressure.node_duress.num_successive_breaches: None != '10'"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test setting search backpressure search_task settings",
+   "error": "match transient.search_backpressure.search_task.elapsed_time_millis_threshold: None != '50000'"
+  },
+  {
+   "file": "search.backpressure/10_basic.yml",
+   "section": "Test setting search backpressure search_shard_task settings",
+   "error": "match transient.search_backpressure.search_shard_task.elapsed_time_millis_threshold: None != '50000'"
+  },
+  {
+   "file": "search.highlight/10_unified.yml",
+   "section": "Basic",
+   "error": "match hits.hits.0.highlight.text.0: None != 'The <em>quick</em> <em>brown</em> <em>fox</em> is <em>brown</em>.'"
+  },
+  {
+   "file": "search.highlight/10_unified.yml",
+   "section": "With matched_fields",
+   "error": "match hits.hits.0.highlight.another_text.0: None != 'What jumps over <em>the</em> lazy <em>dog</em>?'"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Unified highlighter on a field WITHOUT OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Unified highlighter on a field WITHOUT OFFSETS using max_analyzer_offset should SUCCEED",
+   "error": "match hits.hits.0.highlight.field1.0: None != 'The <em>quick</em> brown fox went to the forest and saw another fox.'"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Plain highlighter on a field WITHOUT OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Unified highlighter on a field WITH OFFSETS exceeding index.highlight.max_analyzed_offset should SUCCEED",
+   "error": "match hits.hits.0.highlight.field2.0: None != 'The quick brown <em>fox</em> went to the forest and saw another <em>fox</em>.'"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Plain highlighter on a field WITH OFFSETS exceeding index.highlight.max_analyzed_offset should FAIL",
+   "error": "expected catch [bad_request] but got 200"
+  },
+  {
+   "file": "search.highlight/30_max_analyzed_offset.yml",
+   "section": "Plain highlighter on a field WITHOUT OFFSETS using max_analyzer_offset should SUCCEED",
+   "error": "match hits.hits.0.highlight.field1.0: None != 'The <em>quick</em> '"
+  },
+  {
+   "file": "search.highlight/40_keyword_ignore.yml",
+   "section": "Plain Highligher should skip highlighting ignored keyword values",
+   "error": "match hits.hits.0.highlight.k2.0: None != '<em>123</em>'"
+  },
+  {
+   "file": "search.highlight/40_keyword_ignore.yml",
+   "section": "Unified Highligher should skip highlighting ignored keyword values",
+   "error": "match hits.hits.0.highlight.k2.0: None != '<em>123</em>'"
+  },
+  {
+   "file": "search_shards/10_basic.yml",
+   "section": "Search shards aliases with and without filters",
+   "error": "match indices.test_index.aliases: None != ['test_alias_no_filter']"
+  },
+  {
+   "file": "search_shards/10_basic_field_match_only_field.yml",
+   "section": "Search shards aliases with and without filters",
+   "error": "match indices.test_index.aliases: None != ['test_alias_no_filter']"
+  },
+  {
+   "file": "search_shards/20_slice.yml",
+   "section": "Search shards with slice specified in body",
+   "error": "length shards: 1 != 3"
+  },
+  {
+   "file": "suggest/10_basic.yml",
+   "section": "Basic tests for suggest API",
+   "error": "match suggest.test_suggestion.1.options.0.text: None != 'amsterdam'"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Simple suggestion should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Simple suggestion array should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Suggestion entry should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Suggestion entry array should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Multiple Completion fields should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Suggestions with source should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/20_completion.yml",
+   "section": "Skip duplicates should work",
+   "error": "length suggest.result: missing"
+  },
+  {
+   "file": "suggest/40_typed_keys.yml",
+   "section": "Test typed keys parameter for suggesters",
+   "error": "is_true suggest.term#term_suggester: None"
+  },
+  {
+   "file": "tasks.cancel/10_basic.yml",
+   "section": "tasks_cancel test",
+   "error": "POST /_tasks/_cancel -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "tasks.list/10_basic.yml",
+   "section": "tasks_list headers",
+   "error": "GET /_tasks -> 404: {\"error\": {\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_tasks]\", \"index\": \"_tasks\", \"resource.type\": \"index_or_alias\", \"resource.id\": \"_tasks\", \"index_uuid\": \"_na_\", \"root_cause\": [{\"type\": \"index_not_found_exception\", \"reason\": \"no such index [_tasks]\", \"index\": \"_tasks\"}]}, \"sta"
+  },
+  {
+   "file": "termvectors/10_basic.yml",
+   "section": "Basic tests for termvector get",
+   "error": "GET /testidx/_termvectors/testing_document -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "termvectors/20_issue7121.yml",
+   "section": "Term vector API should return 'found: false' for docs between index and refresh",
+   "error": "GET /testidx/_termvectors/1 -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "termvectors/30_realtime.yml",
+   "section": "Realtime Term Vectors",
+   "error": "GET /test_1/_termvectors/1 -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "update/11_shard_header.yml",
+   "section": "Update check shard header",
+   "error": "match _shards.total: 2 != 1"
+  },
+  {
+   "file": "update/16_noop.yml",
+   "section": "Noop",
+   "error": "match _seq_no: None != 0"
+  },
+  {
+   "file": "update/35_if_seq_no.yml",
+   "section": "Update with if_seq_no",
+   "error": "expected catch [conflict] but got 200"
+  },
+  {
+   "file": "update/40_routing.yml",
+   "section": "Routing",
+   "error": "match _routing: None != '5'"
+  },
+  {
+   "file": "update/60_refresh.yml",
+   "section": "Refresh",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "update/60_refresh.yml",
+   "section": "When refresh url parameter is an empty string that means \"refresh immediately\"",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "update/60_refresh.yml",
+   "section": "refresh=wait_for waits until changes are visible in search",
+   "error": "is_true forced_refresh: None"
+  },
+  {
+   "file": "update/95_require_alias.yml",
+   "section": "Set require_alias flag",
+   "error": "expected catch [missing] but got 201"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Custom size param still returns headers",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Sort by node_id asc does not error",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Sort by workload_group_id desc does not error",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Invalid sort field returns error",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Invalid sort order returns error",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Invalid token returns 400",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Default request returns 200 and contains expected keys",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Max allowed size param returns success",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Too large page size returns error",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Negative page size returns error",
+   "error": "catch [bad_request] expected HTTP 400, got 501"
+  },
+  {
+   "file": "wlm_stats/10_basic.yml",
+   "section": "Sort param omitted uses default 'node_id'",
+   "error": "GET /_list/wlm_stats -> 501: {\"error\": {\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\", \"root_cause\": [{\"type\": \"not_implemented_exception\", \"reason\": \"not ported yet\"}]}, \"status\": 501}"
+  }
+ ]
+}

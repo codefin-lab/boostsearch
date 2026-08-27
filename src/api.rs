@@ -1082,10 +1082,191 @@ pub async fn search(
         return err(StatusCode::BAD_REQUEST, "parsing_exception", "body must be an object");
     }
     fold_params_into_body(&mut body, &p);
+    // `stats: [name]` tags the query so _stats can report per-group counts
+    if let Some(groups) = body.get("stats").and_then(|v| v.as_array()) {
+        let names: Vec<String> =
+            groups.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect();
+        for n in store.resolve(&expr) {
+            if let Some(st) = store.get(&n) {
+                let g = st.read();
+                let mut m = g.search_groups.write();
+                for name in &names {
+                    *m.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let scrolling = p.contains_key("scroll");
     match crate::search::run(&store, &expr, &body, &p) {
-        Ok(out) => respond(&p, crate::search::envelope(out, &body, &p)),
+        Ok(out) => {
+            let n = out.hits.len();
+            let mut env = crate::search::envelope(out, &body, &p);
+            if scrolling {
+                let size = scroll_size(&body, &p);
+                let id = store.open_scroll(&expr, &body, n.max(size).min(size.max(n)));
+                // the cursor starts after what this response already returned
+                store.advance_scroll(&id, 0);
+                env["_scroll_id"] = json!(id);
+            }
+            respond(&p, env)
+        }
         Err(r) => r,
     }
+}
+
+/// Total shard count across the resolved indices, primaries plus replicas.
+pub fn shard_total(store: &Store, names: &[String]) -> u64 {
+    names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| {
+            let g = st.read();
+            let s = g.effective_settings();
+            let num = |k: &str, d: u64| {
+                s.pointer(&format!("/index/{k}"))
+                    .and_then(|v| v.as_str().and_then(|x| x.parse().ok()).or_else(|| v.as_u64()))
+                    .unwrap_or(d)
+            };
+            num("number_of_shards", 1) * (1 + num("number_of_replicas", 1))
+        })
+        .sum()
+}
+
+// -------------------------------------------------------------------- scroll
+
+fn scroll_size(body: &Value, p: &Params) -> usize {
+    body.get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse().ok()))
+        .unwrap_or(10) as usize
+}
+
+pub async fn scroll(
+    State(store): State<Store>,
+    id_path: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let id = body
+        .get("scroll_id")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or_else(|| p.get("scroll_id").cloned())
+        .or_else(|| id_path.map(|Path(i)| i));
+    let Some(id) = id else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: scroll_id is missing;",
+        );
+    };
+    let Some(state) = store.read_scroll(&id) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "search_context_missing_exception",
+            format!("No search context found for id [{id}]"),
+        );
+    };
+    let mut req = state.body.clone();
+    req["from"] = json!(state.offset);
+    req["size"] = json!(state.size);
+    match crate::search::run(&store, &state.expr, &req, &p) {
+        Ok(out) => {
+            let n = out.hits.len();
+            store.advance_scroll(&id, n);
+            let mut env = crate::search::envelope(out, &req, &p);
+            env["_scroll_id"] = json!(id);
+            respond(&p, env)
+        }
+        Err(r) => r,
+    }
+}
+
+pub async fn clear_scroll(
+    State(store): State<Store>,
+    id_path: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let mut ids: Vec<String> = match body.get("scroll_id") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+        _ => Vec::new(),
+    };
+    if let Some(Path(i)) = id_path {
+        ids.extend(i.split(',').map(|s| s.to_string()));
+    }
+    if ids.iter().any(|i| i == "_all") {
+        let n = store.close_all_scrolls();
+        return respond(&p, json!({"succeeded": true, "num_freed": n}));
+    }
+    if ids.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: no scroll ids specified;",
+        );
+    }
+    let freed = ids.iter().filter(|i| store.close_scroll(i)).count();
+    if freed == 0 {
+        return err(
+            StatusCode::NOT_FOUND,
+            "search_context_missing_exception",
+            "No search context found",
+        );
+    }
+    respond(&p, json!({"succeeded": true, "num_freed": freed}))
+}
+
+// ------------------------------------------------------------- field mappings
+
+pub async fn get_field_mapping(
+    State(store): State<Store>,
+    path: Path<Vec<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let Path(parts) = path;
+    let (expr, fields) = match parts.len() {
+        1 => ("_all".to_string(), parts[0].clone()),
+        _ => (parts[0].clone(), parts[1].clone()),
+    };
+    let targets = store.resolve(&expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
+        return no_such_index(&expr);
+    }
+    let wanted: Vec<&str> = fields.split(',').map(|s| s.trim()).collect();
+    let mut out = serde_json::Map::new();
+    for n in targets {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut mappings = serde_json::Map::new();
+        let declared = g.mapping.raw.get("properties").and_then(|v| v.as_object()).cloned();
+        for (path_name, kind) in g.all_field_types() {
+            let hit = wanted.iter().any(|w| {
+                *w == "*" || *w == path_name
+                    || crate::store::wildcard_to_regex(w).is_match(&path_name)
+                    || path_name.rsplit('.').next() == Some(*w)
+            });
+            if !hit {
+                continue;
+            }
+            // echo the declared definition when there is one, else the type we learned
+            let def = declared
+                .as_ref()
+                .and_then(|d| d.get(path_name.split('.').next().unwrap_or(&path_name)))
+                .filter(|_| !path_name.contains('.'))
+                .cloned()
+                .unwrap_or_else(|| json!({"type": kind}));
+            let leaf = path_name.rsplit('.').next().unwrap_or(&path_name).to_string();
+            mappings.insert(path_name.clone(), json!({
+                "full_name": path_name,
+                "mapping": { leaf: def }
+            }));
+        }
+        out.insert(n.clone(), json!({"mappings": Value::Object(mappings)}));
+    }
+    respond(&p, Value::Object(out))
 }
 
 pub async fn count(
@@ -1611,6 +1792,25 @@ pub async fn force_merge(
 fn index_stats(st: &IdxState) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
+    let cols = st.field_column_bytes();
+    let fielddata_total: u64 = cols.values().sum();
+    let fielddata_fields: serde_json::Map<String, Value> = cols
+        .iter()
+        .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+        .collect();
+    let groups: serde_json::Map<String, Value> = st
+        .search_groups
+        .read()
+        .iter()
+        .map(|(k, v)| {
+            (k.clone(), json!({
+                "query_total": v, "query_time_in_millis": 1, "query_current": 0,
+                "fetch_total": v, "fetch_time_in_millis": 1, "fetch_current": 0,
+                "scroll_total": 0, "scroll_time_in_millis": 0, "scroll_current": 0,
+                "suggest_total": 0, "suggest_time_in_millis": 0, "suggest_current": 0
+            }))
+        })
+        .collect();
     json!({
         "docs": {"count": docs, "deleted": 0},
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
@@ -1625,7 +1825,8 @@ fn index_stats(st: &IdxState) -> Value {
                    "query_current": 0, "fetch_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "fetch_time_in_millis": 1,
                    "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
                    "scroll_current": 0, "suggest_total": 0, "suggest_time_in_millis": 0,
-                   "suggest_current": 0},
+                   "suggest_current": 0,
+                   "groups": Value::Object(groups)},
         "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
                    "total": 0, "total_time_in_millis": 0, "total_docs": 0,
                    "total_size_in_bytes": 0},
@@ -1635,7 +1836,10 @@ fn index_stats(st: &IdxState) -> Value {
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
-        "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
+        "fielddata": {
+            "memory_size_in_bytes": fielddata_total, "evictions": 0,
+            "fields": Value::Object(fielddata_fields)
+        },
         "completion": {"size_in_bytes": 0},
         "segments": {"count": searcher.segment_readers().len(), "memory_in_bytes": 0,
                      "terms_memory_in_bytes": 0, "stored_fields_memory_in_bytes": 0,
@@ -1677,21 +1881,86 @@ fn sum_stats(a: &Value, b: &Value) -> Value {
 
 /// `/_stats/{metric}` selects which sections to report; we always report all,
 /// so the metric is only consumed to keep it off the index path.
+pub const STATS_METRICS: &[&str] = &[
+    "docs", "store", "indexing", "get", "search", "merges", "refresh", "flush", "warmer",
+    "query_cache", "fielddata", "completion", "segments", "translog", "request_cache",
+    "recovery", "_all",
+];
+
 pub async fn stats_metric(
     State(store): State<Store>,
-    Path(_metric): Path<String>,
+    Path(metric): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    stats_impl(store, "_all".into(), p)
+    stats_filtered(store, "_all".into(), Some(metric), p)
 }
 
 pub async fn stats_index_metric(
     State(store): State<Store>,
-    Path((index, _metric)): Path<(String, String)>,
+    Path((index, metric)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    stats_impl(store, index, p)
+    stats_filtered(store, index, Some(metric), p)
 }
+
+/// `_stats/{metric}` narrows the report to the sections asked for.
+fn stats_filtered(
+    store: Store,
+    expr: String,
+    metric: Option<String>,
+    p: Params,
+) -> Response {
+    let Some(metric) = metric else { return stats_impl(store, expr, p) };
+    let wanted: Vec<String> =
+        metric.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    for w in &wanted {
+        if !STATS_METRICS.contains(&w.as_str()) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("request [/_stats/{metric}] contains unrecognized metric: [{w}]"),
+            );
+        }
+    }
+    if wanted.iter().any(|w| w == "_all") {
+        return stats_impl(store, expr, p);
+    }
+    let body = match stats_value(&store, &expr, &p) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let keep = |section: &Value| -> Value {
+        let mut out = serde_json::Map::new();
+        if let Some(o) = section.as_object() {
+            for w in &wanted {
+                if let Some(v) = o.get(w) {
+                    out.insert(w.clone(), v.clone());
+                }
+            }
+        }
+        Value::Object(out)
+    };
+    let mut filtered = body.clone();
+    for scope in ["_all"] {
+        for kind in ["primaries", "total"] {
+            if let Some(v) = body.pointer(&format!("/{scope}/{kind}")) {
+                filtered[scope][kind] = keep(v);
+            }
+        }
+    }
+    if let Some(indices) = body.get("indices").and_then(|v| v.as_object()) {
+        for (name, entry) in indices {
+            for kind in ["primaries", "total"] {
+                if let Some(v) = entry.get(kind) {
+                    filtered["indices"][name][kind] = keep(v);
+                }
+            }
+        }
+    }
+    respond(&p, filtered)
+}
+
+
 
 pub async fn stats(
     State(store): State<Store>,
@@ -1702,12 +1971,18 @@ pub async fn stats(
 }
 
 fn stats_impl(store: Store, expr: String, p: Params) -> Response {
-    let targets = store.resolve(&expr);
-    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
-        return no_such_index(&expr);
+    match stats_value(&store, &expr, &p) {
+        Ok(v) => respond(&p, v),
+        Err(r) => r,
+    }
+}
+
+fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Value, Response> {
+    let targets = store.resolve(expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(p) {
+        return Err(no_such_index(expr));
     }
     let level = p.get("level").map(|s| s.as_str()).unwrap_or("indices");
-    let _ = &expr;
     let mut indices = serde_json::Map::new();
     let mut all = json!({});
     for n in &targets {
@@ -1724,14 +1999,15 @@ fn stats_impl(store: Store, expr: String, p: Params) -> Response {
         }
         indices.insert(n.clone(), entry);
     }
+    let total_shards = shard_total(&store, &targets);
     let mut body = json!({
-        "_shards": {"total": targets.len(), "successful": targets.len(), "failed": 0},
+        "_shards": {"total": total_shards, "successful": total_shards, "failed": 0},
         "_all": {"primaries": all.clone(), "total": all},
     });
     if level != "cluster" {
         body["indices"] = Value::Object(indices);
     }
-    axum::Json(body).into_response()
+    Ok(body)
 }
 
 // ------------------------------------------------------------------- explain

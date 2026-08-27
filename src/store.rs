@@ -263,6 +263,8 @@ pub struct IdxState {
     pub search_count: std::sync::atomic::AtomicU64,
     /// misses recorded for `request_cache=true` searches, reported by _stats
     pub request_cache_miss: std::sync::atomic::AtomicU64,
+    /// per-group query counts, from the `stats` field of a search body
+    pub search_groups: RwLock<HashMap<String, u64>>,
     pub auto_id: u64,
     /// field paths seen in indexed documents, with the type OpenSearch's
     /// dynamic mapping would have given them. Explicit mappings win over these.
@@ -327,6 +329,28 @@ impl IdxState {
                 self.pending_bytes = 0;
             }
         }
+    }
+
+    /// Bytes each fast-field column occupies. This is the closest honest
+    /// analogue of what OpenSearch reports as fielddata.
+    pub fn field_column_bytes(&self) -> HashMap<String, u64> {
+        let mut out: HashMap<String, u64> = HashMap::new();
+        let searcher = self.reader.searcher();
+        for seg in searcher.segment_readers() {
+            let ff = seg.fast_fields();
+            for (path, _) in self.all_field_types() {
+                for prefix in [DYN, RAW] {
+                    let col = format!("{prefix}.{path}");
+                    if let Ok(bytes) = ff.column_num_bytes(&col) {
+                        let n = bytes.get_bytes();
+                        if n > 0 {
+                            *out.entry(path.clone()).or_insert(0) += n;
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn has_writer(&self) -> bool {
@@ -607,6 +631,9 @@ pub struct Store {
     data_dir: Option<PathBuf>,
     /// index templates by name
     templates: Arc<RwLock<HashMap<String, Value>>>,
+    /// live scroll cursors, keyed by the id handed to the client
+    scrolls: Arc<RwLock<HashMap<String, ScrollState>>>,
+    scroll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
@@ -692,6 +719,8 @@ impl Store {
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
+            scrolls: Arc::new(RwLock::new(HashMap::new())),
+            scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.start_writer_reaper();
         store
@@ -709,6 +738,8 @@ impl Store {
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
+            scrolls: Arc::new(RwLock::new(HashMap::new())),
+            scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
@@ -847,6 +878,39 @@ impl Store {
             }
         }
         out
+    }
+
+    /// `size` is how many documents each batch returns; the cursor is placed
+    /// after the batch the opening search already delivered.
+    pub fn open_scroll(&self, expr: &str, body: &Value, size: usize) -> String {
+        let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("obsearch-scroll-{n:016x}");
+        self.scrolls.write().insert(
+            id.clone(),
+            ScrollState { expr: expr.to_string(), body: body.clone(), offset: size, size },
+        );
+        id
+    }
+
+    pub fn read_scroll(&self, id: &str) -> Option<ScrollState> {
+        self.scrolls.read().get(id).cloned()
+    }
+
+    pub fn advance_scroll(&self, id: &str, by: usize) {
+        if let Some(s) = self.scrolls.write().get_mut(id) {
+            s.offset += by;
+        }
+    }
+
+    pub fn close_scroll(&self, id: &str) -> bool {
+        self.scrolls.write().remove(id).is_some()
+    }
+
+    pub fn close_all_scrolls(&self) -> usize {
+        let mut s = self.scrolls.write();
+        let n = s.len();
+        s.clear();
+        n
     }
 
     /// Index templates, applied to any index created with a matching name.
@@ -1001,6 +1065,7 @@ impl Store {
             seq_no: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
+            search_groups: RwLock::new(HashMap::new()),
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
@@ -1036,6 +1101,16 @@ impl Store {
         }
         any
     }
+}
+
+/// A scroll is a cursor over a search: the request that opened it plus how far
+/// the client has read.
+#[derive(Clone)]
+pub struct ScrollState {
+    pub expr: String,
+    pub body: Value,
+    pub offset: usize,
+    pub size: usize,
 }
 
 /// Recursive object merge; `patch` wins on conflict.
