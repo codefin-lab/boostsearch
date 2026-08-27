@@ -119,6 +119,74 @@ impl Mapping {
     ///
     /// A normalizer transforms the value at index time rather than tokenising
     /// it, so the sub-field needs its own copy of the value in the index.
+    /// Add the mappings a document's new fields earn under `dynamic_templates`.
+    ///
+    /// Returns the offending field name when the mapping is strict about
+    /// fields no template claims.
+    pub fn apply_dynamic_templates(&mut self, source: &Value) -> Result<(), String> {
+        let dynamic = self
+            .raw
+            .get("dynamic")
+            .and_then(|v| v.as_str())
+            .unwrap_or("true")
+            .to_string();
+        let templates =
+            self.raw.get("dynamic_templates").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if templates.is_empty() && !dynamic.starts_with("strict") {
+            return Ok(());
+        }
+        let Some(obj) = source.as_object() else { return Ok(()) };
+        for (name, value) in obj {
+            if name.starts_with('_') || self.types.contains_key(name) {
+                continue;
+            }
+            if self.raw.pointer(&format!("/properties/{name}")).is_some() {
+                continue;
+            }
+            let kind = json_mapping_type(value);
+            let mut matched = false;
+            for t in &templates {
+                let Some(spec) = t.as_object().and_then(|o| o.values().next()) else { continue };
+                let pattern = spec.get("match").and_then(|v| v.as_str()).unwrap_or("*");
+                if !glob_match(pattern, name) {
+                    continue;
+                }
+                if let Some(mt) = spec.get("match_mapping_type").and_then(|v| v.as_str()) {
+                    if mt != "*" && mt != kind {
+                        continue;
+                    }
+                }
+                if let Some(m) = spec.get("mapping") {
+                    self.insert_property(name, m.clone());
+                }
+                matched = true;
+                break;
+            }
+            if !matched && dynamic.starts_with("strict") {
+                return Err(name.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_property(&mut self, name: &str, def: Value) {
+        if !self.raw.is_object() {
+            self.raw = serde_json::json!({});
+        }
+        let props = self
+            .raw
+            .as_object_mut()
+            .unwrap()
+            .entry("properties")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(o) = props.as_object_mut() {
+            o.insert(name.to_string(), def.clone());
+            let mut one = Map::new();
+            one.insert(name.to_string(), def);
+            flatten_props(&one, "", &mut self.types);
+        }
+    }
+
     /// Note the fields a document maps dynamically.
     ///
     /// Only dates are inferred. Every other type is stored the same way
@@ -1506,6 +1574,64 @@ fn collect_leaves(node: &Value, out: &mut Vec<Value>) {
         Value::Null => {}
         leaf => out.push(leaf.clone()),
     }
+}
+
+/// The type OpenSearch infers for a value before any template is consulted.
+fn json_mapping_type(v: &Value) -> &'static str {
+    match v {
+        Value::Object(_) => "object",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) => {
+            if n.is_f64() && n.as_i64().is_none() {
+                "double"
+            } else {
+                "long"
+            }
+        }
+        Value::String(s) => {
+            if s.len() >= 10
+                && s.as_bytes()[4] == b'-'
+                && s.as_bytes()[7] == b'-'
+                && parse_date_lenient(s).is_some()
+            {
+                "date"
+            } else {
+                "string"
+            }
+        }
+        Value::Array(a) => a.first().map(json_mapping_type).unwrap_or("string"),
+        Value::Null => "string",
+    }
+}
+
+/// `date_*` against a field name -- the only wildcard a template `match` uses.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let mut rest = name;
+    let mut parts = pattern.split('*').peekable();
+    let first = parts.next().unwrap_or("");
+    if !rest.starts_with(first) {
+        return false;
+    }
+    rest = &rest[first.len()..];
+    if !pattern.contains('*') {
+        return rest.is_empty();
+    }
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            if parts.peek().is_none() {
+                return true;
+            }
+            continue;
+        }
+        if parts.peek().is_none() {
+            return rest.ends_with(part);
+        }
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Where a flat_object field's values are gathered so the field itself can be
