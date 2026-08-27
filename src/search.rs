@@ -592,6 +592,30 @@ fn check_agg_params(name: &str, def: &Value, owner: &str) -> std::result::Result
             }
         }
         "percentiles" | "median_absolute_deviation" => {
+            if let Some(d) = def.pointer("/hdr/number_of_significant_value_digits") {
+                if !matches!(d.as_i64(), Some(0..=5)) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "[numberOfSignificantValueDigits] must be between 0 and 5",
+                    ));
+                }
+            }
+            // `percents` names which percentiles to report, so an empty or
+            // unreadable list leaves nothing to compute
+            if let Some(p) = def.get("percents") {
+                let ok = p
+                    .as_array()
+                    .map(|a| !a.is_empty() && a.iter().all(|v| v.as_f64().is_some()))
+                    .unwrap_or(false);
+                if !ok {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "x_content_parse_exception",
+                        "[percents] must be a non-empty list of numbers",
+                    ));
+                }
+            }
             if let Some(v) = num("compression") {
                 if v <= 0.0 {
                     return Err(bad("compression", v, "0"));
@@ -609,7 +633,17 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
         check_agg_params(name, def, owner)?;
         if NUMERIC_AGGS.contains(&name.as_str()) {
             if let Some(f) = def.get("field").and_then(|v| v.as_str()) {
-                if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) {
+                // a field the mapping never named is still a text field if
+                // text is all it has ever held
+                let dynamic_text = ctx.mapping.type_of(f).is_none()
+                    && ctx.kinds_complete
+                    && ctx
+                        .observed_kinds
+                        .get(f)
+                        .map(|k| *k == crate::store::KIND_STR)
+                        .unwrap_or(false);
+                if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) || dynamic_text
+                {
                     return Err(err(
                         StatusCode::BAD_REQUEST,
                         "illegal_argument_exception",
@@ -3031,7 +3065,7 @@ fn run_mad_agg(
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("[compression] must be greater than 0. Found [{c}] in [mad]"),
+                format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
             ));
         }
     }
