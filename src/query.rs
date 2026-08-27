@@ -762,8 +762,21 @@ fn build_range_field_query(
         .and_then(|v| v.as_str())
         .unwrap_or("intersects")
         .to_ascii_lowercase();
-    let q_lo = spec.get("gte").or_else(|| spec.get("gt")).cloned();
-    let q_hi = spec.get("lte").or_else(|| spec.get("lt")).cloned();
+    // a date bound may be written as date math, which names a whole unit; the
+    // bound decides which end of it is meant
+    let bound = |inclusive_key: &str, exclusive_key: &str, up_when_inclusive: bool| {
+        let (v, inclusive) = match spec.get(inclusive_key) {
+            Some(v) => (v.clone(), true),
+            None => (spec.get(exclusive_key)?.clone(), false),
+        };
+        if !kind.starts_with("date") {
+            return Some(v);
+        }
+        let up = if inclusive { up_when_inclusive } else { !up_when_inclusive };
+        Some(crate::store::canonical_date_bound(&v, up).map(Value::String).unwrap_or(v))
+    };
+    let q_lo = bound("gte", "gt", false);
+    let q_hi = bound("lte", "lt", true);
     let lo_field = format!("{field}.gte");
     let hi_field = format!("{field}.lte");
 
@@ -848,9 +861,17 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
     }
     if matches!(ctx.mapping.type_of(&field), Some("ip" | "date" | "date_nanos")) {
-        for b in [&mut lower, &mut upper] {
+        for (is_lower, b) in [(true, &mut lower), (false, &mut upper)] {
             if let Some((v, inclusive)) = b.clone() {
-                *b = Some((ip_value(ctx, &field, &v), inclusive));
+                let up = (is_lower && !inclusive) || (!is_lower && inclusive);
+                let rewritten = if matches!(ctx.mapping.type_of(&field), Some("ip")) {
+                    ip_value(ctx, &field, &v)
+                } else {
+                    crate::store::canonical_date_bound(&v, up)
+                        .map(Value::String)
+                        .unwrap_or(v.clone())
+                };
+                *b = Some((rewritten, inclusive));
             }
         }
     }

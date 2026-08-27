@@ -1871,7 +1871,10 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         .iter()
         .filter(|(k, _)| match want_groups {
             None => false,
-            Some(w) => w.iter().any(|g| g == "_all" || g == *k),
+            // the request may name groups outright, or by pattern
+            Some(w) => w.iter().any(|g| {
+                g == "_all" || g == *k || crate::store::glob_match(g, k)
+            }),
         })
         .map(|(k, v)| {
             (k.clone(), json!({
@@ -2073,7 +2076,16 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
             "total": s,
         });
         if level == "shards" {
-            entry["shards"] = json!({"0": []});
+            entry["shards"] = json!({"0": [{
+                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                "commit": {
+                    "id": st.read().commit_id(),
+                    "generation": 1,
+                    "user_data": {},
+                    "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0)),
+                },
+            }]});
         }
         indices.insert(n.clone(), entry);
     }

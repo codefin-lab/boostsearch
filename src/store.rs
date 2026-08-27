@@ -622,6 +622,15 @@ impl IdxState {
         (version, seq)
     }
 
+    /// A stable identifier for the index's current commit point.
+    pub fn commit_id(&self) -> String {
+        self.index
+            .searchable_segment_ids()
+            .ok()
+            .and_then(|ids| ids.first().map(|i| i.uuid_string()))
+            .unwrap_or_else(|| "0".repeat(22))
+    }
+
     pub fn version_of(&self, id: &str) -> u64 {
         self.versions.get(id).map(|m| m.version).unwrap_or(1)
     }
@@ -1489,6 +1498,9 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
     if let Some(dt) = crate::query::parse_datetime(s) {
         return Some(dt.into_utc());
     }
+    if s.contains("||") || s.starts_with("now") {
+        return parse_date_math(s).map(|(dt, _)| dt);
+    }
     let (day_part, time_part) = match s.split_once(['T', ' ']) {
         Some((d, t)) => (d, Some(t.trim_end_matches('Z'))),
         None => (s, None),
@@ -1605,7 +1617,7 @@ fn json_mapping_type(v: &Value) -> &'static str {
 }
 
 /// `date_*` against a field name -- the only wildcard a template `match` uses.
-fn glob_match(pattern: &str, name: &str) -> bool {
+pub fn glob_match(pattern: &str, name: &str) -> bool {
     let mut rest = name;
     let mut parts = pattern.split('*').peekable();
     let first = parts.next().unwrap_or("");
@@ -1641,6 +1653,143 @@ pub const FLAT_VALUES: &str = "_obs_values";
 /// How many tokens a standard analyser would find.
 pub fn token_count(text: &str) -> u64 {
     text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).count() as u64
+}
+
+/// `2019-12-15||/d`, `now-1d`, `now+1M/M`: an anchor followed by shifts and a
+/// rounding, which is how OpenSearch writes a date relative to another.
+fn parse_date_math(s: &str) -> Option<(tantivy::time::OffsetDateTime, Option<char>)> {
+    use tantivy::time::{Duration, OffsetDateTime};
+    let (anchor, ops) = match s.split_once("||") {
+        Some((a, o)) => (parse_date_lenient(a)?, o),
+        None => (OffsetDateTime::now_utc(), s.strip_prefix("now")?),
+    };
+    let mut dt = anchor;
+    let mut rounded = None;
+    let mut rest = ops;
+    while !rest.is_empty() {
+        let (op, tail) = rest.split_at(1);
+        match op {
+            "/" => {
+                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                dt = round_down(dt, unit)?;
+                rounded = unit.chars().next();
+                rest = tail;
+            }
+            "+" | "-" => {
+                let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let tail = &tail[digits.len()..];
+                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                let n: i64 = if digits.is_empty() { 1 } else { digits.parse().ok()? };
+                let n = if op == "-" { -n } else { n };
+                dt = match unit {
+                    "y" => shift_months(dt, n * 12)?,
+                    "M" => shift_months(dt, n)?,
+                    "w" => dt + Duration::days(n * 7),
+                    "d" => dt + Duration::days(n),
+                    "H" | "h" => dt + Duration::hours(n),
+                    "m" => dt + Duration::minutes(n),
+                    "s" => dt + Duration::seconds(n),
+                    _ => return None,
+                };
+                rest = tail;
+            }
+            _ => return None,
+        }
+    }
+    Some((dt, rounded))
+}
+
+/// A rounded date math expression names a whole unit, not an instant. Which
+/// end of it a bound means depends on the bound: `gt: .../d` excludes the whole
+/// day, `gte: .../d` includes it from the start.
+pub fn canonical_date_bound(v: &Value, round_up: bool) -> Option<String> {
+    let Some(s) = v.as_str() else { return canonical_date(v) };
+    if !round_up || !(s.contains("||") || s.starts_with("now")) {
+        return canonical_date(v);
+    }
+    let (dt, unit) = parse_date_math(s)?;
+    let Some(unit) = unit else { return canonical_date(v) };
+    // the last instant the unit covers
+    let end = advance_unit(dt, unit)? - tantivy::time::Duration::milliseconds(1);
+    canonical_date(&Value::String(format_utc_millis(end)))
+}
+
+fn advance_unit(
+    dt: tantivy::time::OffsetDateTime,
+    unit: char,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::Duration;
+    Some(match unit {
+        'y' => shift_months(dt, 12)?,
+        'M' => shift_months(dt, 1)?,
+        'w' => dt + Duration::days(7),
+        'd' => dt + Duration::days(1),
+        'H' | 'h' => dt + Duration::hours(1),
+        'm' => dt + Duration::minutes(1),
+        's' => dt + Duration::seconds(1),
+        _ => return None,
+    })
+}
+
+fn format_utc_millis(dt: tantivy::time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    )
+}
+
+fn round_down(
+    dt: tantivy::time::OffsetDateTime,
+    unit: &str,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Duration, Month, Time};
+    let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
+    Some(match unit {
+        "y" => midnight(Date::from_calendar_date(dt.year(), Month::January, 1).ok()?),
+        "M" => midnight(Date::from_calendar_date(dt.year(), dt.month(), 1).ok()?),
+        "w" => {
+            let back = dt.weekday().number_days_from_monday() as i64;
+            midnight(dt.date() - Duration::days(back))
+        }
+        "d" => midnight(dt.date()),
+        "H" | "h" => dt.replace_minute(0).ok()?.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
+        "m" => dt.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
+        "s" => dt.replace_nanosecond(0).ok()?,
+        _ => return None,
+    })
+}
+
+fn shift_months(
+    dt: tantivy::time::OffsetDateTime,
+    n: i64,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Month};
+    let total = dt.year() as i64 * 12 + (dt.month() as i64 - 1) + n;
+    let (y, m) = (total.div_euclid(12) as i32, total.rem_euclid(12) as u8 + 1);
+    let month = Month::try_from(m).ok()?;
+    let day = dt.day().min(days_in_month(y, month));
+    Some(Date::from_calendar_date(y, month, day).ok()?.with_time(dt.time()).assume_utc())
+}
+
+fn days_in_month(year: i32, month: tantivy::time::Month) -> u8 {
+    use tantivy::time::Month::*;
+    match month {
+        January | March | May | July | August | October | December => 31,
+        April | June | September | November => 30,
+        February => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+    }
 }
 
 /// A date in the one spelling the index holds.
