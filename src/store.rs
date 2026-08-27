@@ -326,6 +326,10 @@ impl IdxState {
         }
     }
 
+    pub fn has_writer(&self) -> bool {
+        self.writer.is_some()
+    }
+
     /// The writer, created on demand.
     pub fn writer(&mut self) -> Result<&mut IndexWriter> {
         self.last_write = std::time::Instant::now();
@@ -357,6 +361,7 @@ impl IdxState {
         }
         let _ = self.reader.reload();
         let _ = self.realtime.reload();
+        release_freed_memory();
         true
     }
 
@@ -595,6 +600,24 @@ pub struct Store {
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
     executor: tantivy::Executor,
+    /// Indices holding a live writer, oldest first. A writer costs indexing
+    /// threads and an arena sized from the memory budget, so the number alive at
+    /// once has to be bounded by design -- an idle timer alone cannot help when
+    /// a load touches every index inside the timeout.
+    live_writers: Arc<RwLock<Vec<String>>>,
+}
+
+/// Hand memory freed by a finished write burst back to the OS.
+///
+/// Indexing allocates and frees a great deal per index; glibc keeps those
+/// chunks in its arenas, which is invisible with one index and looks like a
+/// leak with hundreds. Everything here is already dropped -- this only returns
+/// what is no longer referenced.
+pub fn release_freed_memory() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 fn shared_executor() -> tantivy::Executor {
@@ -640,7 +663,9 @@ impl Store {
                 std::thread::sleep(std::time::Duration::from_secs(idle_secs.max(1) / 2 + 1));
                 for name in store.names() {
                     if let Some(st) = store.get(&name) {
-                        st.write().release_idle_writer(idle);
+                        if st.write().release_idle_writer(idle) {
+                            store.note_writer_closed(&name);
+                        }
                     }
                 }
             }
@@ -652,6 +677,7 @@ impl Store {
             inner: Arc::new(RwLock::new(HashMap::new())),
             data_dir: None,
             executor: shared_executor(),
+            live_writers: Arc::new(RwLock::new(Vec::new())),
         };
         store.start_writer_reaper();
         store
@@ -667,6 +693,7 @@ impl Store {
             inner: Arc::new(RwLock::new(HashMap::new())),
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
+            live_writers: Arc::new(RwLock::new(Vec::new())),
         };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
@@ -718,6 +745,36 @@ impl Store {
         }
         store.start_writer_reaper();
         Ok(store)
+    }
+
+    /// How many indices may hold a writer at once.
+    pub fn writer_limit() -> usize {
+        std::env::var("OBSEARCH_MAX_LIVE_WRITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+            .max(1)
+    }
+
+    /// Record that `name` now holds a writer, releasing the least recently
+    /// written index's writer if that puts us over the limit.
+    pub fn note_writer_opened(&self, name: &str) {
+        let evict = {
+            let mut live = self.live_writers.write();
+            live.retain(|n| n != name);
+            live.push(name.to_string());
+            let limit = Self::writer_limit();
+            if live.len() > limit { Some(live.remove(0)) } else { None }
+        };
+        if let Some(victim) = evict {
+            if let Some(st) = self.get(&victim) {
+                st.write().release_idle_writer(std::time::Duration::ZERO);
+            }
+        }
+    }
+
+    pub fn note_writer_closed(&self, name: &str) {
+        self.live_writers.write().retain(|n| n != name);
     }
 
     fn index_path(&self, name: &str) -> Option<PathBuf> {

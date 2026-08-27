@@ -11,6 +11,13 @@ mod source;
 mod store;
 
 use axum::Router;
+
+/// Indexing allocates and frees heavily in bursts across many threads. glibc's
+/// allocator holds those chunks rather than returning them, which reads as a
+/// leak once there are hundreds of indices; mimalloc gives them back.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use axum::response::IntoResponse;
 use axum::routing::{any, delete, get, head, post, put};
 use serde_json::json;

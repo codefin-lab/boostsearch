@@ -683,18 +683,22 @@ pub async fn bulk(
     }
 
     // Parse and build documents in parallel; nothing here touches shared state.
-    let prepared: Vec<Option<std::result::Result<(Value, String), String>>> = {
+    let prepare = |o: &Op| {
+        o.doc_line.map(|l| {
+            serde_json::from_str::<Value>(l)
+                .map(|v| (v, l.trim().to_string()))
+                .map_err(|e| e.to_string())
+        })
+    };
+    let prepared: Vec<Option<std::result::Result<(Value, String), String>>> =
+        if std::env::var("OBSEARCH_SERIAL_BULK").is_ok() {
+            ops.iter().map(prepare).collect()
+        } else {
         use rayon::prelude::*;
         ops.par_iter()
-            .map(|o| {
-                o.doc_line.map(|l| {
-                    serde_json::from_str::<Value>(l)
-                        .map(|v| (v, l.trim().to_string()))
-                        .map_err(|e| e.to_string())
-                })
-            })
+            .map(prepare)
             .collect()
-    };
+        };
 
     // consume the prepared documents rather than cloning them back out
     for (o, prep) in ops.into_iter().zip(prepared.into_iter()) {
@@ -719,6 +723,10 @@ pub async fn bulk(
         };
         if !touched.contains(&idx) {
             touched.push(idx.clone());
+        }
+        // keep the number of live writers bounded across indices
+        if !g_has_writer(&st) {
+            store.note_writer_opened(&idx);
         }
         let mut g = st.write();
         let id_was_given = id_opt.is_some();
@@ -1215,6 +1223,10 @@ fn dotted_only_field(v: &Value) -> Option<String> {
         Value::Array(a) => a.iter().find_map(dotted_only_field),
         _ => None,
     }
+}
+
+fn g_has_writer(st: &std::sync::Arc<parking_lot::RwLock<IdxState>>) -> bool {
+    st.read().has_writer()
 }
 
 /// `_id` and `_index` may arrive as strings or bare numbers.
