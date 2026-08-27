@@ -342,13 +342,15 @@ impl IdxState {
         Ok(self.writer.as_mut().unwrap())
     }
 
-    /// Give back the indexing threads and arena if this index has gone quiet.
-    /// Everything written is already committed, so the writer is only a cache.
+    /// Give back the indexing threads and arena for an index that has gone
+    /// quiet. The writer is only a cache: committing first makes everything it
+    /// held durable, so nothing is lost by dropping it.
+    ///
+    /// Buffered writes are not a reason to refuse. They were, which meant a bulk
+    /// load could never release anything -- the buffer is never empty mid-load,
+    /// which is exactly when the writers pile up.
     pub fn release_idle_writer(&mut self, idle_for: std::time::Duration) -> bool {
-        if self.writer.is_none()
-            || !self.pending.is_empty()
-            || self.last_write.elapsed() < idle_for
-        {
+        if self.writer.is_none() || self.last_write.elapsed() < idle_for {
             return false;
         }
         if let Some(mut w) = self.writer.take() {
@@ -359,8 +361,12 @@ impl IdxState {
             }
             let _ = w.wait_merging_threads();
         }
-        let _ = self.reader.reload();
+        // The realtime reader has to advance so GET still answers from the index
+        // now that the buffer is gone. The search reader deliberately does not:
+        // a write must stay invisible to search until an explicit refresh.
         let _ = self.realtime.reload();
+        self.pending.clear();
+        self.pending_bytes = 0;
         release_freed_memory();
         true
     }

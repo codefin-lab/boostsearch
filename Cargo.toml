@@ -25,6 +25,7 @@ regex = "1"
 rayon = "1"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 tantivy-fst = "0.5"
 tantivy-common = "0.11"
 

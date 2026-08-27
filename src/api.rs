@@ -1491,6 +1491,67 @@ pub async fn update_doc(
     (status, axum::Json(body_out)).into_response()
 }
 
+// ------------------------------------------------------------- memory report
+
+/// What the process is actually holding, and where.
+///
+/// `?collect=true` first asks the allocator to hand back everything it can, so
+/// the difference between the two answers separates "retained by the allocator"
+/// from "still referenced by us".
+pub async fn memory_report(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    if flag(&p, "collect") {
+        unsafe { libmimalloc_sys::mi_collect(true) };
+    }
+    let (mut elapsed, mut user, mut sys, mut rss, mut peak_rss, mut commit, mut peak_commit, mut faults) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            &mut elapsed, &mut user, &mut sys, &mut rss, &mut peak_rss,
+            &mut commit, &mut peak_commit, &mut faults,
+        );
+    }
+    let mb = |v: usize| (v as f64 / 1_048_576.0 * 10.0).round() / 10.0;
+
+    let mut per_index = Vec::new();
+    let (mut live_ids, mut versions, mut pending, mut shapes, mut kinds, mut segments, mut writers) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    for name in store.names() {
+        let Some(st) = store.get(&name) else { continue };
+        let g = st.read();
+        let segs = g.reader.searcher().segment_readers().len();
+        live_ids += g.live_ids.len();
+        versions += g.versions.len();
+        pending += g.pending.len();
+        shapes += g.seen_shapes.len();
+        kinds += g.observed_kinds.len();
+        segments += segs;
+        if g.has_writer() {
+            writers += 1;
+        }
+        if per_index.len() < 3 {
+            per_index.push(json!({
+                "index": name, "segments": segs, "live_ids": g.live_ids.len(),
+                "versions": g.versions.len(), "pending": g.pending.len(),
+                "pending_bytes": g.pending_bytes, "has_writer": g.has_writer(),
+            }));
+        }
+    }
+    respond(&p, json!({
+        "allocator": {
+            "rss_mb": mb(rss), "peak_rss_mb": mb(peak_rss),
+            "committed_mb": mb(commit), "peak_committed_mb": mb(peak_commit),
+            "page_faults": faults,
+        },
+        "indices": {
+            "count": store.names().len(), "live_writers": writers,
+            "total_segments": segments, "total_live_ids": live_ids,
+            "total_versions": versions, "total_pending": pending,
+            "total_shapes": shapes, "total_kind_paths": kinds,
+        },
+        "sample": per_index,
+    }))
+}
+
 // --------------------------------------------------------------- force merge
 
 /// `_forcemerge` collapses segments. Fewer segments means less per-segment setup

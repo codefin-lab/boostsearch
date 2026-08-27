@@ -52,6 +52,7 @@ fn app(store: Store) -> Router {
         .route("/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_update/{id}", post(api::update_doc))
+        .route("/_obsearch/memory", get(api::memory_report))
         .route("/_forcemerge", post(api::force_merge))
         .route("/{index}/_forcemerge", post(api::force_merge))
         .route("/_stats", get(api::stats))
