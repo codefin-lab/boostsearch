@@ -1602,6 +1602,7 @@ pub fn run(
                     || def.get("filter").is_some()
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
+                    || def.get("rare_terms").is_some()
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
@@ -2187,6 +2188,8 @@ pub fn run(
             run_variable_width_histogram(store, &targets, &query_json, def)
         } else if def.get("auto_date_histogram").is_some() {
             run_auto_date_histogram(store, &targets, &query_json, def)
+        } else if def.get("rare_terms").is_some() {
+            run_rare_terms_agg(store, &targets, &query_json, def, weighted, name)
         } else if def.get("multi_terms").is_some() {
             run_multi_terms_agg(store, &targets, &query_json, def, weighted)
         } else if def.get("composite").is_some() {
@@ -2747,6 +2750,206 @@ fn run_hdr_percentiles(
 /// sub-aggregations come for free. The cost is one search per bucket, which
 /// suits the handful of buckets a calendar histogram usually spans.
 
+
+
+/// `rare_terms`: the terms few documents carry.
+///
+/// It is `terms` read from the other end -- keep the buckets at or below
+/// `max_doc_count` instead of the largest ones -- so it is answered by
+/// collecting the buckets and filtering, ordered by key.
+fn run_rare_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+    agg_name: &str,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("rare_terms").cloned().unwrap_or(json!({}));
+    let max_doc_count = spec.get("max_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
+    let Some(field) = spec.get("field").and_then(|f| f.as_str()).map(|s| s.to_string()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "Required one of fields [field, script], but none were specified.",
+        ));
+    };
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let ty = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .next()
+        .and_then(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()));
+
+    // a pattern only makes sense against text; a numeric, date or address
+    // field has no spelling for a regular expression to match
+    for pass in ["include", "exclude"] {
+        let is_pattern = matches!(spec.get(pass), Some(Value::String(_)));
+        if is_pattern && !matches!(ty.as_deref(), None | Some("keyword" | "text" | "wildcard")) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Aggregation [{agg_name}] cannot support regular expression style \
+                     include/exclude settings as they can only be applied to string fields. \
+                     Use an array of values for include/exclude clauses"
+                ),
+            ));
+        }
+    }
+
+    let mut terms = json!({"field": field, "size": 65_536});
+    if let Some(v) = spec.get("missing") {
+        terms["missing"] = v.clone();
+    }
+    // include and exclude are matched here rather than pushed down: they are
+    // applied to the term dictionary, which a date or a number does not live
+    // in, so pushing them down silently matches nothing
+    let listed = |key: &str| -> Option<Vec<String>> {
+        let v = spec.get(key)?;
+        let items: Vec<String> = match v {
+            Value::Array(a) => a.iter().filter_map(term_filter_text).collect(),
+            other => term_filter_text(other).into_iter().collect(),
+        };
+        Some(items)
+    };
+    let include = listed("include");
+    let exclude = listed("exclude");
+    let mut node = json!({"terms": terms});
+    if let Some(sa) = sub_aggs {
+        node["aggs"] = sa;
+    }
+    let mut request = json!({"__rare": node});
+    if weighted {
+        inject_doc_count_helpers(&mut request);
+    }
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
+    if weighted {
+        apply_doc_counts(&mut res);
+    }
+    let mut buckets: Vec<Value> = res
+        .pointer("/__rare/buckets")
+        .and_then(|b| b.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0) <= max_doc_count)
+        .filter(|b| {
+            let key = b.get("key").cloned().unwrap_or(Value::Null);
+            let shown = terms_key_view(key, ty.as_deref());
+            let matches = |list: &Vec<String>| {
+                list.iter().any(|want| term_filter_matches(want, &shown, ty.as_deref()))
+            };
+            include.as_ref().map(|l| matches(l)).unwrap_or(true)
+                && !exclude.as_ref().map(|l| matches(l)).unwrap_or(false)
+        })
+        .map(|mut b| {
+            if let Some(o) = b.as_object_mut() {
+                if let Some(raw) = o.get("key").cloned() {
+                    let (k, as_string) = terms_key_view(raw, ty.as_deref());
+                    o.insert("key".into(), k);
+                    match as_string {
+                        Some(s) => {
+                            o.insert("key_as_string".into(), Value::String(s));
+                        }
+                        None => {
+                            o.remove("key_as_string");
+                        }
+                    }
+                }
+                o.remove(DC_SUM);
+                o.remove(DC_CNT);
+            }
+            b
+        })
+        .collect();
+
+    // rarest first, which is the whole point of the aggregation, and the key
+    // settles the order among buckets that are equally rare
+    buckets.sort_by(|a, b| {
+        let c = |v: &Value| v.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0);
+        let k = |v: &Value| v.get("key").cloned().unwrap_or(Value::Null);
+        c(a).cmp(&c(b)).then_with(|| match (k(a), k(b)) {
+            (Value::String(x), Value::String(y)) => x.cmp(&y),
+            (Value::Number(x), Value::Number(y)) => x
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&y.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
+            (x, y) => x.to_string().cmp(&y.to_string()),
+        })
+    });
+    Ok(json!({"buckets": buckets}))
+}
+
+/// One entry of an include/exclude list, as text.
+fn term_filter_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Does one include/exclude entry name this bucket?
+///
+/// The caller writes a date or an address the way it was sent; the bucket
+/// carries the way it is read back. Both are put in one spelling before they
+/// are compared.
+fn term_filter_matches(want: &str, shown: &(Value, Option<String>), ty: Option<&str>) -> bool {
+    let (key, as_string) = shown;
+    match ty {
+        Some("date") | Some("date_nanos") => {
+            let a = crate::store::canonical_date(&Value::String(want.to_string()));
+            let b = as_string
+                .clone()
+                .and_then(|s| crate::store::canonical_date(&Value::String(s)));
+            a.is_some() && a == b
+        }
+        Some("ip") => {
+            let a = crate::store::canonical_ip(want);
+            let b = key.as_str().and_then(crate::store::canonical_ip);
+            a.is_some() && a == b
+        }
+        _ => {
+            let text = match key {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            text == want
+        }
+    }
+}
+
+/// How a term key and its readable form are written for a field of this type.
+fn terms_key_view(raw: Value, ty: Option<&str>) -> (Value, Option<String>) {
+    match ty {
+        Some("ip") => {
+            let shown = raw.as_str().and_then(crate::store::ip_from_canonical);
+            (shown.map(Value::String).unwrap_or(raw), None)
+        }
+        Some("boolean") => {
+            let n = raw.as_u64().unwrap_or(0);
+            (json!(n), Some(if n != 0 { "true".into() } else { "false".into() }))
+        }
+        Some("date") | Some("date_nanos") => {
+            let iso = raw.as_str().and_then(crate::store::canonical_date_str);
+            let millis = raw
+                .as_str()
+                .and_then(crate::store::parse_date_lenient)
+                .map(|d| d.unix_timestamp_nanos() / 1_000_000);
+            match (millis, iso) {
+                (Some(ms), Some(iso)) => (json!(ms as i64), Some(iso)),
+                _ => (raw, None),
+            }
+        }
+        _ => (raw, None),
+    }
+}
 
 /// `multi_terms`: one bucket per combination of several fields' values.
 ///
