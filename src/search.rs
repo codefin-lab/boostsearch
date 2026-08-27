@@ -1283,6 +1283,15 @@ impl tantivy::collector::SegmentCollector for MaybeAggSegment {
         }
     }
 
+    /// Forwarding this matters: tantivy's aggregation collects a block at a
+    /// time, and the default implementation would unroll it back into one call
+    /// per document.
+    fn collect_block(&mut self, docs: &[tantivy::DocId]) {
+        if let Some(c) = &mut self.0 {
+            c.collect_block(docs);
+        }
+    }
+
     fn harvest(self) -> Self::Fruit {
         self.0.map(|c| c.harvest())
     }

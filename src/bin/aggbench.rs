@@ -27,6 +27,8 @@ fn main() -> anyhow::Result<()> {
         ("agg_terms_kw_dyn", json!({"by_region": {"terms": {"field": "_dyn.region", "size": 10}}})),
         ("agg_date_hist", json!({"over_time": {
             "date_histogram": {"field": "_raw.@timestamp", "fixed_interval": "1d"}}})),
+        ("agg_date_hist_dyn", json!({"over_time": {
+            "date_histogram": {"field": "_dyn.@timestamp", "fixed_interval": "1d"}}})),
         ("agg_nested", json!({"by_region": {"terms": {"field": "_raw.region"},
             "aggs": {"avg_ms": {"avg": {"field": "_raw.response_ms"}},
                      "p_size": {"stats": {"field": "_raw.size"}}}}})),
