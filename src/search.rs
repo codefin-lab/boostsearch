@@ -1288,6 +1288,37 @@ impl tantivy::collector::SegmentCollector for MaybeAggSegment {
     }
 }
 
+/// Run a shard's search, choosing where the per-segment work goes.
+///
+/// tantivy's own `search` hands the segments to the index's shared executor.
+/// When a query fans out over many indices the outer parallelism already keeps
+/// every core busy, and asking that same pool for per-segment parallelism from
+/// inside it means each shard queues behind the others: measured on two hundred
+/// empty indices, a search that should be free took 147us of elapsed time
+/// waiting. One index at a time still wants the pool -- that is where
+/// per-segment parallelism pays.
+fn search_shard<C: tantivy::collector::Collector>(
+    searcher: &Searcher,
+    query: &dyn tantivy::query::Query,
+    collector: &C,
+    fanned_out: bool,
+) -> tantivy::Result<C::Fruit> {
+    if !fanned_out {
+        return searcher.search(query, collector);
+    }
+    let scoring = if collector.requires_scoring() {
+        tantivy::query::EnableScoring::enabled_from_statistics_provider(searcher, searcher)
+    } else {
+        tantivy::query::EnableScoring::disabled_from_searcher(searcher)
+    };
+    searcher.search_with_executor(
+        query,
+        collector,
+        &tantivy::Executor::single_thread(),
+        scoring,
+    )
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -1639,6 +1670,7 @@ pub fn run(
         profile: Option<Value>,
     }
 
+    let fanned_out = targets.len() > 1;
     let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
         let Some(st) = store.get(name) else { return Ok(None) };
         let g = st.read();
@@ -1652,12 +1684,7 @@ pub fn run(
         let mut agg_req: Option<Aggregations> = None;
         let mut agg_meta: Vec<(String, Value)> = Vec::new();
         let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
-        shards += g
-            .effective_settings()
-            .pointer("/index/number_of_shards")
-            .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1);
+        shards += g.shard_count();
         let ctx = Ctx {
             fields: &g.fields,
             mapping: &g.mapping,
@@ -1730,10 +1757,16 @@ pub fn run(
             _ => None,
         });
 
-        let searched = if sort_keys.is_empty() {
+        let searched = if want == 0 {
+            // `size: 0` asks for counts and aggregations only. Collecting a
+            // page anyway means scoring and heap-ordering every match for a
+            // result that is thrown away.
+            search_shard(&searcher, &q, &(Count, agg_collector), fanned_out)
+                .map(|(c, agg)| (c, Vec::new(), agg))
+        } else if sort_keys.is_empty() {
             let collector =
                 (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
-            searcher.search(&q, &collector).map(|(c, docs, agg)| {
+            search_shard(&searcher, &q, &collector, fanned_out).map(|(c, docs, agg)| {
                 let cands = docs
                     .into_iter()
                     .map(|(score, addr)| Cand {
@@ -1766,7 +1799,7 @@ pub fn run(
                 SortCollector { sources, desc, limit: want.max(1) },
                 agg_collector,
             );
-            searcher.search(&q, &collector).map(|(c, mut cands, agg)| {
+            search_shard(&searcher, &q, &collector, fanned_out).map(|(c, mut cands, agg)| {
                 for cand in cands.iter_mut() {
                     cand.shard = shard_idx;
                 }

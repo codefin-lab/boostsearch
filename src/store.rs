@@ -803,6 +803,37 @@ impl IdxState {
         v
     }
 
+    /// Look a setting up without building the merged view.
+    ///
+    /// `effective_settings` allocates a fresh JSON object to fold the defaults
+    /// in, which is the right shape for GET _settings but far too much work for
+    /// a value read on every shard of every query.
+    fn raw_setting(&self, key: &str) -> Option<&Value> {
+        let settings = self.settings.as_object()?;
+        if let Some(nested) = settings.get("index").and_then(|v| v.as_object()) {
+            if let Some(v) = nested.get(key).filter(|v| !v.is_null()) {
+                return Some(v);
+            }
+        }
+        settings
+            .get(key)
+            .or_else(|| settings.get(&format!("index.{key}")))
+            .filter(|v| !v.is_null())
+    }
+
+    fn numeric_setting(&self, key: &str) -> Option<u64> {
+        match self.raw_setting(key)? {
+            Value::String(s) => s.parse().ok(),
+            Value::Number(n) => n.as_u64(),
+            _ => None,
+        }
+    }
+
+    /// How many shards the index reports. Read per shard of every query.
+    pub fn shard_count(&self) -> u64 {
+        self.numeric_setting("number_of_shards").unwrap_or(1)
+    }
+
     /// Look a setting up by dotted name, accepting the flat or nested form.
     pub fn setting(&self, key: &str) -> Option<String> {
         let settings = self.effective_settings();
@@ -816,7 +847,7 @@ impl IdxState {
 
     /// `index.max_terms_count` caps how many terms a `terms` query may carry.
     pub fn max_terms_count(&self) -> usize {
-        self.setting("max_terms_count").and_then(|v| v.parse().ok()).unwrap_or(65_536)
+        self.numeric_setting("max_terms_count").unwrap_or(65_536) as usize
     }
 
     pub fn next_auto_id(&mut self) -> String {

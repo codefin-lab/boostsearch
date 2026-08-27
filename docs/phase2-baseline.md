@@ -231,3 +231,75 @@ rayon fan-out กว้าง ๆ ของเรามากกว่า thread
 
 แปลว่า **ตัวเลขเทียบ Docker-vs-Docker บนเครื่อง macOS นี้ให้ผลที่แย่กว่าความจริง
 สำหรับการ deploy บน Linux** จะรู้ตัวเลขจริงต้องวัดบน Linux host
+
+## รอบที่สาม — ค่าคงที่ต่อ index
+
+หลังรวม hit กับ agg เป็น pass เดียว ต้นทุน agg คงที่ต่อ index ลดจาก ~63 µs
+เหลือ ~6 µs ที่เหลือกลายเป็นค่า fan-out เปล่า ๆ — `match_all` บน 200 index
+ยังใช้ 1.18 ms
+
+### วัดกับ index ว่าง
+
+| | match_all | ต่อ index |
+|---|---:|---:|
+| 200 index × 0 docs | 1.13 ms | 5.67 µs |
+| 200 index × 2,000 docs | 1.03 ms | 5.17 µs |
+
+index ที่ **ไม่มีเอกสารเลย** ก็ยังคิดค่าเท่าเดิม ⇒ เป็นค่าเครื่องจักรล้วน ๆ
+
+### สมมติฐานที่วัดแล้วผิด (อีกครั้ง)
+
+**rayon แจกงานทีละ index แพงเกินไป** — ลองรวมเป็น chunk ให้แต่ละ worker
+รับหลาย index ผลคือ **แย่ลง 4 เท่า** (500 µs → 1,800 µs) revert
+
+### ตัวเลขที่ขัดกันเองชี้ทางให้
+
+ใส่ timer วัด CPU รวมใน `run_shard` ได้ **31,063 µs บน 200 index ว่าง
+ในเวลา wall 551 µs** — เป็นไปไม่ได้บน 14 core แปลว่า task **รอ** ไม่ใช่ทำงาน
+
+ไล่ต่อทีละ phase: `lock=82 µs`, `searcher=29 µs`, **`search=46,029 µs`**
+⇒ `searcher.search` บน index ว่างใช้ elapsed ~147 µs ต่อครั้ง
+
+**สาเหตุ: pool ซ้อน pool** `Searcher::search` ส่งงานราย segment เข้า executor
+ที่ทุก index ใช้ร่วมกัน เมื่อ fan-out เรียกจากใน rayon task อยู่แล้ว แต่ละ shard
+จึงไปต่อคิวรอ pool เดียวกันกับอีก 199 ตัว
+
+### แก้: เลือก executor ตามความกว้างของ fan-out
+
+fan-out หลาย index → per-segment เป็น `Executor::single_thread()` เพราะงาน
+ขนานถูกดึงไปที่ระดับ index แล้ว · index เดียว → ใช้ pool ร่วมต่อ เพราะเป็นจุดที่
+per-segment parallelism คุ้ม
+
+| 200 index ว่าง | ก่อน | หลัง |
+|---|---:|---:|
+| fan wall | 551 µs | **163 µs** |
+| shard CPU รวม | 29,604 µs | **462 µs** |
+| ในนั้นเป็น `search` | 29,357 µs | **82 µs** |
+
+ตัวเลขกลับมาสมเหตุสมผล: 462 µs CPU ใน 163 µs wall ≈ ขนาน 2.8 เท่า
+
+### ผลรวมของ Phase 2 รอบนี้ (200 index × 2,000 docs)
+
+native:
+
+| query | เริ่มรอบ | จบรอบ |
+|---|---:|---:|
+| match_all | 2.27 ms | **0.55 ms** |
+| agg_terms | 3.14 ms | **0.93 ms** |
+| agg_nested | 16.72 ms | **1.56 ms** |
+| sort_paged | 1.67 ms | **1.16 ms** |
+
+ทั้งคู่ใน Docker เทียบ OpenSearch 3.1:
+
+| query | obsearch | OpenSearch | |
+|---|---:|---:|---|
+| match_all | 1.85 | 4.25 | 2.30× |
+| term | 1.61 | 4.61 | 2.86× |
+| agg_terms | 3.01 | 5.32 | 1.77× |
+| agg_stats | 3.24 | 3.91 | 1.21× |
+| agg_nested | 3.99 | 5.83 | 1.46× |
+| sort_paged | 2.95 | 10.17 | 3.45× |
+| index build | 7.5 s | 19.8 s | 2.62× |
+
+single index ไม่ถอย: qps c=1 1,230 → 1,300, p99 c=8 6.14 → 5.53 ms,
+RSS 278.9 → 261.9 MB
