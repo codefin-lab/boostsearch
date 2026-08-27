@@ -224,6 +224,19 @@ fn tokenizer_name(analyzer: Option<&str>) -> &str {
     }
 }
 
+/// Tokenise text with a named analyzer, for the `_analyze` endpoint.
+pub fn analyze_text(index: &Index, text: &str, analyzer: Option<&str>) -> Vec<String> {
+    let name = tokenizer_name(analyzer);
+    let mut out = Vec::new();
+    if let Some(mut tk) = index.tokenizers().get(name) {
+        let mut stream = tk.token_stream(text);
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+    }
+    out
+}
+
 fn analyze(ctx: &Ctx, view: View, text: &str) -> Vec<String> {
     analyze_with(ctx, view, text, None)
 }

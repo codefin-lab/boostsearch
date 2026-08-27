@@ -237,7 +237,10 @@ pub struct IdxState {
     pub fields: Fields,
     pub mapping: Mapping,
     pub settings: Value,
-    pub aliases: Vec<String>,
+    /// alias name -> its definition (filter, routing, is_write_index)
+    pub aliases: HashMap<String, Value>,
+    /// closed indices reject reads and writes until reopened
+    pub closed: bool,
     /// Exact record for ids that need one: anything updated past version 1, and
     /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
@@ -602,6 +605,8 @@ pub struct Store {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
     /// where index data lives; `None` keeps everything in RAM
     data_dir: Option<PathBuf>,
+    /// index templates by name
+    templates: Arc<RwLock<HashMap<String, Value>>>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
@@ -686,6 +691,7 @@ impl Store {
             data_dir: None,
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            templates: Arc::new(RwLock::new(HashMap::new())),
         };
         store.start_writer_reaper();
         store
@@ -702,6 +708,7 @@ impl Store {
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            templates: Arc::new(RwLock::new(HashMap::new())),
         };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
@@ -806,7 +813,7 @@ impl Store {
         // alias lookup
         let guard = self.inner.read();
         for st in guard.values() {
-            if st.read().aliases.iter().any(|a| a == name) {
+            if st.read().aliases.contains_key(name) {
                 return Some(st.clone());
             }
         }
@@ -842,7 +849,67 @@ impl Store {
         out
     }
 
+    /// Index templates, applied to any index created with a matching name.
+    pub fn put_template(&self, name: &str, body: Value) {
+        self.templates.write().insert(name.to_string(), body);
+    }
+
+    pub fn get_templates(&self) -> HashMap<String, Value> {
+        self.templates.read().clone()
+    }
+
+    pub fn delete_template(&self, name: &str) -> bool {
+        let mut t = self.templates.write();
+        let pats: Vec<String> = t
+            .keys()
+            .filter(|k| k.as_str() == name || wildcard_to_regex(name).is_match(k))
+            .cloned()
+            .collect();
+        let hit = !pats.is_empty();
+        for p in pats {
+            t.remove(&p);
+        }
+        hit
+    }
+
+    /// Merge every template whose pattern matches, lowest order first, so an
+    /// index picks up the mappings and settings it was meant to be born with.
+    fn apply_templates(&self, index: &str, body: &Value) -> Value {
+        let templates = self.templates.read();
+        let mut matched: Vec<(i64, &Value)> = templates
+            .values()
+            .filter(|t| {
+                let pats = t
+                    .get("index_patterns")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                pats.iter()
+                    .filter_map(|p| p.as_str())
+                    .any(|p| p == index || wildcard_to_regex(p).is_match(index))
+            })
+            .map(|t| (t.get("order").and_then(|o| o.as_i64()).unwrap_or(0), t))
+            .collect();
+        matched.sort_by_key(|(o, _)| *o);
+        if matched.is_empty() {
+            return body.clone();
+        }
+        let mut merged = serde_json::json!({});
+        for (_, t) in matched {
+            for key in ["settings", "mappings", "aliases"] {
+                if let Some(v) = t.get(key) {
+                    let slot = merged.as_object_mut().unwrap().entry(key).or_insert(serde_json::json!({}));
+                    deep_merge(slot, v);
+                }
+            }
+        }
+        // the request itself always wins over a template
+        deep_merge(&mut merged, body);
+        merged
+    }
+
     pub fn create(&self, name: &str, body: &Value) -> Result<()> {
+        let body = &self.apply_templates(name, body);
         if self.exists(name) {
             return Err(anyhow!("resource_already_exists_exception"));
         }
@@ -908,10 +975,10 @@ impl Store {
             .map(Mapping::from_body)
             .unwrap_or_else(|| Mapping { types: HashMap::new(), raw: serde_json::json!({}) });
         let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
-        let aliases = body
+        let aliases: HashMap<String, Value> = body
             .get("aliases")
             .and_then(|a| a.as_object())
-            .map(|o| o.keys().cloned().collect())
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
         let st = IdxState {
             name: name.to_string(),
@@ -925,6 +992,7 @@ impl Store {
             mapping,
             settings,
             aliases,
+            closed: false,
             versions: HashMap::new(),
             live_ids: Default::default(),
             pending: HashMap::new(),
@@ -967,6 +1035,23 @@ impl Store {
             }
         }
         any
+    }
+}
+
+/// Recursive object merge; `patch` wins on conflict.
+pub fn deep_merge(base: &mut Value, patch: &Value) {
+    match (base, patch) {
+        (Value::Object(b), Value::Object(p)) => {
+            for (k, v) in p {
+                match b.get_mut(k) {
+                    Some(slot) if slot.is_object() && v.is_object() => deep_merge(slot, v),
+                    _ => {
+                        b.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (b, p) => *b = p.clone(),
     }
 }
 
