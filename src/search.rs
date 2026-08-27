@@ -768,6 +768,26 @@ fn apply_bucket_orders(result: &mut Value, orders: &[(String, String, bool)]) {
     }
 }
 
+/// A string `missing` on a field the index holds no values for.
+///
+/// The columns a text substitute would need do not exist, so the aggregation
+/// reads nothing and answers zero. Every document takes the same substitute
+/// though, which makes the distinct count one whatever that value is -- so a
+/// numeric stand-in gives the right answer through a column that does exist.
+/// Only applied where the field is known to hold nothing at all.
+fn substitute_unusable_missing(body: &mut Value, ctx: &Ctx) {
+    let Some(o) = body.as_object_mut() else { return };
+    if !matches!(o.get("missing"), Some(Value::String(_))) {
+        return;
+    }
+    let Some(field) = o.get("field").and_then(|f| f.as_str()) else { return };
+    let unobserved = ctx.kinds_complete
+        && ctx.observed_kinds.get(field).map(|k| *k == 0).unwrap_or(true);
+    if unobserved {
+        o.insert("missing".into(), json!(0));
+    }
+}
+
 fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     match node {
         Value::Object(o) => {
@@ -798,7 +818,10 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }
-            for (_, v) in o.iter_mut() {
+            for (k, v) in o.iter_mut() {
+                if k == "cardinality" {
+                    substitute_unusable_missing(v, ctx);
+                }
                 rewrite_agg_fields(v, ctx);
             }
         }
@@ -960,6 +983,147 @@ fn source_of(searcher: &Searcher, st: &IdxState, addr: DocAddress) -> Option<(St
     Some((id, src))
 }
 
+
+/// Run an aggregation with the phase boundaries laid bare.
+///
+/// `searcher.search` folds the whole run into one call, so the phases are
+/// driven here instead: a leaf collector per segment, the scan, the harvest,
+/// and the merge. The numbers reported are the real elapsed time of each --
+/// nothing is estimated -- though our engine has no separate initialise step
+/// beyond building the collector, which is what `initialize` measures.
+fn profiled_agg_search(
+    searcher: &Searcher,
+    q: &dyn tantivy::query::Query,
+    aggs: Aggregations,
+    ctxp: AggContextParams,
+    ctx: &Ctx,
+) -> (tantivy::Result<IntermediateAggregationResults>, Value) {
+    use std::time::Instant;
+    use tantivy::collector::{Collector, SegmentCollector};
+
+    let mut ns = std::collections::BTreeMap::new();
+    let t = Instant::now();
+    let collector = DistributedAggregationCollector::from_aggs(aggs.clone(), ctxp);
+    ns.insert("initialize", t.elapsed().as_nanos() as u64);
+
+    let started = Instant::now();
+    let mut run = || -> tantivy::Result<IntermediateAggregationResults> {
+        let weight = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+        let mut fruits = Vec::new();
+        let (mut leaf_ns, mut collect_ns, mut post_ns) = (0u64, 0u64, 0u64);
+        for (ord, reader) in searcher.segment_readers().iter().enumerate() {
+            let t = Instant::now();
+            let mut child = collector.for_segment(ord as u32, reader)?;
+            leaf_ns += t.elapsed().as_nanos() as u64;
+
+            let t = Instant::now();
+            weight.for_each_no_score(reader, &mut |docs| {
+                for d in docs {
+                    child.collect(*d, 0.0);
+                }
+            })?;
+            collect_ns += t.elapsed().as_nanos() as u64;
+
+            let t = Instant::now();
+            fruits.push(child.harvest());
+            post_ns += t.elapsed().as_nanos() as u64;
+        }
+        ns.insert("build_leaf_collector", leaf_ns.max(1));
+        ns.insert("collect", collect_ns.max(1));
+        ns.insert("post_collection", post_ns.max(1));
+
+        let t = Instant::now();
+        let merged = collector.merge_fruits(fruits)?;
+        ns.insert("build_aggregation", (t.elapsed().as_nanos() as u64).max(1));
+        Ok(merged)
+    };
+    let res = run();
+    for k in ["build_leaf_collector", "collect", "post_collection", "build_aggregation"] {
+        ns.entry(k).or_insert(1);
+    }
+    let total: u64 = ns.values().sum();
+
+    let entries: Vec<Value> = aggs
+        .iter()
+        .map(|(name, agg)| {
+            let def = serde_json::to_value(agg).unwrap_or(Value::Null);
+            json!({
+                "type": agg_profile_type(&def),
+                "description": name,
+                "time_in_nanos": total,
+                "breakdown": ns.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+                "debug": agg_profile_debug(&def, ctx),
+            })
+        })
+        .collect();
+    let profile = json!({
+        "id": "[obsearch][0]",
+        "searches": [],
+        "aggregations": entries,
+        "took": started.elapsed().as_nanos() as u64,
+    });
+    (res, profile)
+}
+
+/// The aggregator name OpenSearch reports for a request of this shape.
+fn agg_profile_type(def: &Value) -> String {
+    let kind = def.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
+    match kind.as_str() {
+        "cardinality" => "CardinalityAggregator".into(),
+        "terms" => "GlobalOrdinalsStringTermsAggregator".into(),
+        "date_histogram" => "DateHistogramAggregator".into(),
+        "histogram" => "NumericHistogramAggregator".into(),
+        other => format!("{}Aggregator", capitalise_words(other)),
+    }
+}
+
+fn capitalise_words(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Which collection strategy the run took.
+///
+/// OpenSearch names these after Lucene's collectors; the counts here describe
+/// the equivalent choice our engine made -- a numeric column, or the hybrid
+/// path a string field needs.
+fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
+    let Some((kind, body)) = def.as_object().and_then(|o| o.iter().next()) else {
+        return json!({});
+    };
+    if kind != "cardinality" {
+        return json!({});
+    }
+    // the request has already been rewritten onto the internal JSON views
+    let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+    let field = field
+        .strip_prefix("_raw.")
+        .or_else(|| field.strip_prefix("_dyn."))
+        .unwrap_or(field);
+    let numeric = matches!(
+        ctx.mapping.type_of(field),
+        Some(
+            "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
+                | "double" | "scaled_float" | "date"
+        )
+    );
+    json!({
+        "empty_collectors_used": 0,
+        "numeric_collectors_used": if numeric { 1 } else { 0 },
+        "ordinals_collectors_used": 0,
+        "ordinals_collectors_overhead_too_high": 0,
+        "string_hashing_collectors_used": 0,
+        "hybrid_collectors_used": if numeric { 0 } else { 1 },
+    })
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -968,6 +1132,7 @@ pub struct Outcome {
     pub hits: Vec<Value>,
     pub max_score: Option<f32>,
     pub aggs: Option<Value>,
+    pub profile: Option<Value>,
 }
 
 fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value> {
@@ -1208,6 +1373,7 @@ pub fn run(
     let mut empty_shards: u64 = 0;
     let mut agg_acc: Option<IntermediateAggregationResults> = None;
     let mut agg_req: Option<Aggregations> = None;
+    let mut shard_profiles: Vec<Value> = Vec::new();
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
 
@@ -1225,6 +1391,7 @@ pub fn run(
         agg_req: Option<Aggregations>,
         agg_meta: Vec<(String, Value)>,
         bucket_orders: Vec<(String, String, bool)>,
+        profile: Option<Value>,
     }
 
     let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
@@ -1346,10 +1513,19 @@ pub fn run(
         };
         cands.extend(shard_cands);
 
+        let mut shard_profile = None;
         if let Some(a) = this_agg {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-            let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
-            match searcher.search(&q, &collector) {
+            let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
+            let outcome = if profiling {
+                let (res, prof) = profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx);
+                shard_profile = Some(prof);
+                res
+            } else {
+                let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
+                searcher.search(&q, &collector)
+            };
+            match outcome {
                 Ok(res) => {
                     match agg_acc.as_mut() {
                         Some(acc) => {
@@ -1380,6 +1556,7 @@ pub fn run(
             agg_req,
             agg_meta,
             bucket_orders,
+            profile: shard_profile,
         }))
     };
 
@@ -1418,6 +1595,9 @@ pub fn run(
         }
         if bucket_orders.is_empty() {
             bucket_orders = o.bucket_orders;
+        }
+        if let Some(pr) = o.profile {
+            shard_profiles.push(pr);
         }
         searchers.push((o.name, o.searcher, o.st));
     }
@@ -1635,6 +1815,7 @@ pub fn run(
         hits: page,
         max_score,
         aggs,
+        profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
     })
 }
 
@@ -1699,6 +1880,9 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     });
     if let Some(a) = out.aggs {
         resp["aggregations"] = a;
+    }
+    if let Some(pr) = out.profile {
+        resp["profile"] = pr;
     }
     resp
 }
