@@ -1229,6 +1229,65 @@ fn apply_doc_counts(node: &mut Value) {
     }
 }
 
+
+/// An aggregation collector that may not be there.
+///
+/// Hits and aggregations were two separate searches over the same query, which
+/// meant building the weight and walking every segment twice per index. At a
+/// couple of hundred indices that second pass is most of the cost, so the two
+/// now ride in one collector tuple -- and a request without aggregations still
+/// needs something to occupy that slot.
+struct MaybeAgg(Option<DistributedAggregationCollector>);
+
+struct MaybeAggSegment(Option<tantivy::aggregation::AggregationSegmentCollector>);
+
+impl tantivy::collector::Collector for MaybeAgg {
+    type Fruit = Option<IntermediateAggregationResults>;
+    type Child = MaybeAggSegment;
+
+    fn for_segment(
+        &self,
+        ord: tantivy::SegmentOrdinal,
+        reader: &tantivy::SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(MaybeAggSegment(match &self.0 {
+            Some(c) => Some(c.for_segment(ord, reader)?),
+            None => None,
+        }))
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(
+        &self,
+        segment_fruits: Vec<Option<tantivy::Result<IntermediateAggregationResults>>>,
+    ) -> tantivy::Result<Self::Fruit> {
+        let Some(inner) = &self.0 else { return Ok(None) };
+        let present: Vec<tantivy::Result<IntermediateAggregationResults>> =
+            segment_fruits.into_iter().flatten().collect();
+        if present.is_empty() {
+            return Ok(None);
+        }
+        inner.merge_fruits(present).map(Some)
+    }
+}
+
+impl tantivy::collector::SegmentCollector for MaybeAggSegment {
+    type Fruit = Option<tantivy::Result<IntermediateAggregationResults>>;
+
+    fn collect(&mut self, doc: tantivy::DocId, score: tantivy::Score) {
+        if let Some(c) = &mut self.0 {
+            c.collect(doc, score);
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.0.map(|c| c.harvest())
+    }
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -1558,6 +1617,7 @@ pub fn run(
     let mut empty_shards: u64 = 0;
     let mut agg_acc: Option<IntermediateAggregationResults> = None;
     let mut agg_req: Option<Aggregations> = None;
+    let mut fruits: Vec<IntermediateAggregationResults> = Vec::new();
     let mut shard_profiles: Vec<Value> = Vec::new();
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
@@ -1657,24 +1717,34 @@ pub fn run(
         }
 
         let want = page_want;
-        let (count, shard_cands): (usize, Vec<Cand>) = if sort_keys.is_empty() {
-            let collector = (Count, TopDocs::with_limit(want.max(1)).order_by_score());
-            match searcher.search(&q, &collector) {
-                Ok((c, docs)) => (
-                    c,
-                    docs.into_iter()
-                        .map(|(score, addr)| Cand {
-                            shard: shard_idx,
-                            addr,
-                            score,
-                            sort: Vec::new(),
-                        })
-                        .collect(),
-                ),
-                Err(e) => {
-                    return Err(err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()));
-                }
+        // The aggregation rides along with the hit collection so the query is
+        // walked once per index rather than twice. Profiling drives the phases
+        // itself and keeps its own pass.
+        let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
+        let agg_collector = MaybeAgg(match (&this_agg, profiling) {
+            (Some(a), false) => {
+                let ctxp =
+                    AggContextParams::new(Default::default(), g.index.tokenizers().clone());
+                Some(DistributedAggregationCollector::from_aggs(a.clone(), ctxp))
             }
+            _ => None,
+        });
+
+        let searched = if sort_keys.is_empty() {
+            let collector =
+                (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
+            searcher.search(&q, &collector).map(|(c, docs, agg)| {
+                let cands = docs
+                    .into_iter()
+                    .map(|(score, addr)| Cand {
+                        shard: shard_idx,
+                        addr,
+                        score,
+                        sort: Vec::new(),
+                    })
+                    .collect::<Vec<_>>();
+                (c, cands, agg)
+            })
         } else {
             // sort keys are evaluated during collection, so only `want`
             // candidates are ever held rather than one per match
@@ -1694,41 +1764,39 @@ pub fn run(
             let collector = (
                 Count,
                 SortCollector { sources, desc, limit: want.max(1) },
+                agg_collector,
             );
-            match searcher.search(&q, &collector) {
-                Ok((c, mut cands)) => {
-                    for cand in cands.iter_mut() {
-                        cand.shard = shard_idx;
-                    }
-                    (c, cands)
+            searcher.search(&q, &collector).map(|(c, mut cands, agg)| {
+                for cand in cands.iter_mut() {
+                    cand.shard = shard_idx;
                 }
-                Err(e) => {
-                    return Err(err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()));
-                }
+                (c, cands, agg)
+            })
+        };
+        let (count, shard_cands, shard_agg) = match searched {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "search_phase_execution_exception",
+                    e.to_string(),
+                ));
             }
         };
+        if let Some(res) = shard_agg {
+            agg_acc = Some(res);
+            agg_req = this_agg.clone();
+        }
         cands.extend(shard_cands);
 
         let mut shard_profile = None;
-        if let Some(a) = this_agg {
+        if let (Some(a), true) = (this_agg, profiling) {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-            let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
-            let outcome = if profiling {
-                let (res, prof) = profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx);
-                shard_profile = Some(prof);
-                res
-            } else {
-                let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
-                searcher.search(&q, &collector)
-            };
-            match outcome {
+            let (res, prof) = profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx);
+            shard_profile = Some(prof);
+            match res {
                 Ok(res) => {
-                    match agg_acc.as_mut() {
-                        Some(acc) => {
-                            let _ = acc.merge_fruits(res);
-                        }
-                        None => agg_acc = Some(res),
-                    }
+                    agg_acc = Some(res);
                     agg_req = Some(a);
                 }
                 Err(e) => {
@@ -1776,12 +1844,7 @@ pub fn run(
         }
         cands.extend(o.cands);
         if let Some(res) = o.agg {
-            match agg_acc.as_mut() {
-                Some(acc) => {
-                    let _ = acc.merge_fruits(res);
-                }
-                None => agg_acc = Some(res),
-            }
+            fruits.push(res);
         }
         if o.agg_req.is_some() {
             agg_req = o.agg_req;
@@ -1796,6 +1859,25 @@ pub fn run(
             shard_profiles.push(pr);
         }
         searchers.push((o.name, o.searcher, o.st));
+    }
+
+    // A wide fan-out leaves one intermediate result per index to combine.
+    // Folding them one after another is linear and single-threaded, which at
+    // a couple of hundred indices is a visible share of the whole request; a
+    // tree reduction spreads it over the pool the shards already ran on.
+    {
+        agg_acc = if fruits.len() > 8 {
+            use rayon::prelude::*;
+            fruits.into_par_iter().reduce_with(|mut a, b| {
+                let _ = a.merge_fruits(b);
+                a
+            })
+        } else {
+            fruits.into_iter().reduce(|mut a, b| {
+                let _ = a.merge_fruits(b);
+                a
+            })
+        };
     }
 
     prune(&mut cands, page_want, &sort_keys);

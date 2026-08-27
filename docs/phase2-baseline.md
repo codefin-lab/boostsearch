@@ -151,3 +151,83 @@ mapping/settings ยังอยู่ครบ
 - **`versions` เป็น HashMap ในหน่วยความจำ** — 200k id ≈ 16 MB และโตตามจำนวนเอกสาร
   ระยะยาวต้องย้ายไปโครงสร้างที่ compact กว่านี้
 - ยังไม่ได้วัด: cold-cache latency, merge behaviour ระยะยาว, หน่วยความจำที่ concurrency สูงกว่านี้
+
+## รอบที่สอง — fan-out หลาย index (หลังปิด Phase 1)
+
+วัดใหม่ทั้งหมดเพราะงาน Phase 1 เพิ่มงานบน write path เยอะ (coercion ตอน index,
+date column, dynamic template, `_ignored`, flat_object) ผลคือ **ไม่ได้แย่ลงเลย**:
+index 71,458 → 99,641 docs/s, RSS หลัง search 428 → 267 MB, p99 ที่ c=8
+20.1 → 5.6 ms
+
+แต่ single index ไม่ใช่รูปที่มีปัญหา — ปัญหาอยู่ที่ fan-out
+
+### เอกสารชุดเดียวกัน 400,000 ตัว ต่างกันแค่จำนวน index
+
+| layout | match_all | agg_nested | เฉพาะ agg |
+|---|---:|---:|---:|
+| 1 index × 400,000 | 1.11 ms | 1.99 ms | 0.88 ms |
+| 10 index × 40,000 | 1.28 ms | 2.28 ms | 0.99 ms |
+| 50 index × 8,000 | 1.77 ms | 4.88 ms | 3.11 ms |
+| 200 index × 2,000 | 2.27 ms | 16.72 ms | **14.45 ms** |
+
+⇒ ต้นทุนเป็น **ต่อ index** ไม่ใช่ต่อเอกสาร: index เดียว 400k docs ใช้ 708 µs
+(1.77 ns/doc) ส่วน 200 index ใช้ CPU 13,334 µs กับเอกสารชุดเดียวกัน
+หักส่วนที่แปรตามเอกสารออกแล้วเหลือ **~63 µs คงที่ต่อ index ต่อ query**
+
+### สมมติฐานที่วัดแล้วผิด
+
+**จำนวน segment** — forcemerge 400 → 200 segment แล้ว `run` ไม่ขยับ
+(13,533 → 13,334 µs) ตรงกับที่เคยวัดไว้รอบก่อน
+
+### วัดผิดครั้งหนึ่ง แล้วจับได้
+
+timer ตัวแรกรายงาน `model=207,525 µs` ทั้งที่ทั้ง request ใช้ 5.29 ms —
+เป็นไปไม่ได้ พอไปดูโค้ดพบว่า `fetch_add` ไปวางหลังการ collect hit ไม่ใช่หลัง
+ก้อน model ตัวเลขนั้นจึงเป็น model + การค้น hit ต่อ shard **ตัวเลขที่ขัดกับ
+wall time คือสัญญาณว่าเครื่องมือวัดพัง ไม่ใช่การค้นพบ**
+
+### แก้สองอย่าง
+
+**1. รวม hit กับ aggregation ให้เดินรอบเดียว**
+เดิมยิง `searcher.search` สองครั้งต่อ index — ครั้งหนึ่งเก็บ hit อีกครั้งทำ agg
+แปลว่าสร้าง weight และเดิน segment สองรอบ ที่ 200 index รอบที่สองคือต้นทุนหลัก
+ตอนนี้ทั้งคู่อยู่ใน collector tuple เดียว (`MaybeAgg` รับหน้าที่ช่องว่างเมื่อ
+request ไม่มี agg)
+
+**2. merge ผลกลางแบบ tree ขนาน**
+เดิมพับ intermediate result ทีละตัวตามลำดับ — เป็นงาน single-thread ที่
+200 index กินราว 750 µs ตอนนี้ใช้ `reduce_with` ของ rayon บน pool เดิม
+⇒ ~300 µs
+
+### ผลที่ 200 index × 2,000 docs (ทั้งคู่รันใน Docker)
+
+| query | obsearch ก่อน | obsearch หลัง | OpenSearch 3.1 |
+|---|---:|---:|---:|
+| match_all | 2.14 | 2.11 | 5.20 |
+| term | 2.15 | 2.15 | 4.44 |
+| agg_terms | 7.78 | **3.69** | 5.35 |
+| agg_stats | 6.10 | **3.57** | 3.77 |
+| agg_nested | 13.52 | **5.22** | 5.91 |
+| sort_paged | 3.94 | 3.90 | 13.27 |
+
+จากที่แพ้ agg ทั้งสามตัว (0.47–0.73×) กลายเป็นชนะทั้งหมด และ single index
+ไม่ถอยเลย (qps c=1 1,230 → 1,216 อยู่ในระดับ noise, p99 c=8 6.14 → 5.62 ms)
+
+### ข้อควรระวังของการวัดบนเครื่องนี้
+
+Docker Desktop บน macOS คิดค่า fan-out กว้างแพงกับเราเป็นพิเศษ และค่านี้
+**โตตามความกว้างของ fan-out**:
+
+| layout | native | docker | penalty |
+|---|---:|---:|---:|
+| 1 index × 400,000 | 1.24 ms | 2.08 ms | 1.68× |
+| 10 index × 40,000 | 1.28 ms | 2.43 ms | 1.89× |
+| 200 index × 2,000 | 4.71 ms | 16.93 ms | 3.59× |
+
+ไม่ได้มาจาก storage (ลอง in-memory ใน Docker ได้ 17.74 ms แย่กว่า on-disk
+16.14 ms ด้วยซ้ำ) และไม่ได้มาจากจำนวน core (เห็น 14 เท่ากับ host)
+เหลือคำอธิบายที่น่าจะเป็นคือค่า schedule thread ข้าม hypervisor ซึ่งกระทบ
+rayon fan-out กว้าง ๆ ของเรามากกว่า thread pool ของ JVM
+
+แปลว่า **ตัวเลขเทียบ Docker-vs-Docker บนเครื่อง macOS นี้ให้ผลที่แย่กว่าความจริง
+สำหรับการ deploy บน Linux** จะรู้ตัวเลขจริงต้องวัดบน Linux host
