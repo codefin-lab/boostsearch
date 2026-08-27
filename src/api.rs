@@ -430,9 +430,41 @@ pub fn write_doc_raw(
             w.delete_term(term);
         }
     }
-    let raw = raw.unwrap_or_else(|| source.to_string());
+    let default_lenient = st
+        .setting("mapping.ignore_malformed")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
+        Ok(v) => v,
+        Err((field, ty)) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "mapper_parsing_exception",
+                format!("failed to parse field [{field}] of type [{ty}]"),
+            ));
+        }
+    };
+    // the ignored names ride along inside the stored source and are lifted back
+    // out on the way to a hit, so no second stored field is needed
+    let raw = if ignored.is_empty() {
+        raw.unwrap_or_else(|| source.to_string())
+    } else {
+        let mut with = source.clone();
+        if let Some(o) = with.as_object_mut() {
+            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+        }
+        with.to_string()
+    };
     // normalized multi-fields are indexed alongside, but never stored
-    let indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    if !ignored.is_empty() {
+        for f in &ignored {
+            crate::store::remove_path(&mut indexed, f);
+        }
+        if let Some(o) = indexed.as_object_mut() {
+            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+        }
+    }
     let doc = make_doc(&st.fields, id, indexed, &raw);
     match st.writer() {
         Ok(w) => {

@@ -119,6 +119,19 @@ impl Mapping {
     ///
     /// A normalizer transforms the value at index time rather than tokenising
     /// it, so the sub-field needs its own copy of the value in the index.
+    /// A knob declared on one field's mapping entry.
+    pub fn field_option(&self, field: &str, key: &str) -> Option<Value> {
+        let mut node = self.raw.get("properties")?;
+        let mut segs = field.split('.').peekable();
+        while let Some(seg) = segs.next() {
+            node = node.as_object()?.get(seg)?;
+            if segs.peek().is_some() {
+                node = node.get("properties").or_else(|| node.get("fields"))?;
+            }
+        }
+        node.get(key).cloned()
+    }
+
     /// The normalizer a field's mapping declares, if any.
     pub fn normalizer_of(&self, field: &str) -> Option<String> {
         let (parent, sub) = field.rsplit_once('.')?;
@@ -1210,6 +1223,126 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
         "lowercase" => Some(Value::String(s.to_lowercase())),
         "uppercase" => Some(Value::String(s.to_uppercase())),
         _ => None,
+    }
+}
+
+
+/// Whether a value can be read as the type its mapping declares.
+///
+/// Only the types with a real parse step are checked; a string field takes
+/// whatever it is given.
+fn value_is_valid(v: &Value, ty: &str) -> bool {
+    match ty {
+        "date" | "date_nanos" => match v {
+            Value::Number(_) => true,
+            Value::String(s) => date_is_valid(s),
+            _ => false,
+        },
+        "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
+        "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
+        | "double" | "scaled_float" => match v {
+            Value::Number(_) => true,
+            Value::String(s) => s.parse::<f64>().is_ok(),
+            _ => false,
+        },
+        "boolean" => matches!(v, Value::Bool(_))
+            || matches!(v.as_str(), Some("true") | Some("false")),
+        _ => true,
+    }
+}
+
+/// The date forms `strict_date_optional_time` accepts, which is the default
+/// OpenSearch applies when a mapping names no format.
+fn date_is_valid(s: &str) -> bool {
+    if crate::query::parse_datetime(s).is_some() {
+        return true;
+    }
+    let body = s.split(['T', ' ']).next().unwrap_or(s);
+    let parts: Vec<&str> = body.split('-').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return false;
+    }
+    let widths = [4usize, 2, 2];
+    parts.iter().enumerate().all(|(i, p)| {
+        p.len() == widths[i] && p.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Field values that cannot be read as their mapped type.
+///
+/// A field that says `ignore_malformed` has its bad values dropped and its name
+/// recorded; one that does not makes the whole write fail, which is how a
+/// field-level `false` overrides an index-wide `true`.
+pub fn scan_malformed(
+    source: &Value,
+    mapping: &Mapping,
+    index_default: bool,
+) -> std::result::Result<Vec<String>, (String, String)> {
+    let mut ignored = Vec::new();
+    walk_malformed(source, &mut String::new(), mapping, index_default, &mut ignored)?;
+    ignored.sort();
+    ignored.dedup();
+    Ok(ignored)
+}
+
+fn walk_malformed(
+    node: &Value,
+    path: &mut String,
+    mapping: &Mapping,
+    index_default: bool,
+    ignored: &mut Vec<String>,
+) -> std::result::Result<(), (String, String)> {
+    match node {
+        Value::Object(obj) => {
+            let base = path.len();
+            for (k, v) in obj {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                let r = walk_malformed(v, path, mapping, index_default, ignored);
+                path.truncate(base);
+                r?;
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                walk_malformed(v, path, mapping, index_default, ignored)?;
+            }
+        }
+        leaf => {
+            let Some(ty) = mapping.type_of(path) else { return Ok(()) };
+            if value_is_valid(leaf, ty) {
+                return Ok(());
+            }
+            let lenient = mapping
+                .field_option(path, "ignore_malformed")
+                .and_then(|v| match v {
+                    Value::Bool(b) => Some(b),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(index_default);
+            if lenient {
+                ignored.push(path.clone());
+            } else {
+                return Err((path.clone(), ty.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drop a leaf the index is not going to hold.
+pub fn remove_path(node: &mut Value, path: &str) {
+    let Some((head, rest)) = path.split_once('.') else {
+        if let Some(o) = node.as_object_mut() {
+            o.remove(path);
+        }
+        return;
+    };
+    if let Some(child) = node.as_object_mut().and_then(|o| o.get_mut(head)) {
+        remove_path(child, rest);
     }
 }
 

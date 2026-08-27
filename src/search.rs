@@ -295,6 +295,7 @@ struct Hit {
     source: Value,
     sort: Vec<SortValue>,
     version: u64,
+    ignored: Option<Value>,
 }
 
 /// What one sort key reads out of a segment.
@@ -1422,7 +1423,9 @@ pub fn run(
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
         let g = st.read();
-        let Some((id, src)) = source_of(searcher, &g, c.addr) else { continue };
+        let Some((id, mut src)) = source_of(searcher, &g, c.addr) else { continue };
+        // `_ignored` travels inside the stored source but belongs on the hit
+        let ignored = src.as_object_mut().and_then(|o| o.remove("_ignored"));
         let version = g.version_of(&id);
         all_hits.push(Hit {
             shard_idx: c.shard,
@@ -1432,6 +1435,7 @@ pub fn run(
             source: src,
             sort: c.sort,
             version,
+            ignored,
         });
     }
 
@@ -1481,6 +1485,9 @@ pub fn run(
                 if !src.is_null() {
                     hit["_source"] = src;
                 }
+            }
+            if let Some(ig) = &h.ignored {
+                hit["_ignored"] = ig.clone();
             }
             if !h.sort.is_empty() {
                 hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
