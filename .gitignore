@@ -4,3 +4,24 @@
 /bench/data
 /bench/docker/obsearch
 /data
+
+# Intermediate conformance snapshots. The runner writes one per invocation with
+# --json-out; only the manifests and the inventory are worth keeping.
+/tools/*.json
+!/tools/test_inventory.json
+!/tools/phase1_manifest.json
+!/tools/phase3_manifest.json
+
+# Benchmark output. Keep the Phase 2 progression and the final clean
+# head-to-head, which are what the docs report; the rest are working runs.
+/bench/results/*.json
+!/bench/results/obsearch-baseline.json
+!/bench/results/obsearch-sortfix.json
+!/bench/results/obsearch-collector.json
+!/bench/results/obsearch-mmap.json
+!/bench/results/obsearch-bounded.json
+!/bench/results/obsearch-topk.json
+!/bench/results/obsearch-liveids.json
+!/bench/results/obsearch-phase2.json
+!/bench/results/final-obs-clean-*.json
+!/bench/results/final-os-clean-*.json

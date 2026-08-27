@@ -105,8 +105,13 @@ impl BlockStats {
             let first = b;
             while b < self.blocks.len() {
                 let (m, x) = self.blocks[b];
-                let partial = !(m > x || x < lo || m > hi) && !(m >= lo && x <= hi);
-                if !partial {
+                let dead = m > x || x < lo || m > hi;
+                // the wholesale shortcut is only available on a full column, so
+                // without it a block that sits inside the range is still work to
+                // do -- treating it as "not partial" here left `b` unmoved and
+                // spun forever
+                let wholesale = full && m >= lo && x <= hi;
+                if dead || wholesale {
                     break;
                 }
                 b += 1;

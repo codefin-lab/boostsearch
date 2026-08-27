@@ -190,3 +190,93 @@ fn prune(
         }
     }
 }
+
+
+/// Reformat a date the way a `format` option on a `fields` entry asks for.
+///
+/// Only the pattern letters the suite uses are handled; anything else is left
+/// alone rather than guessed at.
+pub fn format_date(value: &Value, pattern: &str) -> Option<Value> {
+    let text = value.as_str()?;
+    let dt = crate::query::parse_datetime(text)?;
+    let odt = dt.into_utc();
+    let mut out = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mut run = 1;
+        while chars.peek() == Some(&c) {
+            chars.next();
+            run += 1;
+        }
+        match (c, run) {
+            ('y', 4) => out.push_str(&format!("{:04}", odt.year())),
+            ('y', 2) => out.push_str(&format!("{:02}", odt.year() % 100)),
+            ('M', 2) => out.push_str(&format!("{:02}", odt.month() as u8)),
+            ('d', 2) => out.push_str(&format!("{:02}", odt.day())),
+            ('H', 2) => out.push_str(&format!("{:02}", odt.hour())),
+            ('m', 2) => out.push_str(&format!("{:02}", odt.minute())),
+            ('s', 2) => out.push_str(&format!("{:02}", odt.second())),
+            _ => {
+                for _ in 0..run {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    Some(Value::String(out))
+}
+
+/// The `fields` section of a search response.
+///
+/// Unlike `_source` filtering this returns values keyed by their full path and
+/// always as a list, and a field the mapping declares is taken whole -- a range
+/// field is one value, not an object to descend into.
+pub fn extract_fields(
+    source: &Value,
+    patterns: &[String],
+    is_leaf: &dyn Fn(&str) -> bool,
+) -> serde_json::Map<String, Value> {
+    let mut out: serde_json::Map<String, Value> = serde_json::Map::new();
+    collect(source, "", patterns, is_leaf, &mut out);
+    out
+}
+
+fn collect(
+    v: &Value,
+    path: &str,
+    patterns: &[String],
+    is_leaf: &dyn Fn(&str) -> bool,
+    out: &mut serde_json::Map<String, Value>,
+) {
+    let matches = |p: &str| {
+        patterns.iter().any(|pat| {
+            pat == p || pat == "*"
+                || (pat.contains('*') && crate::store::wildcard_to_regex(pat).is_match(p))
+        })
+    };
+    match v {
+        Value::Object(o) if path.is_empty() || !is_leaf(path) => {
+            for (k, child) in o {
+                let child_path = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                collect(child, &child_path, patterns, is_leaf, out);
+            }
+        }
+        Value::Array(a) if !is_leaf(path) => {
+            for item in a {
+                collect(item, path, patterns, is_leaf, out);
+            }
+        }
+        leaf => {
+            if path.is_empty() || !matches(path) {
+                return;
+            }
+            let slot = out.entry(path.to_string()).or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(arr) = slot.as_array_mut() {
+                match leaf {
+                    Value::Array(items) => arr.extend(items.iter().cloned()),
+                    other => arr.push(other.clone()),
+                }
+            }
+        }
+    }
+}

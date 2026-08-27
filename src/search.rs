@@ -150,6 +150,15 @@ impl SortColumns {
         SortColumns { per_segment: vec![(str_col, num_col, ty)] }
     }
 
+    /// Every numeric value a document holds for this column.
+    fn numeric_values(&self, doc: tantivy::DocId) -> Vec<f64> {
+        let Some((_, num, ty)) = self.per_segment.first() else { return Vec::new() };
+        let (Some(col), Some(ty)) = (num, ty) else { return Vec::new() };
+        col.values_for_doc(doc)
+            .filter_map(|raw| decode_col_value(raw, *ty).and_then(|v| v.as_f64()))
+            .collect()
+    }
+
     /// Read the value for a document inside the segment this was opened for.
     fn read(&self, doc: tantivy::DocId, desc: bool, mode: Option<&str>) -> SortValue {
         self.value(DocAddress::new(0, doc), desc, mode)
@@ -279,12 +288,14 @@ fn reduce_sort_values(vals: &mut Vec<SortValue>, mode: &str) -> SortValue {
 }
 
 struct Hit {
+    shard_idx: usize,
     index: String,
     id: String,
     score: f32,
     source: Value,
     sort: Vec<SortValue>,
     version: u64,
+    ignored: Option<Value>,
 }
 
 /// What one sort key reads out of a segment.
@@ -499,8 +510,21 @@ struct Cand {
 }
 
 fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
+    // ties fall back to document order, which is insertion order within a
+    // shard -- otherwise equally-scored hits come back in a different order
+    // from one run to the next
+    let by_doc = || {
+        a.shard
+            .cmp(&b.shard)
+            .then(a.addr.segment_ord.cmp(&b.addr.segment_ord))
+            .then(a.addr.doc_id.cmp(&b.addr.doc_id))
+    };
     if sort_keys.is_empty() {
-        return b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal);
+        return b
+            .score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(by_doc);
     }
     for (i, k) in sort_keys.iter().enumerate() {
         let ord = a.sort[i].cmp_asc(&b.sort[i]);
@@ -509,7 +533,7 @@ fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
             return ord;
         }
     }
-    Ordering::Equal
+    by_doc()
 }
 
 /// Keep only the best `want` candidates, pruning in amortised linear time
@@ -1119,6 +1143,13 @@ pub fn run(
             .filter(|(_, def)| {
                 def.get("filters").is_some()
                     || def.get("missing").is_some()
+                    || def.get("median_absolute_deviation").is_some()
+                    // HDR percentiles answer a different question from
+                    // tantivy's t-digest, so they are computed here
+                    || def
+                        .get("percentiles")
+                        .map(|v| v.get("hdr").is_some())
+                        .unwrap_or(false)
                     // `_index` is metadata, not a column: bucket it ourselves
                     || def.get("global").is_some()
                     || def
@@ -1142,6 +1173,22 @@ pub fn run(
         }
     }
     let source_sel = body.get("_source").cloned();
+    // `fields` asks for values keyed by path, formatted, always as lists
+    let field_specs: Option<Vec<(String, Option<String>)>> =
+        body.get("fields").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some((s.clone(), None)),
+                    Value::Object(o) => o.get("field").and_then(|f| f.as_str()).map(|s| {
+                        (
+                            s.to_string(),
+                            o.get("format").and_then(|f| f.as_str()).map(|s| s.to_string()),
+                        )
+                    }),
+                    _ => None,
+                })
+                .collect()
+        });
     let stored: Option<Vec<String>> = match body.get("stored_fields") {
         Some(Value::Array(a)) => {
             Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -1389,15 +1436,19 @@ pub fn run(
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
         let g = st.read();
-        let Some((id, src)) = source_of(searcher, &g, c.addr) else { continue };
+        let Some((id, mut src)) = source_of(searcher, &g, c.addr) else { continue };
+        // `_ignored` travels inside the stored source but belongs on the hit
+        let ignored = src.as_object_mut().and_then(|o| o.remove("_ignored"));
         let version = g.version_of(&id);
         all_hits.push(Hit {
+            shard_idx: c.shard,
             index: name.clone(),
             id,
             score: c.score,
             source: src,
             sort: c.sort,
             version,
+            ignored,
         });
     }
 
@@ -1448,8 +1499,30 @@ pub fn run(
                     hit["_source"] = src;
                 }
             }
+            if let Some(ig) = &h.ignored {
+                hit["_ignored"] = ig.clone();
+            }
             if !h.sort.is_empty() {
                 hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
+            }
+            if let Some(specs) = field_specs.as_ref() {
+                let g = searchers[h.shard_idx].2.read();
+                let is_leaf = |p: &str| g.mapping.is_leaf_type(p);
+                let names: Vec<String> = specs.iter().map(|(n, _)| n.clone()).collect();
+                let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // apply any `format` the caller attached to a field
+                for (name, fmt) in specs {
+                    let Some(fmt) = fmt else { continue };
+                    let Some(Value::Array(vals)) = f.get_mut(name) else { continue };
+                    for v in vals.iter_mut() {
+                        if let Some(formatted) = crate::source::format_date(v, fmt) {
+                            *v = formatted;
+                        }
+                    }
+                }
+                if !f.is_empty() {
+                    hit["fields"] = Value::Object(f);
+                }
             }
             if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
                 hit["_version"] = json!(h.version);
@@ -1467,6 +1540,10 @@ pub fn run(
         let own_meta = def.get("meta").cloned();
         let outcome = if def.get("missing").is_some() {
             run_missing_agg(store, &targets, &query_json, def)
+        } else if def.get("median_absolute_deviation").is_some() {
+            run_mad_agg(store, &targets, &query_json, def)
+        } else if def.get("percentiles").is_some() {
+            run_hdr_percentiles(store, &targets, &query_json, def)
         } else if def.get("filter").is_some() {
             run_filter_agg(store, &targets, &query_json, def)
         } else if def.get("global").is_some() {
@@ -1892,4 +1969,136 @@ fn run_index_terms_agg(
         "sum_other_doc_count": 0,
         "buckets": buckets
     }))
+}
+
+
+/// Every value of one numeric field across the documents a query matches.
+///
+/// Aggregations that tantivy does not provide are computed from these directly;
+/// the field is read from the columnar, so nothing is materialised per document
+/// beyond the value itself.
+fn collect_field_values(
+    store: &Store,
+    targets: &[String],
+    query_json: &Value,
+    field: &str,
+    missing: Option<f64>,
+) -> std::result::Result<Vec<f64>, Response> {
+    let mut out = Vec::new();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let ctx = Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+        };
+        let q = crate::query::build(&ctx, query_json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
+        let column = ctx.column_name(field, false);
+        let searcher = g.reader.searcher();
+        let addrs = searcher
+            .search(&q, &tantivy::collector::DocSetCollector)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()))?;
+        let cols: Vec<SortColumns> = searcher
+            .segment_readers()
+            .iter()
+            .map(|r| SortColumns::for_segment(r, &column))
+            .collect();
+        for addr in addrs {
+            let Some(c) = cols.get(addr.segment_ord as usize) else { continue };
+            let mut any = false;
+            for v in c.numeric_values(addr.doc_id) {
+                out.push(v);
+                any = true;
+            }
+            if !any {
+                if let Some(m) = missing {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn agg_field_and_missing(spec: &Value) -> (String, Option<f64>) {
+    let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let missing = spec.get("missing").and_then(|v| v.as_f64());
+    (field, missing)
+}
+
+/// `percentiles` with an `hdr` option, reported the way HdrHistogram does.
+fn run_hdr_percentiles(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("percentiles").cloned().unwrap_or(json!({}));
+    if let Some(digits) = spec.pointer("/hdr/number_of_significant_value_digits") {
+        let d = digits.as_i64().unwrap_or(3);
+        if !(0..=5).contains(&d) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("[numberOfSignificantValueDigits] must be between 0 and 5: [{d}]"),
+            ));
+        }
+    }
+    let (field, missing) = agg_field_and_missing(&spec);
+    let percents: Vec<f64> = spec
+        .get("percents")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+        .unwrap_or_else(|| vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0]);
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let query = combine(main_query, None);
+    let values = collect_field_values(store, targets, &query, &field, missing)?;
+    let mut hist = crate::hdr::HdrHistogram::default();
+    for v in &values {
+        hist.record(*v);
+    }
+
+    if keyed {
+        let mut map = serde_json::Map::new();
+        for p in &percents {
+            let key = format!("{:.1}", p);
+            map.insert(key, hist.value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
+        }
+        Ok(json!({ "values": Value::Object(map) }))
+    } else {
+        let arr: Vec<Value> = percents
+            .iter()
+            .map(|p| json!({"key": p, "value": hist.value_at(*p)}))
+            .collect();
+        Ok(json!({ "values": arr }))
+    }
+}
+
+fn run_mad_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("median_absolute_deviation").cloned().unwrap_or(json!({}));
+    if let Some(c) = spec.get("compression").and_then(|v| v.as_f64()) {
+        if c <= 0.0 {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("[compression] must be greater than 0. Found [{c}] in [mad]"),
+            ));
+        }
+    }
+    let (field, missing) = agg_field_and_missing(&spec);
+    let query = combine(main_query, None);
+    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
+    Ok(json!({ "value": crate::hdr::median_absolute_deviation(&mut values) }))
 }

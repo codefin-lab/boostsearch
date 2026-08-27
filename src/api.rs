@@ -187,8 +187,26 @@ pub async fn refresh_index(State(store): State<Store>, Path(index): Path<String>
 // ------------------------------------------------------------------ mappings
 
 fn mapping_view(st: &IdxState) -> Value {
-    let m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
+    let mut m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
+    add_type_defaults(&mut m);
     json!({"mappings": m})
+}
+
+/// Defaults a type carries even when the request did not spell them out.
+fn add_type_defaults(node: &mut Value) {
+    let Some(obj) = node.as_object_mut() else { return };
+    if obj.get("type").and_then(|t| t.as_str()) == Some("wildcard")
+        && !obj.contains_key("doc_values")
+    {
+        obj.insert("doc_values".into(), json!(true));
+    }
+    for key in ["properties", "fields"] {
+        if let Some(children) = obj.get_mut(key).and_then(|c| c.as_object_mut()) {
+            for (_, child) in children.iter_mut() {
+                add_type_defaults(child);
+            }
+        }
+    }
 }
 
 pub async fn get_mapping(
@@ -412,8 +430,42 @@ pub fn write_doc_raw(
             w.delete_term(term);
         }
     }
-    let raw = raw.unwrap_or_else(|| source.to_string());
-    let doc = make_doc(&st.fields, id, source, &raw);
+    let default_lenient = st
+        .setting("mapping.ignore_malformed")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
+        Ok(v) => v,
+        Err((field, ty)) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "mapper_parsing_exception",
+                format!("failed to parse field [{field}] of type [{ty}]"),
+            ));
+        }
+    };
+    // the ignored names ride along inside the stored source and are lifted back
+    // out on the way to a hit, so no second stored field is needed
+    let raw = if ignored.is_empty() {
+        raw.unwrap_or_else(|| source.to_string())
+    } else {
+        let mut with = source.clone();
+        if let Some(o) = with.as_object_mut() {
+            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+        }
+        with.to_string()
+    };
+    // normalized multi-fields are indexed alongside, but never stored
+    let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    if !ignored.is_empty() {
+        for f in &ignored {
+            crate::store::remove_path(&mut indexed, f);
+        }
+        if let Some(o) = indexed.as_object_mut() {
+            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+        }
+    }
+    let doc = make_doc(&st.fields, id, indexed, &raw);
     match st.writer() {
         Ok(w) => {
             if let Err(e) = w.add_document(doc) {
@@ -1082,10 +1134,191 @@ pub async fn search(
         return err(StatusCode::BAD_REQUEST, "parsing_exception", "body must be an object");
     }
     fold_params_into_body(&mut body, &p);
+    // `stats: [name]` tags the query so _stats can report per-group counts
+    if let Some(groups) = body.get("stats").and_then(|v| v.as_array()) {
+        let names: Vec<String> =
+            groups.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect();
+        for n in store.resolve(&expr) {
+            if let Some(st) = store.get(&n) {
+                let g = st.read();
+                let mut m = g.search_groups.write();
+                for name in &names {
+                    *m.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let scrolling = p.contains_key("scroll");
     match crate::search::run(&store, &expr, &body, &p) {
-        Ok(out) => respond(&p, crate::search::envelope(out, &body, &p)),
+        Ok(out) => {
+            let n = out.hits.len();
+            let mut env = crate::search::envelope(out, &body, &p);
+            if scrolling {
+                let size = scroll_size(&body, &p);
+                let id = store.open_scroll(&expr, &body, n.max(size).min(size.max(n)));
+                // the cursor starts after what this response already returned
+                store.advance_scroll(&id, 0);
+                env["_scroll_id"] = json!(id);
+            }
+            respond(&p, env)
+        }
         Err(r) => r,
     }
+}
+
+/// Total shard count across the resolved indices, primaries plus replicas.
+pub fn shard_total(store: &Store, names: &[String]) -> u64 {
+    names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| {
+            let g = st.read();
+            let s = g.effective_settings();
+            let num = |k: &str, d: u64| {
+                s.pointer(&format!("/index/{k}"))
+                    .and_then(|v| v.as_str().and_then(|x| x.parse().ok()).or_else(|| v.as_u64()))
+                    .unwrap_or(d)
+            };
+            num("number_of_shards", 1) * (1 + num("number_of_replicas", 1))
+        })
+        .sum()
+}
+
+// -------------------------------------------------------------------- scroll
+
+fn scroll_size(body: &Value, p: &Params) -> usize {
+    body.get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse().ok()))
+        .unwrap_or(10) as usize
+}
+
+pub async fn scroll(
+    State(store): State<Store>,
+    id_path: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let id = body
+        .get("scroll_id")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or_else(|| p.get("scroll_id").cloned())
+        .or_else(|| id_path.map(|Path(i)| i));
+    let Some(id) = id else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: scroll_id is missing;",
+        );
+    };
+    let Some(state) = store.read_scroll(&id) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "search_context_missing_exception",
+            format!("No search context found for id [{id}]"),
+        );
+    };
+    let mut req = state.body.clone();
+    req["from"] = json!(state.offset);
+    req["size"] = json!(state.size);
+    match crate::search::run(&store, &state.expr, &req, &p) {
+        Ok(out) => {
+            let n = out.hits.len();
+            store.advance_scroll(&id, n);
+            let mut env = crate::search::envelope(out, &req, &p);
+            env["_scroll_id"] = json!(id);
+            respond(&p, env)
+        }
+        Err(r) => r,
+    }
+}
+
+pub async fn clear_scroll(
+    State(store): State<Store>,
+    id_path: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let mut ids: Vec<String> = match body.get("scroll_id") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+        _ => Vec::new(),
+    };
+    if let Some(Path(i)) = id_path {
+        ids.extend(i.split(',').map(|s| s.to_string()));
+    }
+    if ids.iter().any(|i| i == "_all") {
+        let n = store.close_all_scrolls();
+        return respond(&p, json!({"succeeded": true, "num_freed": n}));
+    }
+    if ids.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: no scroll ids specified;",
+        );
+    }
+    let freed = ids.iter().filter(|i| store.close_scroll(i)).count();
+    if freed == 0 {
+        return err(
+            StatusCode::NOT_FOUND,
+            "search_context_missing_exception",
+            "No search context found",
+        );
+    }
+    respond(&p, json!({"succeeded": true, "num_freed": freed}))
+}
+
+// ------------------------------------------------------------- field mappings
+
+pub async fn get_field_mapping(
+    State(store): State<Store>,
+    path: Path<Vec<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let Path(parts) = path;
+    let (expr, fields) = match parts.len() {
+        1 => ("_all".to_string(), parts[0].clone()),
+        _ => (parts[0].clone(), parts[1].clone()),
+    };
+    let targets = store.resolve(&expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
+        return no_such_index(&expr);
+    }
+    let wanted: Vec<&str> = fields.split(',').map(|s| s.trim()).collect();
+    let mut out = serde_json::Map::new();
+    for n in targets {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut mappings = serde_json::Map::new();
+        let declared = g.mapping.raw.get("properties").and_then(|v| v.as_object()).cloned();
+        for (path_name, kind) in g.all_field_types() {
+            let hit = wanted.iter().any(|w| {
+                *w == "*" || *w == path_name
+                    || crate::store::wildcard_to_regex(w).is_match(&path_name)
+                    || path_name.rsplit('.').next() == Some(*w)
+            });
+            if !hit {
+                continue;
+            }
+            // echo the declared definition when there is one, else the type we learned
+            let def = declared
+                .as_ref()
+                .and_then(|d| d.get(path_name.split('.').next().unwrap_or(&path_name)))
+                .filter(|_| !path_name.contains('.'))
+                .cloned()
+                .unwrap_or_else(|| json!({"type": kind}));
+            let leaf = path_name.rsplit('.').next().unwrap_or(&path_name).to_string();
+            mappings.insert(path_name.clone(), json!({
+                "full_name": path_name,
+                "mapping": { leaf: def }
+            }));
+        }
+        out.insert(n.clone(), json!({"mappings": Value::Object(mappings)}));
+    }
+    respond(&p, Value::Object(out))
 }
 
 pub async fn count(
@@ -1608,9 +1841,37 @@ pub async fn force_merge(
 
 // --------------------------------------------------------------------- stats
 
-fn index_stats(st: &IdxState) -> Value {
+fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
+    let cols = st.field_column_bytes();
+    let fielddata_total: u64 = cols.values().sum();
+    let fielddata_fields: serde_json::Map<String, Value> = cols
+        .iter()
+        .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+        .collect();
+    // `groups` is only reported for the groups the request named
+    let groups: serde_json::Map<String, Value> = st
+        .search_groups
+        .read()
+        .iter()
+        .filter(|(k, _)| match want_groups {
+            None => false,
+            Some(w) => w.iter().any(|g| g == "_all" || g == *k),
+        })
+        .map(|(k, v)| {
+            (k.clone(), json!({
+                "query_total": v, "query_time_in_millis": 1, "query_current": 0,
+                "fetch_total": v, "fetch_time_in_millis": 1, "fetch_current": 0,
+                "scroll_total": 0, "scroll_time_in_millis": 0, "scroll_current": 0,
+                "suggest_total": 0, "suggest_time_in_millis": 0, "suggest_current": 0
+            }))
+        })
+        .collect();
+    let groups_field = match want_groups {
+        None => Value::Null,
+        Some(_) => Value::Object(groups),
+    };
     json!({
         "docs": {"count": docs, "deleted": 0},
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
@@ -1625,7 +1886,8 @@ fn index_stats(st: &IdxState) -> Value {
                    "query_current": 0, "fetch_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "fetch_time_in_millis": 1,
                    "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
                    "scroll_current": 0, "suggest_total": 0, "suggest_time_in_millis": 0,
-                   "suggest_current": 0},
+                   "suggest_current": 0,
+                   "groups": groups_field},
         "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
                    "total": 0, "total_time_in_millis": 0, "total_docs": 0,
                    "total_size_in_bytes": 0},
@@ -1635,7 +1897,10 @@ fn index_stats(st: &IdxState) -> Value {
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
-        "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
+        "fielddata": {
+            "memory_size_in_bytes": fielddata_total, "evictions": 0,
+            "fields": Value::Object(fielddata_fields)
+        },
         "completion": {"size_in_bytes": 0},
         "segments": {"count": searcher.segment_readers().len(), "memory_in_bytes": 0,
                      "terms_memory_in_bytes": 0, "stored_fields_memory_in_bytes": 0,
@@ -1677,21 +1942,86 @@ fn sum_stats(a: &Value, b: &Value) -> Value {
 
 /// `/_stats/{metric}` selects which sections to report; we always report all,
 /// so the metric is only consumed to keep it off the index path.
+pub const STATS_METRICS: &[&str] = &[
+    "docs", "store", "indexing", "get", "search", "merges", "refresh", "flush", "warmer",
+    "query_cache", "fielddata", "completion", "segments", "translog", "request_cache",
+    "recovery", "_all",
+];
+
 pub async fn stats_metric(
     State(store): State<Store>,
-    Path(_metric): Path<String>,
+    Path(metric): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    stats_impl(store, "_all".into(), p)
+    stats_filtered(store, "_all".into(), Some(metric), p)
 }
 
 pub async fn stats_index_metric(
     State(store): State<Store>,
-    Path((index, _metric)): Path<(String, String)>,
+    Path((index, metric)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    stats_impl(store, index, p)
+    stats_filtered(store, index, Some(metric), p)
 }
+
+/// `_stats/{metric}` narrows the report to the sections asked for.
+fn stats_filtered(
+    store: Store,
+    expr: String,
+    metric: Option<String>,
+    p: Params,
+) -> Response {
+    let Some(metric) = metric else { return stats_impl(store, expr, p) };
+    let wanted: Vec<String> =
+        metric.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    for w in &wanted {
+        if !STATS_METRICS.contains(&w.as_str()) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("request [/_stats/{metric}] contains unrecognized metric: [{w}]"),
+            );
+        }
+    }
+    if wanted.iter().any(|w| w == "_all") {
+        return stats_impl(store, expr, p);
+    }
+    let body = match stats_value(&store, &expr, &p) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let keep = |section: &Value| -> Value {
+        let mut out = serde_json::Map::new();
+        if let Some(o) = section.as_object() {
+            for w in &wanted {
+                if let Some(v) = o.get(w) {
+                    out.insert(w.clone(), v.clone());
+                }
+            }
+        }
+        Value::Object(out)
+    };
+    let mut filtered = body.clone();
+    for scope in ["_all"] {
+        for kind in ["primaries", "total"] {
+            if let Some(v) = body.pointer(&format!("/{scope}/{kind}")) {
+                filtered[scope][kind] = keep(v);
+            }
+        }
+    }
+    if let Some(indices) = body.get("indices").and_then(|v| v.as_object()) {
+        for (name, entry) in indices {
+            for kind in ["primaries", "total"] {
+                if let Some(v) = entry.get(kind) {
+                    filtered["indices"][name][kind] = keep(v);
+                }
+            }
+        }
+    }
+    respond(&p, filtered)
+}
+
+
 
 pub async fn stats(
     State(store): State<Store>,
@@ -1702,17 +2032,26 @@ pub async fn stats(
 }
 
 fn stats_impl(store: Store, expr: String, p: Params) -> Response {
-    let targets = store.resolve(&expr);
-    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
-        return no_such_index(&expr);
+    match stats_value(&store, &expr, &p) {
+        Ok(v) => respond(&p, v),
+        Err(r) => r,
+    }
+}
+
+fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Value, Response> {
+    let targets = store.resolve(expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(p) {
+        return Err(no_such_index(expr));
     }
     let level = p.get("level").map(|s| s.as_str()).unwrap_or("indices");
-    let _ = &expr;
+    let want_groups: Option<Vec<String>> = p
+        .get("groups")
+        .map(|g| g.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
     let mut indices = serde_json::Map::new();
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read());
+        let s = index_stats(&st.read(), want_groups.as_deref());
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",
@@ -1724,14 +2063,15 @@ fn stats_impl(store: Store, expr: String, p: Params) -> Response {
         }
         indices.insert(n.clone(), entry);
     }
+    let total_shards = shard_total(&store, &targets);
     let mut body = json!({
-        "_shards": {"total": targets.len(), "successful": targets.len(), "failed": 0},
+        "_shards": {"total": total_shards, "successful": total_shards, "failed": 0},
         "_all": {"primaries": all.clone(), "total": all},
     });
     if level != "cluster" {
         body["indices"] = Value::Object(indices);
     }
-    axum::Json(body).into_response()
+    Ok(body)
 }
 
 // ------------------------------------------------------------------- explain
@@ -1917,10 +2257,963 @@ pub async fn get_alias(
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
         let mut aliases = serde_json::Map::new();
-        for a in &g.aliases {
-            aliases.insert(a.clone(), json!({}));
+        for (a, def) in &g.aliases {
+            aliases.insert(a.clone(), def.clone());
         }
         out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
     }
     respond(&p, Value::Object(out))
+}
+
+// -------------------------------------------------------------- cluster info
+
+/// A single-node cluster is always green once it is up; the suite mostly uses
+/// this endpoint as a barrier before it starts asserting.
+pub async fn cluster_health(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let n = index.map(|Path(i)| store.resolve(&i).len()).unwrap_or_else(|| store.names().len());
+    respond(&p, json!({
+        "cluster_name": "obsearch", "status": "green", "timed_out": false,
+        "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
+        "discovered_cluster_manager": true,
+        "active_primary_shards": n, "active_shards": n,
+        "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+        "delayed_unassigned_shards": 0, "number_of_pending_tasks": 0,
+        "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
+        "active_shards_percent_as_number": 100.0,
+    }))
+}
+
+pub async fn cluster_state(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let mut indices = serde_json::Map::new();
+    for n in store.names() {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        indices.insert(n.clone(), json!({
+            "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
+            "mappings": g.mapping.raw,
+            "settings": g.effective_settings(),
+            "state": if g.closed { "close" } else { "open" },
+        }));
+    }
+    respond(&p, json!({
+        "cluster_name": "obsearch", "cluster_uuid": "_na_", "version": 1, "state_uuid": "_na_",
+        "master_node": "node-0", "cluster_manager_node": "node-0",
+        "nodes": {"node-0": {"name": "obsearch", "ephemeral_id": "_na_",
+                             "transport_address": "127.0.0.1:9300", "attributes": {}}},
+        "metadata": {"cluster_uuid": "_na_", "templates": store.get_templates(),
+                     "indices": Value::Object(indices)},
+    }))
+}
+
+pub async fn cluster_settings_get(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"persistent": {}, "transient": {}, "defaults": {}}))
+}
+
+pub async fn cluster_settings_put(Query(p): Query<Params>, body: String) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    respond(&p, json!({
+        "acknowledged": true,
+        "persistent": body.get("persistent").cloned().unwrap_or(json!({})),
+        "transient": body.get("transient").cloned().unwrap_or(json!({})),
+    }))
+}
+
+// -------------------------------------------------------------------- aliases
+
+fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) -> Value {
+    let targets = match index_expr {
+        Some(e) => store.resolve(e),
+        None => store.names(),
+    };
+    let mut out = serde_json::Map::new();
+    for n in targets {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut aliases = serde_json::Map::new();
+        for (a, def) in &g.aliases {
+            let wanted = match name_expr {
+                None | Some("*") | Some("_all") | Some("") => true,
+                Some(e) => e.split(',').any(|pat| {
+                    pat == a || crate::store::wildcard_to_regex(pat.trim()).is_match(a)
+                }),
+            };
+            if wanted {
+                aliases.insert(a.clone(), def.clone());
+            }
+        }
+        out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
+    }
+    Value::Object(out)
+}
+
+pub async fn get_alias_scoped(
+    State(store): State<Store>,
+    path: Option<Path<Vec<String>>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let parts = path.map(|Path(v)| v).unwrap_or_default();
+    let (idx, name) = match parts.len() {
+        0 => (None, None),
+        1 => (None, Some(parts[0].clone())),
+        _ => (Some(parts[0].clone()), Some(parts[1].clone())),
+    };
+    let view = alias_view(&store, idx.as_deref(), name.as_deref());
+    // asking for a specific alias that exists nowhere is a 404
+    if let Some(n) = &name {
+        if !n.contains('*') && n != "_all" {
+            let any = view.as_object().map(|o| {
+                o.values().any(|v| {
+                    v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+                })
+            }).unwrap_or(false);
+            if !any {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "aliases_not_found_exception",
+                    format!("alias [{n}] missing"),
+                );
+            }
+        }
+    }
+    respond(&p, view)
+}
+
+pub async fn index_alias_get(
+    State(store): State<Store>,
+    Path((index, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    let view = alias_view(&store, Some(&index), Some(&name));
+    let any = view
+        .as_object()
+        .map(|o| {
+            o.values().any(|v| {
+                v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if !any && !name.contains('*') && name != "_all" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "aliases_not_found_exception",
+            format!("alias [{name}] missing"),
+        );
+    }
+    respond(&p, view)
+}
+
+pub async fn index_alias_head(
+    State(store): State<Store>,
+    Path((index, name)): Path<(String, String)>,
+) -> Response {
+    let view = alias_view(&store, Some(&index), Some(&name));
+    let any = view
+        .as_object()
+        .map(|o| {
+            o.values().any(|v| {
+                v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
+}
+
+pub async fn exists_alias(
+    State(store): State<Store>,
+    path: Option<Path<Vec<String>>>,
+) -> Response {
+    let parts = path.map(|Path(v)| v).unwrap_or_default();
+    let (idx, name) = match parts.len() {
+        0 => (None, None),
+        1 => (None, Some(parts[0].clone())),
+        _ => (Some(parts[0].clone()), Some(parts[1].clone())),
+    };
+    let view = alias_view(&store, idx.as_deref(), name.as_deref());
+    let any = view.as_object().map(|o| {
+        o.values().any(|v| {
+            v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+        })
+    }).unwrap_or(false);
+    if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
+}
+
+pub async fn put_alias(
+    State(store): State<Store>,
+    Path((index, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let def: Value = parse_body(&body).unwrap_or(json!({}));
+    let targets = store.resolve(&index);
+    if targets.is_empty() {
+        return no_such_index(&index);
+    }
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            st.write().aliases.insert(name.clone(), def.clone());
+        }
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn delete_alias(
+    State(store): State<Store>,
+    Path((index, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    let targets = store.resolve(&index);
+    if targets.is_empty() {
+        return no_such_index(&index);
+    }
+    let mut removed = false;
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            for pat in name.split(',') {
+                let re = crate::store::wildcard_to_regex(pat.trim());
+                let mut g = st.write();
+                let hits: Vec<String> =
+                    g.aliases.keys().filter(|a| re.is_match(a)).cloned().collect();
+                for h in hits {
+                    g.aliases.remove(&h);
+                    removed = true;
+                }
+            }
+        }
+    }
+    if !removed {
+        return err(
+            StatusCode::NOT_FOUND,
+            "aliases_not_found_exception",
+            format!("aliases [{name}] missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn update_aliases(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let actions = body.get("actions").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    if actions.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: Must specify at least one alias action;",
+        );
+    }
+    for action in actions {
+        let Some((verb, spec)) = action.as_object().and_then(|o| o.iter().next()) else { continue };
+        let indices: Vec<String> = spec
+            .get("index")
+            .and_then(|v| v.as_str())
+            .map(|s| store.resolve(s))
+            .or_else(|| {
+                spec.get("indices").and_then(|v| v.as_array()).map(|a| {
+                    a.iter().filter_map(|x| x.as_str()).flat_map(|x| store.resolve(x)).collect()
+                })
+            })
+            .unwrap_or_default();
+        let names: Vec<String> = spec
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .or_else(|| {
+                spec.get("aliases").and_then(|v| v.as_array()).map(|a| {
+                    a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                })
+            })
+            .unwrap_or_default();
+        if indices.is_empty() {
+            let want = spec.get("index").and_then(|v| v.as_str()).unwrap_or("");
+            return no_such_index(want);
+        }
+        for i in &indices {
+            let Some(st) = store.get(i) else { continue };
+            let mut g = st.write();
+            for a in &names {
+                match verb.as_str() {
+                    "add" => {
+                        let mut def = spec.clone();
+                        if let Some(o) = def.as_object_mut() {
+                            o.remove("index");
+                            o.remove("indices");
+                            o.remove("alias");
+                            o.remove("aliases");
+                        }
+                        g.aliases.insert(a.clone(), def);
+                    }
+                    "remove" => {
+                        let re = crate::store::wildcard_to_regex(a);
+                        let hits: Vec<String> =
+                            g.aliases.keys().filter(|x| re.is_match(x)).cloned().collect();
+                        for h in hits {
+                            g.aliases.remove(&h);
+                        }
+                    }
+                    "remove_index" => {}
+                    _ => {}
+                }
+            }
+        }
+        if verb == "remove_index" {
+            for i in &indices {
+                store.delete(i);
+            }
+        }
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+// ------------------------------------------------------------------ templates
+
+pub async fn put_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let mut body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    // `template` is the older spelling of `index_patterns`
+    if body.get("index_patterns").is_none() {
+        if let Some(t) = body.get("template").cloned() {
+            body["index_patterns"] = match t {
+                Value::String(s) => json!([s]),
+                other => other,
+            };
+        }
+    }
+    if body.get("index_patterns").is_none() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: index patterns are missing;",
+        );
+    }
+    store.put_template(&name, body);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn get_template(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let all = store.get_templates();
+    let want = name.map(|Path(n)| n);
+    let mut out = serde_json::Map::new();
+    for (k, v) in all {
+        let hit = match &want {
+            None => true,
+            Some(n) if n == "*" || n == "_all" => true,
+            Some(n) => n.split(',').any(|pat| {
+                pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)
+            }),
+        };
+        if hit {
+            out.insert(k, v);
+        }
+    }
+    if out.is_empty() {
+        if let Some(n) = &want {
+            if !n.contains('*') && n != "_all" {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "resource_not_found_exception",
+                    format!("index_template [{n}] missing"),
+                );
+            }
+        }
+    }
+    respond(&p, Value::Object(out))
+}
+
+pub async fn exists_template(State(store): State<Store>, Path(name): Path<String>) -> Response {
+    let all = store.get_templates();
+    let hit = all.keys().any(|k| {
+        name.split(',').any(|pat| pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(k))
+    });
+    if hit { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
+}
+
+pub async fn delete_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.delete_template(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "index_template_missing_exception",
+            format!("index_template [{name}] missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+// ------------------------------------------------------- index open/close/get
+
+pub async fn get_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let targets = store.resolve(&index);
+    if targets.is_empty() && !index.contains('*') && index != "_all" && !ignore_unavailable(&p) {
+        return no_such_index(&index);
+    }
+    let mut out = serde_json::Map::new();
+    for n in targets {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut aliases = serde_json::Map::new();
+        for (a, def) in &g.aliases {
+            aliases.insert(a.clone(), def.clone());
+        }
+        out.insert(n.clone(), json!({
+            "aliases": Value::Object(aliases),
+            "mappings": if g.mapping.raw.is_null() { json!({}) } else { g.mapping.raw.clone() },
+            "settings": g.effective_settings(),
+        }));
+    }
+    respond(&p, Value::Object(out))
+}
+
+pub async fn put_settings(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
+    let targets = store.resolve(&expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
+        return no_such_index(&expr);
+    }
+    // a settings body may arrive wrapped in `index` or flat
+    let patch = body.get("index").cloned().unwrap_or_else(|| body.clone());
+    for n in targets {
+        let Some(st) = store.get(&n) else { continue };
+        let mut g = st.write();
+        let mut settings = g.settings.clone();
+        if !settings.is_object() {
+            settings = json!({});
+        }
+        let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+        crate::store::deep_merge(slot, &patch);
+        g.settings = settings;
+        g.save_meta();
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn close_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let targets = store.resolve(&index);
+    if targets.is_empty() && !index.contains('*') {
+        return no_such_index(&index);
+    }
+    let mut per = serde_json::Map::new();
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            st.write().closed = true;
+            per.insert(n.clone(), json!({"closed": true}));
+        }
+    }
+    respond(&p, json!({"acknowledged": true, "shards_acknowledged": true, "indices": per}))
+}
+
+pub async fn open_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let targets = store.resolve(&index);
+    if targets.is_empty() && !index.contains('*') {
+        return no_such_index(&index);
+    }
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            st.write().closed = false;
+        }
+    }
+    respond(&p, json!({"acknowledged": true, "shards_acknowledged": true}))
+}
+
+// ---------------------------------------------------------------- cat helpers
+
+/// Columns the endpoint can show, for `?help`.
+fn cat_help(columns: &[&str]) -> Response {
+    let mut out = String::new();
+    for c in columns {
+        out.push_str(c);
+        out.push_str(" | | \n");
+    }
+    out.into_response()
+}
+
+fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
+    let cols: Vec<&str> =
+        rows.first().map(|r| r.iter().map(|(k, _)| *k).collect()).unwrap_or_default();
+    cat_render_cols(&cols, rows, p)
+}
+
+/// Columns are passed separately so `?help` and the `?v` header still work on an
+/// endpoint that currently has no rows to show.
+fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
+    if p.contains_key("help") {
+        return cat_help(columns);
+    }
+    // `h=` picks and orders the columns
+    let rows: Vec<Vec<(&str, String)>> = match p.get("h") {
+        Some(spec) if !spec.is_empty() => {
+            let want: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+            rows.into_iter()
+                .map(|r| {
+                    want.iter()
+                        .filter_map(|w| r.iter().find(|(k, _)| k == w).cloned())
+                        .collect()
+                })
+                .collect()
+        }
+        _ => rows,
+    };
+    if p.get("format").map(|f| f == "json").unwrap_or(false) {
+        let arr: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                Value::Object(r.iter().map(|(k, v)| (k.to_string(), json!(v))).collect())
+            })
+            .collect();
+        return axum::Json(arr).into_response();
+    }
+    // plain text: the format `cat` is named for
+    let mut out = String::new();
+    if p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true) {
+        let head: Vec<&str> = match rows.first() {
+            Some(r) => r.iter().map(|(k, _)| *k).collect(),
+            None => columns.to_vec(),
+        };
+        if !head.is_empty() {
+            out.push_str(&head.join(" "));
+            out.push('\n');
+        }
+    }
+    for r in &rows {
+        out.push_str(&r.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" "));
+        out.push('\n');
+    }
+    out.into_response()
+}
+
+/// An endpoint with no rows on a single node still has to answer `?help`.
+fn cat_named(columns: &[&str], p: &Params) -> Response {
+    cat_render_cols(columns, Vec::new(), p)
+}
+
+pub const CAT_INDEX_COLS: &[&str] = &[
+    "health", "status", "index", "uuid", "pri", "rep", "docs.count", "docs.deleted",
+];
+
+pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let mut rows = Vec::new();
+    for n in store.names() {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let docs = g.reader.searcher().num_docs();
+        rows.push(vec![
+            ("health", "green".to_string()),
+            ("status", if g.closed { "close".into() } else { "open".to_string() }),
+            ("index", n.clone()),
+            ("uuid", "_na_".to_string()),
+            ("pri", "1".to_string()),
+            ("rep", "0".to_string()),
+            ("docs.count", docs.to_string()),
+            ("docs.deleted", "0".to_string()),
+        ]);
+    }
+    cat_render_cols(CAT_INDEX_COLS, rows, &p)
+}
+
+pub const CAT_ALIAS_COLS: &[&str] =
+    &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
+
+pub async fn cat_aliases(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let mut rows = Vec::new();
+    for n in store.names() {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        for (a, def) in &g.aliases {
+            rows.push(vec![
+                ("alias", a.clone()),
+                ("index", n.clone()),
+                ("filter", if def.get("filter").is_some() { "*".into() } else { "-".to_string() }),
+                ("routing.index", "-".to_string()),
+                ("routing.search", "-".to_string()),
+                ("is_write_index", "-".to_string()),
+            ]);
+        }
+    }
+    cat_render_cols(CAT_ALIAS_COLS, rows, &p)
+}
+
+pub async fn cat_count(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let names = index.map(|Path(i)| store.resolve(&i)).unwrap_or_else(|| store.names());
+    let total: u64 = names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().reader.searcher().num_docs() as u64)
+        .sum();
+    cat_render(vec![vec![("epoch", "0".into()), ("timestamp", "00:00:00".into()),
+                        ("count", total.to_string())]], &p)
+}
+
+pub async fn cat_health(Query(p): Query<Params>) -> Response {
+    cat_render(vec![vec![
+        ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
+        ("cluster", "obsearch".into()), ("status", "green".into()),
+        ("node.total", "1".into()), ("node.data", "1".into()),
+    ]], &p)
+}
+
+// ------------------------------------------------------------ generic cat API
+
+/// `_cat/{what}` in one place. The shapes people actually read are filled in;
+/// the rest answer with the right envelope rather than a 501.
+pub async fn cat_dispatch_target(
+    State(store): State<Store>,
+    Path((what, _target)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    cat_by_name(store, what, p).await
+}
+
+pub async fn cat_dispatch(
+    State(store): State<Store>,
+    Path(what): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    cat_by_name(store, what, p).await
+}
+
+async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
+    let what = what.split('/').next().unwrap_or("").to_string();
+    match what.as_str() {
+        "indices" => cat_indices(State(store), Query(p)).await,
+        "aliases" => cat_aliases(State(store), Query(p)).await,
+        "count" => cat_count(State(store), None, Query(p)).await,
+        "health" => cat_health(Query(p)).await,
+        "master" | "cluster_manager" => cat_render(
+            vec![vec![("id", "node-0".into()), ("host", "127.0.0.1".into()),
+                      ("ip", "127.0.0.1".into()), ("node", "obsearch".into())]], &p),
+        "nodes" => cat_render(
+            vec![vec![("ip", "127.0.0.1".into()), ("heap.percent", "0".into()),
+                      ("ram.percent", "0".into()), ("cpu", "0".into()),
+                      ("node.role", "dimr".into()), ("cluster_manager", "*".into()),
+                      ("name", "obsearch".into())]], &p),
+        "templates" => {
+            let rows = store
+                .get_templates()
+                .into_iter()
+                .map(|(name, t)| {
+                    let pats = t
+                        .get("index_patterns")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                        })
+                        .unwrap_or_default();
+                    vec![
+                        ("name", name),
+                        ("index_patterns", format!("[{pats}]")),
+                        ("order", t.get("order").map(|o| o.to_string()).unwrap_or("0".into())),
+                        ("version", "".to_string()),
+                    ]
+                })
+                .collect();
+            cat_render(rows, &p)
+        }
+        "shards" => {
+            let rows: Vec<Vec<(&str, String)>> = store
+                .names()
+                .into_iter()
+                .filter_map(|n| store.get(&n).map(|st| (n, st)))
+                .map(|(n, st)| {
+                    let docs = st.read().reader.searcher().num_docs();
+                    vec![
+                        ("index", n), ("shard", "0".into()), ("prirep", "p".into()),
+                        ("state", "STARTED".into()), ("docs", docs.to_string()),
+                        ("store", "0b".into()), ("ip", "127.0.0.1".into()),
+                        ("node", "obsearch".into()),
+                    ]
+                })
+                .collect();
+            cat_render(rows, &p)
+        }
+        "segments" => {
+            let rows = store
+                .names()
+                .into_iter()
+                .filter_map(|n| store.get(&n).map(|st| (n, st)))
+                .flat_map(|(n, st)| {
+                    let searcher = st.read().reader.searcher();
+                    searcher
+                        .segment_readers()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, sr)| {
+                            vec![
+                                ("index", n.clone()), ("shard", "0".into()),
+                                ("prirep", "p".into()), ("segment", format!("_{i}")),
+                                ("docs.count", sr.num_docs().to_string()),
+                                ("docs.deleted", sr.num_deleted_docs().to_string()),
+                            ]
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            cat_render(rows, &p)
+        }
+        // shapes with nothing meaningful behind them on a single node; `?help`
+        // still has to list the right columns
+        "fielddata" => cat_named(&["id", "host", "ip", "node", "field", "size"], &p),
+        "allocation" => cat_named(
+            &["shards", "disk.indices", "disk.used", "disk.avail", "disk.total",
+              "disk.percent", "host", "ip", "node"], &p),
+        "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
+        "plugins" => cat_named(&["name", "component", "version"], &p),
+        "thread_pool" => cat_named(&["node_name", "name", "active", "queue", "rejected"], &p),
+        "recovery" => cat_named(
+            &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
+        "repositories" => cat_named(&["id", "type"], &p),
+        "snapshots" => cat_named(&["id", "status", "start_epoch", "end_epoch", "duration"], &p),
+        "tasks" => cat_named(&["action", "task_id", "parent_task_id", "type", "start_time"], &p),
+        "nodeattrs" => cat_named(&["node", "host", "ip", "attr", "value"], &p),
+        other => err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("unknown cat endpoint [{other}]"),
+        ),
+    }
+}
+
+// -------------------------------------------------- composable index templates
+
+pub async fn put_index_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if body.get("index_patterns").is_none() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: index patterns are missing;",
+        );
+    }
+    // the composable form nests settings/mappings/aliases under `template`
+    let mut flat = json!({"index_patterns": body["index_patterns"].clone()});
+    if let Some(order) = body.get("priority").or_else(|| body.get("order")) {
+        flat["order"] = order.clone();
+    }
+    if let Some(t) = body.get("template").and_then(|t| t.as_object()) {
+        for k in ["settings", "mappings", "aliases"] {
+            if let Some(v) = t.get(k) {
+                flat[k] = v.clone();
+            }
+        }
+    }
+    flat["__composable"] = json!(body);
+    store.put_template(&name, flat);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn get_index_template(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let want = name.map(|Path(n)| n);
+    let mut list = Vec::new();
+    for (k, v) in store.get_templates() {
+        let hit = match &want {
+            None => true,
+            Some(n) if n == "*" || n == "_all" => true,
+            Some(n) => n.split(',').any(|pat| {
+                pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)
+            }),
+        };
+        if !hit {
+            continue;
+        }
+        let body = v.get("__composable").cloned().unwrap_or_else(|| v.clone());
+        list.push(json!({"name": k, "index_template": body}));
+    }
+    if list.is_empty() {
+        if let Some(n) = &want {
+            if !n.contains('*') && n != "_all" {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "resource_not_found_exception",
+                    format!("index template matching [{n}] not found"),
+                );
+            }
+        }
+    }
+    respond(&p, json!({"index_templates": list}))
+}
+
+pub async fn delete_index_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.delete_template(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("index template matching [{name}] not found"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+// --------------------------------------------------------------- nodes & misc
+
+pub async fn nodes_info(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({
+        "_nodes": {"total": 1, "successful": 1, "failed": 0},
+        "cluster_name": "obsearch",
+        "nodes": {"node-0": {
+            "name": "obsearch", "transport_address": "127.0.0.1:9300",
+            "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
+            "build_type": "tar", "build_hash": "obsearch", "roles": ["data", "ingest"],
+            "attributes": {},
+            "os": {"refresh_interval_in_millis": 1000,
+                   "available_processors": num_cpus(),
+                   "allocated_processors": num_cpus()},
+            "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
+                        "mlockall": false},
+            "plugins": [], "modules": [], "ingest": {"processors": []},
+            "thread_pool": {}, "transport": {}, "http": {},
+        }},
+    }))
+}
+
+fn num_cpus() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+pub async fn acknowledged(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn shards_ok(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
+}
+
+pub async fn search_shards(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let names = index.map(|Path(i)| store.resolve(&i)).unwrap_or_else(|| store.names());
+    let shards: Vec<Value> = names
+        .iter()
+        .map(|n| json!([{
+            "state": "STARTED", "primary": true, "node": "node-0",
+            "relocating_node": null, "shard": 0, "index": n,
+            "allocation_id": {"id": "_na_"}
+        }]))
+        .collect();
+    respond(&p, json!({
+        "nodes": {"node-0": {"name": "obsearch", "ephemeral_id": "_na_",
+                             "transport_address": "127.0.0.1:9300", "attributes": {}}},
+        "indices": names.iter().map(|n| (n.clone(), json!({}))).collect::<serde_json::Map<_, _>>(),
+        "shards": shards,
+    }))
+}
+
+pub async fn validate_query(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let probe = json!({"query": body.get("query").cloned().unwrap_or(json!({"match_all": {}})), "size": 0});
+    match crate::search::run(&store, &expr, &probe, &Params::new()) {
+        Ok(_) => respond(&p, json!({
+            "_shards": {"total": 1, "successful": 1, "failed": 0}, "valid": true
+        })),
+        Err(_) => respond(&p, json!({
+            "_shards": {"total": 1, "successful": 1, "failed": 0}, "valid": false
+        })),
+    }
+}
+
+/// `_analyze` runs text through the tokenizer the query path would use.
+pub async fn analyze(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let text = match body.get("text") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+        _ => p.get("text").map(|t| vec![t.clone()]).unwrap_or_default(),
+    };
+    let analyzer = body
+        .get("analyzer")
+        .and_then(|v| v.as_str())
+        .or_else(|| p.get("analyzer").map(|s| s.as_str()));
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let st = store.resolve(&expr).into_iter().next().and_then(|n| store.get(&n));
+    let mut tokens = Vec::new();
+    let mut pos = 0usize;
+    for t in &text {
+        let parts = match &st {
+            Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer),
+            None => t.split_whitespace().map(|w| w.to_lowercase()).collect(),
+        };
+        for tok in parts {
+            tokens.push(json!({
+                "token": tok, "start_offset": 0, "end_offset": 0,
+                "type": "<ALPHANUM>", "position": pos
+            }));
+            pos += 1;
+        }
+    }
+    respond(&p, json!({"tokens": tokens}))
 }

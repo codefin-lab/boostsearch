@@ -115,6 +115,54 @@ impl Mapping {
         Mapping { types, raw: body.clone() }
     }
 
+    /// Multi-fields declared with a normalizer, as (parent path, sub name).
+    ///
+    /// A normalizer transforms the value at index time rather than tokenising
+    /// it, so the sub-field needs its own copy of the value in the index.
+    /// A knob declared on one field's mapping entry.
+    pub fn field_option(&self, field: &str, key: &str) -> Option<Value> {
+        let mut node = self.raw.get("properties")?;
+        let mut segs = field.split('.').peekable();
+        while let Some(seg) = segs.next() {
+            node = node.as_object()?.get(seg)?;
+            if segs.peek().is_some() {
+                node = node.get("properties").or_else(|| node.get("fields"))?;
+            }
+        }
+        node.get(key).cloned()
+    }
+
+    /// The normalizer a field's mapping declares, if any.
+    pub fn normalizer_of(&self, field: &str) -> Option<String> {
+        let (parent, sub) = field.rsplit_once('.')?;
+        let props = self.raw.get("properties")?.as_object()?;
+        let mut node = props.get(parent.split('.').next()?)?;
+        for seg in parent.split('.').skip(1) {
+            node = node.get("properties")?.as_object()?.get(seg)?;
+        }
+        node.get("fields")?
+            .get(sub)?
+            .get("normalizer")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
+    pub fn normalized_subfields(&self) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
+            collect_normalizers(props, "", &mut out);
+        }
+        out
+    }
+
+    /// Types the mapping treats as a single value rather than a container.
+    pub fn is_leaf_type(&self, field: &str) -> bool {
+        matches!(
+            self.type_of(field),
+            Some(t) if t.ends_with("_range") || t == "flat_object" || t == "object"
+        )
+    }
+
     pub fn type_of(&self, field: &str) -> Option<&str> {
         self.types.get(field).map(|s| s.as_str())
     }
@@ -199,6 +247,27 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
     }
 }
 
+fn collect_normalizers(
+    props: &Map<String, Value>,
+    prefix: &str,
+    out: &mut Vec<(String, String, String)>,
+) {
+    for (name, def) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(subs) = def.get("fields").and_then(|f| f.as_object()) {
+            for (sub, sdef) in subs {
+                // a multi-field without a normalizer still needs its own copy
+                // of the value; nothing else populates that path
+                let n = sdef.get("normalizer").and_then(|v| v.as_str()).unwrap_or("");
+                out.push((path.clone(), sub.clone(), n.to_string()));
+            }
+        }
+        if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {
+            collect_normalizers(inner, &path, out);
+        }
+    }
+}
+
 fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, String>) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
@@ -237,7 +306,10 @@ pub struct IdxState {
     pub fields: Fields,
     pub mapping: Mapping,
     pub settings: Value,
-    pub aliases: Vec<String>,
+    /// alias name -> its definition (filter, routing, is_write_index)
+    pub aliases: HashMap<String, Value>,
+    /// closed indices reject reads and writes until reopened
+    pub closed: bool,
     /// Exact record for ids that need one: anything updated past version 1, and
     /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
@@ -260,6 +332,8 @@ pub struct IdxState {
     pub search_count: std::sync::atomic::AtomicU64,
     /// misses recorded for `request_cache=true` searches, reported by _stats
     pub request_cache_miss: std::sync::atomic::AtomicU64,
+    /// per-group query counts, from the `stats` field of a search body
+    pub search_groups: RwLock<HashMap<String, u64>>,
     pub auto_id: u64,
     /// field paths seen in indexed documents, with the type OpenSearch's
     /// dynamic mapping would have given them. Explicit mappings win over these.
@@ -324,6 +398,28 @@ impl IdxState {
                 self.pending_bytes = 0;
             }
         }
+    }
+
+    /// Bytes each fast-field column occupies. This is the closest honest
+    /// analogue of what OpenSearch reports as fielddata.
+    pub fn field_column_bytes(&self) -> HashMap<String, u64> {
+        let mut out: HashMap<String, u64> = HashMap::new();
+        let searcher = self.reader.searcher();
+        for seg in searcher.segment_readers() {
+            let ff = seg.fast_fields();
+            for (path, _) in self.all_field_types() {
+                for prefix in [DYN, RAW] {
+                    let col = format!("{prefix}.{path}");
+                    if let Ok(bytes) = ff.column_num_bytes(&col) {
+                        let n = bytes.get_bytes();
+                        if n > 0 {
+                            *out.entry(path.clone()).or_insert(0) += n;
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn has_writer(&self) -> bool {
@@ -602,6 +698,11 @@ pub struct Store {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
     /// where index data lives; `None` keeps everything in RAM
     data_dir: Option<PathBuf>,
+    /// index templates by name
+    templates: Arc<RwLock<HashMap<String, Value>>>,
+    /// live scroll cursors, keyed by the id handed to the client
+    scrolls: Arc<RwLock<HashMap<String, ScrollState>>>,
+    scroll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
@@ -686,6 +787,9 @@ impl Store {
             data_dir: None,
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            templates: Arc::new(RwLock::new(HashMap::new())),
+            scrolls: Arc::new(RwLock::new(HashMap::new())),
+            scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.start_writer_reaper();
         store
@@ -702,6 +806,9 @@ impl Store {
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            templates: Arc::new(RwLock::new(HashMap::new())),
+            scrolls: Arc::new(RwLock::new(HashMap::new())),
+            scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
@@ -806,7 +913,7 @@ impl Store {
         // alias lookup
         let guard = self.inner.read();
         for st in guard.values() {
-            if st.read().aliases.iter().any(|a| a == name) {
+            if st.read().aliases.contains_key(name) {
                 return Some(st.clone());
             }
         }
@@ -842,7 +949,100 @@ impl Store {
         out
     }
 
+    /// `size` is how many documents each batch returns; the cursor is placed
+    /// after the batch the opening search already delivered.
+    pub fn open_scroll(&self, expr: &str, body: &Value, size: usize) -> String {
+        let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("obsearch-scroll-{n:016x}");
+        self.scrolls.write().insert(
+            id.clone(),
+            ScrollState { expr: expr.to_string(), body: body.clone(), offset: size, size },
+        );
+        id
+    }
+
+    pub fn read_scroll(&self, id: &str) -> Option<ScrollState> {
+        self.scrolls.read().get(id).cloned()
+    }
+
+    pub fn advance_scroll(&self, id: &str, by: usize) {
+        if let Some(s) = self.scrolls.write().get_mut(id) {
+            s.offset += by;
+        }
+    }
+
+    pub fn close_scroll(&self, id: &str) -> bool {
+        self.scrolls.write().remove(id).is_some()
+    }
+
+    pub fn close_all_scrolls(&self) -> usize {
+        let mut s = self.scrolls.write();
+        let n = s.len();
+        s.clear();
+        n
+    }
+
+    /// Index templates, applied to any index created with a matching name.
+    pub fn put_template(&self, name: &str, body: Value) {
+        self.templates.write().insert(name.to_string(), body);
+    }
+
+    pub fn get_templates(&self) -> HashMap<String, Value> {
+        self.templates.read().clone()
+    }
+
+    pub fn delete_template(&self, name: &str) -> bool {
+        let mut t = self.templates.write();
+        let pats: Vec<String> = t
+            .keys()
+            .filter(|k| k.as_str() == name || wildcard_to_regex(name).is_match(k))
+            .cloned()
+            .collect();
+        let hit = !pats.is_empty();
+        for p in pats {
+            t.remove(&p);
+        }
+        hit
+    }
+
+    /// Merge every template whose pattern matches, lowest order first, so an
+    /// index picks up the mappings and settings it was meant to be born with.
+    fn apply_templates(&self, index: &str, body: &Value) -> Value {
+        let templates = self.templates.read();
+        let mut matched: Vec<(i64, &Value)> = templates
+            .values()
+            .filter(|t| {
+                let pats = t
+                    .get("index_patterns")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                pats.iter()
+                    .filter_map(|p| p.as_str())
+                    .any(|p| p == index || wildcard_to_regex(p).is_match(index))
+            })
+            .map(|t| (t.get("order").and_then(|o| o.as_i64()).unwrap_or(0), t))
+            .collect();
+        matched.sort_by_key(|(o, _)| *o);
+        if matched.is_empty() {
+            return body.clone();
+        }
+        let mut merged = serde_json::json!({});
+        for (_, t) in matched {
+            for key in ["settings", "mappings", "aliases"] {
+                if let Some(v) = t.get(key) {
+                    let slot = merged.as_object_mut().unwrap().entry(key).or_insert(serde_json::json!({}));
+                    deep_merge(slot, v);
+                }
+            }
+        }
+        // the request itself always wins over a template
+        deep_merge(&mut merged, body);
+        merged
+    }
+
     pub fn create(&self, name: &str, body: &Value) -> Result<()> {
+        let body = &self.apply_templates(name, body);
         if self.exists(name) {
             return Err(anyhow!("resource_already_exists_exception"));
         }
@@ -908,10 +1108,10 @@ impl Store {
             .map(Mapping::from_body)
             .unwrap_or_else(|| Mapping { types: HashMap::new(), raw: serde_json::json!({}) });
         let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
-        let aliases = body
+        let aliases: HashMap<String, Value> = body
             .get("aliases")
             .and_then(|a| a.as_object())
-            .map(|o| o.keys().cloned().collect())
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
         let st = IdxState {
             name: name.to_string(),
@@ -925,6 +1125,7 @@ impl Store {
             mapping,
             settings,
             aliases,
+            closed: false,
             versions: HashMap::new(),
             live_ids: Default::default(),
             pending: HashMap::new(),
@@ -933,6 +1134,7 @@ impl Store {
             seq_no: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
+            search_groups: RwLock::new(HashMap::new()),
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
@@ -970,6 +1172,33 @@ impl Store {
     }
 }
 
+/// A scroll is a cursor over a search: the request that opened it plus how far
+/// the client has read.
+#[derive(Clone)]
+pub struct ScrollState {
+    pub expr: String,
+    pub body: Value,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// Recursive object merge; `patch` wins on conflict.
+pub fn deep_merge(base: &mut Value, patch: &Value) {
+    match (base, patch) {
+        (Value::Object(b), Value::Object(p)) => {
+            for (k, v) in p {
+                match b.get_mut(k) {
+                    Some(slot) if slot.is_object() && v.is_object() => deep_merge(slot, v),
+                    _ => {
+                        b.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (b, p) => *b = p.clone(),
+    }
+}
+
 pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
     let mut s = String::from("^");
     for c in pat.chars() {
@@ -986,6 +1215,261 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
 /// Convert a JSON document into a tantivy document with both views plus `_source`.
 /// Build the tantivy document. Takes the source by value so the JSON tree is
 /// moved into the first view instead of deep-copied for both.
+/// Apply a normalizer the way OpenSearch does at index time.
+pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
+    let s = value.as_str()?;
+    match normalizer {
+        "" => Some(Value::String(s.to_string())),
+        "lowercase" => Some(Value::String(s.to_lowercase())),
+        "uppercase" => Some(Value::String(s.to_uppercase())),
+        _ => None,
+    }
+}
+
+
+/// Whether a value can be read as the type its mapping declares.
+///
+/// Only the types with a real parse step are checked; a string field takes
+/// whatever it is given.
+fn value_is_valid(v: &Value, ty: &str) -> bool {
+    match ty {
+        "date" | "date_nanos" => match v {
+            Value::Number(_) => true,
+            Value::String(s) => date_is_valid(s),
+            _ => false,
+        },
+        "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
+        "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
+        | "double" | "scaled_float" => match v {
+            Value::Number(_) => true,
+            Value::String(s) => s.parse::<f64>().is_ok(),
+            _ => false,
+        },
+        "boolean" => matches!(v, Value::Bool(_))
+            || matches!(v.as_str(), Some("true") | Some("false")),
+        _ => true,
+    }
+}
+
+/// The date forms `strict_date_optional_time` accepts, which is the default
+/// OpenSearch applies when a mapping names no format.
+fn date_is_valid(s: &str) -> bool {
+    if crate::query::parse_datetime(s).is_some() {
+        return true;
+    }
+    let body = s.split(['T', ' ']).next().unwrap_or(s);
+    let parts: Vec<&str> = body.split('-').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return false;
+    }
+    let widths = [4usize, 2, 2];
+    parts.iter().enumerate().all(|(i, p)| {
+        p.len() == widths[i] && p.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Field values that cannot be read as their mapped type.
+///
+/// A field that says `ignore_malformed` has its bad values dropped and its name
+/// recorded; one that does not makes the whole write fail, which is how a
+/// field-level `false` overrides an index-wide `true`.
+pub fn scan_malformed(
+    source: &Value,
+    mapping: &Mapping,
+    index_default: bool,
+) -> std::result::Result<Vec<String>, (String, String)> {
+    let mut ignored = Vec::new();
+    walk_malformed(source, &mut String::new(), mapping, index_default, &mut ignored)?;
+    ignored.sort();
+    ignored.dedup();
+    Ok(ignored)
+}
+
+fn walk_malformed(
+    node: &Value,
+    path: &mut String,
+    mapping: &Mapping,
+    index_default: bool,
+    ignored: &mut Vec<String>,
+) -> std::result::Result<(), (String, String)> {
+    match node {
+        Value::Object(obj) => {
+            let base = path.len();
+            for (k, v) in obj {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                let r = walk_malformed(v, path, mapping, index_default, ignored);
+                path.truncate(base);
+                r?;
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                walk_malformed(v, path, mapping, index_default, ignored)?;
+            }
+        }
+        leaf => {
+            let Some(ty) = mapping.type_of(path) else { return Ok(()) };
+            if value_is_valid(leaf, ty) {
+                return Ok(());
+            }
+            let lenient = mapping
+                .field_option(path, "ignore_malformed")
+                .and_then(|v| match v {
+                    Value::Bool(b) => Some(b),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(index_default);
+            if lenient {
+                ignored.push(path.clone());
+            } else {
+                return Err((path.clone(), ty.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drop a leaf the index is not going to hold.
+pub fn remove_path(node: &mut Value, path: &str) {
+    let Some((head, rest)) = path.split_once('.') else {
+        if let Some(o) = node.as_object_mut() {
+            o.remove(path);
+        }
+        return;
+    };
+    if let Some(child) = node.as_object_mut().and_then(|o| o.get_mut(head)) {
+        remove_path(child, rest);
+    }
+}
+
+/// Bring a value in line with the type its mapping declares.
+///
+/// A client may send `"800.0"` for a field mapped as a float; OpenSearch stores
+/// a number there, and queries phrased with a number have to find it.
+fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
+    match node {
+        Value::Object(obj) => {
+            let base = path.len();
+            for (k, v) in obj.iter_mut() {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                coerce_leaves(v, path, mapping);
+                path.truncate(base);
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                coerce_leaves(v, path, mapping);
+            }
+        }
+        leaf => {
+            if let Some(c) = coerce_leaf(leaf, mapping.type_of(path)) {
+                *leaf = c;
+            }
+        }
+    }
+}
+
+/// An IP in a form that sorts the way addresses do.
+///
+/// Text comparison puts "192.168.0.10" below "192.168.0.9", so ranges and
+/// subnet queries need the fixed-width binary form. IPv4 is widened to its
+/// IPv6-mapped shape so both families share one ordering.
+pub fn canonical_ip(s: &str) -> Option<String> {
+    let octets = match s.parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v) => v.to_ipv6_mapped().octets(),
+        std::net::IpAddr::V6(v) => v.octets(),
+    };
+    Some(octets.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The first and last address of a CIDR block, canonicalised.
+pub fn canonical_cidr(s: &str) -> Option<(String, String)> {
+    let (addr, bits) = s.split_once('/')?;
+    let bits: u32 = bits.trim().parse().ok()?;
+    let (mut lo, family_bits) = match addr.trim().parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v) => (v.to_ipv6_mapped().octets(), 32u32),
+        std::net::IpAddr::V6(v) => (v.octets(), 128u32),
+    };
+    if bits > family_bits {
+        return None;
+    }
+    // an IPv4 prefix addresses the low 32 bits of the mapped form
+    let prefix = bits + (128 - family_bits);
+    let mut hi = lo;
+    for i in 0..16u32 {
+        let keep = prefix.saturating_sub(i * 8).min(8);
+        let mask = if keep == 0 { 0u8 } else { (!0u8) << (8 - keep) };
+        lo[i as usize] &= mask;
+        hi[i as usize] |= !mask;
+    }
+    let hex = |o: [u8; 16]| -> String { o.iter().map(|b| format!("{b:02x}")).collect() };
+    Some((hex(lo), hex(hi)))
+}
+
+fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
+    let s = v.as_str()?;
+    match ty? {
+        "byte" | "short" | "integer" | "long" | "unsigned_long" => {
+            s.parse::<i64>().ok().map(Value::from).or_else(|| s.parse::<u64>().ok().map(Value::from))
+        }
+        "float" | "half_float" | "double" | "scaled_float" => {
+            s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)
+        }
+        "ip" => canonical_ip(s).map(Value::String),
+        "boolean" => match s {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Add the normalized copies a mapping's multi-fields ask for. These only go
+/// into the index; `_source` is always what the client sent.
+///
+/// The copy is added as a dotted top-level key, which the JSON fields expand
+/// into the same path a nested object would produce -- and unlike nesting, it
+/// does not collide with the parent being a scalar.
+pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
+    let subs = mapping.normalized_subfields();
+    let mut out = source.clone();
+    coerce_leaves(&mut out, &mut String::new(), mapping);
+    if subs.is_empty() {
+        return out;
+    }
+    let source = &out.clone();
+    let Some(obj) = out.as_object_mut() else { return out };
+    for (parent, sub, normalizer) in subs {
+        let Some(v) = source.pointer(&format!("/{}", parent.replace('.', "/"))).cloned() else {
+            continue;
+        };
+        let normalized = match &v {
+            Value::Array(items) => {
+                let mapped: Vec<Value> =
+                    items.iter().filter_map(|x| normalize(x, &normalizer)).collect();
+                if mapped.is_empty() {
+                    continue;
+                }
+                Value::Array(mapped)
+            }
+            other => match normalize(other, &normalizer) {
+                Some(n) => n,
+                None => continue,
+            },
+        };
+        obj.insert(format!("{parent}.{sub}"), normalized);
+    }
+    out
+}
+
 pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str) -> TantivyDocument {
     let mut d = TantivyDocument::default();
     d.add_text(fields.id, id);

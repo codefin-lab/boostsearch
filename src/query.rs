@@ -77,6 +77,54 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Put a query term through the same normalizer the field was indexed with,
+/// so `ABCD` finds what `lowercase` stored as `abcd`.
+fn normalized(ctx: &Ctx, field: &str, text: &str) -> String {
+    match ctx.mapping.normalizer_of(field) {
+        Some(n) => crate::store::normalize(&Value::String(text.to_string()), &n)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| text.to_string()),
+        None => text.to_string(),
+    }
+}
+
+/// Rewrite a value written as an IP into the form the field was indexed in.
+fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
+    if ctx.mapping.type_of(field) != Some("ip") {
+        return v.clone();
+    }
+    match v.as_str().and_then(crate::store::canonical_ip) {
+        Some(c) => Value::String(c),
+        None => v.clone(),
+    }
+}
+
+/// `term` on an `ip` field accepts a CIDR block, which names a range of
+/// addresses rather than one of them.
+fn ip_term_query(
+    ctx: &Ctx,
+    field: &str,
+    f: Field,
+    path: &str,
+    v: &Value,
+) -> Option<Box<dyn Query>> {
+    if ctx.mapping.type_of(field) != Some("ip") {
+        return None;
+    }
+    let s = v.as_str()?;
+    if let Some((lo, hi)) = crate::store::canonical_cidr(s) {
+        let mut l = Term::from_field_json_path(f, path, true);
+        l.append_type_and_str(&lo);
+        let mut h = Term::from_field_json_path(f, path, true);
+        h.append_type_and_str(&hi);
+        return Some(Box::new(RangeQuery::new(
+            Bound::Included(l),
+            Bound::Included(h),
+        )));
+    }
+    Some(any_of(term_for(f, path, &ip_value(ctx, field, v))))
+}
+
 fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
     let base = Term::from_field_json_path(field, path, true);
     match v {
@@ -99,12 +147,17 @@ fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
         }
         Value::Number(n) => {
             let mut out = Vec::new();
-            if let Some(i) = n.as_i64() {
+            // 401.0 and 401 name the same value; whichever form was indexed,
+            // either spelling of the query has to find it
+            let whole = n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 9.007e15);
+            let as_i64 = n.as_i64().or_else(|| whole.map(|f| f as i64));
+            let as_u64 = n.as_u64().or_else(|| whole.filter(|f| *f >= 0.0).map(|f| f as u64));
+            if let Some(i) = as_i64 {
                 let mut t = base.clone();
                 t.append_type_and_fast_value(i);
                 out.push(t);
             }
-            if let Some(u) = n.as_u64() {
+            if let Some(u) = as_u64 {
                 let mut t = base.clone();
                 t.append_type_and_fast_value(u);
                 out.push(t);
@@ -200,7 +253,20 @@ fn regex_query(field: Field, path: &str, pattern: &str) -> Result<Box<dyn Query>
 
 pub fn wildcard_to_regex(pat: &str) -> String {
     let mut s = String::new();
-    for c in pat.chars() {
+    let mut chars = pat.chars();
+    while let Some(c) = chars.next() {
+        // a backslash makes the next character a literal, `*` and `?` included
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                if next.is_alphanumeric() {
+                    s.push(next);
+                } else {
+                    s.push('\\');
+                    s.push(next);
+                }
+            }
+            continue;
+        }
         match c {
             '*' => s.push_str(".*"),
             '?' => s.push('.'),
@@ -222,6 +288,19 @@ fn tokenizer_name(analyzer: Option<&str>) -> &str {
         "english" | "en_stem" => "en_stem",
         _ => "default",
     }
+}
+
+/// Tokenise text with a named analyzer, for the `_analyze` endpoint.
+pub fn analyze_text(index: &Index, text: &str, analyzer: Option<&str>) -> Vec<String> {
+    let name = tokenizer_name(analyzer);
+    let mut out = Vec::new();
+    if let Some(mut tk) = index.tokenizers().get(name) {
+        let mut stream = tk.token_stream(text);
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+    }
+    out
 }
 
 fn analyze(ctx: &Ctx, view: View, text: &str) -> Vec<String> {
@@ -258,6 +337,16 @@ fn single_key(o: &Value) -> Result<(String, Value)> {
 }
 
 /// Extract `{"field": value}` or `{"field": {"value": v, ...}}`.
+/// The suite writes flags both as JSON booleans and as the strings the URL form
+/// would carry.
+fn is_true(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
 fn field_and_value(v: &Value) -> Result<(String, Value, Value)> {
     let (field, body) = single_key(v)?;
     if let Some(o) = body.as_object() {
@@ -290,8 +379,22 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "match_none" => Box::new(EmptyQuery),
         "term" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, false);
+            if is_true(opts.get("case_insensitive")) {
+                if let Some(s) = val.as_str() {
+                    return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
+                }
+            }
+            if let Some(s) = val.as_str() {
+                let n = normalized(ctx, &field, s);
+                if n != s {
+                    return Ok(any_of(term_for(f, &path, &Value::String(n))));
+                }
+            }
+            if let Some(q) = ip_term_query(ctx, &field, f, &path, &val) {
+                return Ok(q);
+            }
             any_of(term_for(f, &path, &val))
         }
         "terms" => {
@@ -308,10 +411,27 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let (f, path, _) = ctx.resolve(&field, false);
             let arr = vals.as_array().cloned().unwrap_or_default();
             let mut terms = Vec::new();
+            let mut subs: Vec<Box<dyn Query>> = Vec::new();
             for v in &arr {
-                terms.extend(term_for(f, &path, v));
+                // a CIDR entry names a range, not a term, so it cannot join the
+                // flat term set the common case builds
+                match v.as_str().filter(|s| s.contains('/')).and(
+                    ip_term_query(ctx, &field, f, &path, v),
+                ) {
+                    Some(q) => subs.push(q),
+                    None => terms.extend(term_for(f, &path, &ip_value(ctx, &field, v))),
+                }
             }
-            any_of(terms)
+            if subs.is_empty() {
+                any_of(terms)
+            } else {
+                if !terms.is_empty() {
+                    subs.push(any_of(terms));
+                }
+                Box::new(BooleanQuery::new(
+                    subs.into_iter().map(|q| (Occur::Should, q)).collect(),
+                ))
+            }
         }
         "ids" => {
             let arr = body.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -328,23 +448,43 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             Box::new(ExistsQuery::new(col, true))
         }
         "prefix" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };
-            regex_query(f, &path, &format!("{}.*", escape_regex(&text)))?
+            let text = normalized(ctx, &field, &text);
+            let pat = escape_regex(&text);
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&pat)
+            } else {
+                pat
+            };
+            regex_query(f, &path, &format!("{pat}.*"))?
         }
         "wildcard" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };
-            regex_query(f, &path, &wildcard_to_regex(&text))?
+            let text = normalized(ctx, &field, &text);
+            let pat = wildcard_to_regex(&text);
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&pat)
+            } else {
+                pat
+            };
+            regex_query(f, &path, &pat)?
         }
         "regexp" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, true);
-            regex_query(f, &path, val.as_str().unwrap_or_default())?
+            let text = normalized(ctx, &field, val.as_str().unwrap_or_default());
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&text)
+            } else {
+                text
+            };
+            regex_query(f, &path, &pat)?
         }
         "fuzzy" => {
             let (field, val, opts) = field_and_value(&body)?;
@@ -583,8 +723,75 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     }
 }
 
+/// A `*_range` field stores an interval per document, so a range query over it
+/// compares two intervals rather than a value against bounds. The stored
+/// endpoints are already separate numeric paths, so each relation is a pair of
+/// ordinary range queries.
+fn build_range_field_query(
+    ctx: &Ctx,
+    field: &str,
+    spec: &Value,
+) -> Option<Result<Box<dyn Query>>> {
+    let kind = ctx.mapping.type_of(field)?;
+    if !kind.ends_with("_range") {
+        return None;
+    }
+    let relation = spec
+        .get("relation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("intersects")
+        .to_ascii_lowercase();
+    let q_lo = spec.get("gte").or_else(|| spec.get("gt")).cloned();
+    let q_hi = spec.get("lte").or_else(|| spec.get("lt")).cloned();
+    let lo_field = format!("{field}.gte");
+    let hi_field = format!("{field}.lte");
+
+    let mut clauses: Vec<Value> = Vec::new();
+    match relation.as_str() {
+        // the stored interval overlaps the query interval
+        "intersects" => {
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": hi}}}));
+            }
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": lo}}}));
+            }
+        }
+        // the stored interval covers the query interval
+        "contains" => {
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": lo}}}));
+            }
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": hi}}}));
+            }
+        }
+        // the stored interval sits inside the query interval
+        "within" => {
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"gte": lo}}}));
+            }
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"lte": hi}}}));
+            }
+        }
+        other => {
+            return Some(Err(anyhow!("unsupported range relation [{other}]")));
+        }
+    }
+    if clauses.is_empty() {
+        // no bounds: every document that has the field at all
+        clauses.push(serde_json::json!({"exists": {"field": lo_field}}));
+    }
+    let combined = serde_json::json!({"bool": {"filter": clauses}});
+    Some(build(ctx, &combined))
+}
+
 fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, spec) = single_key(body)?;
+    if let Some(r) = build_range_field_query(ctx, &field, &spec) {
+        return r;
+    }
     let (f, path, _) = ctx.resolve(&field, false);
     let get = |keys: [&str; 2]| -> Option<(Value, bool)> {
         for (i, k) in keys.iter().enumerate() {
@@ -609,11 +816,50 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             }
         }
     }
+    if ctx.mapping.type_of(&field) == Some("ip") {
+        for b in [&mut lower, &mut upper] {
+            if let Some((v, inclusive)) = b.clone() {
+                *b = Some((ip_value(ctx, &field, &v), inclusive));
+            }
+        }
+    }
+    // A numeric bound against a string field is a lexicographic comparison in
+    // OpenSearch -- "5" and "400" are both below 500, "ingesting..." is not.
+    if matches!(
+        ctx.mapping.type_of(&field),
+        Some("keyword" | "text" | "wildcard" | "constant_keyword" | "search_as_you_type"
+            | "match_only_text")
+    ) {
+        for b in [&mut lower, &mut upper] {
+            if let Some((Value::Number(n), inclusive)) = b.clone() {
+                *b = Some((Value::String(n.to_string()), inclusive));
+            }
+        }
+    }
     if lower.is_none() && upper.is_none() {
         return Ok(Box::new(AllQuery));
     }
 
     let sample = lower.as_ref().or(upper.as_ref()).map(|(v, _)| v.clone()).unwrap_or(Value::Null);
+    // there are only two booleans, so a range over them is just the set of
+    // values it admits -- and range scans do not accept the type at all
+    if sample.is_boolean() {
+        let ok = |b: bool| {
+            lower.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
+                Some(l) => b > l || (*inc && b == l),
+                None => true,
+            }) && upper.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
+                Some(u) => b < u || (*inc && b == u),
+                None => true,
+            })
+        };
+        let terms: Vec<Term> = [false, true]
+            .into_iter()
+            .filter(|b| ok(*b))
+            .flat_map(|b| term_for(f, &path, &Value::Bool(b)))
+            .collect();
+        return Ok(any_of(terms));
+    }
     let types: Vec<Type> = match &sample {
         Value::Number(n) => {
             if n.is_f64() && n.as_i64().is_none() {
@@ -630,6 +876,7 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         Value::String(s) if parse_datetime(s).is_some() => vec![Type::Date, Type::Str],
         Value::String(_) => vec![Type::Str],
+        Value::Bool(_) => vec![Type::Bool],
         _ => vec![Type::Str],
     };
 
@@ -788,6 +1035,7 @@ fn bound_term(
             Some(d) => t.append_type_and_fast_value(d),
             None => return Bound::Unbounded,
         },
+        (Type::Bool, Value::Bool(b)) => t.append_type_and_fast_value(*b),
         (Type::Str, Value::String(s)) => t.append_type_and_str(s),
         (Type::Str, other) => t.append_type_and_str(&other.to_string()),
         _ => return Bound::Unbounded,
@@ -862,6 +1110,37 @@ fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
 }
 
+/// Widen every cased letter of a pattern into a two-way character class, so a
+/// literal can be matched without regard to case.
+fn case_insensitive_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    let mut in_class = false;
+    for c in pattern.chars() {
+        if !escaped {
+            if c == '[' {
+                in_class = true;
+            } else if c == ']' {
+                in_class = false;
+            }
+        }
+        // inside a character class an expansion would nest brackets
+        if escaped || in_class || !c.is_alphabetic() {
+            out.push(c);
+            escaped = !escaped && c == '\\';
+            continue;
+        }
+        let (lo, up): (String, String) =
+            (c.to_lowercase().collect(), c.to_uppercase().collect());
+        if lo == up {
+            out.push(c);
+        } else {
+            out.push_str(&format!("[{lo}{up}]"));
+        }
+    }
+    out
+}
+
 fn escape_regex(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -928,11 +1207,47 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         };
         let targets: Vec<String> =
             field_part.map(|f| vec![f]).unwrap_or_else(|| default_fields.clone());
-        let value = value.trim_matches('"').to_string();
+        let value = if value.starts_with('[') || value.starts_with('{') {
+            value
+        } else {
+            value.trim_matches('"').to_string()
+        };
         if value.is_empty() {
             continue;
         }
         let regex_literal = value.len() > 2 && value.starts_with('/') && value.ends_with('/');
+        // `field:[a TO b]` is a range, not a term
+        if let Some(spec) = parse_range_token(&value) {
+            let mut per_field: Vec<Box<dyn Query>> = Vec::new();
+            for name in &targets {
+                let clause = serde_json::json!({"range": { name.clone(): spec.clone() }});
+                if let Ok(q) = build(ctx, &clause) {
+                    per_field.push(q);
+                }
+            }
+            if !per_field.is_empty() {
+                let sub: Box<dyn Query> = if per_field.len() == 1 {
+                    per_field.into_iter().next().unwrap()
+                } else {
+                    Box::new(BooleanQuery::union(per_field))
+                };
+                let occur = if pending_not {
+                    Occur::MustNot
+                } else {
+                    pending_occur.take().unwrap_or(if default_operator == "and" {
+                        Occur::Must
+                    } else {
+                        Occur::Should
+                    })
+                };
+                pending_not = false;
+                if occur == Occur::Should {
+                    should_count += 1;
+                }
+                clauses.push((occur, sub));
+            }
+            continue;
+        }
         let mut per_field: Vec<Box<dyn Query>> = Vec::new();
         for name in &targets {
             let (f, path, view) = ctx.resolve(name, true);
@@ -988,18 +1303,28 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
 }
 
-/// Split on whitespace, keeping quoted phrases (and `field:"phrase"`) together.
+/// Split on whitespace, keeping quoted phrases and bracketed ranges together,
+/// so `field:[3 TO 4]` survives as one token.
 fn split_query_string(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_quotes = false;
+    let mut depth = 0i32;
     for c in s.chars() {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
                 cur.push(c);
             }
-            c if c.is_whitespace() && !in_quotes => {
+            '[' | '{' if !in_quotes => {
+                depth += 1;
+                cur.push(c);
+            }
+            ']' | '}' if !in_quotes => {
+                depth -= 1;
+                cur.push(c);
+            }
+            c if c.is_whitespace() && !in_quotes && depth <= 0 => {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                 }
@@ -1011,4 +1336,37 @@ fn split_query_string(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// `[lo TO hi]` is inclusive, `{lo TO hi}` exclusive; `*` is an open end.
+fn parse_range_token(value: &str) -> Option<Value> {
+    let (open, close) = (value.chars().next()?, value.chars().last()?);
+    let inclusive_lo = match open {
+        '[' => true,
+        '{' => false,
+        _ => return None,
+    };
+    let inclusive_hi = match close {
+        ']' => true,
+        '}' => false,
+        _ => return None,
+    };
+    let inner = &value[1..value.len() - 1];
+    let mut parts = inner.splitn(2, " TO ");
+    let lo = parts.next()?.trim();
+    let hi = parts.next()?.trim();
+    let as_json = |t: &str| -> Option<Value> {
+        if t == "*" {
+            return None;
+        }
+        Some(serde_json::from_str(t).unwrap_or_else(|_| Value::String(t.to_string())))
+    };
+    let mut spec = serde_json::Map::new();
+    if let Some(v) = as_json(lo) {
+        spec.insert(if inclusive_lo { "gte" } else { "gt" }.into(), v);
+    }
+    if let Some(v) = as_json(hi) {
+        spec.insert(if inclusive_hi { "lte" } else { "lt" }.into(), v);
+    }
+    Some(Value::Object(spec))
 }
