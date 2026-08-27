@@ -519,6 +519,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "match_bool_prefix" => build_match_bool_prefix(ctx, &body)?,
         "query_string" | "simple_query_string" => build_query_string(ctx, &body)?,
         "match" | "match_phrase" | "match_phrase_prefix" => build_match(ctx, &kind, &body)?,
+        "span_near" => build_span_near(ctx, &body)?,
         "multi_match" => build_multi_match(ctx, &body)?,
         // combined_fields scores across fields as one; cross_fields is the
         // closest thing we can assemble from per-field matches
@@ -695,7 +696,17 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
     }
     let q = body.get("query").cloned().unwrap_or(Value::Null);
-    let fields = body.get("fields").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    // naming no field searches them all, which for us is every path a document
+    // has actually put a value at
+    let fields = match body.get("fields").and_then(|f| f.as_array()) {
+        Some(f) if !f.is_empty() => f.clone(),
+        _ => ctx
+            .observed_kinds
+            .keys()
+            .filter(|k| !k.starts_with('_'))
+            .map(|k| Value::String(k.clone()))
+            .collect(),
+    };
 
     // per-field options are the multi_match options minus its own keys
     let mut shared = serde_json::Map::new();
@@ -1098,6 +1109,82 @@ fn bound_term(
 
 /// `match_bool_prefix`: every analysed term is a term query except the last,
 /// which matches as a prefix.
+/// `span_near` over ordered `span_term` clauses, optionally ending in a
+/// `span_multi` prefix.
+///
+/// That shape is a phrase, which is what it is built as. The span family's
+/// other members -- `span_or`, `span_not`, unordered clauses -- are not
+/// expressible this way and are still refused rather than approximated.
+fn build_span_near(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let clauses = body
+        .get("clauses")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| anyhow!("[span_near] requires [clauses]"))?;
+    if body.get("in_order").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(anyhow!("unsupported query type [span_near] with in_order: false"));
+    }
+    let slop = body.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let mut field: Option<String> = None;
+    let mut words: Vec<String> = Vec::new();
+    let mut prefix_last = false;
+    for (i, clause) in clauses.iter().enumerate() {
+        let (name, text, is_prefix) = if let Some(t) = clause.get("span_term") {
+            let (f, v, _) = field_and_value(t)?;
+            (f, v.as_str().unwrap_or_default().to_string(), false)
+        } else if let Some(m) = clause.pointer("/span_multi/match/prefix") {
+            let (f, v, _) = field_and_value(m)?;
+            (f, v.as_str().unwrap_or_default().to_string(), true)
+        } else {
+            return Err(anyhow!("unsupported query type [span_near] clause"));
+        };
+        if is_prefix && i + 1 != clauses.len() {
+            return Err(anyhow!("[span_multi] is only supported as the last clause"));
+        }
+        prefix_last |= is_prefix;
+        match &field {
+            Some(f) if *f != name => {
+                return Err(anyhow!("[span_near] clauses must all name one field"));
+            }
+            _ => field = Some(name),
+        }
+        words.push(text);
+    }
+    let Some(field) = field else { return Ok(Box::new(EmptyQuery)) };
+    let (f, path, view) = ctx.resolve(&field, true);
+
+    let mut terms: Vec<Term> = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        let last = i + 1 == words.len();
+        // the prefix clause is matched as written; the rest go through the
+        // analyser so they meet the terms the field actually holds
+        let pieces = if last && prefix_last {
+            vec![if view == View::Dyn { w.to_lowercase() } else { w.clone() }]
+        } else {
+            analyze(ctx, view, w)
+        };
+        for p in pieces {
+            let mut t = Term::from_field_json_path(f, &path, true);
+            t.append_type_and_str(&p);
+            terms.push(t);
+        }
+    }
+    if terms.is_empty() {
+        return Ok(Box::new(EmptyQuery));
+    }
+    if prefix_last {
+        let mut q = tantivy::query::PhrasePrefixQuery::new(terms);
+        q.set_max_expansions(50);
+        return Ok(Box::new(q));
+    }
+    if terms.len() == 1 {
+        return Ok(Box::new(TermQuery::new(terms.remove(0), IndexRecordOption::WithFreqs)));
+    }
+    let mut q = PhraseQuery::new(terms);
+    q.set_slop(slop);
+    Ok(Box::new(q))
+}
+
 fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
     for banned in ["slop", "cutoff_frequency"] {
@@ -1160,6 +1247,27 @@ fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         0
     };
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+}
+
+/// Lower a pattern's literal letters, leaving escapes alone -- `\\W` is not
+/// `\\w`.
+fn lowercase_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    for c in pattern.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            out.push(c);
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// Widen every cased letter of a pattern into a two-way character class, so a
@@ -1304,7 +1412,14 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         for name in &targets {
             let (f, path, view) = ctx.resolve(name, true);
             if regex_literal {
-                if let Ok(q) = regex_query(f, &path, &value[1..value.len() - 1]) {
+                // the analysed view holds lowercased terms, so a pattern
+                // written in capitals has to be lowered to meet them
+                let pat = if view == View::Dyn {
+                    lowercase_regex(&value[1..value.len() - 1])
+                } else {
+                    value[1..value.len() - 1].to_string()
+                };
+                if let Ok(q) = regex_query(f, &path, &pat) {
                     per_field.push(q);
                 }
                 continue;

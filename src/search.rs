@@ -1455,6 +1455,7 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
+                    || def.get("variable_width_histogram").is_some()
                     // calendar units are not fixed lengths, which is all
                     // tantivy's date histogram knows how to step by
                     || def
@@ -1970,6 +1971,8 @@ pub fn run(
             }))
         } else if def.get("weighted_avg").is_some() {
             run_weighted_avg(store, &targets, &query_json, def)
+        } else if def.get("variable_width_histogram").is_some() {
+            run_variable_width_histogram(store, &targets, &query_json, def)
         } else if def.get("auto_date_histogram").is_some() {
             run_auto_date_histogram(store, &targets, &query_json, def)
         } else if def.get("composite").is_some() {
@@ -2685,6 +2688,54 @@ fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
             cur.get("value").and_then(|v| v.as_f64()).or_else(|| cur.as_f64())
         })
         .collect()
+}
+
+
+/// `variable_width_histogram`: buckets whose edges follow the data.
+///
+/// The values are sorted and cut at the widest gaps, which puts the boundaries
+/// where the data is already sparse. Each bucket is keyed by the mean of what
+/// it holds.
+fn run_variable_width_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("variable_width_histogram").cloned().unwrap_or(json!({}));
+    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10).max(1) as usize;
+    let (field, missing) = agg_field_and_missing(&spec);
+    let query = combine(main_query, None);
+    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
+    if values.is_empty() {
+        return Ok(json!({"buckets": []}));
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+    // cut where the data is sparsest: the widest gaps between neighbours
+    let mut gaps: Vec<(f64, usize)> =
+        (1..values.len()).map(|i| (values[i] - values[i - 1], i)).collect();
+    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+    let mut cuts: Vec<usize> = gaps.into_iter().take(want.saturating_sub(1)).map(|(_, i)| i).collect();
+    cuts.sort_unstable();
+
+    let mut buckets = Vec::new();
+    let mut start = 0usize;
+    for end in cuts.into_iter().chain(std::iter::once(values.len())) {
+        let slice = &values[start..end];
+        if slice.is_empty() {
+            continue;
+        }
+        let sum: f64 = slice.iter().sum();
+        buckets.push(json!({
+            "min": slice[0],
+            "key": sum / slice.len() as f64,
+            "max": slice[slice.len() - 1],
+            "doc_count": slice.len(),
+        }));
+        start = end;
+    }
+    Ok(json!({"buckets": buckets}))
 }
 
 /// `auto_date_histogram`: pick the smallest rounding that keeps the bucket
