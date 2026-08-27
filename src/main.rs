@@ -147,7 +147,7 @@ fn app(store: Store) -> Router {
         .route("/{index}/_create/{id}", put(api::create_doc).post(api::create_doc))
         .route("/{index}/_source/{id}", get(api::get_source).head(api::head_doc))
         // --- index lifecycle ---
-        .route("/{index}/_alias", get(api::get_alias_scoped))
+        .route("/{index}/_alias", get(api::index_alias_list))
         .route("/{index}/_alias/{name}", get(api::index_alias_get).head(api::index_alias_head))
         .route(
             "/{index}",

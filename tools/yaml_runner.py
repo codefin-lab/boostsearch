@@ -326,10 +326,14 @@ def should_skip(steps):
 
 
 def reset(base):
-    try:
-        requests.delete(base + "/*", timeout=10)
-    except Exception:
-        pass
+    # Templates outlive a `DELETE /*`, and an index template left behind by an
+    # earlier file changes how the next file's indices are created -- so the
+    # suite has to start from nothing, not just from no indices.
+    for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
+        try:
+            requests.delete(base + path, timeout=10)
+        except Exception:
+            pass
 
 
 def main():

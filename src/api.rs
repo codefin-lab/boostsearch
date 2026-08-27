@@ -2371,9 +2371,27 @@ fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) 
                 aliases.insert(a.clone(), def.clone());
             }
         }
+        // naming an alias asks which indices carry it, so one that carries
+        // none is not an answer; asking without a name asks about the indices
+        // themselves, and an index with no aliases is still one of them
+        if aliases.is_empty() && name_expr.is_some() {
+            continue;
+        }
         out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
     }
     Value::Object(out)
+}
+
+/// `GET /{index}/_alias` -- every alias on the named indices.
+pub async fn index_alias_list(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.resolve(&index).is_empty() {
+        return no_such_index(&index);
+    }
+    respond(&p, alias_view(&store, Some(&index), None))
 }
 
 pub async fn get_alias_scoped(
@@ -2480,7 +2498,7 @@ pub async fn put_alias(
     }
     for n in targets {
         if let Some(st) = store.get(&n) {
-            st.write().aliases.insert(name.clone(), def.clone());
+            st.write().aliases.insert(name.clone(), crate::store::normalize_alias(&def));
         }
     }
     respond(&p, json!({"acknowledged": true}))
@@ -2576,7 +2594,7 @@ pub async fn update_aliases(
                             o.remove("alias");
                             o.remove("aliases");
                         }
-                        g.aliases.insert(a.clone(), def);
+                        g.aliases.insert(a.clone(), crate::store::normalize_alias(&def));
                     }
                     "remove" => {
                         let re = crate::store::wildcard_to_regex(a);
@@ -2805,9 +2823,56 @@ fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
 
 /// Columns are passed separately so `?help` and the `?v` header still work on an
 /// endpoint that currently has no rows to show.
+/// `_cat` columns answer to their full name, to the part after the last dot,
+/// and to a leading-letter abbreviation -- `a` for `alias`, `rs` for
+/// `routing.search`.
+fn cat_column_matches(column: &str, asked: &str) -> bool {
+    if column == asked {
+        return true;
+    }
+    let tail = column.rsplit('.').next().unwrap_or(column);
+    if tail == asked {
+        return true;
+    }
+    let initials: String = column.split('.').filter_map(|p| p.chars().next()).collect();
+    initials == asked || column.starts_with(asked) && asked.len() >= 1 && column.len() > asked.len()
+}
+
 fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
     if p.contains_key("help") {
         return cat_help(columns);
+    }
+    // `s=` orders the rows by named columns, each optionally `:desc`. A column
+    // may be named by any of its aliases, which is how `s=index,a:desc` asks
+    // for alias descending within index.
+    let mut rows = rows;
+    if let Some(spec) = p.get("s").filter(|s| !s.is_empty()) {
+        let keys: Vec<(String, bool)> = spec
+            .split(',')
+            .map(|k| {
+                let k = k.trim();
+                match k.split_once(':') {
+                    Some((name, dir)) => (name.to_string(), dir.eq_ignore_ascii_case("desc")),
+                    None => (k.to_string(), false),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            for (name, desc) in &keys {
+                let pick = |r: &Vec<(&str, String)>| {
+                    r.iter()
+                        .find(|(k, _)| cat_column_matches(k, name))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
+                };
+                let ord = pick(a).cmp(&pick(b));
+                let ord = if *desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
     }
     // `h=` picks and orders the columns
     let rows: Vec<Vec<(&str, String)>> = match p.get("h") {
@@ -2883,22 +2948,59 @@ pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) ->
 pub const CAT_ALIAS_COLS: &[&str] =
     &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
 
-pub async fn cat_aliases(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+pub async fn cat_aliases(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let filter = name.map(|Path(n)| n).or_else(|| p.get("name").map(|s| s.to_string()));
+    // spelling out which wildcards to expand and leaving `hidden` out of the
+    // list excludes hidden aliases; saying nothing at all leaves them in
+    let show_hidden = match p.get("expand_wildcards") {
+        None => true,
+        Some(v) => v.split(',').any(|w| matches!(w.trim(), "hidden" | "all")),
+    };
     let mut rows = Vec::new();
     for n in store.names() {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
         for (a, def) in &g.aliases {
+            let wanted = match filter.as_deref() {
+                None | Some("") | Some("*") | Some("_all") => true,
+                Some(expr) => expr.split(',').any(|pat| {
+                    let pat = pat.trim();
+                    pat == a || crate::store::wildcard_to_regex(pat).is_match(a)
+                }),
+            };
+            if !wanted {
+                continue;
+            }
+            let hidden = def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false)
+                || g.setting("hidden").map(|v| v == "true").unwrap_or(false);
+            if hidden && !show_hidden {
+                continue;
+            }
+            let cell = |k: &str| {
+                def.get(k)
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    })
+                    .unwrap_or_else(|| "-".to_string())
+            };
             rows.push(vec![
                 ("alias", a.clone()),
                 ("index", n.clone()),
                 ("filter", if def.get("filter").is_some() { "*".into() } else { "-".to_string() }),
-                ("routing.index", "-".to_string()),
-                ("routing.search", "-".to_string()),
-                ("is_write_index", "-".to_string()),
+                ("routing.index", cell("index_routing")),
+                ("routing.search", cell("search_routing")),
+                ("is_write_index", cell("is_write_index")),
             ]);
         }
     }
+    // the suite matches the whole body, so the order has to be settled:
+    // by index, then by alias within it
+    rows.sort_by(|a, b| a[1].1.cmp(&b[1].1).then(a[0].1.cmp(&b[0].1)));
     cat_render_cols(CAT_ALIAS_COLS, rows, &p)
 }
 
@@ -2949,7 +3051,7 @@ async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
         "indices" => cat_indices(State(store), Query(p)).await,
-        "aliases" => cat_aliases(State(store), Query(p)).await,
+        "aliases" => cat_aliases(State(store), None, Query(p)).await,
         "count" => cat_count(State(store), None, Query(p)).await,
         "health" => cat_health(Query(p)).await,
         "master" | "cluster_manager" => cat_render(

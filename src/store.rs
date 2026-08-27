@@ -904,6 +904,22 @@ fn shared_executor() -> tantivy::Executor {
         .unwrap_or_else(|_| tantivy::Executor::single_thread())
 }
 
+/// Put an alias definition into the form it is read back in.
+///
+/// `routing` is shorthand: it sets the routing used for indexing and the one
+/// used for searching at once, and only those two are ever reported. Anything
+/// else the caller wrote -- a filter, is_write_index -- is kept as it stands.
+pub fn normalize_alias(def: &Value) -> Value {
+    let Some(obj) = def.as_object() else { return serde_json::json!({}) };
+    let mut out = obj.clone();
+    if let Some(r) = out.remove("routing") {
+        for key in ["index_routing", "search_routing"] {
+            out.entry(key.to_string()).or_insert_with(|| r.clone());
+        }
+    }
+    Value::Object(out)
+}
+
 /// Index names are not path-safe, so each one gets a stable encoded directory.
 fn dir_name(index: &str) -> String {
     let mut out = String::new();
@@ -1274,7 +1290,7 @@ impl Store {
         let aliases: HashMap<String, Value> = body
             .get("aliases")
             .and_then(|a| a.as_object())
-            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), normalize_alias(v))).collect())
             .unwrap_or_default();
         let st = IdxState {
             name: name.to_string(),
