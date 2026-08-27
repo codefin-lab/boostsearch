@@ -781,13 +781,19 @@ fn build_range_field_query(
             None => (spec.get(exclusive_key)?.clone(), false),
         };
         if !kind.starts_with("date") {
-            return Some(v);
+            return Some((v, inclusive));
         }
         let up = if inclusive { up_when_inclusive } else { !up_when_inclusive };
-        Some(crate::store::canonical_date_bound(&v, up).map(Value::String).unwrap_or(v))
+        let rewritten =
+            crate::store::canonical_date_bound(&v, up).map(Value::String).unwrap_or(v);
+        Some((rewritten, inclusive))
     };
     let q_lo = bound("gte", "gt", false);
     let q_hi = bound("lte", "lt", true);
+    // an exclusive query bound stays exclusive in the comparison it becomes:
+    // a bucket ending `lt` March does not reach an interval starting on the 1st
+    let lower_key = |inclusive: bool| if inclusive { "gte" } else { "gt" };
+    let upper_key = |inclusive: bool| if inclusive { "lte" } else { "lt" };
     let lo_field = format!("{field}.gte");
     let hi_field = format!("{field}.lte");
 
@@ -795,29 +801,29 @@ fn build_range_field_query(
     match relation.as_str() {
         // the stored interval overlaps the query interval
         "intersects" => {
-            if let Some(hi) = &q_hi {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": hi}}}));
+            if let Some((hi, inc)) = &q_hi {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {upper_key(*inc): hi}}}));
             }
-            if let Some(lo) = &q_lo {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": lo}}}));
+            if let Some((lo, inc)) = &q_lo {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {lower_key(*inc): lo}}}));
             }
         }
         // the stored interval covers the query interval
         "contains" => {
-            if let Some(lo) = &q_lo {
+            if let Some((lo, _)) = &q_lo {
                 clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": lo}}}));
             }
-            if let Some(hi) = &q_hi {
+            if let Some((hi, _)) = &q_hi {
                 clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": hi}}}));
             }
         }
         // the stored interval sits inside the query interval
         "within" => {
-            if let Some(lo) = &q_lo {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"gte": lo}}}));
+            if let Some((lo, inc)) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {lower_key(*inc): lo}}}));
             }
-            if let Some(hi) = &q_hi {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"lte": hi}}}));
+            if let Some((hi, inc)) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {upper_key(*inc): hi}}}));
             }
         }
         other => {

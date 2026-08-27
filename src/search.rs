@@ -2958,20 +2958,38 @@ fn run_calendar_histogram(
         spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
     // the span to cover comes from the extremes the query actually matches
-    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let probe = json!({
-        "__min": {"min": {"field": field}},
-        "__max": {"max": {"field": field}},
-    });
-    let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
-    // the date column counts in nanoseconds, which is what min/max read out
-    let read = |k: &str| -> Option<f64> {
-        extremes.as_ref()?.get(k)?.get("value")?.as_f64()
-    };
-    let (Some(lo_ns), Some(hi_ns)) = (read("__min"), read("__max")) else {
-        return Ok(json!({"buckets": []}));
-    };
+    // a range-typed field has no single value per document, so it has no
+    // extremes to read; its span has to come from the bounds the request gives
+    let ranged = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| {
+            st.read()
+                .mapping
+                .type_of(&field)
+                .map(|t| t.ends_with("_range"))
+                .unwrap_or(false)
+        });
     let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
+    let (mut lo_ns, mut hi_ns) = (0.0f64, 0.0f64);
+    if !ranged {
+        let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        let probe = json!({
+            "__min": {"min": {"field": field}},
+            "__max": {"max": {"field": field}},
+        });
+        let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+        // the date column counts in nanoseconds, which is what min/max read out
+        let read = |k: &str| -> Option<f64> {
+            extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+        };
+        let (Some(a), Some(b)) = (read("__min"), read("__max")) else {
+            return Ok(json!({"buckets": []}));
+        };
+        (lo_ns, hi_ns) = (a, b);
+    } else if bounds.is_none() {
+        return Ok(json!({"buckets": []}));
+    }
     // bounds are written the way a document would be, so they arrive in
     // milliseconds and have to meet the column's nanoseconds
     let bound_ns = |key: &str| -> Option<f64> {
@@ -2999,11 +3017,16 @@ fn run_calendar_histogram(
     while cursor <= last && guard < 100_000 {
         guard += 1;
         let next = unit.advance(cursor);
-        let range = json!({"range": {field.clone(): {
+        let mut spec = json!({
             "gte": iso_millis(cursor),
             "lt": iso_millis(next),
             "format": "strict_date_optional_time",
-        }}});
+        });
+        if ranged {
+            // a stored interval belongs to every bucket it touches
+            spec["relation"] = json!("intersects");
+        }
+        let range = json!({"range": {field.clone(): spec}});
         let combined = combine(main_query, Some(range));
         let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
         if count >= min_doc_count {

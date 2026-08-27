@@ -1554,6 +1554,87 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
     Some(OffsetDateTime::new_utc(date, time))
 }
 
+/// The window a date column can hold. Nanoseconds in an i64 reach about 292
+/// years either side of the epoch, so an open-ended range is filled to the
+/// edges of that rather than to a year the column could not represent.
+const DATE_FLOOR: &str = "1700-01-01T00:00:00.000Z";
+const DATE_CEIL: &str = "2250-01-01T00:00:00.000Z";
+
+/// A range field written with only one end is open at the other, which a
+/// comparison against a missing sub-field cannot express. The open side is
+/// filled with the extreme its type allows, in the indexing view only.
+fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
+    let ranges: Vec<(String, String)> = mapping
+        .types
+        .iter()
+        .filter(|(_, t)| t.ends_with("_range"))
+        .map(|(p, t)| (p.clone(), t.clone()))
+        .collect();
+    for (path, ty) in ranges {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let dated = ty.starts_with("date");
+        let Some(node) = out.pointer_mut(&pointer).and_then(|n| n.as_object_mut()) else {
+            continue;
+        };
+        if dated {
+            for key in ["gte", "gt", "lte", "lt"] {
+                if let Some(v) = node.get(key) {
+                    if let Some(c) = canonical_date(v) {
+                        node.insert(key.into(), Value::String(c));
+                    }
+                }
+            }
+        }
+        // comparisons run against `gte`/`lte`, so an exclusive endpoint is
+        // moved one step inward rather than left in a form nothing reads
+        let step = |v: &Value, forward: bool| -> Option<Value> {
+            if dated {
+                let dt = parse_date_lenient(v.as_str()?)?;
+                let shifted = if forward {
+                    dt + tantivy::time::Duration::milliseconds(1)
+                } else {
+                    dt - tantivy::time::Duration::milliseconds(1)
+                };
+                return Some(Value::String(format_utc_millis(shifted)));
+            }
+            // a whole-number range steps by one; a fractional one has no next
+            // value to move to, so the bound is kept as written
+            let n = v.as_i64()?;
+            Some(Value::from(if forward { n + 1 } else { n - 1 }))
+        };
+        for (from, to, forward) in [("gt", "gte", true), ("lt", "lte", false)] {
+            if node.contains_key(to) {
+                continue;
+            }
+            let Some(v) = node.get(from).cloned() else { continue };
+            let moved = step(&v, forward).unwrap_or(v);
+            node.insert(to.into(), moved);
+        }
+        let has_lower = node.contains_key("gte");
+        let has_upper = node.contains_key("lte");
+        if !has_lower {
+            node.insert(
+                "gte".into(),
+                if dated {
+                    Value::String(DATE_FLOOR.into())
+                } else {
+                    serde_json::json!(f64::MIN)
+                },
+            );
+        }
+        if !has_upper {
+            node.insert(
+                "lte".into(),
+                if dated {
+                    Value::String(DATE_CEIL.into())
+                } else {
+                    serde_json::json!(f64::MAX)
+                },
+            );
+        }
+    }
+}
+
 /// A flat_object is queryable by its own name, which means every value beneath
 /// it has to live somewhere addressable. They are gathered into one list
 /// alongside, in the indexing view only.
@@ -1894,6 +1975,7 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
     let mut out = source.clone();
     coerce_leaves(&mut out, &mut String::new(), mapping);
+    fill_open_ranges(&mut out, mapping);
     gather_flat_objects(&mut out, mapping);
     if subs.is_empty() {
         return out;
