@@ -32,3 +32,23 @@
 `_remote/info` · `_block/write` · `_segments` · `_shard_stores` · `wlm_stats`
 
 ส่วนใหญ่เป็น cluster/index management ที่แต่ละตัวได้ 1-6 sections
+
+## multi_terms — 13/17 เหลือ 4
+
+| section | ต้องการอะไร |
+|---|---|
+| `multiple multi_terms bucket` | multi_terms ซ้อนใน multi_terms |
+| `aggregate over multi-terms test` | เหมือนกัน |
+| `min_doc_count` (assertion หลัง) | `min_doc_count: 0` ต้องคืน bucket ของคู่ค่าที่ไม่มีเอกสารเลยด้วย |
+| `sum_other_doc_count` | ตัดยอดต่อ shard (`shard_size` กับ 2 shard) เราเป็น single shard จึงได้คนละตัวเลข |
+
+### ข้อจำกัดเชิงโครงสร้าง: aggregation ที่ peel ออกมาซ้อนกันไม่ได้
+
+`multi_terms`, `composite`, `date_histogram` แบบ calendar, `rare_terms`,
+percentiles แบบ HDR — ทั้งหมดถูก **peel** ออกจาก request ก่อนส่งให้ tantivy
+เพราะ tantivy ไม่รู้จัก sub-aggregation ของมันวิ่งผ่าน `filtered_count`
+ซึ่งส่งต่อให้ tantivy parser ⇒ **ถ้า sub-agg เป็นตัวที่ peel เหมือนกัน จะพัง**
+
+แก้ได้ด้วยการวนทีละ bucket แล้วยิง sub-agg พร้อม filter ของ bucket นั้น
+(แบบเดียวกับ calendar histogram) แต่เป็นการรื้อ ควรทำทีเดียวให้ครบทุกตัว
+ไม่ใช่ไล่แก้ทีละอัน

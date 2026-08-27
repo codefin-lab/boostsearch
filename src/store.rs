@@ -1935,6 +1935,12 @@ fn days_in_month(year: i32, month: tantivy::time::Month) -> u8 {
     }
 }
 
+/// Re-format a stored date string with milliseconds, which is how a key is
+/// written back out.
+pub fn canonical_date_str(s: &str) -> Option<String> {
+    canonical_date(&Value::String(s.to_string()))
+}
+
 /// A date in the one spelling the index holds.
 pub fn canonical_date(v: &Value) -> Option<String> {
     let dt = match v {
@@ -1969,6 +1975,22 @@ pub fn canonical_ip(s: &str) -> Option<String> {
         std::net::IpAddr::V6(v) => v.octets(),
     };
     Some(octets.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Read an address back out of the fixed-width form it is stored in.
+pub fn ip_from_canonical(hex: &str) -> Option<String> {
+    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut octets = [0u8; 16];
+    for (i, o) in octets.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    let addr = std::net::Ipv6Addr::from(octets);
+    Some(match addr.to_ipv4_mapped() {
+        Some(v4) => v4.to_string(),
+        None => addr.to_string(),
+    })
 }
 
 /// The first and last address of a CIDR block, canonicalised.

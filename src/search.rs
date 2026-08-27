@@ -1601,6 +1601,7 @@ pub fn run(
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
                     || def.get("composite").is_some()
+                    || def.get("multi_terms").is_some()
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
@@ -2186,6 +2187,8 @@ pub fn run(
             run_variable_width_histogram(store, &targets, &query_json, def)
         } else if def.get("auto_date_histogram").is_some() {
             run_auto_date_histogram(store, &targets, &query_json, def)
+        } else if def.get("multi_terms").is_some() {
+            run_multi_terms_agg(store, &targets, &query_json, def, weighted)
         } else if def.get("composite").is_some() {
             run_composite_agg(store, &targets, &query_json, def, weighted)
         } else if def.get("date_histogram").is_some() {
@@ -2743,6 +2746,241 @@ fn run_hdr_percentiles(
 /// range filter run through the ordinary query path, which also means
 /// sub-aggregations come for free. The cost is one search per bucket, which
 /// suits the handful of buckets a calendar histogram usually spans.
+
+
+/// `multi_terms`: one bucket per combination of several fields' values.
+///
+/// The combinations come from nesting a `terms` aggregation per field and
+/// flattening the tree, the same way `composite` builds its keys. What differs
+/// is the answer: a key is the list of values rather than a named object, and
+/// buckets are ranked by how many documents they hold rather than by key.
+fn run_multi_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("multi_terms").cloned().unwrap_or(json!({}));
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let mut fields: Vec<String> = Vec::new();
+    let mut missings: Vec<Option<Value>> = Vec::new();
+    for entry in spec.get("terms").and_then(|v| v.as_array()).into_iter().flatten() {
+        missings.push(entry.get("missing").cloned());
+        match entry.get("field").and_then(|f| f.as_str()) {
+            Some(f) => fields.push(f.to_string()),
+            None => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "Required one of fields [field, script], but none were specified.",
+                ));
+            }
+        }
+    }
+    if fields.len() < 2 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "multi term aggregation must has at least 2 terms",
+        ));
+    }
+
+    let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+    for (i, field) in fields.iter().enumerate().rev() {
+        let mut node = json!({"terms": {"field": field, "size": 65_536}});
+        // a field the document has no value for still takes part when the
+        // request says what to stand in
+        if let Some(m) = missings.get(i).and_then(|m| m.clone()) {
+            node["terms"]["missing"] = m;
+        }
+        if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            node["aggs"] = request;
+        }
+        request = json!({format!("__m{i}"): node});
+    }
+    if weighted {
+        inject_doc_count_helpers(&mut request);
+    }
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
+    if weighted {
+        apply_doc_counts(&mut res);
+    }
+
+    // the mapped type decides how a key is written back out
+    let types: Vec<Option<String>> = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .next()
+        .map(|st| {
+            let g = st.read();
+            fields.iter().map(|f| g.mapping.type_of(f).map(|t| t.to_string())).collect()
+        })
+        .unwrap_or_else(|| fields.iter().map(|_| None).collect());
+
+    let mut flat: Vec<(Vec<Value>, u64, serde_json::Map<String, Value>)> = Vec::new();
+    flatten_multi_terms(&res, 0, fields.len(), &mut Vec::new(), &mut flat);
+
+    let total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    let mut buckets: Vec<Value> = flat
+        .into_iter()
+        .filter(|(_, c, _)| *c >= min_doc_count)
+        .map(|(key, count, subs)| {
+            let key: Vec<Value> = key
+                .into_iter()
+                .zip(types.iter())
+                .map(|(v, t)| multi_terms_key(v, t.as_deref()))
+                .collect();
+            let as_string = key
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            let mut b = json!({
+                "key": key,
+                "key_as_string": as_string,
+                "doc_count": count,
+            });
+            for (k, v) in subs {
+                b[k] = v;
+            }
+            b
+        })
+        .collect();
+
+    // `order` names sub-aggregations or the bucket itself, and may name
+    // several in turn; without it, most documents first
+    let orders = parse_multi_terms_order(spec.get("order"));
+    buckets.sort_by(|a, b| {
+        for (key, desc) in &orders {
+            let ord = compare_bucket_by(a, b, key);
+            let ord = if *desc { ord.reverse() } else { ord };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        // a settled order among equals
+        let k = |v: &Value| {
+            v.get("key_as_string").and_then(|s| s.as_str()).unwrap_or("").to_string()
+        };
+        k(a).cmp(&k(b))
+    });
+    let kept: u64 = buckets.iter().take(size).map(|b| {
+        b.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0)
+    }).sum();
+    buckets.truncate(size);
+    Ok(json!({
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": total.saturating_sub(kept),
+        "buckets": buckets,
+    }))
+}
+
+/// Read the `order` clause: one object, or several applied in turn.
+fn parse_multi_terms_order(order: Option<&Value>) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut take = |v: &Value| {
+        if let Some(o) = v.as_object() {
+            for (k, dir) in o {
+                let desc = dir.as_str().map(|d| d == "desc").unwrap_or(false);
+                out.push((k.clone(), desc));
+            }
+        }
+    };
+    match order {
+        Some(Value::Array(items)) => items.iter().for_each(&mut take),
+        Some(v) => take(v),
+        None => out.push(("_count".to_string(), true)),
+    }
+    if out.is_empty() {
+        out.push(("_count".to_string(), true));
+    }
+    out
+}
+
+/// Compare two buckets by one ordering key: the document count, the key
+/// itself, or the value of a sub-aggregation.
+fn compare_bucket_by(a: &Value, b: &Value, key: &str) -> Ordering {
+    match key {
+        "_count" => {
+            let c = |v: &Value| v.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0);
+            c(a).cmp(&c(b))
+        }
+        "_key" | "_term" => {
+            let k = |v: &Value| {
+                v.get("key_as_string").and_then(|s| s.as_str()).unwrap_or("").to_string()
+            };
+            k(a).cmp(&k(b))
+        }
+        metric => {
+            let m = |v: &Value| {
+                v.pointer(&format!("/{metric}/value")).and_then(|x| x.as_f64()).unwrap_or(f64::MIN)
+            };
+            m(a).partial_cmp(&m(b)).unwrap_or(Ordering::Equal)
+        }
+    }
+}
+
+/// A key element in the spelling its field's type is read in.
+fn multi_terms_key(v: Value, ty: Option<&str>) -> Value {
+    match ty {
+        Some("ip") => v
+            .as_str()
+            .and_then(crate::store::ip_from_canonical)
+            .map(Value::String)
+            .unwrap_or(v),
+        Some("boolean") => match v.as_u64() {
+            Some(n) => Value::Bool(n != 0),
+            None => v,
+        },
+        Some("date") | Some("date_nanos") => v
+            .as_str()
+            .and_then(crate::store::canonical_date_str)
+            .map(Value::String)
+            .unwrap_or(v),
+        _ => v,
+    }
+}
+
+fn flatten_multi_terms(
+    node: &Value,
+    depth: usize,
+    total_depth: usize,
+    key: &mut Vec<Value>,
+    out: &mut Vec<(Vec<Value>, u64, serde_json::Map<String, Value>)>,
+) {
+    let Some(buckets) = node.pointer(&format!("/__m{depth}/buckets")).and_then(|b| b.as_array())
+    else {
+        return;
+    };
+    for b in buckets {
+        key.push(b.get("key").cloned().unwrap_or(Value::Null));
+        if depth + 1 < total_depth {
+            flatten_multi_terms(b, depth + 1, total_depth, key, out);
+        } else {
+            let count = b.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+            let mut subs = serde_json::Map::new();
+            if let Some(o) = b.as_object() {
+                for (k, v) in o {
+                    if k != "key" && k != "doc_count" && k != "key_as_string" && !k.starts_with("__m")
+                    {
+                        subs.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            out.push((key.clone(), count, subs));
+        }
+        key.pop();
+    }
+}
 
 /// A composite aggregation over `terms` sources.
 ///
