@@ -454,6 +454,7 @@ pub fn write_doc_raw(
         }
         with.to_string()
     };
+    st.has_doc_count |= source.get("_doc_count").is_some();
     st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);

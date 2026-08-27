@@ -400,6 +400,8 @@ pub struct IdxState {
     /// index written before kinds were tracked has partial information, and
     /// narrowing a range with it would silently drop matches.
     pub kinds_complete: bool,
+    /// Whether any document here carries an explicit `_doc_count`.
+    pub has_doc_count: bool,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -1193,6 +1195,7 @@ impl Store {
             seen_shapes: std::collections::HashSet::new(),
             observed_kinds: HashMap::new(),
             kinds_complete: true,
+            has_doc_count: false,
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),

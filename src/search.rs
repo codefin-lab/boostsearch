@@ -1124,6 +1124,77 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
     })
 }
 
+
+/// Weight aggregation buckets by `_doc_count`.
+///
+/// A document may stand for several, which every bucket count has to reflect.
+/// Rather than a second collection pass, each bucket agg gains two helpers --
+/// the sum of the field and how many documents carry it -- and the correction
+/// is `doc_count + sum - carried`: documents without the field still count
+/// once, documents with it count what it says.
+const DC_SUM: &str = "__obs_dc_sum";
+const DC_CNT: &str = "__obs_dc_count";
+
+fn inject_doc_count_helpers(node: &mut Value) {
+    let Some(o) = node.as_object_mut() else { return };
+    for (_, def) in o.iter_mut() {
+        let Some(d) = def.as_object_mut() else { continue };
+        let is_bucket = d.keys().any(|k| {
+            matches!(k.as_str(), "terms" | "histogram" | "date_histogram" | "range" | "filters")
+        });
+        let slot = if d.contains_key("aggregations") { "aggregations" } else { "aggs" };
+        if let Some(sub) = d.get_mut(slot) {
+            inject_doc_count_helpers(sub);
+        }
+        if !is_bucket {
+            continue;
+        }
+        let subs = d.entry(slot).or_insert_with(|| json!({}));
+        if let Some(m) = subs.as_object_mut() {
+            m.insert(DC_SUM.into(), json!({"sum": {"field": "_doc_count"}}));
+            m.insert(DC_CNT.into(), json!({"value_count": {"field": "_doc_count"}}));
+        }
+    }
+}
+
+fn apply_doc_counts(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                for b in buckets.iter_mut() {
+                    let sum = b.pointer(&format!("/{DC_SUM}/value")).and_then(|v| v.as_f64());
+                    let cnt = b.pointer(&format!("/{DC_CNT}/value")).and_then(|v| v.as_f64());
+                    if let (Some(sum), Some(cnt)) = (sum, cnt) {
+                        let base = b.get("doc_count").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        b["doc_count"] = json!((base + sum - cnt).max(0.0) as u64);
+                    }
+                    if let Some(m) = b.as_object_mut() {
+                        m.remove(DC_SUM);
+                        m.remove(DC_CNT);
+                    }
+                }
+                // the correction can reorder buckets a count-ordered agg sorted
+                // before it was applied
+                if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                    buckets.sort_by(|a, b| {
+                        let get = |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        get(b).cmp(&get(a))
+                    });
+                }
+            }
+            for (_, v) in o.iter_mut() {
+                apply_doc_counts(v);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                apply_doc_counts(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -1295,6 +1366,16 @@ pub fn run(
         }
     }
     let mut agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
+    // buckets have to be weighted only where a document stands for several
+    let weighted = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().has_doc_count);
+    if weighted {
+        if let Some(a) = agg_json.as_mut() {
+            inject_doc_count_helpers(a);
+        }
+    }
     if let Some(a) = agg_json.as_mut() {
         // a filter aggregation can carry a terms lookup too
         resolve_terms_lookups(store, a)?;
@@ -1325,6 +1406,7 @@ pub fn run(
                     // tantivy's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
+                    || def.get("composite").is_some()
                     // calendar units are not fixed lengths, which is all
                     // tantivy's date histogram knows how to step by
                     || def
@@ -1809,6 +1891,8 @@ pub fn run(
                 "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
                     .unwrap_or_else(|| json!({}))
             }))
+        } else if def.get("composite").is_some() {
+            run_composite_agg(store, &targets, &query_json, def, weighted)
         } else if def.get("date_histogram").is_some() {
             run_calendar_histogram(store, &targets, &query_json, def)
         } else if def.get("terms").is_some() {
@@ -1831,6 +1915,9 @@ pub fn run(
         (Some(acc), Some(req)) => match acc.into_final_result(req, Default::default()) {
             Ok(res) => serde_json::to_value(res).ok().map(|mut v| {
                 recompute_extended_stats(&mut v);
+                if weighted {
+                    apply_doc_counts(&mut v);
+                }
                 apply_bucket_orders(&mut v, &bucket_orders);
                 reattach_meta(&mut v, &agg_meta);
                 v
@@ -2351,6 +2438,142 @@ fn run_hdr_percentiles(
 /// range filter run through the ordinary query path, which also means
 /// sub-aggregations come for free. The cost is one search per bucket, which
 /// suits the handful of buckets a calendar histogram usually spans.
+
+/// A composite aggregation over `terms` sources.
+///
+/// The sources are run as nested `terms` aggregations and the resulting tree is
+/// flattened into one bucket per combination, which is what a composite is. Key
+/// order is ascending across the whole tuple, as the paging contract requires.
+fn run_composite_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("composite").cloned().unwrap_or(json!({}));
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let after = spec.get("after").cloned();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    // `sources` is a list of single-key objects, each naming one source
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for entry in spec.get("sources").and_then(|v| v.as_array()).into_iter().flatten() {
+        let Some((name, body)) = entry.as_object().and_then(|o| o.iter().next()) else {
+            continue;
+        };
+        let Some(field) = body.pointer("/terms/field").and_then(|f| f.as_str()) else {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "[composite] only supports `terms` sources",
+            ));
+        };
+        sources.push((name.clone(), field.to_string()));
+    }
+    if sources.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[composite] requires at least one source",
+        ));
+    }
+
+    // nest the sources outermost-first; the innermost carries the sub-aggs
+    let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+    for (i, (_, field)) in sources.iter().enumerate().rev() {
+        let mut node = json!({
+            "terms": {"field": field, "size": 65_536, "order": {"_key": "asc"}}
+        });
+        if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            node["aggs"] = request;
+        }
+        request = json!({format!("__c{i}"): node});
+    }
+    if weighted {
+        inject_doc_count_helpers(&mut request);
+    }
+
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
+    if weighted {
+        apply_doc_counts(&mut res);
+    }
+
+    let mut flat: Vec<Value> = Vec::new();
+    flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
+    flat.sort_by(|a, b| composite_key_order(a, b, &sources));
+
+    if let Some(after) = after.as_ref().and_then(|a| a.as_object()) {
+        let marker = json!({"key": Value::Object(after.clone())});
+        flat.retain(|b| composite_key_order(b, &marker, &sources) == Ordering::Greater);
+    }
+    let more = flat.len() > size;
+    flat.truncate(size);
+    let mut out = json!({"buckets": flat});
+    if more || after.is_some() {
+        if let Some(last) = out["buckets"].as_array().and_then(|a| a.last()) {
+            out["after_key"] = last["key"].clone();
+        }
+    }
+    Ok(out)
+}
+
+fn flatten_composite(
+    node: &Value,
+    depth: usize,
+    sources: &[(String, String)],
+    key: &mut serde_json::Map<String, Value>,
+    out: &mut Vec<Value>,
+) {
+    let Some(buckets) = node.pointer(&format!("/__c{depth}/buckets")).and_then(|b| b.as_array())
+    else {
+        return;
+    };
+    for b in buckets {
+        key.insert(sources[depth].0.clone(), b.get("key").cloned().unwrap_or(Value::Null));
+        if depth + 1 < sources.len() {
+            flatten_composite(b, depth + 1, sources, key, out);
+        } else {
+            let mut bucket = json!({
+                "key": Value::Object(key.clone()),
+                "doc_count": b.get("doc_count").cloned().unwrap_or(json!(0)),
+            });
+            // anything else under the bucket is a sub-aggregation of the composite
+            if let Some(o) = b.as_object() {
+                for (k, v) in o {
+                    if k != "key" && k != "doc_count" && !k.starts_with("__c") {
+                        bucket[k] = v.clone();
+                    }
+                }
+            }
+            out.push(bucket);
+        }
+    }
+    key.remove(&sources[depth].0);
+}
+
+fn composite_key_order(a: &Value, b: &Value, sources: &[(String, String)]) -> Ordering {
+    for (name, _) in sources {
+        let (x, y) = (a.pointer(&format!("/key/{name}")), b.pointer(&format!("/key/{name}")));
+        let ord = match (x, y) {
+            (Some(Value::Number(m)), Some(Value::Number(n))) => m
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&n.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
+            (Some(Value::String(m)), Some(Value::String(n))) => m.cmp(n),
+            (Some(m), Some(n)) => m.to_string().cmp(&n.to_string()),
+            _ => Ordering::Equal,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
+}
+
 fn run_calendar_histogram(
     store: &Store,
     targets: &[String],
