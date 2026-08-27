@@ -4,6 +4,13 @@ latency, and process RSS.
 
 Engine-agnostic on purpose -- the same run drives obsearch or a real OpenSearch
 node, so the numbers are comparable rather than self-reported.
+
+The qps figures here are NOT a throughput ceiling. This driver is Python, and
+one process saturates on its own GIL long before either engine does: measured
+against the same server, it reported 15k requests/s for a trivial GET where k6
+measured 152k, and 10k for a search where k6 measured 23k. Read the latency
+numbers, which are per-request and hold up; for throughput use a native load
+generator (`k6 run tools/load.js`).
 """
 import argparse, json, os, pathlib, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
