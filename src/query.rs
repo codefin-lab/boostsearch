@@ -90,12 +90,16 @@ fn normalized(ctx: &Ctx, field: &str, text: &str) -> String {
 
 /// Rewrite a value written as an IP into the form the field was indexed in.
 fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
-    if ctx.mapping.type_of(field) != Some("ip") {
-        return v.clone();
-    }
-    match v.as_str().and_then(crate::store::canonical_ip) {
-        Some(c) => Value::String(c),
-        None => v.clone(),
+    match ctx.mapping.type_of(field) {
+        Some("ip") => match v.as_str().and_then(crate::store::canonical_ip) {
+            Some(c) => Value::String(c),
+            None => v.clone(),
+        },
+        Some("date") | Some("date_nanos") => match crate::store::canonical_date(v) {
+            Some(c) => Value::String(c),
+            None => v.clone(),
+        },
+        _ => v.clone(),
     }
 }
 
@@ -386,6 +390,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
                 }
             }
+            let val = ip_value(ctx, &field, &val);
             if let Some(s) = val.as_str() {
                 let n = normalized(ctx, &field, s);
                 if n != s {
@@ -816,7 +821,7 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             }
         }
     }
-    if ctx.mapping.type_of(&field) == Some("ip") {
+    if matches!(ctx.mapping.type_of(&field), Some("ip" | "date" | "date_nanos")) {
         for b in [&mut lower, &mut upper] {
             if let Some((v, inclusive)) = b.clone() {
                 *b = Some((ip_value(ctx, &field, &v), inclusive));

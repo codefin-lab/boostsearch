@@ -1325,6 +1325,12 @@ pub fn run(
                     // tantivy's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
+                    // calendar units are not fixed lengths, which is all
+                    // tantivy's date histogram knows how to step by
+                    || def
+                        .get("date_histogram")
+                        .map(|d| d.get("calendar_interval").is_some())
+                        .unwrap_or(false)
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -1733,6 +1739,8 @@ pub fn run(
                 "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
                     .unwrap_or_else(|| json!({}))
             }))
+        } else if def.get("date_histogram").is_some() {
+            run_calendar_histogram(store, &targets, &query_json, def)
         } else if def.get("terms").is_some() {
             run_index_terms_agg(store, &targets, &query_json, def)
         } else {
@@ -2262,6 +2270,204 @@ fn run_hdr_percentiles(
             .map(|p| json!({"key": p, "value": hist.value_at(*p)}))
             .collect();
         Ok(json!({ "values": arr }))
+    }
+}
+
+
+/// A date histogram stepped by calendar units.
+///
+/// A month is not a fixed number of milliseconds, so tantivy's histogram --
+/// which steps by a constant -- cannot express one. Each bucket is instead a
+/// range filter run through the ordinary query path, which also means
+/// sub-aggregations come for free. The cost is one search per bucket, which
+/// suits the handful of buckets a calendar histogram usually spans.
+fn run_calendar_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    use tantivy::time::{Duration, OffsetDateTime};
+
+    let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let interval = spec
+        .get("calendar_interval")
+        .and_then(|v| v.as_str())
+        .unwrap_or("day")
+        .to_string();
+    let Some(unit) = CalendarUnit::parse(&interval) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("The supplied interval [{interval}] could not be parsed as a calendar interval."),
+        ));
+    };
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let min_doc_count =
+        spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // the span to cover comes from the extremes the query actually matches
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let probe = json!({
+        "__min": {"min": {"field": field}},
+        "__max": {"max": {"field": field}},
+    });
+    let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+    // the date column counts in nanoseconds, which is what min/max read out
+    let read = |k: &str| -> Option<f64> {
+        extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+    };
+    let (Some(lo_ns), Some(hi_ns)) = (read("__min"), read("__max")) else {
+        return Ok(json!({"buckets": []}));
+    };
+    let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
+    // bounds are written the way a document would be, so they arrive in
+    // milliseconds and have to meet the column's nanoseconds
+    let bound_ns = |key: &str| -> Option<f64> {
+        let v = bounds?.get(key)?;
+        crate::store::canonical_date(v)
+            .and_then(|d| crate::store::parse_date_lenient(&d))
+            .map(|d| d.unix_timestamp_nanos() as f64)
+    };
+    let lo_ns = bound_ns("min").unwrap_or(lo_ns);
+    let hi_ns = bound_ns("max").unwrap_or(hi_ns);
+
+    let to_dt = |ns: f64| -> Option<OffsetDateTime> {
+        OffsetDateTime::from_unix_timestamp_nanos(ns as i128).ok()
+    };
+    let (Some(lo), Some(hi)) = (to_dt(lo_ns), to_dt(hi_ns)) else {
+        return Ok(json!({"buckets": []}));
+    };
+
+    let mut buckets = Vec::new();
+    let mut cursor = unit.floor(lo);
+    let last = unit.floor(hi);
+    // a runaway interval would otherwise spin: no calendar histogram the suite
+    // or a sane request produces comes near this
+    let mut guard = 0;
+    while cursor <= last && guard < 100_000 {
+        guard += 1;
+        let next = unit.advance(cursor);
+        let range = json!({"range": {field.clone(): {
+            "gte": iso_millis(cursor),
+            "lt": iso_millis(next),
+            "format": "strict_date_optional_time",
+        }}});
+        let combined = combine(main_query, Some(range));
+        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        if count >= min_doc_count {
+            let mut b = json!({
+                "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
+                "key_as_string": iso_millis(cursor),
+                "doc_count": count,
+            });
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+            buckets.push(b);
+        }
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    let _ = Duration::seconds(0);
+    Ok(json!({"buckets": buckets}))
+}
+
+fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CalendarUnit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+impl CalendarUnit {
+    fn parse(s: &str) -> Option<CalendarUnit> {
+        Some(match s {
+            "minute" | "1m" => CalendarUnit::Minute,
+            "hour" | "1h" => CalendarUnit::Hour,
+            "day" | "1d" => CalendarUnit::Day,
+            "week" | "1w" => CalendarUnit::Week,
+            "month" | "1M" => CalendarUnit::Month,
+            "quarter" | "1q" => CalendarUnit::Quarter,
+            "year" | "1y" => CalendarUnit::Year,
+            _ => return None,
+        })
+    }
+
+    fn floor(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
+        use tantivy::time::{Date, Month, Time};
+        let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
+        match self {
+            CalendarUnit::Minute => dt.replace_second(0).unwrap().replace_nanosecond(0).unwrap(),
+            CalendarUnit::Hour => dt
+                .replace_minute(0)
+                .unwrap()
+                .replace_second(0)
+                .unwrap()
+                .replace_nanosecond(0)
+                .unwrap(),
+            CalendarUnit::Day => midnight(dt.date()),
+            // calendar weeks start on Monday
+            CalendarUnit::Week => {
+                let back = dt.weekday().number_days_from_monday() as i64;
+                midnight(dt.date() - tantivy::time::Duration::days(back))
+            }
+            CalendarUnit::Month => midnight(
+                Date::from_calendar_date(dt.year(), dt.month(), 1).unwrap(),
+            ),
+            CalendarUnit::Quarter => {
+                let m = ((dt.month() as u8 - 1) / 3) * 3 + 1;
+                midnight(
+                    Date::from_calendar_date(dt.year(), Month::try_from(m).unwrap(), 1).unwrap(),
+                )
+            }
+            CalendarUnit::Year => {
+                midnight(Date::from_calendar_date(dt.year(), Month::January, 1).unwrap())
+            }
+        }
+    }
+
+    fn advance(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
+        use tantivy::time::{Date, Duration, Month, Time};
+        let add_months = |dt: tantivy::time::OffsetDateTime, n: u32| {
+            let total = dt.year() * 12 + (dt.month() as i32 - 1) + n as i32;
+            let (y, m) = (total.div_euclid(12), total.rem_euclid(12) as u8 + 1);
+            Date::from_calendar_date(y, Month::try_from(m).unwrap(), 1)
+                .unwrap()
+                .with_time(Time::MIDNIGHT)
+                .assume_utc()
+        };
+        match self {
+            CalendarUnit::Minute => dt + Duration::minutes(1),
+            CalendarUnit::Hour => dt + Duration::hours(1),
+            CalendarUnit::Day => dt + Duration::days(1),
+            CalendarUnit::Week => dt + Duration::days(7),
+            CalendarUnit::Month => add_months(dt, 1),
+            CalendarUnit::Quarter => add_months(dt, 3),
+            CalendarUnit::Year => add_months(dt, 12),
+        }
     }
 }
 

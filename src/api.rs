@@ -421,7 +421,6 @@ pub fn write_doc_raw(
         ));
     }
     let (version, seq) = st.bump(id, true, existed);
-    st.observe(&source);
     // deleting is only needed when something is actually there to replace;
     // a bulk load of new documents should not queue a delete per document
     if existed {
@@ -455,8 +454,12 @@ pub fn write_doc_raw(
         }
         with.to_string()
     };
+    st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    // the kinds a query narrows against have to be the kinds actually indexed,
+    // which is the coerced view rather than what the client wrote
+    st.observe(&indexed);
     if !ignored.is_empty() {
         for f in &ignored {
             crate::store::remove_path(&mut indexed, f);

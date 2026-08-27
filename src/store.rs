@@ -119,6 +119,59 @@ impl Mapping {
     ///
     /// A normalizer transforms the value at index time rather than tokenising
     /// it, so the sub-field needs its own copy of the value in the index.
+    /// Note the fields a document maps dynamically.
+    ///
+    /// Only dates are inferred. Every other type is stored the same way
+    /// whether the mapping named it or not, but a date needs its own column,
+    /// and nothing downstream can build one without knowing the field is one.
+    pub fn learn_dynamic(&mut self, source: &Value) {
+        let mut found = Vec::new();
+        Self::sniff_dates(source, &mut String::new(), &self.types, &mut found);
+        for path in found {
+            self.types.insert(path, "date".into());
+        }
+    }
+
+    fn sniff_dates(
+        node: &Value,
+        path: &mut String,
+        known: &HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
+        match node {
+            Value::Object(o) => {
+                let base = path.len();
+                for (k, v) in o {
+                    if k.starts_with('_') {
+                        continue;
+                    }
+                    if base > 0 {
+                        path.push('.');
+                    }
+                    path.push_str(k);
+                    Self::sniff_dates(v, path, known, out);
+                    path.truncate(base);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    Self::sniff_dates(v, path, known, out);
+                }
+            }
+            Value::String(s) => {
+                // a full calendar date, not a bare year that happens to parse
+                let dated = s.len() >= 10
+                    && s.as_bytes()[4] == b'-'
+                    && s.as_bytes()[7] == b'-'
+                    && parse_date_lenient(s).is_some();
+                if dated && !known.contains_key(path.as_str()) {
+                    out.push(path.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// A knob declared on one field's mapping entry.
     pub fn field_option(&self, field: &str, key: &str) -> Option<Value> {
         let mut node = self.raw.get("properties")?;
@@ -1233,11 +1286,7 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 /// whatever it is given.
 fn value_is_valid(v: &Value, ty: &str) -> bool {
     match ty {
-        "date" | "date_nanos" => match v {
-            Value::Number(_) => true,
-            Value::String(s) => date_is_valid(s),
-            _ => false,
-        },
+        "date" | "date_nanos" => canonical_date(v).is_some(),
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
@@ -1249,23 +1298,6 @@ fn value_is_valid(v: &Value, ty: &str) -> bool {
             || matches!(v.as_str(), Some("true") | Some("false")),
         _ => true,
     }
-}
-
-/// The date forms `strict_date_optional_time` accepts, which is the default
-/// OpenSearch applies when a mapping names no format.
-fn date_is_valid(s: &str) -> bool {
-    if crate::query::parse_datetime(s).is_some() {
-        return true;
-    }
-    let body = s.split(['T', ' ']).next().unwrap_or(s);
-    let parts: Vec<&str> = body.split('-').collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return false;
-    }
-    let widths = [4usize, 2, 2];
-    parts.iter().enumerate().all(|(i, p)| {
-        p.len() == widths[i] && p.chars().all(|c| c.is_ascii_digit())
-    })
 }
 
 /// Field values that cannot be read as their mapped type.
@@ -1376,6 +1408,92 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
     }
 }
 
+/// The date forms OpenSearch's default `strict_date_optional_time` accepts.
+///
+/// A bare `2024-08-12` is a date to OpenSearch but not to RFC 3339, and a
+/// field indexed as text rather than as a date has no column for a range or an
+/// aggregation to read.
+pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Month, OffsetDateTime, Time};
+    if let Some(dt) = crate::query::parse_datetime(s) {
+        return Some(dt.into_utc());
+    }
+    let (day_part, time_part) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t.trim_end_matches('Z'))),
+        None => (s, None),
+    };
+    let nums: Vec<&str> = day_part.split('-').collect();
+    if nums.is_empty() || nums.len() > 3 {
+        return None;
+    }
+    let widths = [4usize, 2, 2];
+    let mut parts = [1i64, 1, 1];
+    for (i, p) in nums.iter().enumerate() {
+        if p.len() != widths[i] || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        parts[i] = p.parse().ok()?;
+    }
+    let date = Date::from_calendar_date(
+        parts[0] as i32,
+        Month::try_from(parts[1] as u8).ok()?,
+        parts[2] as u8,
+    )
+    .ok()?;
+    let time = match time_part {
+        None => Time::MIDNIGHT,
+        Some(t) => {
+            let (hms, frac) = match t.split_once('.') {
+                Some((a, b)) => (a, b),
+                None => (t, ""),
+            };
+            let f: Vec<&str> = hms.split(':').collect();
+            if f.is_empty() || f.len() > 3 {
+                return None;
+            }
+            let mut c = [0u32; 3];
+            for (i, p) in f.iter().enumerate() {
+                c[i] = p.parse().ok()?;
+            }
+            let millis: u32 = if frac.is_empty() {
+                0
+            } else {
+                let mut d = frac.trim_end_matches(|c: char| !c.is_ascii_digit()).to_string();
+                d.truncate(3);
+                while d.len() < 3 {
+                    d.push('0');
+                }
+                d.parse().ok()?
+            };
+            Time::from_hms_milli(c[0] as u8, c[1] as u8, c[2] as u8, millis as u16).ok()?
+        }
+    };
+    Some(OffsetDateTime::new_utc(date, time))
+}
+
+/// A date in the one spelling the index holds.
+pub fn canonical_date(v: &Value) -> Option<String> {
+    let dt = match v {
+        // a bare number is epoch millis, which is what OpenSearch assumes
+        Value::Number(n) => tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+            (n.as_f64()? as i128) * 1_000_000,
+        )
+        .ok()?,
+        Value::String(s) => parse_date_lenient(s)?,
+        _ => return None,
+    };
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    ))
+}
+
 /// An IP in a form that sorts the way addresses do.
 ///
 /// Text comparison puts "192.168.0.10" below "192.168.0.9", so ranges and
@@ -1414,6 +1532,9 @@ pub fn canonical_cidr(s: &str) -> Option<(String, String)> {
 }
 
 fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
+    if matches!(ty, Some("date") | Some("date_nanos")) {
+        return canonical_date(v).map(Value::String);
+    }
     let s = v.as_str()?;
     match ty? {
         "byte" | "short" | "integer" | "long" | "unsigned_long" => {
