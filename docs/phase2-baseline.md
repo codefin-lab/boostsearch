@@ -434,3 +434,54 @@ thread เดียว median ดีกว่า**ทุกระดับ** แ
 ได้ 21,364 ที่ vus=64 แย่กว่าทั้งสองแบบตายตัว เพราะตัดสินทีละ query
 ตามสภาพชั่วขณะ ทำให้ปนกันแล้วแย่งกันเอง · ตัวแปรที่ใช้ได้คือรูปของ query
 ซึ่งรู้แน่นอนตั้งแต่ต้น ไม่ใช่สภาพโหลดที่แกว่ง
+
+## รอบที่เจ็ด — ไล่ aggregation แล้วชนเพดานของ tantivy
+
+`terms` agg เป็นรูปที่แพงที่สุดที่เหลือ ไล่ต่อแล้วได้ข้อสรุปว่า **หยุดตรงนี้**
+
+### แก้ตัวเลขที่เคยรายงานผิด
+
+เคยเขียนว่า aggregation อยู่ที่ **1.77 ns/doc "ใกล้เพดาน memory bandwidth"**
+ตัวเลขนั้นมาจาก **wall time ที่ tantivy กระจายงานข้าม 8 segment ขนานกัน**
+ไม่ใช่ CPU จริง
+
+วัดใหม่บน index ที่ forcemerge เหลือ 1 segment (ไม่มีอะไรให้ขนาน):
+
+| segment | collect (wall) | ตีความ |
+|---|---:|---|
+| 8 | 172 µs | งานถูกหาร 8 |
+| 1 | **470 µs** | CPU จริง |
+
+⇒ ต้นทุนจริงคือ **~2.3 ns/doc** ไม่ใช่ 0.86 ⇒ **ห่างเพดานมากกว่าที่เคยบอก**
+
+ผลพลอยได้: **segment เยอะทำให้ aggregation latency ดีกว่า** ที่ CPU เท่ากัน
+(ขนานได้) — forcemerge จึงไม่ใช่ของฟรีสำหรับ workload ที่ agg หนัก
+
+### วัดแล้วไม่คุ้ม / ไม่มีผล
+
+| สิ่งที่ลอง | ผล |
+|---|---|
+| forcemerge 8 → 1 segment | throughput +3% (แต่ latency แย่ลง) |
+| route ตัวเลขไป `_dyn` | ที่ 1 segment **เท่ากันเป๊ะ** (470/470, 459/459, 457/458) — กำไร 25% ที่เคยวัดก็เป็น wall ของ 8 segment เหมือนกัน |
+| single-thread สำหรับ agg | เท่าเดิม (1,879 vs 1,880 qps ที่ vus=1) |
+
+### profile ชี้ไปที่ไหน
+
+`/usr/bin/sample` ตอน saturate — ระวังว่าเลขเป็น **inclusive** ไม่ใช่ leaf
+(อ่านผิดรอบแรก แล้วไปสรุปว่า per-segment setup เป็นตัวปัญหา ซึ่ง forcemerge
+พิสูจน์แล้วว่าไม่ใช่) ตัวที่เป็น leaf จริง ๆ:
+
+`ColumnValues::get_vals` · `sstable DeltaReader::advance` · `IndexMap::insert_full`
+· `memmove` — ทั้งหมดคือ **งานในตัว terms aggregation ของ tantivy เอง**
+(อ่านค่า column → map เป็น term ordinal → เพิ่ม bucket)
+
+⇒ ไม่มีคันโยกเหลือฝั่งเรา นอกจากแก้ tantivy หรือเปลี่ยน data layout
+
+### คันโยกเดียวที่เหลือจริง: index sorting
+
+tantivy รองรับ `IndexSettings::sort_by_field` ถ้าเรียงเอกสารตาม field ที่ bucket
+บ่อย ๆ (เช่น timestamp สำหรับ log) block pre-aggregation / skip list จะทำงานได้
+— ตรงกับเงื่อนไขที่ OpenSearch ระบุไว้ใน #19384 เอง
+
+เป็นการเปลี่ยนโครงสร้าง ไม่ใช่ micro-optimization และคุ้มเฉพาะเมื่อรู้ว่า
+workload จริง bucket ด้วย field ไหน — **ยังไม่ทำ**
