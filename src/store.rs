@@ -917,6 +917,16 @@ pub fn normalize_alias(def: &Value) -> Value {
             out.entry(key.to_string()).or_insert_with(|| r.clone());
         }
     }
+    // a routing value is a string even when it was written as a number
+    for key in ["index_routing", "search_routing"] {
+        if let Some(v) = out.get(key) {
+            if let Some(n) = v.as_i64() {
+                out.insert(key.to_string(), Value::String(n.to_string()));
+            } else if let Some(f) = v.as_f64() {
+                out.insert(key.to_string(), Value::String(f.to_string()));
+            }
+        }
+    }
     Value::Object(out)
 }
 

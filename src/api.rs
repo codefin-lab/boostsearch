@@ -2361,13 +2361,7 @@ fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) 
         let g = st.read();
         let mut aliases = serde_json::Map::new();
         for (a, def) in &g.aliases {
-            let wanted = match name_expr {
-                None | Some("*") | Some("_all") | Some("") => true,
-                Some(e) => e.split(',').any(|pat| {
-                    pat == a || crate::store::wildcard_to_regex(pat.trim()).is_match(a)
-                }),
-            };
-            if wanted {
+            if alias_name_wanted(name_expr, a) {
                 aliases.insert(a.clone(), def.clone());
             }
         }
@@ -2380,6 +2374,93 @@ fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) 
         out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
     }
     Value::Object(out)
+}
+
+
+/// Does an alias fall inside the expression naming it?
+///
+/// The expression is a comma list where a leading `-` removes rather than
+/// adds, so `test_alias*,-test_alias_1` is every matching alias but that one.
+fn alias_name_wanted(expr: Option<&str>, alias: &str) -> bool {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return true };
+    if matches!(expr, "*" | "_all") {
+        return true;
+    }
+    let mut wanted = false;
+    for pat in expr.split(',') {
+        let pat = pat.trim();
+        let (neg, pat) = match pat.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, pat),
+        };
+        let hit = pat == alias
+            || pat == "*"
+            || pat == "_all"
+            || crate::store::wildcard_to_regex(pat).is_match(alias);
+        if hit {
+            wanted = !neg;
+        }
+    }
+    wanted
+}
+
+/// The names in the expression that must exist for the request to succeed.
+///
+/// A pattern that matches nothing is simply an empty result, but a plain name
+/// that matches nothing is a request for something that is not there.
+fn alias_names_required(expr: Option<&str>) -> Vec<String> {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
+    expr.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// The 404 this endpoint answers with carries the reason as a bare string
+/// rather than the usual error object.
+fn aliases_missing_response(names: &[String], view: &Value) -> Response {
+    let mut names: Vec<String> = names.to_vec();
+    names.sort();
+    let label = if names.len() > 1 { "aliases" } else { "alias" };
+    // the aliases that were found are still reported alongside the complaint
+    let mut body = view.clone();
+    if !body.is_object() {
+        body = json!({});
+    }
+    if let Some(o) = body.as_object_mut() {
+        o.insert("error".into(), json!(format!("{label} [{}] missing", names.join(","))));
+        o.insert("status".into(), json!(404));
+    }
+    (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+}
+
+/// Which of the required names no index carries.
+fn alias_names_missing(view: &Value, expr: Option<&str>) -> Vec<String> {
+    // an exclusion at the head of the list has nothing to exclude from, and is
+    // reported as it was written, minus sign and all
+    if let Some(first) = expr
+        .filter(|e| !e.is_empty())
+        .and_then(|e| e.split(',').next())
+        .map(|p| p.trim())
+    {
+        if first.starts_with('-') && !first.contains('*') {
+            return vec![first.to_string()];
+        }
+    }
+    let present: std::collections::HashSet<&str> = view
+        .as_object()
+        .map(|o| {
+            o.values()
+                .filter_map(|v| v.get("aliases").and_then(|a| a.as_object()))
+                .flat_map(|a| a.keys().map(|k| k.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    alias_names_required(expr)
+        .into_iter()
+        .filter(|n| !present.contains(n.as_str()))
+        .collect()
 }
 
 /// `GET /{index}/_alias` -- every alias on the named indices.
@@ -2406,22 +2487,9 @@ pub async fn get_alias_scoped(
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
     let view = alias_view(&store, idx.as_deref(), name.as_deref());
-    // asking for a specific alias that exists nowhere is a 404
-    if let Some(n) = &name {
-        if !n.contains('*') && n != "_all" {
-            let any = view.as_object().map(|o| {
-                o.values().any(|v| {
-                    v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
-                })
-            }).unwrap_or(false);
-            if !any {
-                return err(
-                    StatusCode::NOT_FOUND,
-                    "aliases_not_found_exception",
-                    format!("alias [{n}] missing"),
-                );
-            }
-        }
+    let missing = alias_names_missing(&view, name.as_deref());
+    if !missing.is_empty() {
+        return aliases_missing_response(&missing, &view);
     }
     respond(&p, view)
 }
@@ -2432,20 +2500,9 @@ pub async fn index_alias_get(
     Query(p): Query<Params>,
 ) -> Response {
     let view = alias_view(&store, Some(&index), Some(&name));
-    let any = view
-        .as_object()
-        .map(|o| {
-            o.values().any(|v| {
-                v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !any && !name.contains('*') && name != "_all" {
-        return err(
-            StatusCode::NOT_FOUND,
-            "aliases_not_found_exception",
-            format!("alias [{name}] missing"),
-        );
+    let missing = alias_names_missing(&view, Some(&name));
+    if !missing.is_empty() {
+        return aliases_missing_response(&missing, &view);
     }
     respond(&p, view)
 }
@@ -2485,16 +2542,96 @@ pub async fn exists_alias(
     if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
 
-pub async fn put_alias(
-    State(store): State<Store>,
-    Path((index, name)): Path<(String, String)>,
-    Query(p): Query<Params>,
+/// The keys an alias body may carry that are not part of the alias itself.
+const ALIAS_ADDRESSING: &[&str] = &["index", "indices", "alias", "aliases"];
+const ALIAS_OPTIONS: &[&str] = &[
+    "filter",
+    "routing",
+    "index_routing",
+    "search_routing",
+    "is_write_index",
+    "is_hidden",
+    "must_exist",
+];
+
+/// Create or replace an alias.
+///
+/// The index and the alias name may each arrive in the path or in the body,
+/// which is four spellings of the same request.
+async fn put_alias_inner(
+    store: Store,
+    index: Option<String>,
+    name: Option<String>,
+    p: Params,
     body: String,
 ) -> Response {
-    let def: Value = parse_body(&body).unwrap_or(json!({}));
+    let mut def: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    if !def.is_object() {
+        def = json!({});
+    }
+    let from_body = |keys: &[&str]| -> Option<String> {
+        let o = def.as_object()?;
+        for k in keys {
+            match o.get(*k) {
+                Some(Value::String(s)) => return Some(s.clone()),
+                Some(Value::Array(a)) => {
+                    let joined: Vec<String> =
+                        a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                    if !joined.is_empty() {
+                        return Some(joined.join(","));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let index = index.filter(|s| !s.is_empty()).or_else(|| from_body(&["index", "indices"]));
+    let name = name.filter(|s| !s.is_empty()).or_else(|| from_body(&["alias", "aliases"]));
+
+    let (Some(index), Some(name)) = (index, name) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: index is missing;2: alias is missing;",
+        );
+    };
+    if let Some(o) = def.as_object() {
+        for key in o.keys() {
+            let key: &str = key;
+            if !ALIAS_ADDRESSING.contains(&key) && !ALIAS_OPTIONS.contains(&key) {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "x_content_parse_exception",
+                    format!("unknown field [{key}]"),
+                );
+            }
+        }
+    }
+    // an alias is a name for indices, so it can be neither a pattern nor the
+    // name an index already answers to
+    if name.contains('*') || name.contains(',') {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_alias_name_exception",
+            format!("Invalid alias name [{name}]"),
+        );
+    }
+    if store.names().iter().any(|n| *n == name) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_alias_name_exception",
+            format!("Invalid alias name [{name}]: an index or data stream exists with the same name as the alias"),
+        );
+    }
     let targets = store.resolve(&index);
     if targets.is_empty() {
         return no_such_index(&index);
+    }
+    if let Some(o) = def.as_object_mut() {
+        for k in ALIAS_ADDRESSING {
+            o.remove(*k);
+        }
     }
     for n in targets {
         if let Some(st) = store.get(&n) {
@@ -2502,6 +2639,44 @@ pub async fn put_alias(
         }
     }
     respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn put_alias(
+    State(store): State<Store>,
+    Path((index, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, Some(index), Some(name), p, body).await
+}
+
+/// `PUT /{index}/_alias` -- the alias name comes from the body.
+pub async fn put_alias_on_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, Some(index), None, p, body).await
+}
+
+/// `PUT /_alias/{name}` -- the indices come from the body.
+pub async fn put_alias_named(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, None, Some(name), p, body).await
+}
+
+/// `PUT /_alias` -- both come from the body.
+pub async fn put_alias_body(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, None, None, p, body).await
 }
 
 pub async fn delete_alias(

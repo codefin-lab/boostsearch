@@ -65,10 +65,19 @@ fn app(store: Store) -> Router {
         .route("/_cluster/state/{*rest}", get(api::cluster_state))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
         // --- aliases ---
-        .route("/_alias/{*rest}", get(api::get_alias_scoped).head(api::exists_alias))
+        .route(
+            "/_alias/{*rest}",
+            get(api::get_alias_scoped)
+                .head(api::exists_alias)
+                .put(api::put_alias_named)
+                .post(api::put_alias_named),
+        )
         .route("/_aliases", post(api::update_aliases))
         .route("/{index}/_alias/{name}", put(api::put_alias).post(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
+        .route("/{index}/_alias", put(api::put_alias_on_index))
+        .route("/{index}/_aliases", put(api::put_alias_on_index))
+        .route("/_alias", put(api::put_alias_body))
         // --- templates ---
         .route("/_template/{name}",
                put(api::put_template).post(api::put_template)
