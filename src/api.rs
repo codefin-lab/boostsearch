@@ -421,7 +421,6 @@ pub fn write_doc_raw(
         ));
     }
     let (version, seq) = st.bump(id, true, existed);
-    st.observe(&source);
     // deleting is only needed when something is actually there to replace;
     // a bulk load of new documents should not queue a delete per document
     if existed {
@@ -455,8 +454,23 @@ pub fn write_doc_raw(
         }
         with.to_string()
     };
+    st.has_doc_count |= source.get("_doc_count").is_some();
+    if let Err(field) = st.mapping.apply_dynamic_templates(&source) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "strict_dynamic_mapping_exception",
+            format!(
+                "mapping set to strict_allow_templates, dynamic introduction of [{field}] \
+                 within [_doc] is not allowed"
+            ),
+        ));
+    }
+    st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    // the kinds a query narrows against have to be the kinds actually indexed,
+    // which is the coerced view rather than what the client wrote
+    st.observe(&indexed);
     if !ignored.is_empty() {
         for f in &ignored {
             crate::store::remove_path(&mut indexed, f);
@@ -1857,7 +1871,10 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         .iter()
         .filter(|(k, _)| match want_groups {
             None => false,
-            Some(w) => w.iter().any(|g| g == "_all" || g == *k),
+            // the request may name groups outright, or by pattern
+            Some(w) => w.iter().any(|g| {
+                g == "_all" || g == *k || crate::store::glob_match(g, k)
+            }),
         })
         .map(|(k, v)| {
             (k.clone(), json!({
@@ -2059,7 +2076,16 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
             "total": s,
         });
         if level == "shards" {
-            entry["shards"] = json!({"0": []});
+            entry["shards"] = json!({"0": [{
+                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                "commit": {
+                    "id": st.read().commit_id(),
+                    "generation": 1,
+                    "user_data": {},
+                    "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0)),
+                },
+            }]});
         }
         indices.insert(n.clone(), entry);
     }

@@ -592,6 +592,30 @@ fn check_agg_params(name: &str, def: &Value, owner: &str) -> std::result::Result
             }
         }
         "percentiles" | "median_absolute_deviation" => {
+            if let Some(d) = def.pointer("/hdr/number_of_significant_value_digits") {
+                if !matches!(d.as_i64(), Some(0..=5)) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "[numberOfSignificantValueDigits] must be between 0 and 5",
+                    ));
+                }
+            }
+            // `percents` names which percentiles to report, so an empty or
+            // unreadable list leaves nothing to compute
+            if let Some(p) = def.get("percents") {
+                let ok = p
+                    .as_array()
+                    .map(|a| !a.is_empty() && a.iter().all(|v| v.as_f64().is_some()))
+                    .unwrap_or(false);
+                if !ok {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "x_content_parse_exception",
+                        "[percents] must be a non-empty list of numbers",
+                    ));
+                }
+            }
             if let Some(v) = num("compression") {
                 if v <= 0.0 {
                     return Err(bad("compression", v, "0"));
@@ -609,7 +633,17 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
         check_agg_params(name, def, owner)?;
         if NUMERIC_AGGS.contains(&name.as_str()) {
             if let Some(f) = def.get("field").and_then(|v| v.as_str()) {
-                if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) {
+                // a field the mapping never named is still a text field if
+                // text is all it has ever held
+                let dynamic_text = ctx.mapping.type_of(f).is_none()
+                    && ctx.kinds_complete
+                    && ctx
+                        .observed_kinds
+                        .get(f)
+                        .map(|k| *k == crate::store::KIND_STR)
+                        .unwrap_or(false);
+                if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) || dynamic_text
+                {
                     return Err(err(
                         StatusCode::BAD_REQUEST,
                         "illegal_argument_exception",
@@ -768,6 +802,26 @@ fn apply_bucket_orders(result: &mut Value, orders: &[(String, String, bool)]) {
     }
 }
 
+/// A string `missing` on a field the index holds no values for.
+///
+/// The columns a text substitute would need do not exist, so the aggregation
+/// reads nothing and answers zero. Every document takes the same substitute
+/// though, which makes the distinct count one whatever that value is -- so a
+/// numeric stand-in gives the right answer through a column that does exist.
+/// Only applied where the field is known to hold nothing at all.
+fn substitute_unusable_missing(body: &mut Value, ctx: &Ctx) {
+    let Some(o) = body.as_object_mut() else { return };
+    if !matches!(o.get("missing"), Some(Value::String(_))) {
+        return;
+    }
+    let Some(field) = o.get("field").and_then(|f| f.as_str()) else { return };
+    let unobserved = ctx.kinds_complete
+        && ctx.observed_kinds.get(field).map(|k| *k == 0).unwrap_or(true);
+    if unobserved {
+        o.insert("missing".into(), json!(0));
+    }
+}
+
 fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     match node {
         Value::Object(o) => {
@@ -798,7 +852,10 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }
-            for (_, v) in o.iter_mut() {
+            for (k, v) in o.iter_mut() {
+                if k == "cardinality" {
+                    substitute_unusable_missing(v, ctx);
+                }
                 rewrite_agg_fields(v, ctx);
             }
         }
@@ -960,6 +1017,218 @@ fn source_of(searcher: &Searcher, st: &IdxState, addr: DocAddress) -> Option<(St
     Some((id, src))
 }
 
+
+/// Run an aggregation with the phase boundaries laid bare.
+///
+/// `searcher.search` folds the whole run into one call, so the phases are
+/// driven here instead: a leaf collector per segment, the scan, the harvest,
+/// and the merge. The numbers reported are the real elapsed time of each --
+/// nothing is estimated -- though our engine has no separate initialise step
+/// beyond building the collector, which is what `initialize` measures.
+fn profiled_agg_search(
+    searcher: &Searcher,
+    q: &dyn tantivy::query::Query,
+    aggs: Aggregations,
+    ctxp: AggContextParams,
+    ctx: &Ctx,
+) -> (tantivy::Result<IntermediateAggregationResults>, Value) {
+    use std::time::Instant;
+    use tantivy::collector::{Collector, SegmentCollector};
+
+    let mut ns = std::collections::BTreeMap::new();
+    let t = Instant::now();
+    let collector = DistributedAggregationCollector::from_aggs(aggs.clone(), ctxp);
+    ns.insert("initialize", t.elapsed().as_nanos() as u64);
+
+    let started = Instant::now();
+    let mut run = || -> tantivy::Result<IntermediateAggregationResults> {
+        let weight = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+        let mut fruits = Vec::new();
+        let (mut leaf_ns, mut collect_ns, mut post_ns) = (0u64, 0u64, 0u64);
+        for (ord, reader) in searcher.segment_readers().iter().enumerate() {
+            let t = Instant::now();
+            let mut child = collector.for_segment(ord as u32, reader)?;
+            leaf_ns += t.elapsed().as_nanos() as u64;
+
+            let t = Instant::now();
+            weight.for_each_no_score(reader, &mut |docs| {
+                for d in docs {
+                    child.collect(*d, 0.0);
+                }
+            })?;
+            collect_ns += t.elapsed().as_nanos() as u64;
+
+            let t = Instant::now();
+            fruits.push(child.harvest());
+            post_ns += t.elapsed().as_nanos() as u64;
+        }
+        ns.insert("build_leaf_collector", leaf_ns.max(1));
+        ns.insert("collect", collect_ns.max(1));
+        ns.insert("post_collection", post_ns.max(1));
+
+        let t = Instant::now();
+        let merged = collector.merge_fruits(fruits)?;
+        ns.insert("build_aggregation", (t.elapsed().as_nanos() as u64).max(1));
+        Ok(merged)
+    };
+    let res = run();
+    for k in ["build_leaf_collector", "collect", "post_collection", "build_aggregation"] {
+        ns.entry(k).or_insert(1);
+    }
+    let total: u64 = ns.values().sum();
+
+    let entries: Vec<Value> = aggs
+        .iter()
+        .map(|(name, agg)| {
+            let def = serde_json::to_value(agg).unwrap_or(Value::Null);
+            json!({
+                "type": agg_profile_type(&def),
+                "description": name,
+                "time_in_nanos": total,
+                "breakdown": ns.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+                "debug": agg_profile_debug(&def, ctx),
+            })
+        })
+        .collect();
+    let profile = json!({
+        "id": "[obsearch][0]",
+        "searches": [],
+        "aggregations": entries,
+        "took": started.elapsed().as_nanos() as u64,
+    });
+    (res, profile)
+}
+
+/// The aggregator name OpenSearch reports for a request of this shape.
+fn agg_profile_type(def: &Value) -> String {
+    let kind = def.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
+    match kind.as_str() {
+        "cardinality" => "CardinalityAggregator".into(),
+        "terms" => "GlobalOrdinalsStringTermsAggregator".into(),
+        "date_histogram" => "DateHistogramAggregator".into(),
+        "histogram" => "NumericHistogramAggregator".into(),
+        other => format!("{}Aggregator", capitalise_words(other)),
+    }
+}
+
+fn capitalise_words(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Which collection strategy the run took.
+///
+/// OpenSearch names these after Lucene's collectors; the counts here describe
+/// the equivalent choice our engine made -- a numeric column, or the hybrid
+/// path a string field needs.
+fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
+    let Some((kind, body)) = def.as_object().and_then(|o| o.iter().next()) else {
+        return json!({});
+    };
+    if kind != "cardinality" {
+        return json!({});
+    }
+    // the request has already been rewritten onto the internal JSON views
+    let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+    let field = field
+        .strip_prefix("_raw.")
+        .or_else(|| field.strip_prefix("_dyn."))
+        .unwrap_or(field);
+    let numeric = matches!(
+        ctx.mapping.type_of(field),
+        Some(
+            "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
+                | "double" | "scaled_float" | "date"
+        )
+    );
+    json!({
+        "empty_collectors_used": 0,
+        "numeric_collectors_used": if numeric { 1 } else { 0 },
+        "ordinals_collectors_used": 0,
+        "ordinals_collectors_overhead_too_high": 0,
+        "string_hashing_collectors_used": 0,
+        "hybrid_collectors_used": if numeric { 0 } else { 1 },
+    })
+}
+
+
+/// Weight aggregation buckets by `_doc_count`.
+///
+/// A document may stand for several, which every bucket count has to reflect.
+/// Rather than a second collection pass, each bucket agg gains two helpers --
+/// the sum of the field and how many documents carry it -- and the correction
+/// is `doc_count + sum - carried`: documents without the field still count
+/// once, documents with it count what it says.
+const DC_SUM: &str = "__obs_dc_sum";
+const DC_CNT: &str = "__obs_dc_count";
+
+fn inject_doc_count_helpers(node: &mut Value) {
+    let Some(o) = node.as_object_mut() else { return };
+    for (_, def) in o.iter_mut() {
+        let Some(d) = def.as_object_mut() else { continue };
+        let is_bucket = d.keys().any(|k| {
+            matches!(k.as_str(), "terms" | "histogram" | "date_histogram" | "range" | "filters")
+        });
+        let slot = if d.contains_key("aggregations") { "aggregations" } else { "aggs" };
+        if let Some(sub) = d.get_mut(slot) {
+            inject_doc_count_helpers(sub);
+        }
+        if !is_bucket {
+            continue;
+        }
+        let subs = d.entry(slot).or_insert_with(|| json!({}));
+        if let Some(m) = subs.as_object_mut() {
+            m.insert(DC_SUM.into(), json!({"sum": {"field": "_doc_count"}}));
+            m.insert(DC_CNT.into(), json!({"value_count": {"field": "_doc_count"}}));
+        }
+    }
+}
+
+fn apply_doc_counts(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                for b in buckets.iter_mut() {
+                    let sum = b.pointer(&format!("/{DC_SUM}/value")).and_then(|v| v.as_f64());
+                    let cnt = b.pointer(&format!("/{DC_CNT}/value")).and_then(|v| v.as_f64());
+                    if let (Some(sum), Some(cnt)) = (sum, cnt) {
+                        let base = b.get("doc_count").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        b["doc_count"] = json!((base + sum - cnt).max(0.0) as u64);
+                    }
+                    if let Some(m) = b.as_object_mut() {
+                        m.remove(DC_SUM);
+                        m.remove(DC_CNT);
+                    }
+                }
+                // the correction can reorder buckets a count-ordered agg sorted
+                // before it was applied
+                if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                    buckets.sort_by(|a, b| {
+                        let get = |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        get(b).cmp(&get(a))
+                    });
+                }
+            }
+            for (_, v) in o.iter_mut() {
+                apply_doc_counts(v);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                apply_doc_counts(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -968,6 +1237,7 @@ pub struct Outcome {
     pub hits: Vec<Value>,
     pub max_score: Option<f32>,
     pub aggs: Option<Value>,
+    pub profile: Option<Value>,
 }
 
 fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value> {
@@ -1130,12 +1400,34 @@ pub fn run(
         }
     }
     let mut agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
+    // buckets have to be weighted only where a document stands for several
+    let weighted = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().has_doc_count);
+    if weighted {
+        if let Some(a) = agg_json.as_mut() {
+            inject_doc_count_helpers(a);
+        }
+    }
     if let Some(a) = agg_json.as_mut() {
         // a filter aggregation can carry a terms lookup too
         resolve_terms_lookups(store, a)?;
     }
     // tantivy has `filter` but not `filters`; peel those out and run them
     // ourselves as one filtered search per named bucket
+    // sibling pipelines read the finished buckets, so they are held back and
+    // computed once the rest of the aggregations have answered
+    let mut pipeline_aggs: Vec<(String, Value)> = Vec::new();
+    if let Some(Value::Object(o)) = agg_json.as_mut() {
+        let names: Vec<String> =
+            o.iter().filter(|(_, d)| is_pipeline_agg(d)).map(|(k, _)| k.clone()).collect();
+        for n in names {
+            if let Some(def) = o.remove(&n) {
+                pipeline_aggs.push((n, def));
+            }
+        }
+    }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Object(o)) = agg_json.as_mut() {
         let names: Vec<String> = o
@@ -1160,6 +1452,16 @@ pub fn run(
                     // tantivy's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
+                    || def.get("composite").is_some()
+                    || def.get("weighted_avg").is_some()
+                    || def.get("auto_date_histogram").is_some()
+                    || def.get("variable_width_histogram").is_some()
+                    // calendar units are not fixed lengths, which is all
+                    // tantivy's date histogram knows how to step by
+                    || def
+                        .get("date_histogram")
+                        .map(|d| d.get("calendar_interval").is_some())
+                        .unwrap_or(false)
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -1172,10 +1474,49 @@ pub fn run(
             agg_json = None;
         }
     }
+    // `fields` reads values back out of the stored source; without one there
+    // is nothing to read, and a date format asks a field that holds no dates
+    // to answer in a shape it has no values for
+    if let Some(specs) = body.get("fields").and_then(|v| v.as_array()) {
+        for name in targets.iter() {
+            let Some(st) = store.get(name) else { continue };
+            let g = st.read();
+            if g.mapping.raw.pointer("/_source/enabled") == Some(&json!(false)) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "Unable to retrieve the requested [fields] since _source is disabled \
+                         in the mappings for index [{name}]"
+                    ),
+                ));
+            }
+            for spec in specs {
+                let (Some(f), Some(_)) = (
+                    spec.get("field").and_then(|v| v.as_str()),
+                    spec.get("format"),
+                ) else {
+                    continue;
+                };
+                if !matches!(
+                    g.mapping.type_of(f),
+                    None | Some("date" | "date_nanos" | "date_range")
+                ) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!("error fetching [{f}]: field has no date formatter"),
+                    ));
+                }
+            }
+        }
+    }
     let source_sel = body.get("_source").cloned();
     // `fields` asks for values keyed by path, formatted, always as lists
-    let field_specs: Option<Vec<(String, Option<String>)>> =
-        body.get("fields").and_then(|v| v.as_array()).map(|a| {
+    // `docvalue_fields` names the same values `fields` does; both are read out
+    // of the stored source here, which holds every value either could report
+    let spec_list = |v: Option<&Value>| -> Option<Vec<(String, Option<String>)>> {
+        v.and_then(|v| v.as_array()).map(|a| {
             a.iter()
                 .filter_map(|x| match x {
                     Value::String(s) => Some((s.clone(), None)),
@@ -1188,7 +1529,16 @@ pub fn run(
                     _ => None,
                 })
                 .collect()
-        });
+        })
+    };
+    let field_specs: Option<Vec<(String, Option<String>)>> =
+        match (spec_list(body.get("fields")), spec_list(body.get("docvalue_fields"))) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        };
     let stored: Option<Vec<String>> = match body.get("stored_fields") {
         Some(Value::Array(a)) => {
             Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -1208,6 +1558,7 @@ pub fn run(
     let mut empty_shards: u64 = 0;
     let mut agg_acc: Option<IntermediateAggregationResults> = None;
     let mut agg_req: Option<Aggregations> = None;
+    let mut shard_profiles: Vec<Value> = Vec::new();
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
 
@@ -1225,6 +1576,7 @@ pub fn run(
         agg_req: Option<Aggregations>,
         agg_meta: Vec<(String, Value)>,
         bucket_orders: Vec<(String, String, bool)>,
+        profile: Option<Value>,
     }
 
     let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
@@ -1270,6 +1622,17 @@ pub fn run(
         };
 
         let searcher = g.reader.searcher();
+
+        // the peeled aggregations never reach the parser, so their fields are
+        // checked here rather than alongside the ones that do
+        if !filters_aggs.is_empty() {
+            let peeled: Value = filters_aggs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            check_agg_types(&peeled, &ctx)?;
+        }
 
         // aggregations, when asked for, run over the same query
         let mut this_agg: Option<Aggregations> = None;
@@ -1346,10 +1709,19 @@ pub fn run(
         };
         cands.extend(shard_cands);
 
+        let mut shard_profile = None;
         if let Some(a) = this_agg {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-            let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
-            match searcher.search(&q, &collector) {
+            let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
+            let outcome = if profiling {
+                let (res, prof) = profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx);
+                shard_profile = Some(prof);
+                res
+            } else {
+                let collector = DistributedAggregationCollector::from_aggs(a.clone(), ctxp);
+                searcher.search(&q, &collector)
+            };
+            match outcome {
                 Ok(res) => {
                     match agg_acc.as_mut() {
                         Some(acc) => {
@@ -1380,6 +1752,7 @@ pub fn run(
             agg_req,
             agg_meta,
             bucket_orders,
+            profile: shard_profile,
         }))
     };
 
@@ -1418,6 +1791,9 @@ pub fn run(
         }
         if bucket_orders.is_empty() {
             bucket_orders = o.bucket_orders;
+        }
+        if let Some(pr) = o.profile {
+            shard_profiles.push(pr);
         }
         searchers.push((o.name, o.searcher, o.st));
     }
@@ -1507,9 +1883,42 @@ pub fn run(
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
-                let is_leaf = |p: &str| g.mapping.is_leaf_type(p);
-                let names: Vec<String> = specs.iter().map(|(n, _)| n.clone()).collect();
+                // a flat_object is one value unless the request named a path
+                // inside it, in which case it has to be descended
+                let is_leaf = |p: &str| {
+                    g.mapping.is_leaf_type(p)
+                        && !specs.iter().any(|(n, _)| {
+                            n.len() > p.len() && n.starts_with(p) && n.as_bytes()[p.len()] == b'.'
+                        })
+                };
+                // a field without doc values has nothing for `fields` to read
+                let names: Vec<String> = specs
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .filter(|n| {
+                        g.mapping.field_option(n, "doc_values") != Some(json!(false))
+                    })
+                    .collect();
                 let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a token_count field stores the text but reports the count
+                for (name, vals) in f.iter_mut() {
+                    if g.mapping.type_of(name) != Some("token_count") {
+                        continue;
+                    }
+                    if let Value::Array(items) = vals {
+                        for v in items.iter_mut() {
+                            if let Some(t) = v.as_str() {
+                                *v = json!(crate::store::token_count(t));
+                            }
+                        }
+                    }
+                }
+                // a value the index refused is not a value the field has
+                if let Some(Value::Array(ig)) = &h.ignored {
+                    for name in ig.iter().filter_map(|v| v.as_str()) {
+                        f.remove(name);
+                    }
+                }
                 // apply any `format` the caller attached to a field
                 for (name, fmt) in specs {
                     let Some(fmt) = fmt else { continue };
@@ -1518,6 +1927,13 @@ pub fn run(
                         if let Some(formatted) = crate::source::format_date(v, fmt) {
                             *v = formatted;
                         }
+                    }
+                }
+                // `stored_fields` may have filled some in already; both
+                // selections share the one `fields` section
+                if let Some(Value::Object(existing)) = hit.get("fields") {
+                    for (k, v) in existing {
+                        f.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                 }
                 if !f.is_empty() {
@@ -1553,6 +1969,16 @@ pub fn run(
                 "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
                     .unwrap_or_else(|| json!({}))
             }))
+        } else if def.get("weighted_avg").is_some() {
+            run_weighted_avg(store, &targets, &query_json, def)
+        } else if def.get("variable_width_histogram").is_some() {
+            run_variable_width_histogram(store, &targets, &query_json, def)
+        } else if def.get("auto_date_histogram").is_some() {
+            run_auto_date_histogram(store, &targets, &query_json, def)
+        } else if def.get("composite").is_some() {
+            run_composite_agg(store, &targets, &query_json, def, weighted)
+        } else if def.get("date_histogram").is_some() {
+            run_calendar_histogram(store, &targets, &query_json, def)
         } else if def.get("terms").is_some() {
             run_index_terms_agg(store, &targets, &query_json, def)
         } else {
@@ -1573,6 +1999,9 @@ pub fn run(
         (Some(acc), Some(req)) => match acc.into_final_result(req, Default::default()) {
             Ok(res) => serde_json::to_value(res).ok().map(|mut v| {
                 recompute_extended_stats(&mut v);
+                if weighted {
+                    apply_doc_counts(&mut v);
+                }
                 apply_bucket_orders(&mut v, &bucket_orders);
                 reattach_meta(&mut v, &agg_meta);
                 v
@@ -1594,6 +2023,16 @@ pub fn run(
         let mut base = aggs.unwrap_or_else(|| json!({}));
         for (name, v) in filters_results {
             base[name] = v;
+        }
+        Some(base)
+    };
+
+    let aggs = if pipeline_aggs.is_empty() {
+        aggs
+    } else {
+        let mut base = aggs.unwrap_or_else(|| json!({}));
+        for (name, def) in pipeline_aggs {
+            base[name] = run_pipeline_agg(&base, &def)?;
         }
         Some(base)
     };
@@ -1635,6 +2074,7 @@ pub fn run(
         hits: page,
         max_score,
         aggs,
+        profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
     })
 }
 
@@ -1699,6 +2139,9 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     });
     if let Some(a) = out.aggs {
         resp["aggregations"] = a;
+    }
+    if let Some(pr) = out.profile {
+        resp["profile"] = pr;
     }
     resp
 }
@@ -2081,6 +2524,638 @@ fn run_hdr_percentiles(
     }
 }
 
+
+/// A date histogram stepped by calendar units.
+///
+/// A month is not a fixed number of milliseconds, so tantivy's histogram --
+/// which steps by a constant -- cannot express one. Each bucket is instead a
+/// range filter run through the ordinary query path, which also means
+/// sub-aggregations come for free. The cost is one search per bucket, which
+/// suits the handful of buckets a calendar histogram usually spans.
+
+/// A composite aggregation over `terms` sources.
+///
+/// The sources are run as nested `terms` aggregations and the resulting tree is
+/// flattened into one bucket per combination, which is what a composite is. Key
+/// order is ascending across the whole tuple, as the paging contract requires.
+
+/// `weighted_avg`: sum(value * weight) / sum(weight), paired per document.
+fn run_weighted_avg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("weighted_avg").cloned().unwrap_or(json!({}));
+    let read = |key: &str| -> (String, Option<f64>) {
+        let side = spec.get(key).cloned().unwrap_or(json!({}));
+        agg_field_and_missing(&side)
+    };
+    let (vf, vmiss) = read("value");
+    let (wf, wmiss) = read("weight");
+    let query = combine(main_query, None);
+    let pairs = collect_field_pairs(store, targets, &query, &vf, vmiss, &wf, wmiss)?;
+
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (v, w) in pairs {
+        num += v * w;
+        den += w;
+    }
+    if den == 0.0 {
+        return Ok(json!({"value": Value::Null}));
+    }
+    Ok(json!({"value": num / den}))
+}
+
+/// Read two columns side by side, one pair per document that has both.
+fn collect_field_pairs(
+    store: &Store,
+    targets: &[String],
+    query_json: &Value,
+    a_field: &str,
+    a_missing: Option<f64>,
+    b_field: &str,
+    b_missing: Option<f64>,
+) -> std::result::Result<Vec<(f64, f64)>, Response> {
+    let mut out = Vec::new();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let ctx = Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+        };
+        let q = crate::query::build(&ctx, query_json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
+        let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
+        let searcher = g.reader.searcher();
+        let addrs = searcher
+            .search(&q, &tantivy::collector::DocSetCollector)
+            .map_err(|e| {
+                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+            })?;
+        let cols: Vec<(SortColumns, SortColumns)> = searcher
+            .segment_readers()
+            .iter()
+            .map(|r| (SortColumns::for_segment(r, &a_col), SortColumns::for_segment(r, &b_col)))
+            .collect();
+        for addr in addrs {
+            let Some((ca, cb)) = cols.get(addr.segment_ord as usize) else { continue };
+            let av = ca.numeric_values(addr.doc_id);
+            let bv = cb.numeric_values(addr.doc_id);
+            let a = av.first().copied().or(a_missing);
+            let b = bv.first().copied().or(b_missing);
+            if let (Some(a), Some(b)) = (a, b) {
+                out.push((a, b));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The sibling pipelines: aggregations whose input is other aggregations'
+/// buckets rather than documents.
+const PIPELINES: &[&str] =
+    &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
+
+fn is_pipeline_agg(def: &Value) -> bool {
+    def.as_object()
+        .map(|o| o.keys().any(|k| PIPELINES.contains(&k.as_str())))
+        .unwrap_or(false)
+}
+
+fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Response> {
+    let Some(o) = def.as_object() else { return Ok(Value::Null) };
+    let mut kind = String::new();
+    for k in o.keys() {
+        if PIPELINES.contains(&k.as_str()) {
+            kind = k.clone();
+            break;
+        }
+    }
+    if kind.is_empty() {
+        return Ok(Value::Null);
+    }
+    let spec = o.get(&kind).cloned().unwrap_or(Value::Null);
+    let path = spec.get("buckets_path").and_then(|v| v.as_str()).unwrap_or("");
+    let values = resolve_buckets_path(aggs, path);
+    if values.is_empty() {
+        return Ok(json!({"value": Value::Null}));
+    }
+    let sum: f64 = values.iter().sum();
+    let n = values.len() as f64;
+    let value = match kind.as_str() {
+        "avg_bucket" => sum / n,
+        "sum_bucket" => sum,
+        "min_bucket" => values.iter().copied().fold(f64::INFINITY, f64::min),
+        "max_bucket" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "stats_bucket" => {
+            return Ok(json!({
+                "count": values.len(),
+                "min": values.iter().copied().fold(f64::INFINITY, f64::min),
+                "max": values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                "avg": sum / n,
+                "sum": sum,
+            }));
+        }
+        _ => return Ok(json!({"value": Value::Null})),
+    };
+    Ok(json!({"value": value}))
+}
+
+/// `histo.v` means: the metric `v` of every bucket of `histo`.
+fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
+    let mut segs = path.split('>').flat_map(|s| s.split('.'));
+    let Some(first) = segs.next() else { return Vec::new() };
+    let rest: Vec<&str> = segs.collect();
+    let Some(node) = aggs.get(first) else { return Vec::new() };
+    let Some(buckets) = node.get("buckets").and_then(|b| b.as_array()) else {
+        return Vec::new();
+    };
+    buckets
+        .iter()
+        .filter_map(|b| {
+            let mut cur = b;
+            for seg in &rest {
+                cur = cur.get(seg)?;
+            }
+            cur.get("value").and_then(|v| v.as_f64()).or_else(|| cur.as_f64())
+        })
+        .collect()
+}
+
+
+/// `variable_width_histogram`: buckets whose edges follow the data.
+///
+/// The values are sorted and cut at the widest gaps, which puts the boundaries
+/// where the data is already sparse. Each bucket is keyed by the mean of what
+/// it holds.
+fn run_variable_width_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("variable_width_histogram").cloned().unwrap_or(json!({}));
+    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10).max(1) as usize;
+    let (field, missing) = agg_field_and_missing(&spec);
+    let query = combine(main_query, None);
+    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
+    if values.is_empty() {
+        return Ok(json!({"buckets": []}));
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+    // cut where the data is sparsest: the widest gaps between neighbours
+    let mut gaps: Vec<(f64, usize)> =
+        (1..values.len()).map(|i| (values[i] - values[i - 1], i)).collect();
+    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+    let mut cuts: Vec<usize> = gaps.into_iter().take(want.saturating_sub(1)).map(|(_, i)| i).collect();
+    cuts.sort_unstable();
+
+    let mut buckets = Vec::new();
+    let mut start = 0usize;
+    for end in cuts.into_iter().chain(std::iter::once(values.len())) {
+        let slice = &values[start..end];
+        if slice.is_empty() {
+            continue;
+        }
+        let sum: f64 = slice.iter().sum();
+        buckets.push(json!({
+            "min": slice[0],
+            "key": sum / slice.len() as f64,
+            "max": slice[slice.len() - 1],
+            "doc_count": slice.len(),
+        }));
+        start = end;
+    }
+    Ok(json!({"buckets": buckets}))
+}
+
+/// `auto_date_histogram`: pick the smallest rounding that keeps the bucket
+/// count within the target, then bucket by it.
+///
+/// The choice is made from the span the data actually covers rather than by
+/// building each candidate histogram: at one-second resolution a week-long
+/// span is over half a million buckets, which is a lot of searching to do only
+/// to discard it.
+fn run_auto_date_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("auto_date_histogram").cloned().unwrap_or(json!({}));
+    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10).max(1);
+    let field = spec.get("field").cloned().unwrap_or(Value::Null);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let probe = json!({
+        "__min": {"min": {"field": field}},
+        "__max": {"max": {"field": field}},
+    });
+    let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+    let read = |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
+    let (Some(lo), Some(hi)) = (read("__min"), read("__max")) else {
+        return Ok(json!({"buckets": [], "interval": "1s"}));
+    };
+    let span_ns = (hi - lo).max(0.0);
+
+    // label, the unit the histogram steps by, and roughly how long it is
+    const NS: f64 = 1e9;
+    const STEPS: &[(&str, &str, f64)] = &[
+        ("1s", "second", NS),
+        ("1m", "minute", 60.0 * NS),
+        ("1h", "hour", 3600.0 * NS),
+        ("1d", "day", 86_400.0 * NS),
+        ("7d", "week_sunday", 604_800.0 * NS),
+        ("1M", "month", 2_629_746.0 * NS),
+        ("3M", "quarter", 7_889_238.0 * NS),
+        ("1y", "year", 31_556_952.0 * NS),
+    ];
+    let (label, unit) = STEPS
+        .iter()
+        .find(|(_, _, len)| (span_ns / len).floor() + 1.0 <= want as f64)
+        .map(|(l, u, _)| (*l, *u))
+        .unwrap_or(("1y", "year"));
+
+    let mut request = json!({
+        "date_histogram": {
+            "field": field,
+            "calendar_interval": unit,
+            "min_doc_count": 1,
+        },
+    });
+    if let Some(sa) = sub_aggs {
+        request["aggs"] = sa;
+    }
+    let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
+    out["interval"] = json!(label);
+    Ok(out)
+}
+
+fn run_composite_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("composite").cloned().unwrap_or(json!({}));
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let after = spec.get("after").cloned();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    // `sources` is a list of single-key objects, each naming one source
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for entry in spec.get("sources").and_then(|v| v.as_array()).into_iter().flatten() {
+        let Some((name, body)) = entry.as_object().and_then(|o| o.iter().next()) else {
+            continue;
+        };
+        let Some(field) = body.pointer("/terms/field").and_then(|f| f.as_str()) else {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "[composite] only supports `terms` sources",
+            ));
+        };
+        sources.push((name.clone(), field.to_string()));
+    }
+    if sources.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[composite] requires at least one source",
+        ));
+    }
+
+    // nest the sources outermost-first; the innermost carries the sub-aggs
+    let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+    for (i, (_, field)) in sources.iter().enumerate().rev() {
+        let mut node = json!({
+            "terms": {"field": field, "size": 65_536, "order": {"_key": "asc"}}
+        });
+        if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            node["aggs"] = request;
+        }
+        request = json!({format!("__c{i}"): node});
+    }
+    if weighted {
+        inject_doc_count_helpers(&mut request);
+    }
+
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
+    if weighted {
+        apply_doc_counts(&mut res);
+    }
+
+    let mut flat: Vec<Value> = Vec::new();
+    flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
+    flat.sort_by(|a, b| composite_key_order(a, b, &sources));
+
+    if let Some(after) = after.as_ref().and_then(|a| a.as_object()) {
+        let marker = json!({"key": Value::Object(after.clone())});
+        flat.retain(|b| composite_key_order(b, &marker, &sources) == Ordering::Greater);
+    }
+    let more = flat.len() > size;
+    flat.truncate(size);
+    let mut out = json!({"buckets": flat});
+    if more || after.is_some() {
+        if let Some(last) = out["buckets"].as_array().and_then(|a| a.last()) {
+            out["after_key"] = last["key"].clone();
+        }
+    }
+    Ok(out)
+}
+
+fn flatten_composite(
+    node: &Value,
+    depth: usize,
+    sources: &[(String, String)],
+    key: &mut serde_json::Map<String, Value>,
+    out: &mut Vec<Value>,
+) {
+    let Some(buckets) = node.pointer(&format!("/__c{depth}/buckets")).and_then(|b| b.as_array())
+    else {
+        return;
+    };
+    for b in buckets {
+        key.insert(sources[depth].0.clone(), b.get("key").cloned().unwrap_or(Value::Null));
+        if depth + 1 < sources.len() {
+            flatten_composite(b, depth + 1, sources, key, out);
+        } else {
+            let mut bucket = json!({
+                "key": Value::Object(key.clone()),
+                "doc_count": b.get("doc_count").cloned().unwrap_or(json!(0)),
+            });
+            // anything else under the bucket is a sub-aggregation of the composite
+            if let Some(o) = b.as_object() {
+                for (k, v) in o {
+                    if k != "key" && k != "doc_count" && !k.starts_with("__c") {
+                        bucket[k] = v.clone();
+                    }
+                }
+            }
+            out.push(bucket);
+        }
+    }
+    key.remove(&sources[depth].0);
+}
+
+fn composite_key_order(a: &Value, b: &Value, sources: &[(String, String)]) -> Ordering {
+    for (name, _) in sources {
+        let (x, y) = (a.pointer(&format!("/key/{name}")), b.pointer(&format!("/key/{name}")));
+        let ord = match (x, y) {
+            (Some(Value::Number(m)), Some(Value::Number(n))) => m
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&n.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
+            (Some(Value::String(m)), Some(Value::String(n))) => m.cmp(n),
+            (Some(m), Some(n)) => m.to_string().cmp(&n.to_string()),
+            _ => Ordering::Equal,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
+}
+
+fn run_calendar_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    use tantivy::time::{Duration, OffsetDateTime};
+
+    let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let interval = spec
+        .get("calendar_interval")
+        .and_then(|v| v.as_str())
+        .unwrap_or("day")
+        .to_string();
+    let Some(unit) = CalendarUnit::parse(&interval) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("The supplied interval [{interval}] could not be parsed as a calendar interval."),
+        ));
+    };
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let min_doc_count =
+        spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // the span to cover comes from the extremes the query actually matches
+    // a range-typed field has no single value per document, so it has no
+    // extremes to read; its span has to come from the bounds the request gives
+    let ranged = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| {
+            st.read()
+                .mapping
+                .type_of(&field)
+                .map(|t| t.ends_with("_range"))
+                .unwrap_or(false)
+        });
+    let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
+    let (mut lo_ns, mut hi_ns) = (0.0f64, 0.0f64);
+    if !ranged {
+        let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        let probe = json!({
+            "__min": {"min": {"field": field}},
+            "__max": {"max": {"field": field}},
+        });
+        let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+        // the date column counts in nanoseconds, which is what min/max read out
+        let read = |k: &str| -> Option<f64> {
+            extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+        };
+        let (Some(a), Some(b)) = (read("__min"), read("__max")) else {
+            return Ok(json!({"buckets": []}));
+        };
+        (lo_ns, hi_ns) = (a, b);
+    } else if bounds.is_none() {
+        return Ok(json!({"buckets": []}));
+    }
+    // bounds are written the way a document would be, so they arrive in
+    // milliseconds and have to meet the column's nanoseconds
+    let bound_ns = |key: &str| -> Option<f64> {
+        let v = bounds?.get(key)?;
+        crate::store::canonical_date(v)
+            .and_then(|d| crate::store::parse_date_lenient(&d))
+            .map(|d| d.unix_timestamp_nanos() as f64)
+    };
+    let lo_ns = bound_ns("min").unwrap_or(lo_ns);
+    let hi_ns = bound_ns("max").unwrap_or(hi_ns);
+
+    let to_dt = |ns: f64| -> Option<OffsetDateTime> {
+        OffsetDateTime::from_unix_timestamp_nanos(ns as i128).ok()
+    };
+    let (Some(lo), Some(hi)) = (to_dt(lo_ns), to_dt(hi_ns)) else {
+        return Ok(json!({"buckets": []}));
+    };
+
+    let mut buckets = Vec::new();
+    let mut cursor = unit.floor(lo);
+    let last = unit.floor(hi);
+    // a runaway interval would otherwise spin: no calendar histogram the suite
+    // or a sane request produces comes near this
+    let mut guard = 0;
+    while cursor <= last && guard < 100_000 {
+        guard += 1;
+        let next = unit.advance(cursor);
+        let mut spec = json!({
+            "gte": iso_millis(cursor),
+            "lt": iso_millis(next),
+            "format": "strict_date_optional_time",
+        });
+        if ranged {
+            // a stored interval belongs to every bucket it touches
+            spec["relation"] = json!("intersects");
+        }
+        let range = json!({"range": {field.clone(): spec}});
+        let combined = combine(main_query, Some(range));
+        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        if count >= min_doc_count {
+            let mut b = json!({
+                "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
+                "key_as_string": iso_millis(cursor),
+                "doc_count": count,
+            });
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+            buckets.push(b);
+        }
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    let _ = Duration::seconds(0);
+    Ok(json!({"buckets": buckets}))
+}
+
+fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CalendarUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    /// auto_date_histogram's seven-day rounding starts its weeks on Sunday,
+    /// unlike `calendar_interval: week`
+    WeekSunday,
+    Month,
+    Quarter,
+    Year,
+}
+
+impl CalendarUnit {
+    fn parse(s: &str) -> Option<CalendarUnit> {
+        Some(match s {
+            "second" | "1s" => CalendarUnit::Second,
+            "minute" | "1m" => CalendarUnit::Minute,
+            "hour" | "1h" => CalendarUnit::Hour,
+            "day" | "1d" => CalendarUnit::Day,
+            "week" | "1w" => CalendarUnit::Week,
+            "week_sunday" => CalendarUnit::WeekSunday,
+            "month" | "1M" => CalendarUnit::Month,
+            "quarter" | "1q" => CalendarUnit::Quarter,
+            "year" | "1y" => CalendarUnit::Year,
+            _ => return None,
+        })
+    }
+
+    fn floor(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
+        use tantivy::time::{Date, Month, Time};
+        let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
+        match self {
+            CalendarUnit::Second => dt.replace_nanosecond(0).unwrap(),
+            CalendarUnit::Minute => dt.replace_second(0).unwrap().replace_nanosecond(0).unwrap(),
+            CalendarUnit::Hour => dt
+                .replace_minute(0)
+                .unwrap()
+                .replace_second(0)
+                .unwrap()
+                .replace_nanosecond(0)
+                .unwrap(),
+            CalendarUnit::Day => midnight(dt.date()),
+            // calendar weeks start on Monday
+            CalendarUnit::Week => {
+                let back = dt.weekday().number_days_from_monday() as i64;
+                midnight(dt.date() - tantivy::time::Duration::days(back))
+            }
+            CalendarUnit::WeekSunday => {
+                let back = dt.weekday().number_days_from_sunday() as i64;
+                midnight(dt.date() - tantivy::time::Duration::days(back))
+            }
+            CalendarUnit::Month => midnight(
+                Date::from_calendar_date(dt.year(), dt.month(), 1).unwrap(),
+            ),
+            CalendarUnit::Quarter => {
+                let m = ((dt.month() as u8 - 1) / 3) * 3 + 1;
+                midnight(
+                    Date::from_calendar_date(dt.year(), Month::try_from(m).unwrap(), 1).unwrap(),
+                )
+            }
+            CalendarUnit::Year => {
+                midnight(Date::from_calendar_date(dt.year(), Month::January, 1).unwrap())
+            }
+        }
+    }
+
+    fn advance(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
+        use tantivy::time::{Date, Duration, Month, Time};
+        let add_months = |dt: tantivy::time::OffsetDateTime, n: u32| {
+            let total = dt.year() * 12 + (dt.month() as i32 - 1) + n as i32;
+            let (y, m) = (total.div_euclid(12), total.rem_euclid(12) as u8 + 1);
+            Date::from_calendar_date(y, Month::try_from(m).unwrap(), 1)
+                .unwrap()
+                .with_time(Time::MIDNIGHT)
+                .assume_utc()
+        };
+        match self {
+            CalendarUnit::Second => dt + Duration::seconds(1),
+            CalendarUnit::Minute => dt + Duration::minutes(1),
+            CalendarUnit::Hour => dt + Duration::hours(1),
+            CalendarUnit::Day => dt + Duration::days(1),
+            CalendarUnit::Week | CalendarUnit::WeekSunday => dt + Duration::days(7),
+            CalendarUnit::Month => add_months(dt, 1),
+            CalendarUnit::Quarter => add_months(dt, 3),
+            CalendarUnit::Year => add_months(dt, 12),
+        }
+    }
+}
+
 fn run_mad_agg(
     store: &Store,
     targets: &[String],
@@ -2093,7 +3168,7 @@ fn run_mad_agg(
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("[compression] must be greater than 0. Found [{c}] in [mad]"),
+                format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
             ));
         }
     }

@@ -125,3 +125,38 @@ byte ของ path ที่ escape แล้ว มิฉะนั้น `pref
 - `took` เป็นค่าคงที่ ยังไม่จับเวลาจริง
 - ทุก index เป็น single shard, `Index::create_in_ram` — ยังไม่แตะ mmap/persistence
 - scoring ของ prefix clause เป็น const score ⇒ ลำดับผลต่างจาก OpenSearch ในบางกรณี
+
+## Phase 1 cut: 388 of 398 (97.5%)
+
+Ten sections are left, and each needs something our engine has no honest way to
+produce.
+
+**Java stack traces** (`bulk/100_error_traces`, `mget/90_error_traces`,
+`msearch/30_error_traces`, 3 sections). With `error_trace=true` the suite
+matches `stack_trace` against Java class names -- `IndexNotFoundException`,
+`DocumentMissingException`. We could print our own error chain there, but not
+one naming Java classes we do not have.
+
+**HDR percentile values** (`190_percentiles_hdr_metric` ×2,
+`..._unsigned` ×1). The reported value depends on the range HDR's
+`DoubleHistogram` picked, which it derives from the first value recorded: the
+same input 51 comes back as 51.0 in one test and 51.0302734375 in another. Our
+histogram uses one fixed scale, which matches the second and not the first.
+Reaching both means porting DoubleHistogram's auto-ranging. One of the three
+also asserts a shard failure of type `array_index_out_of_bounds_exception`,
+which is a Java bug being pinned down rather than a behaviour.
+
+**Aggregator profile counters** (`330_auto_date_histogram` ×2,
+`360_date_histogram` ×1). These assert `type:
+AutoDateHistogramAggregator.FromSingle` and counters like `surviving_buckets`,
+`optimized_segments`, `leaf_visited` -- the internals of Lucene's filter-rewrite
+path. We measure and report our own phases honestly; these particular numbers
+describe an algorithm we do not run.
+
+**Order of equally-scored hits** (`115_constant_keyword`, 1 section). OpenSearch
+breaks score ties by document id within a shard, which is insertion order. Ours
+is not recoverable from a document address: tantivy assigns doc ids across
+indexing threads, so two documents written by separate requests come back either
+way round. Ordering the segments by the index's own segment list does not fix it
+either -- measured, then reverted. Matching this needs a sequence number stored
+per document, which is memory we spent a while reclaiming.

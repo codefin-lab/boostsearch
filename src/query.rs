@@ -45,9 +45,19 @@ impl<'a> Ctx<'a> {
     pub fn view(&self, field: &str, analyzed: bool) -> View {
         match self.mapping.type_of(field) {
             Some("text") | Some("match_only_text") | Some("search_as_you_type") => View::Dyn,
-            Some("keyword") | Some("constant_keyword") | Some("wildcard") | Some("ip") => View::Raw,
+            Some("keyword") | Some("constant_keyword") | Some("wildcard") | Some("ip")
+            | Some("flat_object") => View::Raw,
             Some(_) => View::Dyn, // numeric, date, boolean: identical in both views
             None => {
+                // a path inside a flat_object is exact, like a keyword; the
+                // mapping never names it, so the ancestor has to be consulted
+                let mut prefix = field;
+                while let Some((head, _)) = prefix.rsplit_once('.') {
+                    if self.mapping.type_of(head) == Some("flat_object") {
+                        return View::Raw;
+                    }
+                    prefix = head;
+                }
                 if analyzed {
                     View::Dyn
                 } else {
@@ -59,6 +69,12 @@ impl<'a> Ctx<'a> {
 
     /// `title.keyword` addresses the raw view of `title`.
     pub fn resolve(&self, field: &str, analyzed: bool) -> (Field, String, View) {
+        // naming a flat_object itself asks about every value beneath it
+        if self.mapping.type_of(field) == Some("flat_object") {
+            let path = format!("{field}.{}", crate::store::FLAT_VALUES);
+            let v = self.view(field, analyzed);
+            return (self.field_of(v), path, v);
+        }
         if self.mapping.type_of(field).is_none() {
             if let Some(base) = field.strip_suffix(".keyword") {
                 if self.mapping.type_of(base).is_some() || base.contains('.') || true {
@@ -90,12 +106,16 @@ fn normalized(ctx: &Ctx, field: &str, text: &str) -> String {
 
 /// Rewrite a value written as an IP into the form the field was indexed in.
 fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
-    if ctx.mapping.type_of(field) != Some("ip") {
-        return v.clone();
-    }
-    match v.as_str().and_then(crate::store::canonical_ip) {
-        Some(c) => Value::String(c),
-        None => v.clone(),
+    match ctx.mapping.type_of(field) {
+        Some("ip") => match v.as_str().and_then(crate::store::canonical_ip) {
+            Some(c) => Value::String(c),
+            None => v.clone(),
+        },
+        Some("date") | Some("date_nanos") => match crate::store::canonical_date(v) {
+            Some(c) => Value::String(c),
+            None => v.clone(),
+        },
+        _ => v.clone(),
     }
 }
 
@@ -386,6 +406,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
                 }
             }
+            let val = ip_value(ctx, &field, &val);
             if let Some(s) = val.as_str() {
                 let n = normalized(ctx, &field, s);
                 if n != s {
@@ -498,6 +519,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "match_bool_prefix" => build_match_bool_prefix(ctx, &body)?,
         "query_string" | "simple_query_string" => build_query_string(ctx, &body)?,
         "match" | "match_phrase" | "match_phrase_prefix" => build_match(ctx, &kind, &body)?,
+        "span_near" => build_span_near(ctx, &body)?,
         "multi_match" => build_multi_match(ctx, &body)?,
         // combined_fields scores across fields as one; cross_fields is the
         // closest thing we can assemble from per-field matches
@@ -674,7 +696,17 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
     }
     let q = body.get("query").cloned().unwrap_or(Value::Null);
-    let fields = body.get("fields").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    // naming no field searches them all, which for us is every path a document
+    // has actually put a value at
+    let fields = match body.get("fields").and_then(|f| f.as_array()) {
+        Some(f) if !f.is_empty() => f.clone(),
+        _ => ctx
+            .observed_kinds
+            .keys()
+            .filter(|k| !k.starts_with('_'))
+            .map(|k| Value::String(k.clone()))
+            .collect(),
+    };
 
     // per-field options are the multi_match options minus its own keys
     let mut shared = serde_json::Map::new();
@@ -741,8 +773,27 @@ fn build_range_field_query(
         .and_then(|v| v.as_str())
         .unwrap_or("intersects")
         .to_ascii_lowercase();
-    let q_lo = spec.get("gte").or_else(|| spec.get("gt")).cloned();
-    let q_hi = spec.get("lte").or_else(|| spec.get("lt")).cloned();
+    // a date bound may be written as date math, which names a whole unit; the
+    // bound decides which end of it is meant
+    let bound = |inclusive_key: &str, exclusive_key: &str, up_when_inclusive: bool| {
+        let (v, inclusive) = match spec.get(inclusive_key) {
+            Some(v) => (v.clone(), true),
+            None => (spec.get(exclusive_key)?.clone(), false),
+        };
+        if !kind.starts_with("date") {
+            return Some((v, inclusive));
+        }
+        let up = if inclusive { up_when_inclusive } else { !up_when_inclusive };
+        let rewritten =
+            crate::store::canonical_date_bound(&v, up).map(Value::String).unwrap_or(v);
+        Some((rewritten, inclusive))
+    };
+    let q_lo = bound("gte", "gt", false);
+    let q_hi = bound("lte", "lt", true);
+    // an exclusive query bound stays exclusive in the comparison it becomes:
+    // a bucket ending `lt` March does not reach an interval starting on the 1st
+    let lower_key = |inclusive: bool| if inclusive { "gte" } else { "gt" };
+    let upper_key = |inclusive: bool| if inclusive { "lte" } else { "lt" };
     let lo_field = format!("{field}.gte");
     let hi_field = format!("{field}.lte");
 
@@ -750,29 +801,29 @@ fn build_range_field_query(
     match relation.as_str() {
         // the stored interval overlaps the query interval
         "intersects" => {
-            if let Some(hi) = &q_hi {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": hi}}}));
+            if let Some((hi, inc)) = &q_hi {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {upper_key(*inc): hi}}}));
             }
-            if let Some(lo) = &q_lo {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": lo}}}));
+            if let Some((lo, inc)) = &q_lo {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {lower_key(*inc): lo}}}));
             }
         }
         // the stored interval covers the query interval
         "contains" => {
-            if let Some(lo) = &q_lo {
+            if let Some((lo, _)) = &q_lo {
                 clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": lo}}}));
             }
-            if let Some(hi) = &q_hi {
+            if let Some((hi, _)) = &q_hi {
                 clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": hi}}}));
             }
         }
         // the stored interval sits inside the query interval
         "within" => {
-            if let Some(lo) = &q_lo {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"gte": lo}}}));
+            if let Some((lo, inc)) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {lower_key(*inc): lo}}}));
             }
-            if let Some(hi) = &q_hi {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"lte": hi}}}));
+            if let Some((hi, inc)) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {upper_key(*inc): hi}}}));
             }
         }
         other => {
@@ -803,8 +854,18 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         None
     };
-    let mut lower = get(["gte", "gt"]);
-    let mut upper = get(["lte", "lt"]);
+    // `from`/`to` are the older spelling, with inclusivity as its own flag
+    let older = |key: &str, flag: &str| -> Option<(Value, bool)> {
+        let v = spec.get(key).filter(|v| !v.is_null())?.clone();
+        let inclusive = match spec.get(flag) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => s != "false",
+            _ => true,
+        };
+        Some((v, inclusive))
+    };
+    let mut lower = get(["gte", "gt"]).or_else(|| older("from", "include_lower"));
+    let mut upper = get(["lte", "lt"]).or_else(|| older("to", "include_upper"));
     // OpenSearch's default date format accepts a bare year; our date values are
     // indexed as ISO strings, which compare correctly lexicographically
     if ctx.mapping.type_of(&field).map(|t| t == "date").unwrap_or(false) {
@@ -816,10 +877,18 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             }
         }
     }
-    if ctx.mapping.type_of(&field) == Some("ip") {
-        for b in [&mut lower, &mut upper] {
+    if matches!(ctx.mapping.type_of(&field), Some("ip" | "date" | "date_nanos")) {
+        for (is_lower, b) in [(true, &mut lower), (false, &mut upper)] {
             if let Some((v, inclusive)) = b.clone() {
-                *b = Some((ip_value(ctx, &field, &v), inclusive));
+                let up = (is_lower && !inclusive) || (!is_lower && inclusive);
+                let rewritten = if matches!(ctx.mapping.type_of(&field), Some("ip")) {
+                    ip_value(ctx, &field, &v)
+                } else {
+                    crate::store::canonical_date_bound(&v, up)
+                        .map(Value::String)
+                        .unwrap_or(v.clone())
+                };
+                *b = Some((rewritten, inclusive));
             }
         }
     }
@@ -1046,6 +1115,82 @@ fn bound_term(
 
 /// `match_bool_prefix`: every analysed term is a term query except the last,
 /// which matches as a prefix.
+/// `span_near` over ordered `span_term` clauses, optionally ending in a
+/// `span_multi` prefix.
+///
+/// That shape is a phrase, which is what it is built as. The span family's
+/// other members -- `span_or`, `span_not`, unordered clauses -- are not
+/// expressible this way and are still refused rather than approximated.
+fn build_span_near(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let clauses = body
+        .get("clauses")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| anyhow!("[span_near] requires [clauses]"))?;
+    if body.get("in_order").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(anyhow!("unsupported query type [span_near] with in_order: false"));
+    }
+    let slop = body.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let mut field: Option<String> = None;
+    let mut words: Vec<String> = Vec::new();
+    let mut prefix_last = false;
+    for (i, clause) in clauses.iter().enumerate() {
+        let (name, text, is_prefix) = if let Some(t) = clause.get("span_term") {
+            let (f, v, _) = field_and_value(t)?;
+            (f, v.as_str().unwrap_or_default().to_string(), false)
+        } else if let Some(m) = clause.pointer("/span_multi/match/prefix") {
+            let (f, v, _) = field_and_value(m)?;
+            (f, v.as_str().unwrap_or_default().to_string(), true)
+        } else {
+            return Err(anyhow!("unsupported query type [span_near] clause"));
+        };
+        if is_prefix && i + 1 != clauses.len() {
+            return Err(anyhow!("[span_multi] is only supported as the last clause"));
+        }
+        prefix_last |= is_prefix;
+        match &field {
+            Some(f) if *f != name => {
+                return Err(anyhow!("[span_near] clauses must all name one field"));
+            }
+            _ => field = Some(name),
+        }
+        words.push(text);
+    }
+    let Some(field) = field else { return Ok(Box::new(EmptyQuery)) };
+    let (f, path, view) = ctx.resolve(&field, true);
+
+    let mut terms: Vec<Term> = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        let last = i + 1 == words.len();
+        // the prefix clause is matched as written; the rest go through the
+        // analyser so they meet the terms the field actually holds
+        let pieces = if last && prefix_last {
+            vec![if view == View::Dyn { w.to_lowercase() } else { w.clone() }]
+        } else {
+            analyze(ctx, view, w)
+        };
+        for p in pieces {
+            let mut t = Term::from_field_json_path(f, &path, true);
+            t.append_type_and_str(&p);
+            terms.push(t);
+        }
+    }
+    if terms.is_empty() {
+        return Ok(Box::new(EmptyQuery));
+    }
+    if prefix_last {
+        let mut q = tantivy::query::PhrasePrefixQuery::new(terms);
+        q.set_max_expansions(50);
+        return Ok(Box::new(q));
+    }
+    if terms.len() == 1 {
+        return Ok(Box::new(TermQuery::new(terms.remove(0), IndexRecordOption::WithFreqs)));
+    }
+    let mut q = PhraseQuery::new(terms);
+    q.set_slop(slop);
+    Ok(Box::new(q))
+}
+
 fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
     for banned in ["slop", "cutoff_frequency"] {
@@ -1108,6 +1253,27 @@ fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         0
     };
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+}
+
+/// Lower a pattern's literal letters, leaving escapes alone -- `\\W` is not
+/// `\\w`.
+fn lowercase_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    for c in pattern.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            out.push(c);
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// Widen every cased letter of a pattern into a two-way character class, so a
@@ -1252,7 +1418,14 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         for name in &targets {
             let (f, path, view) = ctx.resolve(name, true);
             if regex_literal {
-                if let Ok(q) = regex_query(f, &path, &value[1..value.len() - 1]) {
+                // the analysed view holds lowercased terms, so a pattern
+                // written in capitals has to be lowered to meet them
+                let pat = if view == View::Dyn {
+                    lowercase_regex(&value[1..value.len() - 1])
+                } else {
+                    value[1..value.len() - 1].to_string()
+                };
+                if let Ok(q) = regex_query(f, &path, &pat) {
                     per_field.push(q);
                 }
                 continue;

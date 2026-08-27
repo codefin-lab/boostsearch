@@ -119,6 +119,127 @@ impl Mapping {
     ///
     /// A normalizer transforms the value at index time rather than tokenising
     /// it, so the sub-field needs its own copy of the value in the index.
+    /// Add the mappings a document's new fields earn under `dynamic_templates`.
+    ///
+    /// Returns the offending field name when the mapping is strict about
+    /// fields no template claims.
+    pub fn apply_dynamic_templates(&mut self, source: &Value) -> Result<(), String> {
+        let dynamic = self
+            .raw
+            .get("dynamic")
+            .and_then(|v| v.as_str())
+            .unwrap_or("true")
+            .to_string();
+        let templates =
+            self.raw.get("dynamic_templates").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if templates.is_empty() && !dynamic.starts_with("strict") {
+            return Ok(());
+        }
+        let Some(obj) = source.as_object() else { return Ok(()) };
+        for (name, value) in obj {
+            if name.starts_with('_') || self.types.contains_key(name) {
+                continue;
+            }
+            if self.raw.pointer(&format!("/properties/{name}")).is_some() {
+                continue;
+            }
+            let kind = json_mapping_type(value);
+            let mut matched = false;
+            for t in &templates {
+                let Some(spec) = t.as_object().and_then(|o| o.values().next()) else { continue };
+                let pattern = spec.get("match").and_then(|v| v.as_str()).unwrap_or("*");
+                if !glob_match(pattern, name) {
+                    continue;
+                }
+                if let Some(mt) = spec.get("match_mapping_type").and_then(|v| v.as_str()) {
+                    if mt != "*" && mt != kind {
+                        continue;
+                    }
+                }
+                if let Some(m) = spec.get("mapping") {
+                    self.insert_property(name, m.clone());
+                }
+                matched = true;
+                break;
+            }
+            if !matched && dynamic.starts_with("strict") {
+                return Err(name.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_property(&mut self, name: &str, def: Value) {
+        if !self.raw.is_object() {
+            self.raw = serde_json::json!({});
+        }
+        let props = self
+            .raw
+            .as_object_mut()
+            .unwrap()
+            .entry("properties")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(o) = props.as_object_mut() {
+            o.insert(name.to_string(), def.clone());
+            let mut one = Map::new();
+            one.insert(name.to_string(), def);
+            flatten_props(&one, "", &mut self.types);
+        }
+    }
+
+    /// Note the fields a document maps dynamically.
+    ///
+    /// Only dates are inferred. Every other type is stored the same way
+    /// whether the mapping named it or not, but a date needs its own column,
+    /// and nothing downstream can build one without knowing the field is one.
+    pub fn learn_dynamic(&mut self, source: &Value) {
+        let mut found = Vec::new();
+        Self::sniff_dates(source, &mut String::new(), &self.types, &mut found);
+        for path in found {
+            self.types.insert(path, "date".into());
+        }
+    }
+
+    fn sniff_dates(
+        node: &Value,
+        path: &mut String,
+        known: &HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
+        match node {
+            Value::Object(o) => {
+                let base = path.len();
+                for (k, v) in o {
+                    if k.starts_with('_') {
+                        continue;
+                    }
+                    if base > 0 {
+                        path.push('.');
+                    }
+                    path.push_str(k);
+                    Self::sniff_dates(v, path, known, out);
+                    path.truncate(base);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    Self::sniff_dates(v, path, known, out);
+                }
+            }
+            Value::String(s) => {
+                // a full calendar date, not a bare year that happens to parse
+                let dated = s.len() >= 10
+                    && s.as_bytes()[4] == b'-'
+                    && s.as_bytes()[7] == b'-'
+                    && parse_date_lenient(s).is_some();
+                if dated && !known.contains_key(path.as_str()) {
+                    out.push(path.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// A knob declared on one field's mapping entry.
     pub fn field_option(&self, field: &str, key: &str) -> Option<Value> {
         let mut node = self.raw.get("properties")?;
@@ -347,6 +468,8 @@ pub struct IdxState {
     /// index written before kinds were tracked has partial information, and
     /// narrowing a range with it would silently drop matches.
     pub kinds_complete: bool,
+    /// Whether any document here carries an explicit `_doc_count`.
+    pub has_doc_count: bool,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -497,6 +620,15 @@ impl IdxState {
         let seq = self.seq_no;
         self.seq_no += 1;
         (version, seq)
+    }
+
+    /// A stable identifier for the index's current commit point.
+    pub fn commit_id(&self) -> String {
+        self.index
+            .searchable_segment_ids()
+            .ok()
+            .and_then(|ids| ids.first().map(|i| i.uuid_string()))
+            .unwrap_or_else(|| "0".repeat(22))
     }
 
     pub fn version_of(&self, id: &str) -> u64 {
@@ -1140,6 +1272,7 @@ impl Store {
             seen_shapes: std::collections::HashSet::new(),
             observed_kinds: HashMap::new(),
             kinds_complete: true,
+            has_doc_count: false,
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),
@@ -1233,11 +1366,7 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 /// whatever it is given.
 fn value_is_valid(v: &Value, ty: &str) -> bool {
     match ty {
-        "date" | "date_nanos" => match v {
-            Value::Number(_) => true,
-            Value::String(s) => date_is_valid(s),
-            _ => false,
-        },
+        "date" | "date_nanos" => canonical_date(v).is_some(),
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
@@ -1249,23 +1378,6 @@ fn value_is_valid(v: &Value, ty: &str) -> bool {
             || matches!(v.as_str(), Some("true") | Some("false")),
         _ => true,
     }
-}
-
-/// The date forms `strict_date_optional_time` accepts, which is the default
-/// OpenSearch applies when a mapping names no format.
-fn date_is_valid(s: &str) -> bool {
-    if crate::query::parse_datetime(s).is_some() {
-        return true;
-    }
-    let body = s.split(['T', ' ']).next().unwrap_or(s);
-    let parts: Vec<&str> = body.split('-').collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return false;
-    }
-    let widths = [4usize, 2, 2];
-    parts.iter().enumerate().all(|(i, p)| {
-        p.len() == widths[i] && p.chars().all(|c| c.is_ascii_digit())
-    })
 }
 
 /// Field values that cannot be read as their mapped type.
@@ -1376,6 +1488,414 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
     }
 }
 
+/// The date forms OpenSearch's default `strict_date_optional_time` accepts.
+///
+/// A bare `2024-08-12` is a date to OpenSearch but not to RFC 3339, and a
+/// field indexed as text rather than as a date has no column for a range or an
+/// aggregation to read.
+pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Month, OffsetDateTime, Time};
+    if let Some(dt) = crate::query::parse_datetime(s) {
+        return Some(dt.into_utc());
+    }
+    if s.contains("||") || s.starts_with("now") {
+        return parse_date_math(s).map(|(dt, _)| dt);
+    }
+    let (day_part, time_part) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t.trim_end_matches('Z'))),
+        None => (s, None),
+    };
+    let nums: Vec<&str> = day_part.split('-').collect();
+    if nums.is_empty() || nums.len() > 3 {
+        return None;
+    }
+    let widths = [4usize, 2, 2];
+    let mut parts = [1i64, 1, 1];
+    for (i, p) in nums.iter().enumerate() {
+        if p.len() != widths[i] || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        parts[i] = p.parse().ok()?;
+    }
+    let date = Date::from_calendar_date(
+        parts[0] as i32,
+        Month::try_from(parts[1] as u8).ok()?,
+        parts[2] as u8,
+    )
+    .ok()?;
+    let time = match time_part {
+        None => Time::MIDNIGHT,
+        Some(t) => {
+            let (hms, frac) = match t.split_once('.') {
+                Some((a, b)) => (a, b),
+                None => (t, ""),
+            };
+            let f: Vec<&str> = hms.split(':').collect();
+            if f.is_empty() || f.len() > 3 {
+                return None;
+            }
+            let mut c = [0u32; 3];
+            for (i, p) in f.iter().enumerate() {
+                c[i] = p.parse().ok()?;
+            }
+            let millis: u32 = if frac.is_empty() {
+                0
+            } else {
+                let mut d = frac.trim_end_matches(|c: char| !c.is_ascii_digit()).to_string();
+                d.truncate(3);
+                while d.len() < 3 {
+                    d.push('0');
+                }
+                d.parse().ok()?
+            };
+            Time::from_hms_milli(c[0] as u8, c[1] as u8, c[2] as u8, millis as u16).ok()?
+        }
+    };
+    Some(OffsetDateTime::new_utc(date, time))
+}
+
+/// The window a date column can hold. Nanoseconds in an i64 reach about 292
+/// years either side of the epoch, so an open-ended range is filled to the
+/// edges of that rather than to a year the column could not represent.
+const DATE_FLOOR: &str = "1700-01-01T00:00:00.000Z";
+const DATE_CEIL: &str = "2250-01-01T00:00:00.000Z";
+
+/// A range field written with only one end is open at the other, which a
+/// comparison against a missing sub-field cannot express. The open side is
+/// filled with the extreme its type allows, in the indexing view only.
+fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
+    let ranges: Vec<(String, String)> = mapping
+        .types
+        .iter()
+        .filter(|(_, t)| t.ends_with("_range"))
+        .map(|(p, t)| (p.clone(), t.clone()))
+        .collect();
+    for (path, ty) in ranges {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let dated = ty.starts_with("date");
+        let Some(node) = out.pointer_mut(&pointer).and_then(|n| n.as_object_mut()) else {
+            continue;
+        };
+        if dated {
+            for key in ["gte", "gt", "lte", "lt"] {
+                if let Some(v) = node.get(key) {
+                    if let Some(c) = canonical_date(v) {
+                        node.insert(key.into(), Value::String(c));
+                    }
+                }
+            }
+        }
+        // comparisons run against `gte`/`lte`, so an exclusive endpoint is
+        // moved one step inward rather than left in a form nothing reads
+        let step = |v: &Value, forward: bool| -> Option<Value> {
+            if dated {
+                let dt = parse_date_lenient(v.as_str()?)?;
+                let shifted = if forward {
+                    dt + tantivy::time::Duration::milliseconds(1)
+                } else {
+                    dt - tantivy::time::Duration::milliseconds(1)
+                };
+                return Some(Value::String(format_utc_millis(shifted)));
+            }
+            // a whole-number range steps by one; a fractional one has no next
+            // value to move to, so the bound is kept as written
+            let n = v.as_i64()?;
+            Some(Value::from(if forward { n + 1 } else { n - 1 }))
+        };
+        for (from, to, forward) in [("gt", "gte", true), ("lt", "lte", false)] {
+            if node.contains_key(to) {
+                continue;
+            }
+            let Some(v) = node.get(from).cloned() else { continue };
+            let moved = step(&v, forward).unwrap_or(v);
+            node.insert(to.into(), moved);
+        }
+        let has_lower = node.contains_key("gte");
+        let has_upper = node.contains_key("lte");
+        if !has_lower {
+            node.insert(
+                "gte".into(),
+                if dated {
+                    Value::String(DATE_FLOOR.into())
+                } else {
+                    serde_json::json!(f64::MIN)
+                },
+            );
+        }
+        if !has_upper {
+            node.insert(
+                "lte".into(),
+                if dated {
+                    Value::String(DATE_CEIL.into())
+                } else {
+                    serde_json::json!(f64::MAX)
+                },
+            );
+        }
+    }
+}
+
+/// A flat_object is queryable by its own name, which means every value beneath
+/// it has to live somewhere addressable. They are gathered into one list
+/// alongside, in the indexing view only.
+fn gather_flat_objects(out: &mut Value, mapping: &Mapping) {
+    let flats: Vec<String> = mapping
+        .types
+        .iter()
+        .filter(|(_, t)| t.as_str() == "flat_object")
+        .map(|(p, _)| p.clone())
+        .collect();
+    let Some(obj) = out.as_object_mut() else { return };
+    for path in flats {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let Some(node) = obj.get(path.split('.').next().unwrap_or(&path)) else { continue };
+        let root = Value::Object(obj.clone());
+        let Some(node) = root.pointer(&pointer).or(Some(node)) else { continue };
+        let mut values = Vec::new();
+        collect_leaves(node, &mut values);
+        if values.is_empty() {
+            continue;
+        }
+        obj.insert(format!("{path}.{FLAT_VALUES}"), Value::Array(values));
+    }
+}
+
+fn collect_leaves(node: &Value, out: &mut Vec<Value>) {
+    match node {
+        Value::Object(o) => o.values().for_each(|v| collect_leaves(v, out)),
+        Value::Array(a) => a.iter().for_each(|v| collect_leaves(v, out)),
+        Value::Null => {}
+        leaf => out.push(leaf.clone()),
+    }
+}
+
+/// The type OpenSearch infers for a value before any template is consulted.
+fn json_mapping_type(v: &Value) -> &'static str {
+    match v {
+        Value::Object(_) => "object",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) => {
+            if n.is_f64() && n.as_i64().is_none() {
+                "double"
+            } else {
+                "long"
+            }
+        }
+        Value::String(s) => {
+            if s.len() >= 10
+                && s.as_bytes()[4] == b'-'
+                && s.as_bytes()[7] == b'-'
+                && parse_date_lenient(s).is_some()
+            {
+                "date"
+            } else {
+                "string"
+            }
+        }
+        Value::Array(a) => a.first().map(json_mapping_type).unwrap_or("string"),
+        Value::Null => "string",
+    }
+}
+
+/// `date_*` against a field name -- the only wildcard a template `match` uses.
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    let mut rest = name;
+    let mut parts = pattern.split('*').peekable();
+    let first = parts.next().unwrap_or("");
+    if !rest.starts_with(first) {
+        return false;
+    }
+    rest = &rest[first.len()..];
+    if !pattern.contains('*') {
+        return rest.is_empty();
+    }
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            if parts.peek().is_none() {
+                return true;
+            }
+            continue;
+        }
+        if parts.peek().is_none() {
+            return rest.ends_with(part);
+        }
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Where a flat_object field's values are gathered so the field itself can be
+/// queried without naming a path inside it.
+pub const FLAT_VALUES: &str = "_obs_values";
+
+/// How many tokens a standard analyser would find.
+pub fn token_count(text: &str) -> u64 {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).count() as u64
+}
+
+/// `2019-12-15||/d`, `now-1d`, `now+1M/M`: an anchor followed by shifts and a
+/// rounding, which is how OpenSearch writes a date relative to another.
+fn parse_date_math(s: &str) -> Option<(tantivy::time::OffsetDateTime, Option<char>)> {
+    use tantivy::time::{Duration, OffsetDateTime};
+    let (anchor, ops) = match s.split_once("||") {
+        Some((a, o)) => (parse_date_lenient(a)?, o),
+        None => (OffsetDateTime::now_utc(), s.strip_prefix("now")?),
+    };
+    let mut dt = anchor;
+    let mut rounded = None;
+    let mut rest = ops;
+    while !rest.is_empty() {
+        let (op, tail) = rest.split_at(1);
+        match op {
+            "/" => {
+                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                dt = round_down(dt, unit)?;
+                rounded = unit.chars().next();
+                rest = tail;
+            }
+            "+" | "-" => {
+                let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let tail = &tail[digits.len()..];
+                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                let n: i64 = if digits.is_empty() { 1 } else { digits.parse().ok()? };
+                let n = if op == "-" { -n } else { n };
+                dt = match unit {
+                    "y" => shift_months(dt, n * 12)?,
+                    "M" => shift_months(dt, n)?,
+                    "w" => dt + Duration::days(n * 7),
+                    "d" => dt + Duration::days(n),
+                    "H" | "h" => dt + Duration::hours(n),
+                    "m" => dt + Duration::minutes(n),
+                    "s" => dt + Duration::seconds(n),
+                    _ => return None,
+                };
+                rest = tail;
+            }
+            _ => return None,
+        }
+    }
+    Some((dt, rounded))
+}
+
+/// A rounded date math expression names a whole unit, not an instant. Which
+/// end of it a bound means depends on the bound: `gt: .../d` excludes the whole
+/// day, `gte: .../d` includes it from the start.
+pub fn canonical_date_bound(v: &Value, round_up: bool) -> Option<String> {
+    let Some(s) = v.as_str() else { return canonical_date(v) };
+    if !round_up || !(s.contains("||") || s.starts_with("now")) {
+        return canonical_date(v);
+    }
+    let (dt, unit) = parse_date_math(s)?;
+    let Some(unit) = unit else { return canonical_date(v) };
+    // the last instant the unit covers
+    let end = advance_unit(dt, unit)? - tantivy::time::Duration::milliseconds(1);
+    canonical_date(&Value::String(format_utc_millis(end)))
+}
+
+fn advance_unit(
+    dt: tantivy::time::OffsetDateTime,
+    unit: char,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::Duration;
+    Some(match unit {
+        'y' => shift_months(dt, 12)?,
+        'M' => shift_months(dt, 1)?,
+        'w' => dt + Duration::days(7),
+        'd' => dt + Duration::days(1),
+        'H' | 'h' => dt + Duration::hours(1),
+        'm' => dt + Duration::minutes(1),
+        's' => dt + Duration::seconds(1),
+        _ => return None,
+    })
+}
+
+fn format_utc_millis(dt: tantivy::time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    )
+}
+
+fn round_down(
+    dt: tantivy::time::OffsetDateTime,
+    unit: &str,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Duration, Month, Time};
+    let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
+    Some(match unit {
+        "y" => midnight(Date::from_calendar_date(dt.year(), Month::January, 1).ok()?),
+        "M" => midnight(Date::from_calendar_date(dt.year(), dt.month(), 1).ok()?),
+        "w" => {
+            let back = dt.weekday().number_days_from_monday() as i64;
+            midnight(dt.date() - Duration::days(back))
+        }
+        "d" => midnight(dt.date()),
+        "H" | "h" => dt.replace_minute(0).ok()?.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
+        "m" => dt.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
+        "s" => dt.replace_nanosecond(0).ok()?,
+        _ => return None,
+    })
+}
+
+fn shift_months(
+    dt: tantivy::time::OffsetDateTime,
+    n: i64,
+) -> Option<tantivy::time::OffsetDateTime> {
+    use tantivy::time::{Date, Month};
+    let total = dt.year() as i64 * 12 + (dt.month() as i64 - 1) + n;
+    let (y, m) = (total.div_euclid(12) as i32, total.rem_euclid(12) as u8 + 1);
+    let month = Month::try_from(m).ok()?;
+    let day = dt.day().min(days_in_month(y, month));
+    Some(Date::from_calendar_date(y, month, day).ok()?.with_time(dt.time()).assume_utc())
+}
+
+fn days_in_month(year: i32, month: tantivy::time::Month) -> u8 {
+    use tantivy::time::Month::*;
+    match month {
+        January | March | May | July | August | October | December => 31,
+        April | June | September | November => 30,
+        February => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+    }
+}
+
+/// A date in the one spelling the index holds.
+pub fn canonical_date(v: &Value) -> Option<String> {
+    let dt = match v {
+        // a bare number is epoch millis, which is what OpenSearch assumes
+        Value::Number(n) => tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+            (n.as_f64()? as i128) * 1_000_000,
+        )
+        .ok()?,
+        Value::String(s) => parse_date_lenient(s)?,
+        _ => return None,
+    };
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.millisecond(),
+    ))
+}
+
 /// An IP in a form that sorts the way addresses do.
 ///
 /// Text comparison puts "192.168.0.10" below "192.168.0.9", so ranges and
@@ -1414,10 +1934,23 @@ pub fn canonical_cidr(s: &str) -> Option<(String, String)> {
 }
 
 fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
+    if matches!(ty, Some("date") | Some("date_nanos")) {
+        return canonical_date(v).map(Value::String);
+    }
     let s = v.as_str()?;
     match ty? {
+        // a token_count field holds how many tokens the text produced, not
+        // the text itself
+        "token_count" => Some(Value::from(token_count(s))),
         "byte" | "short" | "integer" | "long" | "unsigned_long" => {
-            s.parse::<i64>().ok().map(Value::from).or_else(|| s.parse::<u64>().ok().map(Value::from))
+            // an integer field takes the whole part of a decimal, and the
+            // magnitudes unsigned_long reaches do not survive a trip via f64
+            let whole = s.split_once('.').map(|(a, _)| a).unwrap_or(s);
+            whole
+                .parse::<i64>()
+                .ok()
+                .map(Value::from)
+                .or_else(|| whole.parse::<u64>().ok().map(Value::from))
         }
         "float" | "half_float" | "double" | "scaled_float" => {
             s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)
@@ -1442,6 +1975,8 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
     let mut out = source.clone();
     coerce_leaves(&mut out, &mut String::new(), mapping);
+    fill_open_ranges(&mut out, mapping);
+    gather_flat_objects(&mut out, mapping);
     if subs.is_empty() {
         return out;
     }
