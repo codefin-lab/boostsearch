@@ -1343,6 +1343,43 @@ pub fn run(
             agg_json = None;
         }
     }
+    // `fields` reads values back out of the stored source; without one there
+    // is nothing to read, and a date format asks a field that holds no dates
+    // to answer in a shape it has no values for
+    if let Some(specs) = body.get("fields").and_then(|v| v.as_array()) {
+        for name in targets.iter() {
+            let Some(st) = store.get(name) else { continue };
+            let g = st.read();
+            if g.mapping.raw.pointer("/_source/enabled") == Some(&json!(false)) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "Unable to retrieve the requested [fields] since _source is disabled \
+                         in the mappings for index [{name}]"
+                    ),
+                ));
+            }
+            for spec in specs {
+                let (Some(f), Some(_)) = (
+                    spec.get("field").and_then(|v| v.as_str()),
+                    spec.get("format"),
+                ) else {
+                    continue;
+                };
+                if !matches!(
+                    g.mapping.type_of(f),
+                    None | Some("date" | "date_nanos" | "date_range")
+                ) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!("error fetching [{f}]: field has no date formatter"),
+                    ));
+                }
+            }
+        }
+    }
     let source_sel = body.get("_source").cloned();
     // `fields` asks for values keyed by path, formatted, always as lists
     let field_specs: Option<Vec<(String, Option<String>)>> =
@@ -1694,8 +1731,34 @@ pub fn run(
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
                 let is_leaf = |p: &str| g.mapping.is_leaf_type(p);
-                let names: Vec<String> = specs.iter().map(|(n, _)| n.clone()).collect();
+                // a field without doc values has nothing for `fields` to read
+                let names: Vec<String> = specs
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .filter(|n| {
+                        g.mapping.field_option(n, "doc_values") != Some(json!(false))
+                    })
+                    .collect();
                 let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a token_count field stores the text but reports the count
+                for (name, vals) in f.iter_mut() {
+                    if g.mapping.type_of(name) != Some("token_count") {
+                        continue;
+                    }
+                    if let Value::Array(items) = vals {
+                        for v in items.iter_mut() {
+                            if let Some(t) = v.as_str() {
+                                *v = json!(crate::store::token_count(t));
+                            }
+                        }
+                    }
+                }
+                // a value the index refused is not a value the field has
+                if let Some(Value::Array(ig)) = &h.ignored {
+                    for name in ig.iter().filter_map(|v| v.as_str()) {
+                        f.remove(name);
+                    }
+                }
                 // apply any `format` the caller attached to a field
                 for (name, fmt) in specs {
                     let Some(fmt) = fmt else { continue };
@@ -1704,6 +1767,13 @@ pub fn run(
                         if let Some(formatted) = crate::source::format_date(v, fmt) {
                             *v = formatted;
                         }
+                    }
+                }
+                // `stored_fields` may have filled some in already; both
+                // selections share the one `fields` section
+                if let Some(Value::Object(existing)) = hit.get("fields") {
+                    for (k, v) in existing {
+                        f.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                 }
                 if !f.is_empty() {

@@ -146,7 +146,15 @@ class Runner:
             action.pop(meta, None)
         if not action:
             raise Failure("empty do block")
-        api, params = next(iter(action.items()))
+        # a few suite files put more than one action in a single `do`; the
+        # OpenSearch runner executes each of them in order
+        apis = list(action.items())
+        for api, params in apis[:-1]:
+            self.do_one(api, params, None)
+        api, params = apis[-1]
+        return self.do_one(api, params, catch)
+
+    def do_one(self, api, params, catch):
         params = self.unstash(params or {})
         if not isinstance(params, dict):
             params = {}

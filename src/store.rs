@@ -1471,6 +1471,11 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
     Some(OffsetDateTime::new_utc(date, time))
 }
 
+/// How many tokens a standard analyser would find.
+pub fn token_count(text: &str) -> u64 {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).count() as u64
+}
+
 /// A date in the one spelling the index holds.
 pub fn canonical_date(v: &Value) -> Option<String> {
     let dt = match v {
@@ -1537,8 +1542,18 @@ fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
     }
     let s = v.as_str()?;
     match ty? {
+        // a token_count field holds how many tokens the text produced, not
+        // the text itself
+        "token_count" => Some(Value::from(token_count(s))),
         "byte" | "short" | "integer" | "long" | "unsigned_long" => {
-            s.parse::<i64>().ok().map(Value::from).or_else(|| s.parse::<u64>().ok().map(Value::from))
+            // an integer field takes the whole part of a decimal, and the
+            // magnitudes unsigned_long reaches do not survive a trip via f64
+            let whole = s.split_once('.').map(|(a, _)| a).unwrap_or(s);
+            whole
+                .parse::<i64>()
+                .ok()
+                .map(Value::from)
+                .or_else(|| whole.parse::<u64>().ok().map(Value::from))
         }
         "float" | "half_float" | "double" | "scaled_float" => {
             s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)
