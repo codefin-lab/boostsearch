@@ -600,10 +600,12 @@ pub struct Store {
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
     executor: tantivy::Executor,
-    /// Indices holding a live writer, oldest first. A writer costs indexing
-    /// threads and an arena sized from the memory budget, so the number alive at
-    /// once has to be bounded by design -- an idle timer alone cannot help when
-    /// a load touches every index inside the timeout.
+    /// Indices holding a live writer, oldest first, capped so a load touching
+    /// hundreds of indices cannot hold hundreds of sets of indexing threads.
+    ///
+    /// Measured: capping this does *not* reduce the memory retained after a
+    /// write burst (11.15 MB/index uncapped vs 11.37 MB/index at a cap of 8).
+    /// It is kept for the thread bound, not as a memory fix.
     live_writers: Arc<RwLock<Vec<String>>>,
 }
 
