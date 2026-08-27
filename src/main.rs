@@ -5,6 +5,7 @@
 
 mod api;
 mod blockstats;
+mod hdr;
 mod search;
 mod query;
 mod source;
