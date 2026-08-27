@@ -115,6 +115,18 @@ impl Mapping {
         Mapping { types, raw: body.clone() }
     }
 
+    /// Multi-fields declared with a normalizer, as (parent path, sub name).
+    ///
+    /// A normalizer transforms the value at index time rather than tokenising
+    /// it, so the sub-field needs its own copy of the value in the index.
+    pub fn normalized_subfields(&self) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
+            collect_normalizers(props, "", &mut out);
+        }
+        out
+    }
+
     /// Types the mapping treats as a single value rather than a container.
     pub fn is_leaf_type(&self, field: &str) -> bool {
         matches!(
@@ -204,6 +216,26 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
             }
         }
         _ => {}
+    }
+}
+
+fn collect_normalizers(
+    props: &Map<String, Value>,
+    prefix: &str,
+    out: &mut Vec<(String, String, String)>,
+) {
+    for (name, def) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(subs) = def.get("fields").and_then(|f| f.as_object()) {
+            for (sub, sdef) in subs {
+                if let Some(n) = sdef.get("normalizer").and_then(|v| v.as_str()) {
+                    out.push((path.clone(), sub.clone(), n.to_string()));
+                }
+            }
+        }
+        if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {
+            collect_normalizers(inner, &path, out);
+        }
     }
 }
 
@@ -1154,6 +1186,52 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
 /// Convert a JSON document into a tantivy document with both views plus `_source`.
 /// Build the tantivy document. Takes the source by value so the JSON tree is
 /// moved into the first view instead of deep-copied for both.
+/// Apply a normalizer the way OpenSearch does at index time.
+fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
+    let s = value.as_str()?;
+    match normalizer {
+        "lowercase" => Some(Value::String(s.to_lowercase())),
+        "uppercase" => Some(Value::String(s.to_uppercase())),
+        _ => None,
+    }
+}
+
+/// Add the normalized copies a mapping's multi-fields ask for. These only go
+/// into the index; `_source` is always what the client sent.
+///
+/// The copy is added as a dotted top-level key, which the JSON fields expand
+/// into the same path a nested object would produce -- and unlike nesting, it
+/// does not collide with the parent being a scalar.
+pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
+    let subs = mapping.normalized_subfields();
+    if subs.is_empty() {
+        return source.clone();
+    }
+    let mut out = source.clone();
+    let Some(obj) = out.as_object_mut() else { return out };
+    for (parent, sub, normalizer) in subs {
+        let Some(v) = source.pointer(&format!("/{}", parent.replace('.', "/"))).cloned() else {
+            continue;
+        };
+        let normalized = match &v {
+            Value::Array(items) => {
+                let mapped: Vec<Value> =
+                    items.iter().filter_map(|x| normalize(x, &normalizer)).collect();
+                if mapped.is_empty() {
+                    continue;
+                }
+                Value::Array(mapped)
+            }
+            other => match normalize(other, &normalizer) {
+                Some(n) => n,
+                None => continue,
+            },
+        };
+        obj.insert(format!("{parent}.{sub}"), normalized);
+    }
+    out
+}
+
 pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str) -> TantivyDocument {
     let mut d = TantivyDocument::default();
     d.add_text(fields.id, id);

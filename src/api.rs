@@ -187,8 +187,26 @@ pub async fn refresh_index(State(store): State<Store>, Path(index): Path<String>
 // ------------------------------------------------------------------ mappings
 
 fn mapping_view(st: &IdxState) -> Value {
-    let m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
+    let mut m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
+    add_type_defaults(&mut m);
     json!({"mappings": m})
+}
+
+/// Defaults a type carries even when the request did not spell them out.
+fn add_type_defaults(node: &mut Value) {
+    let Some(obj) = node.as_object_mut() else { return };
+    if obj.get("type").and_then(|t| t.as_str()) == Some("wildcard")
+        && !obj.contains_key("doc_values")
+    {
+        obj.insert("doc_values".into(), json!(true));
+    }
+    for key in ["properties", "fields"] {
+        if let Some(children) = obj.get_mut(key).and_then(|c| c.as_object_mut()) {
+            for (_, child) in children.iter_mut() {
+                add_type_defaults(child);
+            }
+        }
+    }
 }
 
 pub async fn get_mapping(
@@ -413,7 +431,9 @@ pub fn write_doc_raw(
         }
     }
     let raw = raw.unwrap_or_else(|| source.to_string());
-    let doc = make_doc(&st.fields, id, source, &raw);
+    // normalized multi-fields are indexed alongside, but never stored
+    let indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    let doc = make_doc(&st.fields, id, indexed, &raw);
     match st.writer() {
         Ok(w) => {
             if let Err(e) = w.add_document(doc) {
