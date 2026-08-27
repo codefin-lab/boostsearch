@@ -596,8 +596,75 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     }
 }
 
+/// A `*_range` field stores an interval per document, so a range query over it
+/// compares two intervals rather than a value against bounds. The stored
+/// endpoints are already separate numeric paths, so each relation is a pair of
+/// ordinary range queries.
+fn build_range_field_query(
+    ctx: &Ctx,
+    field: &str,
+    spec: &Value,
+) -> Option<Result<Box<dyn Query>>> {
+    let kind = ctx.mapping.type_of(field)?;
+    if !kind.ends_with("_range") {
+        return None;
+    }
+    let relation = spec
+        .get("relation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("intersects")
+        .to_ascii_lowercase();
+    let q_lo = spec.get("gte").or_else(|| spec.get("gt")).cloned();
+    let q_hi = spec.get("lte").or_else(|| spec.get("lt")).cloned();
+    let lo_field = format!("{field}.gte");
+    let hi_field = format!("{field}.lte");
+
+    let mut clauses: Vec<Value> = Vec::new();
+    match relation.as_str() {
+        // the stored interval overlaps the query interval
+        "intersects" => {
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": hi}}}));
+            }
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": lo}}}));
+            }
+        }
+        // the stored interval covers the query interval
+        "contains" => {
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"lte": lo}}}));
+            }
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"gte": hi}}}));
+            }
+        }
+        // the stored interval sits inside the query interval
+        "within" => {
+            if let Some(lo) = &q_lo {
+                clauses.push(serde_json::json!({"range": {lo_field.clone(): {"gte": lo}}}));
+            }
+            if let Some(hi) = &q_hi {
+                clauses.push(serde_json::json!({"range": {hi_field.clone(): {"lte": hi}}}));
+            }
+        }
+        other => {
+            return Some(Err(anyhow!("unsupported range relation [{other}]")));
+        }
+    }
+    if clauses.is_empty() {
+        // no bounds: every document that has the field at all
+        clauses.push(serde_json::json!({"exists": {"field": lo_field}}));
+    }
+    let combined = serde_json::json!({"bool": {"filter": clauses}});
+    Some(build(ctx, &combined))
+}
+
 fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, spec) = single_key(body)?;
+    if let Some(r) = build_range_field_query(ctx, &field, &spec) {
+        return r;
+    }
     let (f, path, _) = ctx.resolve(&field, false);
     let get = |keys: [&str; 2]| -> Option<(Value, bool)> {
         for (i, k) in keys.iter().enumerate() {
@@ -941,11 +1008,47 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         };
         let targets: Vec<String> =
             field_part.map(|f| vec![f]).unwrap_or_else(|| default_fields.clone());
-        let value = value.trim_matches('"').to_string();
+        let value = if value.starts_with('[') || value.starts_with('{') {
+            value
+        } else {
+            value.trim_matches('"').to_string()
+        };
         if value.is_empty() {
             continue;
         }
         let regex_literal = value.len() > 2 && value.starts_with('/') && value.ends_with('/');
+        // `field:[a TO b]` is a range, not a term
+        if let Some(spec) = parse_range_token(&value) {
+            let mut per_field: Vec<Box<dyn Query>> = Vec::new();
+            for name in &targets {
+                let clause = serde_json::json!({"range": { name.clone(): spec.clone() }});
+                if let Ok(q) = build(ctx, &clause) {
+                    per_field.push(q);
+                }
+            }
+            if !per_field.is_empty() {
+                let sub: Box<dyn Query> = if per_field.len() == 1 {
+                    per_field.into_iter().next().unwrap()
+                } else {
+                    Box::new(BooleanQuery::union(per_field))
+                };
+                let occur = if pending_not {
+                    Occur::MustNot
+                } else {
+                    pending_occur.take().unwrap_or(if default_operator == "and" {
+                        Occur::Must
+                    } else {
+                        Occur::Should
+                    })
+                };
+                pending_not = false;
+                if occur == Occur::Should {
+                    should_count += 1;
+                }
+                clauses.push((occur, sub));
+            }
+            continue;
+        }
         let mut per_field: Vec<Box<dyn Query>> = Vec::new();
         for name in &targets {
             let (f, path, view) = ctx.resolve(name, true);
@@ -1001,18 +1104,28 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
 }
 
-/// Split on whitespace, keeping quoted phrases (and `field:"phrase"`) together.
+/// Split on whitespace, keeping quoted phrases and bracketed ranges together,
+/// so `field:[3 TO 4]` survives as one token.
 fn split_query_string(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_quotes = false;
+    let mut depth = 0i32;
     for c in s.chars() {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
                 cur.push(c);
             }
-            c if c.is_whitespace() && !in_quotes => {
+            '[' | '{' if !in_quotes => {
+                depth += 1;
+                cur.push(c);
+            }
+            ']' | '}' if !in_quotes => {
+                depth -= 1;
+                cur.push(c);
+            }
+            c if c.is_whitespace() && !in_quotes && depth <= 0 => {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                 }
@@ -1024,4 +1137,37 @@ fn split_query_string(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// `[lo TO hi]` is inclusive, `{lo TO hi}` exclusive; `*` is an open end.
+fn parse_range_token(value: &str) -> Option<Value> {
+    let (open, close) = (value.chars().next()?, value.chars().last()?);
+    let inclusive_lo = match open {
+        '[' => true,
+        '{' => false,
+        _ => return None,
+    };
+    let inclusive_hi = match close {
+        ']' => true,
+        '}' => false,
+        _ => return None,
+    };
+    let inner = &value[1..value.len() - 1];
+    let mut parts = inner.splitn(2, " TO ");
+    let lo = parts.next()?.trim();
+    let hi = parts.next()?.trim();
+    let as_json = |t: &str| -> Option<Value> {
+        if t == "*" {
+            return None;
+        }
+        Some(serde_json::from_str(t).unwrap_or_else(|_| Value::String(t.to_string())))
+    };
+    let mut spec = serde_json::Map::new();
+    if let Some(v) = as_json(lo) {
+        spec.insert(if inclusive_lo { "gte" } else { "gt" }.into(), v);
+    }
+    if let Some(v) = as_json(hi) {
+        spec.insert(if inclusive_hi { "lte" } else { "lt" }.into(), v);
+    }
+    Some(Value::Object(spec))
 }
