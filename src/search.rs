@@ -1512,8 +1512,10 @@ pub fn run(
     }
     let source_sel = body.get("_source").cloned();
     // `fields` asks for values keyed by path, formatted, always as lists
-    let field_specs: Option<Vec<(String, Option<String>)>> =
-        body.get("fields").and_then(|v| v.as_array()).map(|a| {
+    // `docvalue_fields` names the same values `fields` does; both are read out
+    // of the stored source here, which holds every value either could report
+    let spec_list = |v: Option<&Value>| -> Option<Vec<(String, Option<String>)>> {
+        v.and_then(|v| v.as_array()).map(|a| {
             a.iter()
                 .filter_map(|x| match x {
                     Value::String(s) => Some((s.clone(), None)),
@@ -1526,7 +1528,16 @@ pub fn run(
                     _ => None,
                 })
                 .collect()
-        });
+        })
+    };
+    let field_specs: Option<Vec<(String, Option<String>)>> =
+        match (spec_list(body.get("fields")), spec_list(body.get("docvalue_fields"))) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        };
     let stored: Option<Vec<String>> = match body.get("stored_fields") {
         Some(Value::Array(a)) => {
             Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -1610,6 +1621,17 @@ pub fn run(
         };
 
         let searcher = g.reader.searcher();
+
+        // the peeled aggregations never reach the parser, so their fields are
+        // checked here rather than alongside the ones that do
+        if !filters_aggs.is_empty() {
+            let peeled: Value = filters_aggs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            check_agg_types(&peeled, &ctx)?;
+        }
 
         // aggregations, when asked for, run over the same query
         let mut this_agg: Option<Aggregations> = None;
@@ -1860,7 +1882,14 @@ pub fn run(
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
-                let is_leaf = |p: &str| g.mapping.is_leaf_type(p);
+                // a flat_object is one value unless the request named a path
+                // inside it, in which case it has to be descended
+                let is_leaf = |p: &str| {
+                    g.mapping.is_leaf_type(p)
+                        && !specs.iter().any(|(n, _)| {
+                            n.len() > p.len() && n.starts_with(p) && n.as_bytes()[p.len()] == b'.'
+                        })
+                };
                 // a field without doc values has nothing for `fields` to read
                 let names: Vec<String> = specs
                     .iter()

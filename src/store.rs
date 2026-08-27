@@ -1474,6 +1474,44 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
     Some(OffsetDateTime::new_utc(date, time))
 }
 
+/// A flat_object is queryable by its own name, which means every value beneath
+/// it has to live somewhere addressable. They are gathered into one list
+/// alongside, in the indexing view only.
+fn gather_flat_objects(out: &mut Value, mapping: &Mapping) {
+    let flats: Vec<String> = mapping
+        .types
+        .iter()
+        .filter(|(_, t)| t.as_str() == "flat_object")
+        .map(|(p, _)| p.clone())
+        .collect();
+    let Some(obj) = out.as_object_mut() else { return };
+    for path in flats {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let Some(node) = obj.get(path.split('.').next().unwrap_or(&path)) else { continue };
+        let root = Value::Object(obj.clone());
+        let Some(node) = root.pointer(&pointer).or(Some(node)) else { continue };
+        let mut values = Vec::new();
+        collect_leaves(node, &mut values);
+        if values.is_empty() {
+            continue;
+        }
+        obj.insert(format!("{path}.{FLAT_VALUES}"), Value::Array(values));
+    }
+}
+
+fn collect_leaves(node: &Value, out: &mut Vec<Value>) {
+    match node {
+        Value::Object(o) => o.values().for_each(|v| collect_leaves(v, out)),
+        Value::Array(a) => a.iter().for_each(|v| collect_leaves(v, out)),
+        Value::Null => {}
+        leaf => out.push(leaf.clone()),
+    }
+}
+
+/// Where a flat_object field's values are gathered so the field itself can be
+/// queried without naming a path inside it.
+pub const FLAT_VALUES: &str = "_obs_values";
+
 /// How many tokens a standard analyser would find.
 pub fn token_count(text: &str) -> u64 {
     text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).count() as u64
@@ -1581,6 +1619,7 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
     let mut out = source.clone();
     coerce_leaves(&mut out, &mut String::new(), mapping);
+    gather_flat_objects(&mut out, mapping);
     if subs.is_empty() {
         return out;
     }

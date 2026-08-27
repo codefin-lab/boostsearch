@@ -45,9 +45,19 @@ impl<'a> Ctx<'a> {
     pub fn view(&self, field: &str, analyzed: bool) -> View {
         match self.mapping.type_of(field) {
             Some("text") | Some("match_only_text") | Some("search_as_you_type") => View::Dyn,
-            Some("keyword") | Some("constant_keyword") | Some("wildcard") | Some("ip") => View::Raw,
+            Some("keyword") | Some("constant_keyword") | Some("wildcard") | Some("ip")
+            | Some("flat_object") => View::Raw,
             Some(_) => View::Dyn, // numeric, date, boolean: identical in both views
             None => {
+                // a path inside a flat_object is exact, like a keyword; the
+                // mapping never names it, so the ancestor has to be consulted
+                let mut prefix = field;
+                while let Some((head, _)) = prefix.rsplit_once('.') {
+                    if self.mapping.type_of(head) == Some("flat_object") {
+                        return View::Raw;
+                    }
+                    prefix = head;
+                }
                 if analyzed {
                     View::Dyn
                 } else {
@@ -59,6 +69,12 @@ impl<'a> Ctx<'a> {
 
     /// `title.keyword` addresses the raw view of `title`.
     pub fn resolve(&self, field: &str, analyzed: bool) -> (Field, String, View) {
+        // naming a flat_object itself asks about every value beneath it
+        if self.mapping.type_of(field) == Some("flat_object") {
+            let path = format!("{field}.{}", crate::store::FLAT_VALUES);
+            let v = self.view(field, analyzed);
+            return (self.field_of(v), path, v);
+        }
         if self.mapping.type_of(field).is_none() {
             if let Some(base) = field.strip_suffix(".keyword") {
                 if self.mapping.type_of(base).is_some() || base.contains('.') || true {
@@ -808,8 +824,18 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         None
     };
-    let mut lower = get(["gte", "gt"]);
-    let mut upper = get(["lte", "lt"]);
+    // `from`/`to` are the older spelling, with inclusivity as its own flag
+    let older = |key: &str, flag: &str| -> Option<(Value, bool)> {
+        let v = spec.get(key).filter(|v| !v.is_null())?.clone();
+        let inclusive = match spec.get(flag) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => s != "false",
+            _ => true,
+        };
+        Some((v, inclusive))
+    };
+    let mut lower = get(["gte", "gt"]).or_else(|| older("from", "include_lower"));
+    let mut upper = get(["lte", "lt"]).or_else(|| older("to", "include_upper"));
     // OpenSearch's default date format accepts a bare year; our date values are
     // indexed as ISO strings, which compare correctly lexicographically
     if ctx.mapping.type_of(&field).map(|t| t == "date").unwrap_or(false) {
