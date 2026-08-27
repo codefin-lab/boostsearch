@@ -119,6 +119,21 @@ impl Mapping {
     ///
     /// A normalizer transforms the value at index time rather than tokenising
     /// it, so the sub-field needs its own copy of the value in the index.
+    /// The normalizer a field's mapping declares, if any.
+    pub fn normalizer_of(&self, field: &str) -> Option<String> {
+        let (parent, sub) = field.rsplit_once('.')?;
+        let props = self.raw.get("properties")?.as_object()?;
+        let mut node = props.get(parent.split('.').next()?)?;
+        for seg in parent.split('.').skip(1) {
+            node = node.get("properties")?.as_object()?.get(seg)?;
+        }
+        node.get("fields")?
+            .get(sub)?
+            .get("normalizer")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
     pub fn normalized_subfields(&self) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
@@ -228,9 +243,10 @@ fn collect_normalizers(
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         if let Some(subs) = def.get("fields").and_then(|f| f.as_object()) {
             for (sub, sdef) in subs {
-                if let Some(n) = sdef.get("normalizer").and_then(|v| v.as_str()) {
-                    out.push((path.clone(), sub.clone(), n.to_string()));
-                }
+                // a multi-field without a normalizer still needs its own copy
+                // of the value; nothing else populates that path
+                let n = sdef.get("normalizer").and_then(|v| v.as_str()).unwrap_or("");
+                out.push((path.clone(), sub.clone(), n.to_string()));
             }
         }
         if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {
@@ -1187,9 +1203,10 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
 /// Build the tantivy document. Takes the source by value so the JSON tree is
 /// moved into the first view instead of deep-copied for both.
 /// Apply a normalizer the way OpenSearch does at index time.
-fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
+pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
     let s = value.as_str()?;
     match normalizer {
+        "" => Some(Value::String(s.to_string())),
         "lowercase" => Some(Value::String(s.to_lowercase())),
         "uppercase" => Some(Value::String(s.to_uppercase())),
         _ => None,

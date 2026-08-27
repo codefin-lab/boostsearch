@@ -77,6 +77,17 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Put a query term through the same normalizer the field was indexed with,
+/// so `ABCD` finds what `lowercase` stored as `abcd`.
+fn normalized(ctx: &Ctx, field: &str, text: &str) -> String {
+    match ctx.mapping.normalizer_of(field) {
+        Some(n) => crate::store::normalize(&Value::String(text.to_string()), &n)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| text.to_string()),
+        None => text.to_string(),
+    }
+}
+
 /// Rewrite a value written as an IP into the form the field was indexed in.
 fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
     if ctx.mapping.type_of(field) != Some("ip") {
@@ -242,7 +253,20 @@ fn regex_query(field: Field, path: &str, pattern: &str) -> Result<Box<dyn Query>
 
 pub fn wildcard_to_regex(pat: &str) -> String {
     let mut s = String::new();
-    for c in pat.chars() {
+    let mut chars = pat.chars();
+    while let Some(c) = chars.next() {
+        // a backslash makes the next character a literal, `*` and `?` included
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                if next.is_alphanumeric() {
+                    s.push(next);
+                } else {
+                    s.push('\\');
+                    s.push(next);
+                }
+            }
+            continue;
+        }
         match c {
             '*' => s.push_str(".*"),
             '?' => s.push('.'),
@@ -362,6 +386,12 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
                 }
             }
+            if let Some(s) = val.as_str() {
+                let n = normalized(ctx, &field, s);
+                if n != s {
+                    return Ok(any_of(term_for(f, &path, &Value::String(n))));
+                }
+            }
             if let Some(q) = ip_term_query(ctx, &field, f, &path, &val) {
                 return Ok(q);
             }
@@ -418,23 +448,43 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             Box::new(ExistsQuery::new(col, true))
         }
         "prefix" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };
-            regex_query(f, &path, &format!("{}.*", escape_regex(&text)))?
+            let text = normalized(ctx, &field, &text);
+            let pat = escape_regex(&text);
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&pat)
+            } else {
+                pat
+            };
+            regex_query(f, &path, &format!("{pat}.*"))?
         }
         "wildcard" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };
-            regex_query(f, &path, &wildcard_to_regex(&text))?
+            let text = normalized(ctx, &field, &text);
+            let pat = wildcard_to_regex(&text);
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&pat)
+            } else {
+                pat
+            };
+            regex_query(f, &path, &pat)?
         }
         "regexp" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, true);
-            regex_query(f, &path, val.as_str().unwrap_or_default())?
+            let text = normalized(ctx, &field, val.as_str().unwrap_or_default());
+            let pat = if is_true(opts.get("case_insensitive")) {
+                case_insensitive_regex(&text)
+            } else {
+                text
+            };
+            regex_query(f, &path, &pat)?
         }
         "fuzzy" => {
             let (field, val, opts) = field_and_value(&body)?;
@@ -1065,8 +1115,17 @@ fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 fn case_insensitive_regex(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut escaped = false;
+    let mut in_class = false;
     for c in pattern.chars() {
-        if escaped || !c.is_alphabetic() {
+        if !escaped {
+            if c == '[' {
+                in_class = true;
+            } else if c == ']' {
+                in_class = false;
+            }
+        }
+        // inside a character class an expansion would nest brackets
+        if escaped || in_class || !c.is_alphabetic() {
             out.push(c);
             escaped = !escaped && c == '\\';
             continue;
