@@ -182,10 +182,14 @@ class Runner:
         try:
             parsed = resp.json() if resp.content else None
         except Exception:
-            parsed = {"_raw": resp.text}
-        # HEAD-style APIs return no body; the suite asserts `is_true: ''` on the
-        # outcome itself, so surface the status as a boolean.
-        self.last = (resp.status_code < 400) if parsed is None else parsed
+            # cat APIs answer in plain text; the suite matches on the body itself
+            parsed = resp.text
+        # HEAD-style APIs return no body and the suite asserts on the outcome
+        # itself; a GET that simply answered with an empty body is still a body.
+        if parsed is None:
+            self.last = (resp.status_code < 400) if method == "HEAD" else ""
+        else:
+            self.last = parsed
 
         if catch:
             if resp.status_code < 400:
@@ -215,9 +219,11 @@ class Runner:
         for path, expected in spec.items():
             actual = flatten_path(self.last, path)
             expected = self.unstash(expected)
-            if isinstance(expected, str) and len(expected) > 2 \
-                    and expected.startswith("/") and expected.endswith("/"):
-                if not re.search(expected[1:-1].strip(), str(actual or ""), re.X):
+            # a regex may carry surrounding whitespace from a yaml block scalar
+            stripped = expected.strip() if isinstance(expected, str) else expected
+            if isinstance(stripped, str) and len(stripped) > 2 \
+                    and stripped.startswith("/") and stripped.endswith("/"):
+                if not re.search(stripped[1:-1], str(actual if actual is not None else ""), re.X):
                     raise Failure(f"match {path}: {actual!r} !~ {expected}")
                 continue
             if isinstance(expected, (int, float)) and isinstance(actual, (int, float)) \

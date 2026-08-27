@@ -2421,7 +2421,42 @@ pub async fn open_index(
 
 // ---------------------------------------------------------------- cat helpers
 
+/// Columns the endpoint can show, for `?help`.
+fn cat_help(columns: &[&str]) -> Response {
+    let mut out = String::new();
+    for c in columns {
+        out.push_str(c);
+        out.push_str(" | | \n");
+    }
+    out.into_response()
+}
+
 fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
+    let cols: Vec<&str> =
+        rows.first().map(|r| r.iter().map(|(k, _)| *k).collect()).unwrap_or_default();
+    cat_render_cols(&cols, rows, p)
+}
+
+/// Columns are passed separately so `?help` and the `?v` header still work on an
+/// endpoint that currently has no rows to show.
+fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
+    if p.contains_key("help") {
+        return cat_help(columns);
+    }
+    // `h=` picks and orders the columns
+    let rows: Vec<Vec<(&str, String)>> = match p.get("h") {
+        Some(spec) if !spec.is_empty() => {
+            let want: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+            rows.into_iter()
+                .map(|r| {
+                    want.iter()
+                        .filter_map(|w| r.iter().find(|(k, _)| k == w).cloned())
+                        .collect()
+                })
+                .collect()
+        }
+        _ => rows,
+    };
     if p.get("format").map(|f| f == "json").unwrap_or(false) {
         let arr: Vec<Value> = rows
             .iter()
@@ -2433,9 +2468,13 @@ fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
     }
     // plain text: the format `cat` is named for
     let mut out = String::new();
-    if p.get("v").map(|v| v == "true" || v.is_empty()).unwrap_or(false) {
-        if let Some(first) = rows.first() {
-            out.push_str(&first.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(" "));
+    if p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true) {
+        let head: Vec<&str> = match rows.first() {
+            Some(r) => r.iter().map(|(k, _)| *k).collect(),
+            None => columns.to_vec(),
+        };
+        if !head.is_empty() {
+            out.push_str(&head.join(" "));
             out.push('\n');
         }
     }
@@ -2445,6 +2484,15 @@ fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
     }
     out.into_response()
 }
+
+/// An endpoint with no rows on a single node still has to answer `?help`.
+fn cat_named(columns: &[&str], p: &Params) -> Response {
+    cat_render_cols(columns, Vec::new(), p)
+}
+
+pub const CAT_INDEX_COLS: &[&str] = &[
+    "health", "status", "index", "uuid", "pri", "rep", "docs.count", "docs.deleted",
+];
 
 pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let mut rows = Vec::new();
@@ -2463,8 +2511,11 @@ pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) ->
             ("docs.deleted", "0".to_string()),
         ]);
     }
-    cat_render(rows, &p)
+    cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
+
+pub const CAT_ALIAS_COLS: &[&str] =
+    &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
 
 pub async fn cat_aliases(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let mut rows = Vec::new();
@@ -2482,7 +2533,7 @@ pub async fn cat_aliases(State(store): State<Store>, Query(p): Query<Params>) ->
             ]);
         }
     }
-    cat_render(rows, &p)
+    cat_render_cols(CAT_ALIAS_COLS, rows, &p)
 }
 
 pub async fn cat_count(
@@ -2512,11 +2563,23 @@ pub async fn cat_health(Query(p): Query<Params>) -> Response {
 
 /// `_cat/{what}` in one place. The shapes people actually read are filled in;
 /// the rest answer with the right envelope rather than a 501.
+pub async fn cat_dispatch_target(
+    State(store): State<Store>,
+    Path((what, _target)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    cat_by_name(store, what, p).await
+}
+
 pub async fn cat_dispatch(
     State(store): State<Store>,
     Path(what): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    cat_by_name(store, what, p).await
+}
+
+async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
         "indices" => cat_indices(State(store), Query(p)).await,
@@ -2554,7 +2617,7 @@ pub async fn cat_dispatch(
             cat_render(rows, &p)
         }
         "shards" => {
-            let rows = store
+            let rows: Vec<Vec<(&str, String)>> = store
                 .names()
                 .into_iter()
                 .filter_map(|n| store.get(&n).map(|st| (n, st)))
@@ -2594,11 +2657,21 @@ pub async fn cat_dispatch(
                 .collect();
             cat_render(rows, &p)
         }
-        // shapes with nothing meaningful behind them on a single node
-        "pending_tasks" | "plugins" | "thread_pool" | "recovery" | "repositories"
-        | "snapshots" | "tasks" | "fielddata" | "nodeattrs" | "allocation" => {
-            cat_render(Vec::new(), &p)
-        }
+        // shapes with nothing meaningful behind them on a single node; `?help`
+        // still has to list the right columns
+        "fielddata" => cat_named(&["id", "host", "ip", "node", "field", "size"], &p),
+        "allocation" => cat_named(
+            &["shards", "disk.indices", "disk.used", "disk.avail", "disk.total",
+              "disk.percent", "host", "ip", "node"], &p),
+        "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
+        "plugins" => cat_named(&["name", "component", "version"], &p),
+        "thread_pool" => cat_named(&["node_name", "name", "active", "queue", "rejected"], &p),
+        "recovery" => cat_named(
+            &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
+        "repositories" => cat_named(&["id", "type"], &p),
+        "snapshots" => cat_named(&["id", "status", "start_epoch", "end_epoch", "duration"], &p),
+        "tasks" => cat_named(&["action", "task_id", "parent_task_id", "type", "start_time"], &p),
+        "nodeattrs" => cat_named(&["node", "host", "ip", "attr", "value"], &p),
         other => err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",

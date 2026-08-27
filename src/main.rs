@@ -104,7 +104,7 @@ fn app(store: Store) -> Router {
         .route("/_settings", put(api::put_settings))
         // --- cat ---
         .route("/_cat/{what}", get(api::cat_dispatch))
-        .route("/_cat/{what}/{target}", get(api::cat_dispatch))
+        .route("/_cat/{what}/{target}", get(api::cat_dispatch_target))
         .route("/_cat/indices", get(api::cat_indices))
         .route("/_cat/indices/{index}", get(api::cat_indices))
         .route("/_cat/aliases", get(api::cat_aliases))
