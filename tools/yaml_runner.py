@@ -89,6 +89,7 @@ class Runner:
         self.specs = specs
         self.stash = {}
         self.last = None
+        self.last_req = None
         self.verbose = verbose
         self.session = requests.Session()
 
@@ -186,6 +187,7 @@ class Runner:
             parsed = resp.text
         # HEAD-style APIs return no body and the suite asserts on the outcome
         # itself; a GET that simply answered with an empty body is still a body.
+        self.last_req = (method, url, body)
         if parsed is None:
             self.last = (resp.status_code < 400) if method == "HEAD" else ""
         else:
@@ -386,7 +388,9 @@ def main():
             except Failure as e:
                 failed += 1
                 fa += 1
-                failures.append((rel, name, str(e)))
+                req = getattr(r, "last_req", None)
+                ctx = f"  <- {req[0]} {req[1]} {json.dumps(req[2])[:220]}" if req else ""
+                failures.append((rel, name, str(e) + ctx))
             except Exception as e:
                 failed += 1
                 fa += 1

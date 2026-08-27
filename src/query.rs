@@ -77,6 +77,43 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Rewrite a value written as an IP into the form the field was indexed in.
+fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
+    if ctx.mapping.type_of(field) != Some("ip") {
+        return v.clone();
+    }
+    match v.as_str().and_then(crate::store::canonical_ip) {
+        Some(c) => Value::String(c),
+        None => v.clone(),
+    }
+}
+
+/// `term` on an `ip` field accepts a CIDR block, which names a range of
+/// addresses rather than one of them.
+fn ip_term_query(
+    ctx: &Ctx,
+    field: &str,
+    f: Field,
+    path: &str,
+    v: &Value,
+) -> Option<Box<dyn Query>> {
+    if ctx.mapping.type_of(field) != Some("ip") {
+        return None;
+    }
+    let s = v.as_str()?;
+    if let Some((lo, hi)) = crate::store::canonical_cidr(s) {
+        let mut l = Term::from_field_json_path(f, path, true);
+        l.append_type_and_str(&lo);
+        let mut h = Term::from_field_json_path(f, path, true);
+        h.append_type_and_str(&hi);
+        return Some(Box::new(RangeQuery::new(
+            Bound::Included(l),
+            Bound::Included(h),
+        )));
+    }
+    Some(any_of(term_for(f, path, &ip_value(ctx, field, v))))
+}
+
 fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
     let base = Term::from_field_json_path(field, path, true);
     match v {
@@ -99,12 +136,17 @@ fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
         }
         Value::Number(n) => {
             let mut out = Vec::new();
-            if let Some(i) = n.as_i64() {
+            // 401.0 and 401 name the same value; whichever form was indexed,
+            // either spelling of the query has to find it
+            let whole = n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 9.007e15);
+            let as_i64 = n.as_i64().or_else(|| whole.map(|f| f as i64));
+            let as_u64 = n.as_u64().or_else(|| whole.filter(|f| *f >= 0.0).map(|f| f as u64));
+            if let Some(i) = as_i64 {
                 let mut t = base.clone();
                 t.append_type_and_fast_value(i);
                 out.push(t);
             }
-            if let Some(u) = n.as_u64() {
+            if let Some(u) = as_u64 {
                 let mut t = base.clone();
                 t.append_type_and_fast_value(u);
                 out.push(t);
@@ -271,6 +313,16 @@ fn single_key(o: &Value) -> Result<(String, Value)> {
 }
 
 /// Extract `{"field": value}` or `{"field": {"value": v, ...}}`.
+/// The suite writes flags both as JSON booleans and as the strings the URL form
+/// would carry.
+fn is_true(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
 fn field_and_value(v: &Value) -> Result<(String, Value, Value)> {
     let (field, body) = single_key(v)?;
     if let Some(o) = body.as_object() {
@@ -303,8 +355,16 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "match_none" => Box::new(EmptyQuery),
         "term" => {
-            let (field, val, _) = field_and_value(&body)?;
+            let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, false);
+            if is_true(opts.get("case_insensitive")) {
+                if let Some(s) = val.as_str() {
+                    return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
+                }
+            }
+            if let Some(q) = ip_term_query(ctx, &field, f, &path, &val) {
+                return Ok(q);
+            }
             any_of(term_for(f, &path, &val))
         }
         "terms" => {
@@ -321,10 +381,27 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let (f, path, _) = ctx.resolve(&field, false);
             let arr = vals.as_array().cloned().unwrap_or_default();
             let mut terms = Vec::new();
+            let mut subs: Vec<Box<dyn Query>> = Vec::new();
             for v in &arr {
-                terms.extend(term_for(f, &path, v));
+                // a CIDR entry names a range, not a term, so it cannot join the
+                // flat term set the common case builds
+                match v.as_str().filter(|s| s.contains('/')).and(
+                    ip_term_query(ctx, &field, f, &path, v),
+                ) {
+                    Some(q) => subs.push(q),
+                    None => terms.extend(term_for(f, &path, &ip_value(ctx, &field, v))),
+                }
             }
-            any_of(terms)
+            if subs.is_empty() {
+                any_of(terms)
+            } else {
+                if !terms.is_empty() {
+                    subs.push(any_of(terms));
+                }
+                Box::new(BooleanQuery::new(
+                    subs.into_iter().map(|q| (Occur::Should, q)).collect(),
+                ))
+            }
         }
         "ids" => {
             let arr = body.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -689,11 +766,50 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             }
         }
     }
+    if ctx.mapping.type_of(&field) == Some("ip") {
+        for b in [&mut lower, &mut upper] {
+            if let Some((v, inclusive)) = b.clone() {
+                *b = Some((ip_value(ctx, &field, &v), inclusive));
+            }
+        }
+    }
+    // A numeric bound against a string field is a lexicographic comparison in
+    // OpenSearch -- "5" and "400" are both below 500, "ingesting..." is not.
+    if matches!(
+        ctx.mapping.type_of(&field),
+        Some("keyword" | "text" | "wildcard" | "constant_keyword" | "search_as_you_type"
+            | "match_only_text")
+    ) {
+        for b in [&mut lower, &mut upper] {
+            if let Some((Value::Number(n), inclusive)) = b.clone() {
+                *b = Some((Value::String(n.to_string()), inclusive));
+            }
+        }
+    }
     if lower.is_none() && upper.is_none() {
         return Ok(Box::new(AllQuery));
     }
 
     let sample = lower.as_ref().or(upper.as_ref()).map(|(v, _)| v.clone()).unwrap_or(Value::Null);
+    // there are only two booleans, so a range over them is just the set of
+    // values it admits -- and range scans do not accept the type at all
+    if sample.is_boolean() {
+        let ok = |b: bool| {
+            lower.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
+                Some(l) => b > l || (*inc && b == l),
+                None => true,
+            }) && upper.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
+                Some(u) => b < u || (*inc && b == u),
+                None => true,
+            })
+        };
+        let terms: Vec<Term> = [false, true]
+            .into_iter()
+            .filter(|b| ok(*b))
+            .flat_map(|b| term_for(f, &path, &Value::Bool(b)))
+            .collect();
+        return Ok(any_of(terms));
+    }
     let types: Vec<Type> = match &sample {
         Value::Number(n) => {
             if n.is_f64() && n.as_i64().is_none() {
@@ -710,6 +826,7 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         Value::String(s) if parse_datetime(s).is_some() => vec![Type::Date, Type::Str],
         Value::String(_) => vec![Type::Str],
+        Value::Bool(_) => vec![Type::Bool],
         _ => vec![Type::Str],
     };
 
@@ -868,6 +985,7 @@ fn bound_term(
             Some(d) => t.append_type_and_fast_value(d),
             None => return Bound::Unbounded,
         },
+        (Type::Bool, Value::Bool(b)) => t.append_type_and_fast_value(*b),
         (Type::Str, Value::String(s)) => t.append_type_and_str(s),
         (Type::Str, other) => t.append_type_and_str(&other.to_string()),
         _ => return Bound::Unbounded,
@@ -940,6 +1058,28 @@ fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         0
     };
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+}
+
+/// Widen every cased letter of a pattern into a two-way character class, so a
+/// literal can be matched without regard to case.
+fn case_insensitive_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    for c in pattern.chars() {
+        if escaped || !c.is_alphabetic() {
+            out.push(c);
+            escaped = !escaped && c == '\\';
+            continue;
+        }
+        let (lo, up): (String, String) =
+            (c.to_lowercase().collect(), c.to_uppercase().collect());
+        if lo == up {
+            out.push(c);
+        } else {
+            out.push_str(&format!("[{lo}{up}]"));
+        }
+    }
+    out
 }
 
 fn escape_regex(s: &str) -> String {

@@ -1196,6 +1196,92 @@ fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
     }
 }
 
+/// Bring a value in line with the type its mapping declares.
+///
+/// A client may send `"800.0"` for a field mapped as a float; OpenSearch stores
+/// a number there, and queries phrased with a number have to find it.
+fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
+    match node {
+        Value::Object(obj) => {
+            let base = path.len();
+            for (k, v) in obj.iter_mut() {
+                if base > 0 {
+                    path.push('.');
+                }
+                path.push_str(k);
+                coerce_leaves(v, path, mapping);
+                path.truncate(base);
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                coerce_leaves(v, path, mapping);
+            }
+        }
+        leaf => {
+            if let Some(c) = coerce_leaf(leaf, mapping.type_of(path)) {
+                *leaf = c;
+            }
+        }
+    }
+}
+
+/// An IP in a form that sorts the way addresses do.
+///
+/// Text comparison puts "192.168.0.10" below "192.168.0.9", so ranges and
+/// subnet queries need the fixed-width binary form. IPv4 is widened to its
+/// IPv6-mapped shape so both families share one ordering.
+pub fn canonical_ip(s: &str) -> Option<String> {
+    let octets = match s.parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v) => v.to_ipv6_mapped().octets(),
+        std::net::IpAddr::V6(v) => v.octets(),
+    };
+    Some(octets.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The first and last address of a CIDR block, canonicalised.
+pub fn canonical_cidr(s: &str) -> Option<(String, String)> {
+    let (addr, bits) = s.split_once('/')?;
+    let bits: u32 = bits.trim().parse().ok()?;
+    let (mut lo, family_bits) = match addr.trim().parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v) => (v.to_ipv6_mapped().octets(), 32u32),
+        std::net::IpAddr::V6(v) => (v.octets(), 128u32),
+    };
+    if bits > family_bits {
+        return None;
+    }
+    // an IPv4 prefix addresses the low 32 bits of the mapped form
+    let prefix = bits + (128 - family_bits);
+    let mut hi = lo;
+    for i in 0..16u32 {
+        let keep = prefix.saturating_sub(i * 8).min(8);
+        let mask = if keep == 0 { 0u8 } else { (!0u8) << (8 - keep) };
+        lo[i as usize] &= mask;
+        hi[i as usize] |= !mask;
+    }
+    let hex = |o: [u8; 16]| -> String { o.iter().map(|b| format!("{b:02x}")).collect() };
+    Some((hex(lo), hex(hi)))
+}
+
+fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
+    let s = v.as_str()?;
+    match ty? {
+        "byte" | "short" | "integer" | "long" | "unsigned_long" => {
+            s.parse::<i64>().ok().map(Value::from).or_else(|| s.parse::<u64>().ok().map(Value::from))
+        }
+        "float" | "half_float" | "double" | "scaled_float" => {
+            s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)
+        }
+        "ip" => canonical_ip(s).map(Value::String),
+        "boolean" => match s {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Add the normalized copies a mapping's multi-fields ask for. These only go
 /// into the index; `_source` is always what the client sent.
 ///
@@ -1204,10 +1290,12 @@ fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 /// does not collide with the parent being a scalar.
 pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
-    if subs.is_empty() {
-        return source.clone();
-    }
     let mut out = source.clone();
+    coerce_leaves(&mut out, &mut String::new(), mapping);
+    if subs.is_empty() {
+        return out;
+    }
+    let source = &out.clone();
     let Some(obj) = out.as_object_mut() else { return out };
     for (parent, sub, normalizer) in subs {
         let Some(v) = source.pointer(&format!("/{}", parent.replace('.', "/"))).cloned() else {
