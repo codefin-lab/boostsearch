@@ -1382,6 +1382,18 @@ pub fn run(
     }
     // tantivy has `filter` but not `filters`; peel those out and run them
     // ourselves as one filtered search per named bucket
+    // sibling pipelines read the finished buckets, so they are held back and
+    // computed once the rest of the aggregations have answered
+    let mut pipeline_aggs: Vec<(String, Value)> = Vec::new();
+    if let Some(Value::Object(o)) = agg_json.as_mut() {
+        let names: Vec<String> =
+            o.iter().filter(|(_, d)| is_pipeline_agg(d)).map(|(k, _)| k.clone()).collect();
+        for n in names {
+            if let Some(def) = o.remove(&n) {
+                pipeline_aggs.push((n, def));
+            }
+        }
+    }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Object(o)) = agg_json.as_mut() {
         let names: Vec<String> = o
@@ -1407,6 +1419,8 @@ pub fn run(
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
                     || def.get("composite").is_some()
+                    || def.get("weighted_avg").is_some()
+                    || def.get("auto_date_histogram").is_some()
                     // calendar units are not fixed lengths, which is all
                     // tantivy's date histogram knows how to step by
                     || def
@@ -1891,6 +1905,10 @@ pub fn run(
                 "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
                     .unwrap_or_else(|| json!({}))
             }))
+        } else if def.get("weighted_avg").is_some() {
+            run_weighted_avg(store, &targets, &query_json, def)
+        } else if def.get("auto_date_histogram").is_some() {
+            run_auto_date_histogram(store, &targets, &query_json, def)
         } else if def.get("composite").is_some() {
             run_composite_agg(store, &targets, &query_json, def, weighted)
         } else if def.get("date_histogram").is_some() {
@@ -1939,6 +1957,16 @@ pub fn run(
         let mut base = aggs.unwrap_or_else(|| json!({}));
         for (name, v) in filters_results {
             base[name] = v;
+        }
+        Some(base)
+    };
+
+    let aggs = if pipeline_aggs.is_empty() {
+        aggs
+    } else {
+        let mut base = aggs.unwrap_or_else(|| json!({}));
+        for (name, def) in pipeline_aggs {
+            base[name] = run_pipeline_agg(&base, &def)?;
         }
         Some(base)
     };
@@ -2444,6 +2472,221 @@ fn run_hdr_percentiles(
 /// The sources are run as nested `terms` aggregations and the resulting tree is
 /// flattened into one bucket per combination, which is what a composite is. Key
 /// order is ascending across the whole tuple, as the paging contract requires.
+
+/// `weighted_avg`: sum(value * weight) / sum(weight), paired per document.
+fn run_weighted_avg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("weighted_avg").cloned().unwrap_or(json!({}));
+    let read = |key: &str| -> (String, Option<f64>) {
+        let side = spec.get(key).cloned().unwrap_or(json!({}));
+        agg_field_and_missing(&side)
+    };
+    let (vf, vmiss) = read("value");
+    let (wf, wmiss) = read("weight");
+    let query = combine(main_query, None);
+    let pairs = collect_field_pairs(store, targets, &query, &vf, vmiss, &wf, wmiss)?;
+
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (v, w) in pairs {
+        num += v * w;
+        den += w;
+    }
+    if den == 0.0 {
+        return Ok(json!({"value": Value::Null}));
+    }
+    Ok(json!({"value": num / den}))
+}
+
+/// Read two columns side by side, one pair per document that has both.
+fn collect_field_pairs(
+    store: &Store,
+    targets: &[String],
+    query_json: &Value,
+    a_field: &str,
+    a_missing: Option<f64>,
+    b_field: &str,
+    b_missing: Option<f64>,
+) -> std::result::Result<Vec<(f64, f64)>, Response> {
+    let mut out = Vec::new();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let ctx = Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+        };
+        let q = crate::query::build(&ctx, query_json)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
+        let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
+        let searcher = g.reader.searcher();
+        let addrs = searcher
+            .search(&q, &tantivy::collector::DocSetCollector)
+            .map_err(|e| {
+                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+            })?;
+        let cols: Vec<(SortColumns, SortColumns)> = searcher
+            .segment_readers()
+            .iter()
+            .map(|r| (SortColumns::for_segment(r, &a_col), SortColumns::for_segment(r, &b_col)))
+            .collect();
+        for addr in addrs {
+            let Some((ca, cb)) = cols.get(addr.segment_ord as usize) else { continue };
+            let av = ca.numeric_values(addr.doc_id);
+            let bv = cb.numeric_values(addr.doc_id);
+            let a = av.first().copied().or(a_missing);
+            let b = bv.first().copied().or(b_missing);
+            if let (Some(a), Some(b)) = (a, b) {
+                out.push((a, b));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The sibling pipelines: aggregations whose input is other aggregations'
+/// buckets rather than documents.
+const PIPELINES: &[&str] =
+    &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
+
+fn is_pipeline_agg(def: &Value) -> bool {
+    def.as_object()
+        .map(|o| o.keys().any(|k| PIPELINES.contains(&k.as_str())))
+        .unwrap_or(false)
+}
+
+fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Response> {
+    let Some(o) = def.as_object() else { return Ok(Value::Null) };
+    let mut kind = String::new();
+    for k in o.keys() {
+        if PIPELINES.contains(&k.as_str()) {
+            kind = k.clone();
+            break;
+        }
+    }
+    if kind.is_empty() {
+        return Ok(Value::Null);
+    }
+    let spec = o.get(&kind).cloned().unwrap_or(Value::Null);
+    let path = spec.get("buckets_path").and_then(|v| v.as_str()).unwrap_or("");
+    let values = resolve_buckets_path(aggs, path);
+    if values.is_empty() {
+        return Ok(json!({"value": Value::Null}));
+    }
+    let sum: f64 = values.iter().sum();
+    let n = values.len() as f64;
+    let value = match kind.as_str() {
+        "avg_bucket" => sum / n,
+        "sum_bucket" => sum,
+        "min_bucket" => values.iter().copied().fold(f64::INFINITY, f64::min),
+        "max_bucket" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "stats_bucket" => {
+            return Ok(json!({
+                "count": values.len(),
+                "min": values.iter().copied().fold(f64::INFINITY, f64::min),
+                "max": values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                "avg": sum / n,
+                "sum": sum,
+            }));
+        }
+        _ => return Ok(json!({"value": Value::Null})),
+    };
+    Ok(json!({"value": value}))
+}
+
+/// `histo.v` means: the metric `v` of every bucket of `histo`.
+fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
+    let mut segs = path.split('>').flat_map(|s| s.split('.'));
+    let Some(first) = segs.next() else { return Vec::new() };
+    let rest: Vec<&str> = segs.collect();
+    let Some(node) = aggs.get(first) else { return Vec::new() };
+    let Some(buckets) = node.get("buckets").and_then(|b| b.as_array()) else {
+        return Vec::new();
+    };
+    buckets
+        .iter()
+        .filter_map(|b| {
+            let mut cur = b;
+            for seg in &rest {
+                cur = cur.get(seg)?;
+            }
+            cur.get("value").and_then(|v| v.as_f64()).or_else(|| cur.as_f64())
+        })
+        .collect()
+}
+
+/// `auto_date_histogram`: pick the smallest rounding that keeps the bucket
+/// count within the target, then bucket by it.
+///
+/// The choice is made from the span the data actually covers rather than by
+/// building each candidate histogram: at one-second resolution a week-long
+/// span is over half a million buckets, which is a lot of searching to do only
+/// to discard it.
+fn run_auto_date_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("auto_date_histogram").cloned().unwrap_or(json!({}));
+    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10).max(1);
+    let field = spec.get("field").cloned().unwrap_or(Value::Null);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let probe = json!({
+        "__min": {"min": {"field": field}},
+        "__max": {"max": {"field": field}},
+    });
+    let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+    let read = |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
+    let (Some(lo), Some(hi)) = (read("__min"), read("__max")) else {
+        return Ok(json!({"buckets": [], "interval": "1s"}));
+    };
+    let span_ns = (hi - lo).max(0.0);
+
+    // label, the unit the histogram steps by, and roughly how long it is
+    const NS: f64 = 1e9;
+    const STEPS: &[(&str, &str, f64)] = &[
+        ("1s", "second", NS),
+        ("1m", "minute", 60.0 * NS),
+        ("1h", "hour", 3600.0 * NS),
+        ("1d", "day", 86_400.0 * NS),
+        ("7d", "week_sunday", 604_800.0 * NS),
+        ("1M", "month", 2_629_746.0 * NS),
+        ("3M", "quarter", 7_889_238.0 * NS),
+        ("1y", "year", 31_556_952.0 * NS),
+    ];
+    let (label, unit) = STEPS
+        .iter()
+        .find(|(_, _, len)| (span_ns / len).floor() + 1.0 <= want as f64)
+        .map(|(l, u, _)| (*l, *u))
+        .unwrap_or(("1y", "year"));
+
+    let mut request = json!({
+        "date_histogram": {
+            "field": field,
+            "calendar_interval": unit,
+            "min_doc_count": 1,
+        },
+    });
+    if let Some(sa) = sub_aggs {
+        request["aggs"] = sa;
+    }
+    let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
+    out["interval"] = json!(label);
+    Ok(out)
+}
+
 fn run_composite_agg(
     store: &Store,
     targets: &[String],
@@ -2686,10 +2929,14 @@ fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
 
 #[derive(Clone, Copy)]
 enum CalendarUnit {
+    Second,
     Minute,
     Hour,
     Day,
     Week,
+    /// auto_date_histogram's seven-day rounding starts its weeks on Sunday,
+    /// unlike `calendar_interval: week`
+    WeekSunday,
     Month,
     Quarter,
     Year,
@@ -2698,10 +2945,12 @@ enum CalendarUnit {
 impl CalendarUnit {
     fn parse(s: &str) -> Option<CalendarUnit> {
         Some(match s {
+            "second" | "1s" => CalendarUnit::Second,
             "minute" | "1m" => CalendarUnit::Minute,
             "hour" | "1h" => CalendarUnit::Hour,
             "day" | "1d" => CalendarUnit::Day,
             "week" | "1w" => CalendarUnit::Week,
+            "week_sunday" => CalendarUnit::WeekSunday,
             "month" | "1M" => CalendarUnit::Month,
             "quarter" | "1q" => CalendarUnit::Quarter,
             "year" | "1y" => CalendarUnit::Year,
@@ -2713,6 +2962,7 @@ impl CalendarUnit {
         use tantivy::time::{Date, Month, Time};
         let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
         match self {
+            CalendarUnit::Second => dt.replace_nanosecond(0).unwrap(),
             CalendarUnit::Minute => dt.replace_second(0).unwrap().replace_nanosecond(0).unwrap(),
             CalendarUnit::Hour => dt
                 .replace_minute(0)
@@ -2725,6 +2975,10 @@ impl CalendarUnit {
             // calendar weeks start on Monday
             CalendarUnit::Week => {
                 let back = dt.weekday().number_days_from_monday() as i64;
+                midnight(dt.date() - tantivy::time::Duration::days(back))
+            }
+            CalendarUnit::WeekSunday => {
+                let back = dt.weekday().number_days_from_sunday() as i64;
                 midnight(dt.date() - tantivy::time::Duration::days(back))
             }
             CalendarUnit::Month => midnight(
@@ -2753,10 +3007,11 @@ impl CalendarUnit {
                 .assume_utc()
         };
         match self {
+            CalendarUnit::Second => dt + Duration::seconds(1),
             CalendarUnit::Minute => dt + Duration::minutes(1),
             CalendarUnit::Hour => dt + Duration::hours(1),
             CalendarUnit::Day => dt + Duration::days(1),
-            CalendarUnit::Week => dt + Duration::days(7),
+            CalendarUnit::Week | CalendarUnit::WeekSunday => dt + Duration::days(7),
             CalendarUnit::Month => add_months(dt, 1),
             CalendarUnit::Quarter => add_months(dt, 3),
             CalendarUnit::Year => add_months(dt, 12),
