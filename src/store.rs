@@ -115,6 +115,14 @@ impl Mapping {
         Mapping { types, raw: body.clone() }
     }
 
+    /// Types the mapping treats as a single value rather than a container.
+    pub fn is_leaf_type(&self, field: &str) -> bool {
+        matches!(
+            self.type_of(field),
+            Some(t) if t.ends_with("_range") || t == "flat_object" || t == "object"
+        )
+    }
+
     pub fn type_of(&self, field: &str) -> Option<&str> {
         self.types.get(field).map(|s| s.as_str())
     }

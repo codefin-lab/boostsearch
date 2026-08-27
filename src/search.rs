@@ -288,6 +288,7 @@ fn reduce_sort_values(vals: &mut Vec<SortValue>, mode: &str) -> SortValue {
 }
 
 struct Hit {
+    shard_idx: usize,
     index: String,
     id: String,
     score: f32,
@@ -1158,6 +1159,22 @@ pub fn run(
         }
     }
     let source_sel = body.get("_source").cloned();
+    // `fields` asks for values keyed by path, formatted, always as lists
+    let field_specs: Option<Vec<(String, Option<String>)>> =
+        body.get("fields").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some((s.clone(), None)),
+                    Value::Object(o) => o.get("field").and_then(|f| f.as_str()).map(|s| {
+                        (
+                            s.to_string(),
+                            o.get("format").and_then(|f| f.as_str()).map(|s| s.to_string()),
+                        )
+                    }),
+                    _ => None,
+                })
+                .collect()
+        });
     let stored: Option<Vec<String>> = match body.get("stored_fields") {
         Some(Value::Array(a)) => {
             Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -1408,6 +1425,7 @@ pub fn run(
         let Some((id, src)) = source_of(searcher, &g, c.addr) else { continue };
         let version = g.version_of(&id);
         all_hits.push(Hit {
+            shard_idx: c.shard,
             index: name.clone(),
             id,
             score: c.score,
@@ -1466,6 +1484,25 @@ pub fn run(
             }
             if !h.sort.is_empty() {
                 hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
+            }
+            if let Some(specs) = field_specs.as_ref() {
+                let g = searchers[h.shard_idx].2.read();
+                let is_leaf = |p: &str| g.mapping.is_leaf_type(p);
+                let names: Vec<String> = specs.iter().map(|(n, _)| n.clone()).collect();
+                let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // apply any `format` the caller attached to a field
+                for (name, fmt) in specs {
+                    let Some(fmt) = fmt else { continue };
+                    let Some(Value::Array(vals)) = f.get_mut(name) else { continue };
+                    for v in vals.iter_mut() {
+                        if let Some(formatted) = crate::source::format_date(v, fmt) {
+                            *v = formatted;
+                        }
+                    }
+                }
+                if !f.is_empty() {
+                    hit["fields"] = Value::Object(f);
+                }
             }
             if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
                 hit["_version"] = json!(h.version);

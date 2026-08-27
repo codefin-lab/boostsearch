@@ -1789,7 +1789,7 @@ pub async fn force_merge(
 
 // --------------------------------------------------------------------- stats
 
-fn index_stats(st: &IdxState) -> Value {
+fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
     let cols = st.field_column_bytes();
@@ -1798,10 +1798,15 @@ fn index_stats(st: &IdxState) -> Value {
         .iter()
         .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
         .collect();
+    // `groups` is only reported for the groups the request named
     let groups: serde_json::Map<String, Value> = st
         .search_groups
         .read()
         .iter()
+        .filter(|(k, _)| match want_groups {
+            None => false,
+            Some(w) => w.iter().any(|g| g == "_all" || g == *k),
+        })
         .map(|(k, v)| {
             (k.clone(), json!({
                 "query_total": v, "query_time_in_millis": 1, "query_current": 0,
@@ -1811,6 +1816,10 @@ fn index_stats(st: &IdxState) -> Value {
             }))
         })
         .collect();
+    let groups_field = match want_groups {
+        None => Value::Null,
+        Some(_) => Value::Object(groups),
+    };
     json!({
         "docs": {"count": docs, "deleted": 0},
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
@@ -1826,7 +1835,7 @@ fn index_stats(st: &IdxState) -> Value {
                    "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
                    "scroll_current": 0, "suggest_total": 0, "suggest_time_in_millis": 0,
                    "suggest_current": 0,
-                   "groups": Value::Object(groups)},
+                   "groups": groups_field},
         "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
                    "total": 0, "total_time_in_millis": 0, "total_docs": 0,
                    "total_size_in_bytes": 0},
@@ -1983,11 +1992,14 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
         return Err(no_such_index(expr));
     }
     let level = p.get("level").map(|s| s.as_str()).unwrap_or("indices");
+    let want_groups: Option<Vec<String>> = p
+        .get("groups")
+        .map(|g| g.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
     let mut indices = serde_json::Map::new();
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read());
+        let s = index_stats(&st.read(), want_groups.as_deref());
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",
