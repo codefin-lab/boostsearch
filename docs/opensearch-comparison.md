@@ -51,14 +51,34 @@
 
 `agg_terms` เคยเป็น query เดียวที่แพ้ ตอนนี้นำ 1.58 vs 2.34 ms
 
-### ต้องอ่านคู่กันเสมอ
+## รูปแบบหลาย index เล็ก (200 indices × 5,000 docs = 1M docs)
 
-ตัวเลขข้างบนคือ **index เดียว 200,000 เอกสาร** ในรูปแบบ **หลาย index เล็ก**
-(200 indices × 5,000 docs) obsearch ยังถือ heap ค้างหลังเขียนราว 11 MB ต่อ index
-เทียบกับ OpenSearch ~0.7 MB
+รูปแบบที่ log/tenant deployment ใช้จริง และเป็นจุดที่ single-index benchmark ปิดบังไว้
 
-steady state ของเราดีกว่า (restart แล้วเปิด 200 index ที่มี 1M docs = 123 MB
-เทียบกับ ~147 MB) แต่ **write path ทิ้งหน่วยความจำไว้แล้วไม่คืน** ซึ่งยังหาสาเหตุไม่พบ
+| | obsearch | OpenSearch 3.1.0 | |
+|---|---:|---:|---|
+| **RSS รวมทั้งโปรเซส** | **356 MB** | 1,396 MB | obsearch **3.9x** |
+| ต่อ index | 1.78 MB | 0.42 MB (ส่วนเพิ่ม) | OpenSearch |
+| threads | 44 | — | |
+| สร้าง 200 index + เขียน 1M docs | **12 s** | 23 s | obsearch **1.9x** |
+| fan-out match_all | 19.0 ms | 10.7 ms | OpenSearch 1.8x |
+| fan-out term | 16.6 ms | 9.1 ms | OpenSearch 1.8x |
+| fan-out aggregation | 37.5 ms | 10.0 ms | OpenSearch 3.8x |
+
+**หน่วยความจำรวมเราน้อยกว่าเกือบ 4 เท่า** — ส่วนเพิ่มต่อ index ของ OpenSearch ดูน้อยกว่า
+เพราะมันมี JVM heap ก้อนใหญ่ตายตัวรองรับอยู่แล้ว แต่ยอดรวมคือสิ่งที่ต้องจ่ายจริง
+
+**ที่ยังแพ้คือ fan-out latency** โดยเฉพาะ aggregation ข้าม 200 index (37.5 vs 10.0 ms)
+
+### ทางที่ไล่มา
+
+| | ตอนเจอครั้งแรก | ตอนนี้ |
+|---|---:|---:|
+| RSS | 2,906 MB | **356 MB** |
+| threads | 4,215 | **44** |
+| fan-out match_all | 49.5 ms | **19.0 ms** |
+| fan-out aggregation | 104.9 ms | **37.5 ms** |
+| peak ตอนเขียน | 3,535 MB | **613 MB** |
 
 ## สรุปที่เชื่อถือได้
 
