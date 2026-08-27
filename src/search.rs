@@ -1800,7 +1800,16 @@ pub fn run(
             // The count then comes from the weight, which answers it from the
             // postings header for the queries that can, and otherwise walks
             // the same documents the tuple would have.
-            let topk = searcher.search(&q, &TopDocs::with_limit(want.max(1)).order_by_score());
+            // This query is cheap: the heap prunes and only `want` documents
+            // are kept. Splitting its segments across the pool costs more in
+            // coordination than the walk itself, and steals cores from the
+            // aggregations, which are the expensive shape and do need them.
+            let topk = search_shard(
+                &searcher,
+                &q,
+                &TopDocs::with_limit(want.max(1)).order_by_score(),
+                true,
+            );
             topk.and_then(|docs| {
                 let cands = docs
                     .into_iter()
