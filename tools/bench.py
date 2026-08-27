@@ -49,6 +49,14 @@ def query_mix(index):
                                 "aggs": {"avg_ms": {"avg": {"field": "response_ms"}},
                                          "p_size": {"stats": {"field": "size"}}}}}}, 5),
         ("sort_paged",     {"query": {"match_all": {}}, "sort": [{"size": "desc"}], "size": 10, "from": 100}, 5),
+        # every real log query carries a time filter; the mix was missing it
+        ("time_range",     {"query": {"range": {"@timestamp": {
+                                "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}},
+                            "size": 10}, 15),
+        ("time_range_agg", {"size": 0,
+                            "query": {"range": {"@timestamp": {
+                                "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}},
+                            "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}}, 10),
     ]
 
 

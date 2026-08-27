@@ -110,3 +110,68 @@ aggregation ที่ตามมาก็ทำงานบนชุดที�
 ประเมิน ~400-600 LOC ไม่ใช่ fork — และวัดผลได้ด้วย harness ที่มีอยู่แล้ว
 
 **โค้ดทดลองอยู่ที่ `src/bin/colbench.rs` ทำซ้ำได้ด้วย `OBSEARCH_DATA=<dir> ./target/release/colbench`**
+
+---
+
+# ทำจริงแล้ว: `src/blockstats.rs`
+
+## สิ่งที่ทำ
+
+- เก็บ min/max ต่อบล็อก 512 doc ของทุก numeric fast-field column
+- **สร้างตอนใช้ครั้งแรก แล้ว cache ตาม segment id** ไม่ต้อง persist:
+  segment id ของ tantivy ไม่มีวันชี้ไปข้อมูลอื่น และการ merge สร้าง segment ใหม่
+  ⇒ cache key เป๊ะโดยธรรมชาติ ไม่ต้องมี invalidation logic
+- range query ใหม่: ข้ามบล็อกที่แมตช์ไม่ได้ · บล็อกที่อยู่ในช่วงทั้งหมดคืน doc id
+  ตรง ๆ ไม่เทียบค่าเลย · เหลือเฉพาะบล็อกคาบเกี่ยวจึงเรียก API เดิมของ tantivy
+
+## ความถูกต้องที่ต้องระวัง
+
+- **เอกสารหลายค่า** — สถิติต้องรวมทุกค่าไม่ใช่แค่ค่าแรก ไม่งั้นค่าที่ซ่อนอยู่จะถูกข้ามทิ้ง
+- **บล็อกที่อยู่ในช่วงทั้งหมด** ใช้ทางลัดได้เฉพาะเมื่อทุก doc มีค่า
+  (`cardinality().is_full()`) ไม่งั้นจะกวาด doc ที่ไม่มีค่าติดมาด้วย
+- **bound แบบ exclusive บน float** ขยับค่าไม่ได้แบบ integer จึงตกกลับไปทางเดิม
+- ตรวจด้วย differential test: **45 range query ให้ผลตรงกันเป๊ะทั้งเปิดและปิด**
+
+## กับดัก: เร็วขึ้นบางอย่าง แต่ทำอย่างอื่นช้าลง
+
+เวอร์ชันแรกใช้ block scan เสมอ ผลคือ:
+
+| | เปลี่ยน |
+|---|---:|
+| time_range_1pct | −80% |
+| time_range_25pct | −53% |
+| **bool_filter** | **+22%** |
+| **range_float_bound** | **+12%** |
+| range_numeric | +10% |
+
+เพราะ block scan **materialize ผลทั้งหมดล่วงหน้า** ส่วน range ของ tantivy stream
+แบบ lazy ให้ intersection ข้างนอกข้ามไปข้างหน้าได้ — บน field ที่ค่ากระจายสุ่ม
+(skip ได้ 0 บล็อก) จึงจ่ายค่า materialize ฟรี ๆ
+
+## ทางแก้: ให้สถิติเป็นตัวตัดสินเอง
+
+`weight()` ถาม skip ratio จากสถิติก่อน ถ้าต่ำกว่า 25% ก็ส่งงานให้ range query
+ทั่วไปทำแทน — **นี่คือ sidecar ทำหน้าที่เป็น planner input ในตัว**
+ต้นทุนของการถามคือการวน block header ซึ่งถูกกว่าการอ่านค่าจริงหลายเท่า
+
+| query | ปิด sidecar | เปิด sidecar | เปลี่ยน |
+|---|---:|---:|---:|
+| time_range_1pct | 623 µs | 225 µs | **−64%** |
+| time_range_25pct | 742 µs | 430 µs | **−42%** |
+| time_range_agg | 1,435 µs | 818 µs | **−43%** |
+| range_numeric (ค่าสุ่ม) | 2,006 µs | 2,100 µs | +5% |
+| bool_filter | 3,710 µs | 3,735 µs | +1% |
+| **รวม** | 31,528 µs | 29,824 µs | **−5%** |
+
+regression หายหมด เหลือแค่ค่าที่อยู่ในช่วง noise
+
+## ผลปลายทาง
+
+พอเพิ่ม time-filtered query เข้า benchmark mix (25% ของน้ำหนัก — ใกล้ log workload จริง):
+
+| | obsearch | OpenSearch |
+|---|---:|---:|
+| time_range p50 | **1.45 ms** | 2.07 ms |
+| qps c=1 | **562** | 430 |
+| p99 c=1 | **3.01 ms** | 4.06 ms |
+| memory | **265 MB** | 1,533 MB |

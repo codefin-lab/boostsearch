@@ -4,12 +4,20 @@
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
 
 mod api;
+mod blockstats;
 mod search;
 mod query;
 mod source;
 mod store;
 
 use axum::Router;
+
+/// Indexing allocates and frees heavily in bursts across many threads. glibc's
+/// allocator holds those chunks rather than returning them, which reads as a
+/// leak once there are hundreds of indices; mimalloc gives them back.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use axum::response::IntoResponse;
 use axum::routing::{any, delete, get, head, post, put};
 use serde_json::json;
@@ -44,6 +52,9 @@ fn app(store: Store) -> Router {
         .route("/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_update/{id}", post(api::update_doc))
+        .route("/_obsearch/memory", get(api::memory_report))
+        .route("/_forcemerge", post(api::force_merge))
+        .route("/{index}/_forcemerge", post(api::force_merge))
         .route("/_stats", get(api::stats))
         .route("/{index}/_stats", get(api::stats))
         .route("/_stats/{metric}", get(api::stats_metric))

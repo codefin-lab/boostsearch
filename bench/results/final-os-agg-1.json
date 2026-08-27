@@ -1,0 +1,196 @@
+{
+ "label": "os-agg",
+ "target": {
+  "distribution": "opensearch",
+  "number": "3.1.0",
+  "build_type": "tar",
+  "build_hash": "8ff7c6ee924a49f0f59f80a6e1c73073c8904214",
+  "build_date": "2025-06-21T08:05:50.445588571Z",
+  "build_snapshot": false,
+  "lucene_version": "10.2.1",
+  "minimum_wire_compatibility_version": "2.19.0",
+  "minimum_index_compatibility_version": "2.0.0"
+ },
+ "rss_mb_idle": 1637.5,
+ "indexing": {
+  "docs": 200000,
+  "index_seconds": 3.04,
+  "index_docs_per_sec": 65847,
+  "index_plus_refresh_seconds": 3.13
+ },
+ "rss_mb_after_index": 1655.7,
+ "doc_count": 200000,
+ "search": [
+  {
+   "queries": 375,
+   "concurrency": 1,
+   "qps": 347.9,
+   "latency_ms": {
+    "p50": 2.47,
+    "p90": 3.98,
+    "p99": 10.9,
+    "max": 21.6
+   },
+   "per_query_ms": {
+    "match_all": {
+     "n": 30,
+     "p50": 2.31,
+     "p90": 2.85,
+     "p99": 3.46
+    },
+    "term_keyword": {
+     "n": 45,
+     "p50": 1.82,
+     "p90": 2.93,
+     "p99": 3.51
+    },
+    "term_numeric": {
+     "n": 30,
+     "p50": 2.67,
+     "p90": 3.89,
+     "p99": 5.52
+    },
+    "range_numeric": {
+     "n": 45,
+     "p50": 2.71,
+     "p90": 3.6,
+     "p99": 8.63
+    },
+    "match_text": {
+     "n": 30,
+     "p50": 3.36,
+     "p90": 4.98,
+     "p99": 8.47
+    },
+    "bool_filter": {
+     "n": 45,
+     "p50": 3.3,
+     "p90": 5.31,
+     "p99": 16.75
+    },
+    "agg_terms": {
+     "n": 30,
+     "p50": 2.44,
+     "p90": 3.95,
+     "p99": 11.06
+    },
+    "agg_date_hist": {
+     "n": 15,
+     "p50": 2.4,
+     "p90": 2.92,
+     "p99": 4.28
+    },
+    "agg_nested": {
+     "n": 15,
+     "p50": 2.15,
+     "p90": 2.77,
+     "p99": 6.37
+    },
+    "sort_paged": {
+     "n": 15,
+     "p50": 2.74,
+     "p90": 3.9,
+     "p99": 6.76
+    },
+    "time_range": {
+     "n": 45,
+     "p50": 2.17,
+     "p90": 3.49,
+     "p99": 11.14
+    },
+    "time_range_agg": {
+     "n": 30,
+     "p50": 2.29,
+     "p90": 2.91,
+     "p99": 5.91
+    }
+   }
+  },
+  {
+   "queries": 375,
+   "concurrency": 8,
+   "qps": 1591.5,
+   "latency_ms": {
+    "p50": 4.58,
+    "p90": 6.08,
+    "p99": 9.84,
+    "max": 13.86
+   },
+   "per_query_ms": {
+    "match_all": {
+     "n": 30,
+     "p50": 4.54,
+     "p90": 5.43,
+     "p99": 6.22
+    },
+    "term_keyword": {
+     "n": 45,
+     "p50": 4.32,
+     "p90": 5.02,
+     "p99": 5.93
+    },
+    "term_numeric": {
+     "n": 30,
+     "p50": 4.6,
+     "p90": 5.63,
+     "p99": 6.05
+    },
+    "range_numeric": {
+     "n": 45,
+     "p50": 4.82,
+     "p90": 8.02,
+     "p99": 11.8
+    },
+    "match_text": {
+     "n": 30,
+     "p50": 4.94,
+     "p90": 8.74,
+     "p99": 12.96
+    },
+    "bool_filter": {
+     "n": 45,
+     "p50": 4.83,
+     "p90": 6.64,
+     "p99": 8.07
+    },
+    "agg_terms": {
+     "n": 30,
+     "p50": 4.29,
+     "p90": 5.83,
+     "p99": 6.94
+    },
+    "agg_date_hist": {
+     "n": 15,
+     "p50": 4.57,
+     "p90": 5.77,
+     "p99": 5.97
+    },
+    "agg_nested": {
+     "n": 15,
+     "p50": 4.43,
+     "p90": 5.4,
+     "p99": 5.63
+    },
+    "sort_paged": {
+     "n": 15,
+     "p50": 4.83,
+     "p90": 5.96,
+     "p99": 6.2
+    },
+    "time_range": {
+     "n": 45,
+     "p50": 4.58,
+     "p90": 5.54,
+     "p99": 6.41
+    },
+    "time_range_agg": {
+     "n": 30,
+     "p50": 4.21,
+     "p90": 5.72,
+     "p99": 6.17
+    }
+   }
+  }
+ ],
+ "rss_mb_after_search": 1677.2
+}

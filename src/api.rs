@@ -408,12 +408,25 @@ pub fn write_doc_raw(
     // a bulk load of new documents should not queue a delete per document
     if existed {
         let term = Term::from_field_text(st.fields.id, id);
-        st.writer.delete_term(term);
+        if let Ok(w) = st.writer() {
+            w.delete_term(term);
+        }
     }
     let raw = raw.unwrap_or_else(|| source.to_string());
     let doc = make_doc(&st.fields, id, source, &raw);
-    if let Err(e) = st.writer.add_document(doc) {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
+    match st.writer() {
+        Ok(w) => {
+            if let Err(e) = w.add_document(doc) {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "index_exception",
+                    e.to_string(),
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
+        }
     }
     st.note_pending(id, Some(raw));
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -433,7 +446,10 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     if existed {
-        st.writer.delete_term(Term::from_field_text(st.fields.id, id));
+        let term = Term::from_field_text(st.fields.id, id);
+        if let Ok(w) = st.writer() {
+            w.delete_term(term);
+        }
         st.note_pending(id, None);
     }
     let body = json!({
@@ -667,18 +683,22 @@ pub async fn bulk(
     }
 
     // Parse and build documents in parallel; nothing here touches shared state.
-    let prepared: Vec<Option<std::result::Result<(Value, String), String>>> = {
+    let prepare = |o: &Op| {
+        o.doc_line.map(|l| {
+            serde_json::from_str::<Value>(l)
+                .map(|v| (v, l.trim().to_string()))
+                .map_err(|e| e.to_string())
+        })
+    };
+    let prepared: Vec<Option<std::result::Result<(Value, String), String>>> =
+        if std::env::var("OBSEARCH_SERIAL_BULK").is_ok() {
+            ops.iter().map(prepare).collect()
+        } else {
         use rayon::prelude::*;
         ops.par_iter()
-            .map(|o| {
-                o.doc_line.map(|l| {
-                    serde_json::from_str::<Value>(l)
-                        .map(|v| (v, l.trim().to_string()))
-                        .map_err(|e| e.to_string())
-                })
-            })
+            .map(prepare)
             .collect()
-    };
+        };
 
     // consume the prepared documents rather than cloning them back out
     for (o, prep) in ops.into_iter().zip(prepared.into_iter()) {
@@ -703,6 +723,10 @@ pub async fn bulk(
         };
         if !touched.contains(&idx) {
             touched.push(idx.clone());
+        }
+        // keep the number of live writers bounded across indices
+        if !g_has_writer(&st) {
+            store.note_writer_opened(&idx);
         }
         let mut g = st.write();
         let id_was_given = id_opt.is_some();
@@ -1201,6 +1225,10 @@ fn dotted_only_field(v: &Value) -> Option<String> {
     }
 }
 
+fn g_has_writer(st: &std::sync::Arc<parking_lot::RwLock<IdxState>>) -> bool {
+    st.read().has_writer()
+}
+
 /// `_id` and `_index` may arrive as strings or bare numbers.
 fn scalar_str(v: &Value) -> Option<String> {
     match v {
@@ -1461,6 +1489,121 @@ pub async fn update_doc(
     maybe_refresh(&mut g, &p);
     let status = if result == "created" { StatusCode::CREATED } else { StatusCode::OK };
     (status, axum::Json(body_out)).into_response()
+}
+
+// ------------------------------------------------------------- memory report
+
+/// What the process is actually holding, and where.
+///
+/// `?collect=true` first asks the allocator to hand back everything it can, so
+/// the difference between the two answers separates "retained by the allocator"
+/// from "still referenced by us".
+pub async fn memory_report(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    if flag(&p, "collect") {
+        unsafe { libmimalloc_sys::mi_collect(true) };
+    }
+    let (mut elapsed, mut user, mut sys, mut rss, mut peak_rss, mut commit, mut peak_commit, mut faults) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            &mut elapsed, &mut user, &mut sys, &mut rss, &mut peak_rss,
+            &mut commit, &mut peak_commit, &mut faults,
+        );
+    }
+    let mb = |v: usize| (v as f64 / 1_048_576.0 * 10.0).round() / 10.0;
+
+    let mut per_index = Vec::new();
+    let (mut live_ids, mut versions, mut pending, mut shapes, mut kinds, mut segments, mut writers) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    for name in store.names() {
+        let Some(st) = store.get(&name) else { continue };
+        let g = st.read();
+        let segs = g.reader.searcher().segment_readers().len();
+        live_ids += g.live_ids.len();
+        versions += g.versions.len();
+        pending += g.pending.len();
+        shapes += g.seen_shapes.len();
+        kinds += g.observed_kinds.len();
+        segments += segs;
+        if g.has_writer() {
+            writers += 1;
+        }
+        if per_index.len() < 3 {
+            per_index.push(json!({
+                "index": name, "segments": segs, "live_ids": g.live_ids.len(),
+                "versions": g.versions.len(), "pending": g.pending.len(),
+                "pending_bytes": g.pending_bytes, "has_writer": g.has_writer(),
+            }));
+        }
+    }
+    respond(&p, json!({
+        "allocator": {
+            "rss_mb": mb(rss), "peak_rss_mb": mb(peak_rss),
+            "committed_mb": mb(commit), "peak_committed_mb": mb(peak_commit),
+            "page_faults": faults,
+        },
+        "indices": {
+            "count": store.names().len(), "live_writers": writers,
+            "total_segments": segments, "total_live_ids": live_ids,
+            "total_versions": versions, "total_pending": pending,
+            "total_shapes": shapes, "total_kind_paths": kinds,
+        },
+        "sample": per_index,
+    }))
+}
+
+// --------------------------------------------------------------- force merge
+
+/// `_forcemerge` collapses segments. Fewer segments means less per-segment setup
+/// on every search, which matters most for aggregations: each one opens columns
+/// and builds its own intermediate result per segment before they are merged.
+pub async fn force_merge(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
+    let targets = store.resolve(&expr);
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" {
+        return no_such_index(&expr);
+    }
+    let max_segments: usize = p
+        .get("max_num_segments")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    for name in targets {
+        let Some(st) = store.get(&name) else { continue };
+        let mut g = st.write();
+        if g.refresh().is_err() {
+            continue;
+        }
+        loop {
+            let ids: Vec<tantivy::index::SegmentId> = g
+                .index
+                .searchable_segment_metas()
+                .unwrap_or_default()
+                .iter()
+                .map(|m| m.id())
+                .collect();
+            if ids.len() <= max_segments {
+                break;
+            }
+            // merge the whole set down in one step; tantivy handles the rest
+            let take = ids.len() - max_segments + 1;
+            let batch: Vec<_> = ids.into_iter().take(take).collect();
+            let merged = match g.writer() {
+                Ok(w) => w.merge(&batch).wait().is_ok(),
+                Err(_) => false,
+            };
+            if !merged {
+                break;
+            }
+            let _ = g.refresh();
+        }
+    }
+    respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
 }
 
 // --------------------------------------------------------------------- stats

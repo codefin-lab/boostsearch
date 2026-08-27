@@ -751,13 +751,26 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // `_raw` carries both the untokenised strings and the numerics,
                 // so it is the right column for every agg except one over an
                 // explicitly analysed text field.
-                // `_raw` carries both the untokenised strings and the numerics,
-                // so it is the right column for every agg except one over an
-                // explicitly analysed text field.
+                let base = f.strip_suffix(".keyword").unwrap_or(f);
+                // Both views carry the numerics, but resolving a purely numeric
+                // path is measurably cheaper on `_dyn` -- `_raw` also holds a
+                // string column for every path, which the lookup has to consider.
+                // Strings must stay on `_raw`, whose values are untokenised.
+                let numeric_only = std::env::var("OBSEARCH_NO_NUMERIC_DYN_AGG").is_err()
+                    && ctx
+                    .observed_kinds
+                    .get(base)
+                    .map(|k| {
+                        *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0
+                    })
+                    .unwrap_or(false);
                 let analyzed = matches!(ctx.view(f, false), View::Dyn)
                     && ctx.mapping.type_of(f).is_some();
-                let prefix = if analyzed { crate::store::DYN } else { crate::store::RAW };
-                let base = f.strip_suffix(".keyword").unwrap_or(f);
+                let prefix = if analyzed || numeric_only {
+                    crate::store::DYN
+                } else {
+                    crate::store::RAW
+                };
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }
@@ -1151,13 +1164,35 @@ pub fn run(
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
 
-    for (shard_idx, name) in targets.iter().enumerate() {
-        let Some(st) = store.get(name) else { continue };
+    // One shard's work touches only its own index, so the fan-out runs across
+    // cores. Searching many small indices is otherwise bounded by walking them
+    // one at a time.
+    struct ShardOut {
+        name: String,
+        searcher: Searcher,
+        st: std::sync::Arc<parking_lot::RwLock<IdxState>>,
+        shards: u64,
+        count: usize,
+        cands: Vec<Cand>,
+        agg: Option<IntermediateAggregationResults>,
+        agg_req: Option<Aggregations>,
+        agg_meta: Vec<(String, Value)>,
+        bucket_orders: Vec<(String, String, bool)>,
+    }
+
+    let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
+        let Some(st) = store.get(name) else { return Ok(None) };
         let g = st.read();
         g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
             g.request_cache_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        let mut shards = 0u64;
+        let mut cands: Vec<Cand> = Vec::new();
+        let mut agg_acc: Option<IntermediateAggregationResults> = None;
+        let mut agg_req: Option<Aggregations> = None;
+        let mut agg_meta: Vec<(String, Value)> = Vec::new();
+        let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
         shards += g
             .effective_settings()
             .pointer("/index/number_of_shards")
@@ -1171,6 +1206,7 @@ pub fn run(
             max_terms_count: g.max_terms_count(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
+            stats: &g.stats,
         };
         let q: Box<dyn tantivy::query::Query> = match &query_json {
             Some(qj) => match crate::query::build(&ctx, qj) {
@@ -1261,10 +1297,6 @@ pub fn run(
                 }
             }
         };
-        total += count as u64;
-        if count == 0 {
-            empty_shards += 1;
-        }
         cands.extend(shard_cands);
 
         if let Some(a) = this_agg {
@@ -1290,7 +1322,57 @@ pub fn run(
             }
         }
 
-        searchers.push((g.name.clone(), searcher, st.clone()));
+        Ok(Some(ShardOut {
+            name: g.name.clone(),
+            searcher,
+            st: st.clone(),
+            shards,
+            count,
+            cands,
+            agg: agg_acc,
+            agg_req,
+            agg_meta,
+            bucket_orders,
+        }))
+    };
+
+    let outs: Vec<std::result::Result<Option<ShardOut>, Response>> = if targets.len() > 1 {
+        use rayon::prelude::*;
+        targets
+            .par_iter()
+            .enumerate()
+            .map(|(i, n)| run_shard(i, n))
+            .collect()
+    } else {
+        targets.iter().enumerate().map(|(i, n)| run_shard(i, n)).collect()
+    };
+
+    for out in outs {
+        let Some(o) = out? else { continue };
+        shards += o.shards;
+        total += o.count as u64;
+        if o.count == 0 {
+            empty_shards += 1;
+        }
+        cands.extend(o.cands);
+        if let Some(res) = o.agg {
+            match agg_acc.as_mut() {
+                Some(acc) => {
+                    let _ = acc.merge_fruits(res);
+                }
+                None => agg_acc = Some(res),
+            }
+        }
+        if o.agg_req.is_some() {
+            agg_req = o.agg_req;
+        }
+        if agg_meta.is_empty() {
+            agg_meta = o.agg_meta;
+        }
+        if bucket_orders.is_empty() {
+            bucket_orders = o.bucket_orders;
+        }
+        searchers.push((o.name, o.searcher, o.st));
     }
 
     prune(&mut cands, page_want, &sort_keys);
@@ -1669,6 +1751,7 @@ fn filtered_count(
             max_terms_count: g.max_terms_count(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
+            stats: &g.stats,
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
