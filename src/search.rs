@@ -510,8 +510,21 @@ struct Cand {
 }
 
 fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
+    // ties fall back to document order, which is insertion order within a
+    // shard -- otherwise equally-scored hits come back in a different order
+    // from one run to the next
+    let by_doc = || {
+        a.shard
+            .cmp(&b.shard)
+            .then(a.addr.segment_ord.cmp(&b.addr.segment_ord))
+            .then(a.addr.doc_id.cmp(&b.addr.doc_id))
+    };
     if sort_keys.is_empty() {
-        return b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal);
+        return b
+            .score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(by_doc);
     }
     for (i, k) in sort_keys.iter().enumerate() {
         let ord = a.sort[i].cmp_asc(&b.sort[i]);
@@ -520,7 +533,7 @@ fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
             return ord;
         }
     }
-    Ordering::Equal
+    by_doc()
 }
 
 /// Keep only the best `want` candidates, pruning in amortised linear time
