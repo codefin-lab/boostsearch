@@ -1298,6 +1298,37 @@ impl tantivy::collector::SegmentCollector for MaybeAggSegment {
 }
 
 
+
+/// Whether the total can be had without walking the matches.
+///
+/// `Weight::count` reads the figure from the postings header for a term query
+/// and from the segment for a match-all, and otherwise counts by iterating.
+/// Splitting top-k from the count only pays where that shortcut exists: where
+/// it does not, the count walks everything the pruned pass just avoided, and
+/// two passes beat one only in the wrong direction.
+fn count_without_walking(query_json: &Option<Value>) -> bool {
+    let Some(q) = query_json else { return true };
+    let Some(obj) = q.as_object() else { return false };
+    if obj.len() != 1 {
+        return false;
+    }
+    match obj.keys().next().map(|k| k.as_str()) {
+        Some("match_all") => true,
+        // a term query on one field, with no per-term options that would make
+        // it something else
+        Some("term") => obj
+            .values()
+            .next()
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.len() == 1
+                    && o.values().next().map(|v| !v.is_object()).unwrap_or(false)
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 /// How many documents the query matches.
 ///
 /// `Weight::count` reads it straight from the postings header where the query
@@ -1790,7 +1821,10 @@ pub fn run(
             // result that is thrown away.
             search_shard(&searcher, &q, &(Count, agg_collector), fanned_out)
                 .map(|(c, agg)| (c, Vec::new(), agg))
-        } else if sort_keys.is_empty() && agg_collector.0.is_none() {
+        } else if sort_keys.is_empty()
+            && agg_collector.0.is_none()
+            && count_without_walking(&query_json)
+        {
             // Nothing else needs every document, so the top-k collector can
             // prune: once its heap is full, whole blocks that cannot beat the
             // worst kept score are skipped. Bundling a counter alongside it
