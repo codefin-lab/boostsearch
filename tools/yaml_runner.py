@@ -131,6 +131,10 @@ class Runner:
             val = params[name]
             if isinstance(val, list):
                 val = ",".join(str(v) for v in val)
+            elif val is None:
+                # `index: null` in a test means the caller sent nothing there,
+                # not the four letters of Python's None
+                val = ""
             path = path.replace("{" + name + "}", requests.utils.quote(str(val), safe=",*"))
             used.add(name)
         method = best["methods"][0]
@@ -164,7 +168,15 @@ class Runner:
         if ignore is not None:
             vals = ignore if isinstance(ignore, list) else [ignore]
             ignore_codes = {int(v) for v in vals}
-        method, path, used = self.resolve_path(api, params)
+        try:
+            method, path, used = self.resolve_path(api, params)
+        except Failure:
+            # `catch: param` expects the client to refuse the call because a
+            # required path part is missing -- which is exactly what a failure
+            # to resolve one means
+            if catch == "param":
+                return
+            raise
         query = {k: v for k, v in params.items() if k not in used and v is not None}
         for k, v in list(query.items()):
             if isinstance(v, bool):

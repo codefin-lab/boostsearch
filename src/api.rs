@@ -536,12 +536,29 @@ fn maybe_refresh(st: &mut IdxState, p: &Params) {
     }
 }
 
+/// `require_alias` says the write is only meant for an alias, so a name that
+/// is not one is treated as absent rather than created on the spot.
+fn refuse_unless_alias(store: &Store, index: &str, p: &Params) -> Option<Response> {
+    let asked = p.get("require_alias").map(|v| v != "false").unwrap_or(false);
+    if asked && !store.is_alias(index) {
+        return Some(err(
+            StatusCode::NOT_FOUND,
+            "index_not_found_exception",
+            format!("no such index [{index}] and [require_alias] request flag is [true] and [{index}] is not an alias"),
+        ));
+    }
+    None
+}
+
 pub async fn index_doc(
     State(store): State<Store>,
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     do_index(store, index, Some(id), p, body, "index").await
 }
 
@@ -551,6 +568,9 @@ pub async fn index_doc_auto(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     do_index(store, index, None, p, body, "index").await
 }
 
@@ -1637,6 +1657,9 @@ pub async fn update_doc(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     let patch: Value = match parse_body(&body) {
         Ok(b) => b,
         Err(r) => return r,
@@ -2435,31 +2458,42 @@ fn aliases_missing_response(names: &[String], view: &Value) -> Response {
     (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
 }
 
-/// Which of the required names no index carries.
-fn alias_names_missing(view: &Value, expr: Option<&str>) -> Vec<String> {
-    // an exclusion at the head of the list has nothing to exclude from, and is
-    // reported as it was written, minus sign and all
-    if let Some(first) = expr
-        .filter(|e| !e.is_empty())
-        .and_then(|e| e.split(',').next())
-        .map(|p| p.trim())
-    {
-        if first.starts_with('-') && !first.contains('*') {
-            return vec![first.to_string()];
+/// Which of the named aliases do not exist at all.
+///
+/// A name that exists but was removed from the answer by a later exclusion is
+/// not missing -- it is excluded. Only a name nothing carries is missing.
+/// Exclusions at the head of the list are a separate complaint: they have
+/// nothing to exclude from, and are reported as written.
+fn alias_names_missing(store: &Store, idx: Option<&str>, expr: Option<&str>) -> Vec<String> {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
+    // the run of plain exclusions at the head, ending at the first entry that
+    // adds something or carries a wildcard
+    let mut leading = Vec::new();
+    for pat in expr.split(',').map(|p| p.trim()) {
+        if !pat.starts_with('-') || pat.contains('*') {
+            break;
         }
+        leading.push(pat.to_string());
     }
-    let present: std::collections::HashSet<&str> = view
-        .as_object()
-        .map(|o| {
-            o.values()
-                .filter_map(|v| v.get("aliases").and_then(|a| a.as_object()))
-                .flat_map(|a| a.keys().map(|k| k.as_str()))
-                .collect()
+    if !leading.is_empty() {
+        return leading;
+    }
+    let targets = match idx {
+        Some(e) => store.resolve(e),
+        None => store.names(),
+    };
+    let existing: std::collections::HashSet<String> = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .flat_map(|st| st.read().aliases.keys().cloned().collect::<Vec<_>>())
+        .collect();
+    expr.split(',')
+        .map(|p| p.trim())
+        .filter(|p| {
+            !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty()
         })
-        .unwrap_or_default();
-    alias_names_required(expr)
-        .into_iter()
-        .filter(|n| !present.contains(n.as_str()))
+        .filter(|p| !existing.contains(*p))
+        .map(|p| p.to_string())
         .collect()
 }
 
@@ -2487,7 +2521,7 @@ pub async fn get_alias_scoped(
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
     let view = alias_view(&store, idx.as_deref(), name.as_deref());
-    let missing = alias_names_missing(&view, name.as_deref());
+    let missing = alias_names_missing(&store, idx.as_deref(), name.as_deref());
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
     }
@@ -2500,7 +2534,7 @@ pub async fn index_alias_get(
     Query(p): Query<Params>,
 ) -> Response {
     let view = alias_view(&store, Some(&index), Some(&name));
-    let missing = alias_names_missing(&view, Some(&name));
+    let missing = alias_names_missing(&store, Some(&index), Some(&name));
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
     }
@@ -2692,10 +2726,15 @@ pub async fn delete_alias(
     for n in targets {
         if let Some(st) = store.get(&n) {
             for pat in name.split(',') {
-                let re = crate::store::wildcard_to_regex(pat.trim());
+                let pat = pat.trim();
                 let mut g = st.write();
-                let hits: Vec<String> =
-                    g.aliases.keys().filter(|a| re.is_match(a)).cloned().collect();
+                // `_all` names every alias the index carries
+                let hits: Vec<String> = if pat == "_all" {
+                    g.aliases.keys().cloned().collect()
+                } else {
+                    let re = crate::store::wildcard_to_regex(pat);
+                    g.aliases.keys().filter(|a| re.is_match(a)).cloned().collect()
+                };
                 for h in hits {
                     g.aliases.remove(&h);
                     removed = true;
@@ -2730,6 +2769,9 @@ pub async fn update_aliases(
             "Validation Failed: 1: Must specify at least one alias action;",
         );
     }
+    // `must_exist` on a remove turns "nothing to do" into an error, and every
+    // action is checked before any of them is reported
+    let mut missing_required: Vec<String> = Vec::new();
     for action in actions {
         let Some((verb, spec)) = action.as_object().and_then(|o| o.iter().next()) else { continue };
         let indices: Vec<String> = spec
@@ -2752,10 +2794,21 @@ pub async fn update_aliases(
                 })
             })
             .unwrap_or_default();
+        // an explicit empty list is a request that names nothing
+        if spec.get("aliases").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(false) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                "Validation Failed: 1: [aliases] can't be empty;",
+            );
+        }
         if indices.is_empty() {
             let want = spec.get("index").and_then(|v| v.as_str()).unwrap_or("");
             return no_such_index(want);
         }
+        // a remove that removed nothing is an error, whether or not the caller
+        // asked for must_exist -- there was nothing there to act on
+        let mut removed_any = false;
         for i in &indices {
             let Some(st) = store.get(i) else { continue };
             let mut g = st.write();
@@ -2775,6 +2828,7 @@ pub async fn update_aliases(
                         let re = crate::store::wildcard_to_regex(a);
                         let hits: Vec<String> =
                             g.aliases.keys().filter(|x| re.is_match(x)).cloned().collect();
+                        removed_any |= !hits.is_empty();
                         for h in hits {
                             g.aliases.remove(&h);
                         }
@@ -2789,6 +2843,24 @@ pub async fn update_aliases(
                 store.delete(i);
             }
         }
+        // must_exist spelled out decides it either way; left unsaid, a remove
+        // that matched nothing at all is still an error
+        let complain = match spec.get("must_exist").and_then(|v| v.as_bool()) {
+            Some(explicit) => explicit,
+            None => true,
+        };
+        if verb == "remove" && !removed_any && !names.is_empty() && complain {
+            missing_required.extend(names.iter().cloned());
+        }
+    }
+    if !missing_required.is_empty() {
+        missing_required.sort();
+        missing_required.dedup();
+        return err(
+            StatusCode::NOT_FOUND,
+            "aliases_not_found_exception",
+            format!("aliases [{}] missing", missing_required.join(",")),
+        );
     }
     respond(&p, json!({"acknowledged": true}))
 }

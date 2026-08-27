@@ -1095,6 +1095,11 @@ impl Store {
         v
     }
 
+    /// Is this name an alias rather than an index of its own?
+    pub fn is_alias(&self, name: &str) -> bool {
+        self.inner.read().values().any(|st| st.read().aliases.contains_key(name))
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<RwLock<IdxState>>> {
         if let Some(s) = self.inner.read().get(name) {
             return Some(s.clone());
