@@ -6,7 +6,7 @@ implementation under test is ours. Nothing here is rewritten by hand, so a
 passing test means we match OpenSearch's documented behaviour, not our idea
 of it.
 """
-import argparse, json, os, pathlib, re, sys, time, traceback
+import argparse, datetime, json, os, pathlib, re, sys, time, traceback
 import yaml
 import requests
 
@@ -131,6 +131,10 @@ class Runner:
             val = params[name]
             if isinstance(val, list):
                 val = ",".join(str(v) for v in val)
+            elif val is None:
+                # `index: null` in a test means the caller sent nothing there,
+                # not the four letters of Python's None
+                val = ""
             path = path.replace("{" + name + "}", requests.utils.quote(str(val), safe=",*"))
             used.add(name)
         method = best["methods"][0]
@@ -164,7 +168,15 @@ class Runner:
         if ignore is not None:
             vals = ignore if isinstance(ignore, list) else [ignore]
             ignore_codes = {int(v) for v in vals}
-        method, path, used = self.resolve_path(api, params)
+        try:
+            method, path, used = self.resolve_path(api, params)
+        except Failure:
+            # `catch: param` expects the client to refuse the call because a
+            # required path part is missing -- which is exactly what a failure
+            # to resolve one means
+            if catch == "param":
+                return
+            raise
         query = {k: v for k, v in params.items() if k not in used and v is not None}
         for k, v in list(query.items()):
             if isinstance(v, bool):
@@ -183,7 +195,7 @@ class Runner:
             elif isinstance(body, str):
                 data = body
             else:
-                data = json.dumps(body)
+                data = json.dumps(body, default=_json_default)
 
         url = self.base + path
         resp = self.session.request(method, url, params=query, data=data,
@@ -325,11 +337,22 @@ def should_skip(steps):
     return None
 
 
+def _json_default(o):
+    """YAML turns an unquoted date into a datetime; the wire wants the text."""
+    if isinstance(o, (datetime.datetime, datetime.date)):
+        return o.isoformat()
+    raise TypeError(f"not JSON serialisable: {type(o).__name__}")
+
+
 def reset(base):
-    try:
-        requests.delete(base + "/*", timeout=10)
-    except Exception:
-        pass
+    # Templates outlive a `DELETE /*`, and an index template left behind by an
+    # earlier file changes how the next file's indices are created -- so the
+    # suite has to start from nothing, not just from no indices.
+    for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
+        try:
+            requests.delete(base + path, timeout=10)
+        except Exception:
+            pass
 
 
 def main():
@@ -397,7 +420,11 @@ def main():
                 failed += 1
                 fa += 1
                 req = getattr(r, "last_req", None)
-                ctx = f"  <- {req[0]} {req[1]} {json.dumps(req[2])[:220]}" if req else ""
+                ctx = (
+                    f"  <- {req[0]} {req[1]} {json.dumps(req[2], default=_json_default)[:220]}"
+                    if req
+                    else ""
+                )
                 failures.append((rel, name, str(e) + ctx))
             except Exception as e:
                 failed += 1

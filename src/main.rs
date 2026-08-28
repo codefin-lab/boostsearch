@@ -65,10 +65,19 @@ fn app(store: Store) -> Router {
         .route("/_cluster/state/{*rest}", get(api::cluster_state))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
         // --- aliases ---
-        .route("/_alias/{*rest}", get(api::get_alias_scoped).head(api::exists_alias))
+        .route(
+            "/_alias/{*rest}",
+            get(api::get_alias_scoped)
+                .head(api::exists_alias)
+                .put(api::put_alias_named)
+                .post(api::put_alias_named),
+        )
         .route("/_aliases", post(api::update_aliases))
         .route("/{index}/_alias/{name}", put(api::put_alias).post(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
+        .route("/{index}/_alias", put(api::put_alias_on_index))
+        .route("/{index}/_aliases", put(api::put_alias_on_index))
+        .route("/_alias", put(api::put_alias_body))
         // --- templates ---
         .route("/_template/{name}",
                put(api::put_template).post(api::put_template)
@@ -89,8 +98,12 @@ fn app(store: Store) -> Router {
         .route("/_cluster/allocation/explain", get(api::acknowledged).post(api::acknowledged))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
         // --- index housekeeping ---
-        .route("/_flush", post(api::shards_ok).get(api::shards_ok))
-        .route("/{index}/_flush", post(api::shards_ok).get(api::shards_ok))
+        .route("/_cat/segments", get(api::cat_segments))
+        .route("/_cat/segments/{index}", get(api::cat_segments))
+        .route("/_segments", get(api::segments))
+        .route("/{index}/_segments", get(api::segments))
+        .route("/_flush", post(api::flush).get(api::flush))
+        .route("/{index}/_flush", post(api::flush).get(api::flush))
         .route("/_cache/clear", post(api::shards_ok))
         .route("/{index}/_cache/clear", post(api::shards_ok))
         .route("/_upgrade", post(api::shards_ok).get(api::shards_ok))
@@ -147,7 +160,7 @@ fn app(store: Store) -> Router {
         .route("/{index}/_create/{id}", put(api::create_doc).post(api::create_doc))
         .route("/{index}/_source/{id}", get(api::get_source).head(api::head_doc))
         // --- index lifecycle ---
-        .route("/{index}/_alias", get(api::get_alias_scoped))
+        .route("/{index}/_alias", get(api::index_alias_list))
         .route("/{index}/_alias/{name}", get(api::index_alias_get).head(api::index_alias_head))
         .route(
             "/{index}",

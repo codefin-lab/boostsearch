@@ -162,6 +162,34 @@ pub async fn index_exists(State(store): State<Store>, Path(index): Path<String>)
     }
 }
 
+/// `_flush` writes what is buffered and makes it searchable.
+///
+/// The distinction OpenSearch draws is between committing to disk and making
+/// documents visible; here committing does both, so a flush is a refresh that
+/// also settles the writer.
+pub async fn flush(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(_p): Query<Params>,
+) -> Response {
+    let targets = match index {
+        Some(Path(i)) => {
+            let t = store.resolve(&i);
+            if t.is_empty() {
+                return no_such_index(&i);
+            }
+            t
+        }
+        None => store.names(),
+    };
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            let _ = st.write().refresh();
+        }
+    }
+    axum::Json(json!({"_shards": shards()})).into_response()
+}
+
 pub async fn refresh_all(State(store): State<Store>) -> Response {
     for n in store.names() {
         if let Some(st) = store.get(&n) {
@@ -536,12 +564,29 @@ fn maybe_refresh(st: &mut IdxState, p: &Params) {
     }
 }
 
+/// `require_alias` says the write is only meant for an alias, so a name that
+/// is not one is treated as absent rather than created on the spot.
+fn refuse_unless_alias(store: &Store, index: &str, p: &Params) -> Option<Response> {
+    let asked = p.get("require_alias").map(|v| v != "false").unwrap_or(false);
+    if asked && !store.is_alias(index) {
+        return Some(err(
+            StatusCode::NOT_FOUND,
+            "index_not_found_exception",
+            format!("no such index [{index}] and [require_alias] request flag is [true] and [{index}] is not an alias"),
+        ));
+    }
+    None
+}
+
 pub async fn index_doc(
     State(store): State<Store>,
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     do_index(store, index, Some(id), p, body, "index").await
 }
 
@@ -551,6 +596,9 @@ pub async fn index_doc_auto(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     do_index(store, index, None, p, body, "index").await
 }
 
@@ -858,11 +906,23 @@ pub async fn bulk(
                 let doc = patch.get("doc").cloned();
                 match (existing, doc) {
                     (Some(mut base), Some(d)) => {
+                        let before = base.clone();
                         merge_into(&mut base, &d);
+                        // an update that changes nothing is reported as such,
+                        // and counted, the same way the single-document API
+                        // reports it
+                        let noop = patch
+                            .get("detect_noop")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true)
+                            && base == before;
+                        if noop {
+                            g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         match write_doc(&mut g, &id, base.clone(), "index") {
                             Ok((body, _)) => {
                                 let mut b = body;
-                                b["result"] = json!("updated");
+                                b["result"] = json!(if noop { "noop" } else { "updated" });
                                 b["status"] = json!(200);
                                 let sel = meta_source
                                     .clone()
@@ -1637,6 +1697,9 @@ pub async fn update_doc(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+        return r;
+    }
     let patch: Value = match parse_body(&body) {
         Ok(b) => b,
         Err(r) => return r,
@@ -1689,6 +1752,9 @@ pub async fn update_doc(
             let mut merged = base.clone();
             merge_into(&mut merged, d);
             if detect_noop && merged == base {
+                // the write guard is already held here; taking a read on the
+                // same lock would wait for itself
+                g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 (base, "noop")
             } else {
                 (merged, "updated")
@@ -1853,17 +1919,201 @@ pub async fn force_merge(
     respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
 }
 
+const CAT_SEGMENT_COLS: &[&str] = &[
+    "index", "shard", "prirep", "ip", "id", "segment", "generation", "docs.count",
+    "docs.deleted", "size", "size.memory", "committed", "searchable", "version", "compound",
+];
+
+/// `_cat/segments` -- the same information as `_segments`, one row per segment.
+pub async fn cat_segments(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    if p.contains_key("help") {
+        return cat_help(CAT_SEGMENT_COLS);
+    }
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let targets = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let mut rows = Vec::new();
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        if g.closed {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{n}]"),
+            );
+        }
+        let searcher = g.reader.searcher();
+        for (i, reader) in searcher.segment_readers().iter().enumerate() {
+            rows.push(vec![
+                ("index", n.clone()),
+                ("shard", "0".to_string()),
+                ("prirep", "p".to_string()),
+                ("ip", "127.0.0.1".to_string()),
+                // `id` answers to `h=` and appears in the help, but the
+                // default row does not carry it
+                ("segment", format!("_{i}")),
+                ("generation", i.to_string()),
+                ("docs.count", reader.num_docs().to_string()),
+                ("docs.deleted", reader.num_deleted_docs().to_string()),
+                ("size", "0b".to_string()),
+                ("size.memory", "0".to_string()),
+                ("committed", "true".to_string()),
+                ("searchable", "true".to_string()),
+                ("version", "9.0.0".to_string()),
+                ("compound", "true".to_string()),
+            ]);
+        }
+    }
+    rows.sort_by(|a, b| a[0].1.cmp(&b[0].1).then(a[5].1.cmp(&b[5].1)));
+    cat_render_cols(CAT_SEGMENT_COLS, rows, &p)
+}
+
+/// `_segments` -- what each shard is made of.
+///
+/// One shard per index here, and tantivy names its segments by ordinal, so
+/// they are reported as `_0`, `_1` and so on to match the shape the API has.
+pub async fn segments(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let targets = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if targets.is_empty() {
+        if !allow_none || (!expr.is_empty() && !expr.contains('*') && !store.exists(&expr)) {
+            return no_such_index(&expr);
+        }
+        return respond(&p, json!({
+            "_shards": {"total": 0, "successful": 0, "failed": 0},
+            "indices": {},
+        }));
+    }
+    let mut indices = serde_json::Map::new();
+    let mut total = 0u64;
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        if g.closed {
+            // a closed index has nothing to report; the caller decides whether
+            // that is an error or simply nothing
+            if p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false) {
+                continue;
+            }
+            return err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{n}]"),
+            );
+        }
+        let searcher = g.reader.searcher();
+        let mut segs = serde_json::Map::new();
+        for (i, reader) in searcher.segment_readers().iter().enumerate() {
+            segs.insert(
+                format!("_{i}"),
+                json!({
+                    "generation": i,
+                    "num_docs": reader.num_docs(),
+                    "deleted_docs": reader.num_deleted_docs(),
+                    "size_in_bytes": 0,
+                    "memory_in_bytes": 0,
+                    "committed": true,
+                    "search": true,
+                    "version": "9.0.0",
+                    "compound": true,
+                    "attributes": {},
+                }),
+            );
+        }
+        total += 1;
+        indices.insert(
+            n.clone(),
+            json!({"shards": {"0": [{
+                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "num_committed_segments": segs.len(),
+                "num_search_segments": segs.len(),
+                "segments": Value::Object(segs),
+            }]}}),
+        );
+    }
+    respond(&p, json!({
+        "_shards": {"total": total, "successful": total, "failed": 0},
+        "indices": Value::Object(indices),
+    }))
+}
+
 // --------------------------------------------------------------------- stats
 
-fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
+/// Which fields a `fields=`-style parameter names.
+///
+/// Absent means the caller wants no per-field breakdown at all, which is not
+/// the same as naming none.
+fn stats_field_patterns(p: &Params, specific: &str) -> Option<Vec<String>> {
+    for key in [specific, "fields"] {
+        if let Some(v) = p.get(key) {
+            return Some(
+                v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            );
+        }
+    }
+    None
+}
+
+fn stats_field_wanted(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|pat| {
+        pat == "*" || pat == "_all" || pat == name || crate::store::glob_match(pat, name)
+    })
+}
+
+fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
     let cols = st.field_column_bytes();
     let fielddata_total: u64 = cols.values().sum();
-    let fielddata_fields: serde_json::Map<String, Value> = cols
+    // a per-field breakdown is reported only where the request asked for one,
+    // and a field appears under the statistic its type can carry: fielddata
+    // for a text field, completion for a completion field
+    let is_completion = |name: &str| st.mapping.type_of(name) == Some("completion");
+    let fielddata_fields: Value = match stats_field_patterns(p, "fielddata_fields") {
+        None => Value::Null,
+        Some(pats) => Value::Object(
+            cols.iter()
+                .filter(|(k, _)| !is_completion(k) && stats_field_wanted(&pats, k))
+                .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+                .collect(),
+        ),
+    };
+    let completion_names: Vec<String> = st
+        .mapping
+        .types
         .iter()
-        .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+        .filter(|(_, t)| t.as_str() == Some("completion"))
+        .map(|(k, _)| k.clone())
         .collect();
+    let completion_total: u64 = completion_names.len() as u64 * 64 * docs.max(1) as u64;
+    let completion_fields: Value = match stats_field_patterns(p, "completion_fields") {
+        None => Value::Null,
+        Some(pats) => Value::Object(
+            completion_names
+                .iter()
+                .filter(|k| stats_field_wanted(&pats, k))
+                .map(|k| (k.clone(), json!({"size_in_bytes": 64 * docs.max(1)})))
+                .collect(),
+        ),
+    };
+    let mut fielddata_stat = json!({"memory_size_in_bytes": fielddata_total, "evictions": 0});
+    if let Value::Object(f) = fielddata_fields {
+        fielddata_stat["fields"] = Value::Object(f);
+    }
+    let mut completion_stat = json!({"size_in_bytes": completion_total});
+    if let Value::Object(f) = completion_fields {
+        completion_stat["fields"] = Value::Object(f);
+    }
+
     // `groups` is only reported for the groups the request named
     let groups: serde_json::Map<String, Value> = st
         .search_groups
@@ -1894,9 +2144,13 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
         "indexing": {"index_total": docs, "index_time_in_millis": 0, "index_current": 0,
                      "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,
-                     "delete_current": 0, "noop_update_total": 0, "is_throttled": false,
+                     "delete_current": 0,
+                     "noop_update_total":
+                         st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
+                     "is_throttled": false,
                      "throttle_time_in_millis": 0},
-        "get": {"total": 0, "time_in_millis": 0, "getTime": "0s", "exists_total": 0,
+        "get": {"total": 0, "time_in_millis": 0, "time": "0s", "getTime": "0s",
+                "exists_total": 0,
                 "exists_time_in_millis": 0, "missing_total": 0,
                 "missing_time_in_millis": 0, "current": 0},
         "search": {"open_contexts": 0, "query_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "query_time_in_millis": 1,
@@ -1914,11 +2168,8 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
-        "fielddata": {
-            "memory_size_in_bytes": fielddata_total, "evictions": 0,
-            "fields": Value::Object(fielddata_fields)
-        },
-        "completion": {"size_in_bytes": 0},
+        "fielddata": fielddata_stat,
+        "completion": completion_stat,
         "segments": {"count": searcher.segment_readers().len(), "memory_in_bytes": 0,
                      "terms_memory_in_bytes": 0, "stored_fields_memory_in_bytes": 0,
                      "term_vectors_memory_in_bytes": 0, "norms_memory_in_bytes": 0,
@@ -1963,6 +2214,8 @@ pub const STATS_METRICS: &[&str] = &[
     "docs", "store", "indexing", "get", "search", "merges", "refresh", "flush", "warmer",
     "query_cache", "fielddata", "completion", "segments", "translog", "request_cache",
     "recovery", "_all",
+    // the section is named `merges` but the metric may be asked for either way
+    "merge",
 ];
 
 pub async fn stats_metric(
@@ -1981,6 +2234,35 @@ pub async fn stats_index_metric(
     stats_filtered(store, index, Some(metric), p)
 }
 
+/// Are these two names a single character apart -- one changed, added, or
+/// dropped? Close enough to be worth suggesting when a metric is not known.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let (long, short) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    let (mut i, mut j, mut edits) = (0, 0, 0);
+    while i < long.len() && j < short.len() {
+        if long[i] == short[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+        if long.len() == short.len() {
+            i += 1;
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    edits + (long.len() - i) <= 1
+}
+
 /// `_stats/{metric}` narrows the report to the sections asked for.
 fn stats_filtered(
     store: Store,
@@ -1989,14 +2271,33 @@ fn stats_filtered(
     p: Params,
 ) -> Response {
     let Some(metric) = metric else { return stats_impl(store, expr, p) };
-    let wanted: Vec<String> =
-        metric.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    let wanted: Vec<String> = metric
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        // the section is called `merges`, and the metric may be asked for
+        // in the singular
+        .map(|m| if m == "merge" { "merges".to_string() } else { m.to_string() })
+        .collect();
     for w in &wanted {
         if !STATS_METRICS.contains(&w.as_str()) {
             return err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("request [/_stats/{metric}] contains unrecognized metric: [{w}]"),
+                {
+                    // a near miss is usually a typo, so the closest known
+                    // metric is offered rather than only the complaint
+                    let close = STATS_METRICS.iter().find(|m| one_edit_apart(m, w));
+                    match close {
+                        Some(m) => format!(
+                            "request [/_stats/{metric}] contains unrecognized metric: \
+                             [{w}] -> did you mean [{m}]?"
+                        ),
+                        None => format!(
+                            "request [/_stats/{metric}] contains unrecognized metric: [{w}]"
+                        ),
+                    }
+                },
             );
         }
     }
@@ -2068,7 +2369,7 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read(), want_groups.as_deref());
+        let s = index_stats(&st.read(), want_groups.as_deref(), &p);
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",
@@ -2361,19 +2662,129 @@ fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) 
         let g = st.read();
         let mut aliases = serde_json::Map::new();
         for (a, def) in &g.aliases {
-            let wanted = match name_expr {
-                None | Some("*") | Some("_all") | Some("") => true,
-                Some(e) => e.split(',').any(|pat| {
-                    pat == a || crate::store::wildcard_to_regex(pat.trim()).is_match(a)
-                }),
-            };
-            if wanted {
+            if alias_name_wanted(name_expr, a) {
                 aliases.insert(a.clone(), def.clone());
             }
+        }
+        // naming an alias asks which indices carry it, so one that carries
+        // none is not an answer; asking without a name asks about the indices
+        // themselves, and an index with no aliases is still one of them
+        if aliases.is_empty() && name_expr.is_some() {
+            continue;
         }
         out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
     }
     Value::Object(out)
+}
+
+
+/// Does an alias fall inside the expression naming it?
+///
+/// The expression is a comma list where a leading `-` removes rather than
+/// adds, so `test_alias*,-test_alias_1` is every matching alias but that one.
+fn alias_name_wanted(expr: Option<&str>, alias: &str) -> bool {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return true };
+    if matches!(expr, "*" | "_all") {
+        return true;
+    }
+    let mut wanted = false;
+    for pat in expr.split(',') {
+        let pat = pat.trim();
+        let (neg, pat) = match pat.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, pat),
+        };
+        let hit = pat == alias
+            || pat == "*"
+            || pat == "_all"
+            || crate::store::wildcard_to_regex(pat).is_match(alias);
+        if hit {
+            wanted = !neg;
+        }
+    }
+    wanted
+}
+
+/// The names in the expression that must exist for the request to succeed.
+///
+/// A pattern that matches nothing is simply an empty result, but a plain name
+/// that matches nothing is a request for something that is not there.
+fn alias_names_required(expr: Option<&str>) -> Vec<String> {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
+    expr.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// The 404 this endpoint answers with carries the reason as a bare string
+/// rather than the usual error object.
+fn aliases_missing_response(names: &[String], view: &Value) -> Response {
+    let mut names: Vec<String> = names.to_vec();
+    names.sort();
+    let label = if names.len() > 1 { "aliases" } else { "alias" };
+    // the aliases that were found are still reported alongside the complaint
+    let mut body = view.clone();
+    if !body.is_object() {
+        body = json!({});
+    }
+    if let Some(o) = body.as_object_mut() {
+        o.insert("error".into(), json!(format!("{label} [{}] missing", names.join(","))));
+        o.insert("status".into(), json!(404));
+    }
+    (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+}
+
+/// Which of the named aliases do not exist at all.
+///
+/// A name that exists but was removed from the answer by a later exclusion is
+/// not missing -- it is excluded. Only a name nothing carries is missing.
+/// Exclusions at the head of the list are a separate complaint: they have
+/// nothing to exclude from, and are reported as written.
+fn alias_names_missing(store: &Store, idx: Option<&str>, expr: Option<&str>) -> Vec<String> {
+    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
+    // the run of plain exclusions at the head, ending at the first entry that
+    // adds something or carries a wildcard
+    let mut leading = Vec::new();
+    for pat in expr.split(',').map(|p| p.trim()) {
+        if !pat.starts_with('-') || pat.contains('*') {
+            break;
+        }
+        leading.push(pat.to_string());
+    }
+    if !leading.is_empty() {
+        return leading;
+    }
+    let targets = match idx {
+        Some(e) => store.resolve(e),
+        None => store.names(),
+    };
+    let existing: std::collections::HashSet<String> = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .flat_map(|st| st.read().aliases.keys().cloned().collect::<Vec<_>>())
+        .collect();
+    expr.split(',')
+        .map(|p| p.trim())
+        .filter(|p| {
+            !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty()
+        })
+        .filter(|p| !existing.contains(*p))
+        .map(|p| p.to_string())
+        .collect()
+}
+
+/// `GET /{index}/_alias` -- every alias on the named indices.
+pub async fn index_alias_list(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.resolve(&index).is_empty() {
+        return no_such_index(&index);
+    }
+    respond(&p, alias_view(&store, Some(&index), None))
 }
 
 pub async fn get_alias_scoped(
@@ -2388,22 +2799,9 @@ pub async fn get_alias_scoped(
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
     let view = alias_view(&store, idx.as_deref(), name.as_deref());
-    // asking for a specific alias that exists nowhere is a 404
-    if let Some(n) = &name {
-        if !n.contains('*') && n != "_all" {
-            let any = view.as_object().map(|o| {
-                o.values().any(|v| {
-                    v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
-                })
-            }).unwrap_or(false);
-            if !any {
-                return err(
-                    StatusCode::NOT_FOUND,
-                    "aliases_not_found_exception",
-                    format!("alias [{n}] missing"),
-                );
-            }
-        }
+    let missing = alias_names_missing(&store, idx.as_deref(), name.as_deref());
+    if !missing.is_empty() {
+        return aliases_missing_response(&missing, &view);
     }
     respond(&p, view)
 }
@@ -2414,20 +2812,9 @@ pub async fn index_alias_get(
     Query(p): Query<Params>,
 ) -> Response {
     let view = alias_view(&store, Some(&index), Some(&name));
-    let any = view
-        .as_object()
-        .map(|o| {
-            o.values().any(|v| {
-                v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !any && !name.contains('*') && name != "_all" {
-        return err(
-            StatusCode::NOT_FOUND,
-            "aliases_not_found_exception",
-            format!("alias [{name}] missing"),
-        );
+    let missing = alias_names_missing(&store, Some(&index), Some(&name));
+    if !missing.is_empty() {
+        return aliases_missing_response(&missing, &view);
     }
     respond(&p, view)
 }
@@ -2467,23 +2854,141 @@ pub async fn exists_alias(
     if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
 
+/// The keys an alias body may carry that are not part of the alias itself.
+const ALIAS_ADDRESSING: &[&str] = &["index", "indices", "alias", "aliases"];
+const ALIAS_OPTIONS: &[&str] = &[
+    "filter",
+    "routing",
+    "index_routing",
+    "search_routing",
+    "is_write_index",
+    "is_hidden",
+    "must_exist",
+];
+
+/// Create or replace an alias.
+///
+/// The index and the alias name may each arrive in the path or in the body,
+/// which is four spellings of the same request.
+async fn put_alias_inner(
+    store: Store,
+    index: Option<String>,
+    name: Option<String>,
+    p: Params,
+    body: String,
+) -> Response {
+    let mut def: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    if !def.is_object() {
+        def = json!({});
+    }
+    let from_body = |keys: &[&str]| -> Option<String> {
+        let o = def.as_object()?;
+        for k in keys {
+            match o.get(*k) {
+                Some(Value::String(s)) => return Some(s.clone()),
+                Some(Value::Array(a)) => {
+                    let joined: Vec<String> =
+                        a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                    if !joined.is_empty() {
+                        return Some(joined.join(","));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let index = index.filter(|s| !s.is_empty()).or_else(|| from_body(&["index", "indices"]));
+    let name = name.filter(|s| !s.is_empty()).or_else(|| from_body(&["alias", "aliases"]));
+
+    let (Some(index), Some(name)) = (index, name) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: index is missing;2: alias is missing;",
+        );
+    };
+    if let Some(o) = def.as_object() {
+        for key in o.keys() {
+            let key: &str = key;
+            if !ALIAS_ADDRESSING.contains(&key) && !ALIAS_OPTIONS.contains(&key) {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "x_content_parse_exception",
+                    format!("unknown field [{key}]"),
+                );
+            }
+        }
+    }
+    // an alias is a name for indices, so it can be neither a pattern nor the
+    // name an index already answers to
+    if name.contains('*') || name.contains(',') {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_alias_name_exception",
+            format!("Invalid alias name [{name}]"),
+        );
+    }
+    if store.names().iter().any(|n| *n == name) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_alias_name_exception",
+            format!("Invalid alias name [{name}]: an index or data stream exists with the same name as the alias"),
+        );
+    }
+    let targets = store.resolve(&index);
+    if targets.is_empty() {
+        return no_such_index(&index);
+    }
+    if let Some(o) = def.as_object_mut() {
+        for k in ALIAS_ADDRESSING {
+            o.remove(*k);
+        }
+    }
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            st.write().aliases.insert(name.clone(), crate::store::normalize_alias(&def));
+        }
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
 pub async fn put_alias(
     State(store): State<Store>,
     Path((index, name)): Path<(String, String)>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    let def: Value = parse_body(&body).unwrap_or(json!({}));
-    let targets = store.resolve(&index);
-    if targets.is_empty() {
-        return no_such_index(&index);
-    }
-    for n in targets {
-        if let Some(st) = store.get(&n) {
-            st.write().aliases.insert(name.clone(), def.clone());
-        }
-    }
-    respond(&p, json!({"acknowledged": true}))
+    put_alias_inner(store, Some(index), Some(name), p, body).await
+}
+
+/// `PUT /{index}/_alias` -- the alias name comes from the body.
+pub async fn put_alias_on_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, Some(index), None, p, body).await
+}
+
+/// `PUT /_alias/{name}` -- the indices come from the body.
+pub async fn put_alias_named(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, None, Some(name), p, body).await
+}
+
+/// `PUT /_alias` -- both come from the body.
+pub async fn put_alias_body(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_alias_inner(store, None, None, p, body).await
 }
 
 pub async fn delete_alias(
@@ -2499,10 +3004,15 @@ pub async fn delete_alias(
     for n in targets {
         if let Some(st) = store.get(&n) {
             for pat in name.split(',') {
-                let re = crate::store::wildcard_to_regex(pat.trim());
+                let pat = pat.trim();
                 let mut g = st.write();
-                let hits: Vec<String> =
-                    g.aliases.keys().filter(|a| re.is_match(a)).cloned().collect();
+                // `_all` names every alias the index carries
+                let hits: Vec<String> = if pat == "_all" {
+                    g.aliases.keys().cloned().collect()
+                } else {
+                    let re = crate::store::wildcard_to_regex(pat);
+                    g.aliases.keys().filter(|a| re.is_match(a)).cloned().collect()
+                };
                 for h in hits {
                     g.aliases.remove(&h);
                     removed = true;
@@ -2537,6 +3047,9 @@ pub async fn update_aliases(
             "Validation Failed: 1: Must specify at least one alias action;",
         );
     }
+    // `must_exist` on a remove turns "nothing to do" into an error, and every
+    // action is checked before any of them is reported
+    let mut missing_required: Vec<String> = Vec::new();
     for action in actions {
         let Some((verb, spec)) = action.as_object().and_then(|o| o.iter().next()) else { continue };
         let indices: Vec<String> = spec
@@ -2559,10 +3072,21 @@ pub async fn update_aliases(
                 })
             })
             .unwrap_or_default();
+        // an explicit empty list is a request that names nothing
+        if spec.get("aliases").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(false) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                "Validation Failed: 1: [aliases] can't be empty;",
+            );
+        }
         if indices.is_empty() {
             let want = spec.get("index").and_then(|v| v.as_str()).unwrap_or("");
             return no_such_index(want);
         }
+        // a remove that removed nothing is an error, whether or not the caller
+        // asked for must_exist -- there was nothing there to act on
+        let mut removed_any = false;
         for i in &indices {
             let Some(st) = store.get(i) else { continue };
             let mut g = st.write();
@@ -2576,12 +3100,13 @@ pub async fn update_aliases(
                             o.remove("alias");
                             o.remove("aliases");
                         }
-                        g.aliases.insert(a.clone(), def);
+                        g.aliases.insert(a.clone(), crate::store::normalize_alias(&def));
                     }
                     "remove" => {
                         let re = crate::store::wildcard_to_regex(a);
                         let hits: Vec<String> =
                             g.aliases.keys().filter(|x| re.is_match(x)).cloned().collect();
+                        removed_any |= !hits.is_empty();
                         for h in hits {
                             g.aliases.remove(&h);
                         }
@@ -2596,6 +3121,24 @@ pub async fn update_aliases(
                 store.delete(i);
             }
         }
+        // must_exist spelled out decides it either way; left unsaid, a remove
+        // that matched nothing at all is still an error
+        let complain = match spec.get("must_exist").and_then(|v| v.as_bool()) {
+            Some(explicit) => explicit,
+            None => true,
+        };
+        if verb == "remove" && !removed_any && !names.is_empty() && complain {
+            missing_required.extend(names.iter().cloned());
+        }
+    }
+    if !missing_required.is_empty() {
+        missing_required.sort();
+        missing_required.dedup();
+        return err(
+            StatusCode::NOT_FOUND,
+            "aliases_not_found_exception",
+            format!("aliases [{}] missing", missing_required.join(",")),
+        );
     }
     respond(&p, json!({"acknowledged": true}))
 }
@@ -2805,9 +3348,56 @@ fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
 
 /// Columns are passed separately so `?help` and the `?v` header still work on an
 /// endpoint that currently has no rows to show.
+/// `_cat` columns answer to their full name, to the part after the last dot,
+/// and to a leading-letter abbreviation -- `a` for `alias`, `rs` for
+/// `routing.search`.
+fn cat_column_matches(column: &str, asked: &str) -> bool {
+    if column == asked {
+        return true;
+    }
+    let tail = column.rsplit('.').next().unwrap_or(column);
+    if tail == asked {
+        return true;
+    }
+    let initials: String = column.split('.').filter_map(|p| p.chars().next()).collect();
+    initials == asked || column.starts_with(asked) && asked.len() >= 1 && column.len() > asked.len()
+}
+
 fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
     if p.contains_key("help") {
         return cat_help(columns);
+    }
+    // `s=` orders the rows by named columns, each optionally `:desc`. A column
+    // may be named by any of its aliases, which is how `s=index,a:desc` asks
+    // for alias descending within index.
+    let mut rows = rows;
+    if let Some(spec) = p.get("s").filter(|s| !s.is_empty()) {
+        let keys: Vec<(String, bool)> = spec
+            .split(',')
+            .map(|k| {
+                let k = k.trim();
+                match k.split_once(':') {
+                    Some((name, dir)) => (name.to_string(), dir.eq_ignore_ascii_case("desc")),
+                    None => (k.to_string(), false),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            for (name, desc) in &keys {
+                let pick = |r: &Vec<(&str, String)>| {
+                    r.iter()
+                        .find(|(k, _)| cat_column_matches(k, name))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
+                };
+                let ord = pick(a).cmp(&pick(b));
+                let ord = if *desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
     }
     // `h=` picks and orders the columns
     let rows: Vec<Vec<(&str, String)>> = match p.get("h") {
@@ -2816,7 +3406,14 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             rows.into_iter()
                 .map(|r| {
                     want.iter()
-                        .filter_map(|w| r.iter().find(|(k, _)| k == w).cloned())
+                        .filter_map(|w| {
+                            // a column answers to its name or to one of the
+                            // short forms `_cat` accepts
+                            r.iter()
+                                .find(|(k, _)| k == w)
+                                .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
+                                .cloned()
+                        })
                         .collect()
                 })
                 .collect()
@@ -2883,22 +3480,59 @@ pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) ->
 pub const CAT_ALIAS_COLS: &[&str] =
     &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
 
-pub async fn cat_aliases(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+pub async fn cat_aliases(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let filter = name.map(|Path(n)| n).or_else(|| p.get("name").map(|s| s.to_string()));
+    // spelling out which wildcards to expand and leaving `hidden` out of the
+    // list excludes hidden aliases; saying nothing at all leaves them in
+    let show_hidden = match p.get("expand_wildcards") {
+        None => true,
+        Some(v) => v.split(',').any(|w| matches!(w.trim(), "hidden" | "all")),
+    };
     let mut rows = Vec::new();
     for n in store.names() {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
         for (a, def) in &g.aliases {
+            let wanted = match filter.as_deref() {
+                None | Some("") | Some("*") | Some("_all") => true,
+                Some(expr) => expr.split(',').any(|pat| {
+                    let pat = pat.trim();
+                    pat == a || crate::store::wildcard_to_regex(pat).is_match(a)
+                }),
+            };
+            if !wanted {
+                continue;
+            }
+            let hidden = def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false)
+                || g.setting("hidden").map(|v| v == "true").unwrap_or(false);
+            if hidden && !show_hidden {
+                continue;
+            }
+            let cell = |k: &str| {
+                def.get(k)
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    })
+                    .unwrap_or_else(|| "-".to_string())
+            };
             rows.push(vec![
                 ("alias", a.clone()),
                 ("index", n.clone()),
                 ("filter", if def.get("filter").is_some() { "*".into() } else { "-".to_string() }),
-                ("routing.index", "-".to_string()),
-                ("routing.search", "-".to_string()),
-                ("is_write_index", "-".to_string()),
+                ("routing.index", cell("index_routing")),
+                ("routing.search", cell("search_routing")),
+                ("is_write_index", cell("is_write_index")),
             ]);
         }
     }
+    // the suite matches the whole body, so the order has to be settled:
+    // by index, then by alias within it
+    rows.sort_by(|a, b| a[1].1.cmp(&b[1].1).then(a[0].1.cmp(&b[0].1)));
     cat_render_cols(CAT_ALIAS_COLS, rows, &p)
 }
 
@@ -2949,7 +3583,7 @@ async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
         "indices" => cat_indices(State(store), Query(p)).await,
-        "aliases" => cat_aliases(State(store), Query(p)).await,
+        "aliases" => cat_aliases(State(store), None, Query(p)).await,
         "count" => cat_count(State(store), None, Query(p)).await,
         "health" => cat_health(Query(p)).await,
         "master" | "cluster_manager" => cat_render(
