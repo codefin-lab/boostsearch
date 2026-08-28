@@ -1919,6 +1919,133 @@ pub async fn force_merge(
     respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
 }
 
+const CAT_SEGMENT_COLS: &[&str] = &[
+    "index", "shard", "prirep", "ip", "id", "segment", "generation", "docs.count",
+    "docs.deleted", "size", "size.memory", "committed", "searchable", "version", "compound",
+];
+
+/// `_cat/segments` -- the same information as `_segments`, one row per segment.
+pub async fn cat_segments(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    if p.contains_key("help") {
+        return cat_help(CAT_SEGMENT_COLS);
+    }
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let targets = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let mut rows = Vec::new();
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        if g.closed {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{n}]"),
+            );
+        }
+        let searcher = g.reader.searcher();
+        for (i, reader) in searcher.segment_readers().iter().enumerate() {
+            rows.push(vec![
+                ("index", n.clone()),
+                ("shard", "0".to_string()),
+                ("prirep", "p".to_string()),
+                ("ip", "127.0.0.1".to_string()),
+                // `id` answers to `h=` and appears in the help, but the
+                // default row does not carry it
+                ("segment", format!("_{i}")),
+                ("generation", i.to_string()),
+                ("docs.count", reader.num_docs().to_string()),
+                ("docs.deleted", reader.num_deleted_docs().to_string()),
+                ("size", "0b".to_string()),
+                ("size.memory", "0".to_string()),
+                ("committed", "true".to_string()),
+                ("searchable", "true".to_string()),
+                ("version", "9.0.0".to_string()),
+                ("compound", "true".to_string()),
+            ]);
+        }
+    }
+    rows.sort_by(|a, b| a[0].1.cmp(&b[0].1).then(a[5].1.cmp(&b[5].1)));
+    cat_render_cols(CAT_SEGMENT_COLS, rows, &p)
+}
+
+/// `_segments` -- what each shard is made of.
+///
+/// One shard per index here, and tantivy names its segments by ordinal, so
+/// they are reported as `_0`, `_1` and so on to match the shape the API has.
+pub async fn segments(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let targets = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if targets.is_empty() {
+        if !allow_none || (!expr.is_empty() && !expr.contains('*') && !store.exists(&expr)) {
+            return no_such_index(&expr);
+        }
+        return respond(&p, json!({
+            "_shards": {"total": 0, "successful": 0, "failed": 0},
+            "indices": {},
+        }));
+    }
+    let mut indices = serde_json::Map::new();
+    let mut total = 0u64;
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        if g.closed {
+            // a closed index has nothing to report; the caller decides whether
+            // that is an error or simply nothing
+            if p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false) {
+                continue;
+            }
+            return err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{n}]"),
+            );
+        }
+        let searcher = g.reader.searcher();
+        let mut segs = serde_json::Map::new();
+        for (i, reader) in searcher.segment_readers().iter().enumerate() {
+            segs.insert(
+                format!("_{i}"),
+                json!({
+                    "generation": i,
+                    "num_docs": reader.num_docs(),
+                    "deleted_docs": reader.num_deleted_docs(),
+                    "size_in_bytes": 0,
+                    "memory_in_bytes": 0,
+                    "committed": true,
+                    "search": true,
+                    "version": "9.0.0",
+                    "compound": true,
+                    "attributes": {},
+                }),
+            );
+        }
+        total += 1;
+        indices.insert(
+            n.clone(),
+            json!({"shards": {"0": [{
+                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "num_committed_segments": segs.len(),
+                "num_search_segments": segs.len(),
+                "segments": Value::Object(segs),
+            }]}}),
+        );
+    }
+    respond(&p, json!({
+        "_shards": {"total": total, "successful": total, "failed": 0},
+        "indices": Value::Object(indices),
+    }))
+}
+
 // --------------------------------------------------------------------- stats
 
 /// Which fields a `fields=`-style parameter names.
@@ -3279,7 +3406,14 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             rows.into_iter()
                 .map(|r| {
                     want.iter()
-                        .filter_map(|w| r.iter().find(|(k, _)| k == w).cloned())
+                        .filter_map(|w| {
+                            // a column answers to its name or to one of the
+                            // short forms `_cat` accepts
+                            r.iter()
+                                .find(|(k, _)| k == w)
+                                .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
+                                .cloned()
+                        })
                         .collect()
                 })
                 .collect()

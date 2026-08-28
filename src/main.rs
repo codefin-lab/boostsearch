@@ -98,6 +98,10 @@ fn app(store: Store) -> Router {
         .route("/_cluster/allocation/explain", get(api::acknowledged).post(api::acknowledged))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
         // --- index housekeeping ---
+        .route("/_cat/segments", get(api::cat_segments))
+        .route("/_cat/segments/{index}", get(api::cat_segments))
+        .route("/_segments", get(api::segments))
+        .route("/{index}/_segments", get(api::segments))
         .route("/_flush", post(api::flush).get(api::flush))
         .route("/{index}/_flush", post(api::flush).get(api::flush))
         .route("/_cache/clear", post(api::shards_ok))

@@ -1593,7 +1593,18 @@ pub fn run(
     validate_params(body, p)?;
     let from = as_usize(body_or_param(body, p, "from")).unwrap_or(0);
     let size = as_usize(body_or_param(body, p, "size")).unwrap_or(10);
-    let targets = store.resolve(expr);
+    // reading documents skips the closed indices a pattern would otherwise
+    // reach; a closed index named outright is a different complaint
+    let targets = store.resolve_open(expr);
+    for name in expr.split(',').map(|n| n.trim()).filter(|n| !n.is_empty() && !n.contains('*')) {
+        if store.is_closed(name) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{name}]"),
+            ));
+        }
+    }
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !expr.is_empty() {
         return Err(no_such_index(expr));
     }

@@ -1117,16 +1117,43 @@ impl Store {
     }
 
     /// Resolve an index expression (`test`, `test*`, `_all`, `a,b`) to concrete indices.
+    /// Which indices a name or pattern addresses.
+    ///
+    /// Closed indices are included: most APIs -- delete, stats, the cat
+    /// endpoints -- are meant to see them. Searching is the exception, and
+    /// asks for `resolve_open` instead.
     pub fn resolve(&self, expr: &str) -> Vec<String> {
+        self.resolve_with(expr, true)
+    }
+
+    /// As `resolve`, but a pattern passes over the closed indices, which is
+    /// what `expand_wildcards` defaults to when reading documents. A name
+    /// given outright still resolves, so the caller can say it is closed
+    /// rather than that it does not exist.
+    pub fn resolve_open(&self, expr: &str) -> Vec<String> {
+        self.resolve_with(expr, false)
+    }
+
+    pub fn is_closed(&self, name: &str) -> bool {
+        self.get(name).map(|st| st.read().closed).unwrap_or(false)
+    }
+
+    fn resolve_with(&self, expr: &str, include_closed: bool) -> Vec<String> {
+        let open_only = |names: Vec<String>| -> Vec<String> {
+            if include_closed {
+                return names;
+            }
+            names.into_iter().filter(|n| !self.is_closed(n)).collect()
+        };
         if expr.is_empty() || expr == "_all" || expr == "*" {
-            return self.names();
+            return open_only(self.names());
         }
         let mut out = Vec::new();
         for part in expr.split(',') {
             let part = part.trim();
             if part.contains('*') {
                 let re = wildcard_to_regex(part);
-                for n in self.names() {
+                for n in open_only(self.names()) {
                     if re.is_match(&n) && !out.contains(&n) {
                         out.push(n);
                     }

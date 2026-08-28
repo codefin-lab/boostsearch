@@ -41,7 +41,21 @@ tantivy จึงไม่มี profile entry · `_time order` · `time_zone` �
 | `Translog stats on closed indices` | ต้องมี open/close index |
 | `Segment Stats` | ต้องมี open/close index (assertion สุดท้ายคาดว่าปิดแล้ว segment count เป็น 0) |
 
-## เรียงตามขนาดที่เหลือ (387)
+## closed indices — endpoint มีอยู่แล้ว ที่ขาดคือการ resolve
+
+`_close`/`_open` มีมาก่อนแล้วและตั้ง flag ถูก แต่ **การ resolve index ไม่เคยสนใจ flag นั้น**
+closed index จึงยังถูกค้นและถูกนับเหมือนเปิดอยู่
+
+**บทเรียน**: ครั้งแรกทำให้ทุก wildcard เป็น open-only → **พัง 229 sections**
+เพราะ `DELETE /*` ของ runner ไม่ลบ closed index อีกต่อไป และมันค้างข้ามไฟล์
+ค่าเริ่มต้นของ `expand_wildcards` **ต่างกันตาม API** — `open` สำหรับการอ่านเอกสาร
+แต่ `open,closed` สำหรับ delete/cat/stats ⇒ ทำเป็น **opt-in** (`resolve_open`)
+ไม่ใช่เปลี่ยนค่าเริ่มต้น
+
+ยังเหลือที่ต้องรู้จัก closed: `cluster.state` (3) · `get_mapping` wildcard_expansion (2) ·
+`indices.recovery` (5) · `cat.indices`/`cat.shards` บางส่วน
+
+## เรียงตามขนาดที่เหลือ (376)
 
 | จำนวน | กลุ่ม | หมายเหตุ |
 |---:|---|---|
