@@ -6,7 +6,7 @@ implementation under test is ours. Nothing here is rewritten by hand, so a
 passing test means we match OpenSearch's documented behaviour, not our idea
 of it.
 """
-import argparse, json, os, pathlib, re, sys, time, traceback
+import argparse, datetime, json, os, pathlib, re, sys, time, traceback
 import yaml
 import requests
 
@@ -195,7 +195,7 @@ class Runner:
             elif isinstance(body, str):
                 data = body
             else:
-                data = json.dumps(body)
+                data = json.dumps(body, default=_json_default)
 
         url = self.base + path
         resp = self.session.request(method, url, params=query, data=data,
@@ -337,6 +337,13 @@ def should_skip(steps):
     return None
 
 
+def _json_default(o):
+    """YAML turns an unquoted date into a datetime; the wire wants the text."""
+    if isinstance(o, (datetime.datetime, datetime.date)):
+        return o.isoformat()
+    raise TypeError(f"not JSON serialisable: {type(o).__name__}")
+
+
 def reset(base):
     # Templates outlive a `DELETE /*`, and an index template left behind by an
     # earlier file changes how the next file's indices are created -- so the
@@ -413,7 +420,11 @@ def main():
                 failed += 1
                 fa += 1
                 req = getattr(r, "last_req", None)
-                ctx = f"  <- {req[0]} {req[1]} {json.dumps(req[2])[:220]}" if req else ""
+                ctx = (
+                    f"  <- {req[0]} {req[1]} {json.dumps(req[2], default=_json_default)[:220]}"
+                    if req
+                    else ""
+                )
                 failures.append((rel, name, str(e) + ctx))
             except Exception as e:
                 failed += 1

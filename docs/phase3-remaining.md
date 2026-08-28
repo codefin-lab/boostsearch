@@ -11,7 +11,15 @@
 | `indices.put_alias :: Basic test for put alias` (assertion สุดท้าย) | client ส่ง `PUT //_alias/` (path segment ว่าง) รูปที่ถูกต้อง `PUT /_alias` ตอบ 400 อยู่แล้ว · ลอง middleware normalize path แล้ว **ไม่ได้ผลเพราะ layer ทำงานหลัง routing** และการครอบจากข้างนอกต้องเพิ่ม `tower` เป็น dependency — ประเมินว่าไม่คุ้มกับ 1 section |
 | `indices.put_alias :: Index and alias in request body can be overridden by path` | path ชี้ index ที่ไม่มีจริง ต้องดูว่า OpenSearch ให้ path ชนะ body หรือ error |
 
-## เรียงตามขนาดที่เหลือ (453)
+## range aggregations — 8/11 ใน 40_range, adjacency_matrix 2/2
+
+| section | ต้องการอะไร |
+|---|---|
+| `Date Range Missing` | ค่าใน test คือ epoch **seconds** ระดับ 3×10¹¹ = ปี 11972 · date column ของเราเป็น i64 nanosecond ซึ่งเก็บได้ราว ±292 ปีรอบ epoch (1678–2262) ⇒ **เก็บไม่ได้** จะรองรับต้องเปลี่ยนความละเอียดของ date column ทั้งระบบ |
+| `Date range unmapped with children` | ยังไม่ได้ไล่ |
+| `Double range profiler shows filter rewrite info` | counter ภายในของ Lucene filter-rewrite เหมือนกลุ่มที่ Phase 1 ไปไม่ถึง |
+
+## เรียงตามขนาดที่เหลือ (420)
 
 | จำนวน | กลุ่ม | หมายเหตุ |
 |---:|---|---|

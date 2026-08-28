@@ -1426,9 +1426,9 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 ///
 /// Only the types with a real parse step are checked; a string field takes
 /// whatever it is given.
-fn value_is_valid(v: &Value, ty: &str) -> bool {
+fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool {
     match ty {
-        "date" | "date_nanos" => canonical_date(v).is_some(),
+        "date" | "date_nanos" => canonical_date_with(v, format).is_some() || v.is_number(),
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
@@ -1486,7 +1486,9 @@ fn walk_malformed(
         }
         leaf => {
             let Some(ty) = mapping.type_of(path) else { return Ok(()) };
-            if value_is_valid(leaf, ty) {
+            let fmt = mapping.field_option(path, "format");
+            let fmt = fmt.as_ref().and_then(|v| v.as_str());
+            if value_is_valid(leaf, ty, fmt) {
                 return Ok(());
             }
             let lenient = mapping
@@ -1543,7 +1545,14 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             }
         }
         leaf => {
-            if let Some(c) = coerce_leaf(leaf, mapping.type_of(path)) {
+            let ty = mapping.type_of(path);
+            if matches!(ty, Some("date") | Some("date_nanos")) {
+                let fmt = mapping.field_option(path, "format");
+                let fmt = fmt.as_ref().and_then(|v| v.as_str());
+                if let Some(c) = canonical_date_with(leaf, fmt) {
+                    *leaf = Value::String(c);
+                }
+            } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
             }
         }
@@ -1943,13 +1952,30 @@ pub fn canonical_date_str(s: &str) -> Option<String> {
 
 /// A date in the one spelling the index holds.
 pub fn canonical_date(v: &Value) -> Option<String> {
+    canonical_date_with(v, None)
+}
+
+/// As `canonical_date`, but honouring the `format` a mapping declares.
+///
+/// A bare number is epoch milliseconds unless the field says otherwise, which
+/// is the assumption OpenSearch makes too.
+pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
+    let scale: i128 = match format {
+        Some(f) if f.contains("epoch_second") => 1_000_000_000,
+        _ => 1_000_000,
+    };
     let dt = match v {
-        // a bare number is epoch millis, which is what OpenSearch assumes
         Value::Number(n) => tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
-            (n.as_f64()? as i128) * 1_000_000,
+            (n.as_f64()? as i128) * scale,
         )
         .ok()?,
-        Value::String(s) => parse_date_lenient(s)?,
+        Value::String(s) => match s.parse::<f64>() {
+            // a number written as text still means what the format says
+            Ok(n) if format.is_some() => {
+                tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
+            }
+            _ => parse_date_lenient(s)?,
+        },
         _ => return None,
     };
     Some(format!(
@@ -1962,6 +1988,28 @@ pub fn canonical_date(v: &Value) -> Option<String> {
         dt.second(),
         dt.millisecond(),
     ))
+}
+
+/// The span a CIDR block covers, written the way a range is: the first address
+/// it contains, and the first one it does not.
+pub fn cidr_bounds(mask: &str) -> Option<(String, String)> {
+    let (lo, hi) = canonical_cidr(mask)?;
+    let mut octets = [0u8; 16];
+    for (i, o) in octets.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&hi[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    // one past the last address in the block
+    for byte in octets.iter_mut().rev() {
+        match byte.checked_add(1) {
+            Some(next) => {
+                *byte = next;
+                break;
+            }
+            None => *byte = 0,
+        }
+    }
+    let past: String = octets.iter().map(|b| format!("{b:02x}")).collect();
+    Some((ip_from_canonical(&lo)?, ip_from_canonical(&past)?))
 }
 
 /// An IP in a form that sorts the way addresses do.

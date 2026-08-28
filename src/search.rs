@@ -1603,6 +1603,9 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
                     || def.get("rare_terms").is_some()
+                    || def.get("ip_range").is_some()
+                    || def.get("date_range").is_some()
+                    || def.get("adjacency_matrix").is_some()
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
@@ -2188,6 +2191,12 @@ pub fn run(
             run_variable_width_histogram(store, &targets, &query_json, def)
         } else if def.get("auto_date_histogram").is_some() {
             run_auto_date_histogram(store, &targets, &query_json, def)
+        } else if def.get("date_range").is_some() {
+            run_date_range_agg(store, &targets, &query_json, def)
+        } else if def.get("ip_range").is_some() {
+            run_ip_range_agg(store, &targets, &query_json, def)
+        } else if def.get("adjacency_matrix").is_some() {
+            run_adjacency_matrix_agg(store, &targets, &query_json, def)
         } else if def.get("rare_terms").is_some() {
             run_rare_terms_agg(store, &targets, &query_json, def, weighted, name)
         } else if def.get("multi_terms").is_some() {
@@ -2216,6 +2225,7 @@ pub fn run(
         (Some(acc), Some(req)) => match acc.into_final_result(req, Default::default()) {
             Ok(res) => serde_json::to_value(res).ok().map(|mut v| {
                 recompute_extended_stats(&mut v);
+                normalize_range_keys(&mut v);
                 if weighted {
                     apply_doc_counts(&mut v);
                 }
@@ -2751,6 +2761,292 @@ fn run_hdr_percentiles(
 /// suits the handful of buckets a calendar histogram usually spans.
 
 
+
+
+/// A numeric range bucket names its bounds as doubles.
+///
+/// tantivy writes `*-50` where the suite expects `*-50.0`; the bounds are
+/// already on the bucket, so the key is rebuilt from them rather than parsed.
+fn normalize_range_keys(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                for b in buckets.iter_mut() {
+                    let numeric = b.get("from").map(|v| v.is_number()).unwrap_or(false)
+                        || b.get("to").map(|v| v.is_number()).unwrap_or(false);
+                    let has_key = b.get("key").map(|k| k.is_string()).unwrap_or(false);
+                    if !numeric || !has_key {
+                        continue;
+                    }
+                    let show = |v: Option<&Value>| match v.and_then(|x| x.as_f64()) {
+                        Some(n) if n.is_finite() => {
+                            if n.fract() == 0.0 && n.abs() < 1e15 {
+                                format!("{n:.1}")
+                            } else {
+                                format!("{n}")
+                            }
+                        }
+                        _ => "*".to_string(),
+                    };
+                    let key = format!("{}-{}", show(b.get("from")), show(b.get("to")));
+                    b["key"] = json!(key);
+                }
+            }
+            for (_, v) in o.iter_mut() {
+                normalize_range_keys(v);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(normalize_range_keys),
+        _ => {}
+    }
+}
+
+
+/// `date_range`: one bucket per span of time.
+///
+/// Each range becomes a filter on the field, so the ordinary query path
+/// answers it. The bounds are reported in epoch milliseconds however they were
+/// written, while the key keeps the caller's own spelling.
+fn run_date_range_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("date_range").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let missing = spec.get("missing").cloned();
+
+    // the request may name its own format; otherwise the mapping's applies
+    let mapped_format = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .next()
+        .and_then(|st| {
+            st.read().mapping.field_option(&field, "format").and_then(|v| {
+                v.as_str().map(|s| s.to_string())
+            })
+        });
+    let format = spec
+        .get("format")
+        .and_then(|f| f.as_str())
+        .map(|s| s.to_string())
+        .or(mapped_format);
+
+    let iso = |v: &Value| crate::store::canonical_date_with(v, format.as_deref());
+    let millis = |v: &Value| {
+        iso(v)
+            .and_then(|s| crate::store::parse_date_lenient(&s))
+            .map(|d| (d.unix_timestamp_nanos() / 1_000_000) as i64)
+    };
+    let shown = |v: &Option<Value>| match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) if !other.is_null() => other.to_string(),
+        _ => "*".to_string(),
+    };
+
+    let mut buckets = Vec::new();
+    let mut keyed_out = serde_json::Map::new();
+    for range in spec.get("ranges").and_then(|r| r.as_array()).into_iter().flatten() {
+        let from = range.get("from").cloned().filter(|v| !v.is_null());
+        let to = range.get("to").cloned().filter(|v| !v.is_null());
+        let mut clause = serde_json::Map::new();
+        if let Some(f) = from.as_ref().and_then(iso) {
+            clause.insert("gte".into(), json!(f));
+        }
+        if let Some(t) = to.as_ref().and_then(iso) {
+            clause.insert("lt".into(), json!(t));
+        }
+        let unbounded = clause.is_empty();
+        let filter = if unbounded {
+            // documents with no value take part when a stand-in was named
+            if missing.is_some() {
+                json!({"match_all": {}})
+            } else {
+                json!({"exists": {"field": field}})
+            }
+        } else {
+            json!({"range": {field.clone(): Value::Object(clause)}})
+        };
+        let combined = combine(main_query, Some(filter));
+        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+
+        let key = range
+            .get("key")
+            .and_then(|k| k.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}-{}", shown(&from), shown(&to)));
+        let mut b = json!({"key": key.clone(), "doc_count": count});
+        if let Some(f) = from.as_ref() {
+            if let Some(ms) = millis(f) {
+                b["from"] = json!(ms);
+                if let Some(s) = iso(f) {
+                    b["from_as_string"] = json!(s);
+                }
+            }
+        }
+        if let Some(t) = to.as_ref() {
+            if let Some(ms) = millis(t) {
+                b["to"] = json!(ms);
+                if let Some(s) = iso(t) {
+                    b["to_as_string"] = json!(s);
+                }
+            }
+        }
+        if let Some(Value::Object(o)) = sub {
+            for (k, v) in o {
+                b[k] = v;
+            }
+        }
+        if keyed {
+            keyed_out.insert(key, b);
+        } else {
+            buckets.push(b);
+        }
+    }
+    if keyed {
+        return Ok(json!({"buckets": Value::Object(keyed_out)}));
+    }
+    Ok(json!({"buckets": buckets}))
+}
+
+/// `ip_range`: one bucket per address range.
+///
+/// Each range is a filter on the field, so the ordinary query path answers it;
+/// `from` is included and `to` is not, and either may be left open.
+fn run_ip_range_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("ip_range").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut buckets = Vec::new();
+    let mut keyed_out = serde_json::Map::new();
+    for range in spec.get("ranges").and_then(|r| r.as_array()).into_iter().flatten() {
+        // a mask names the same span as the addresses at its edges
+        let (from, to) = match range.get("mask").and_then(|m| m.as_str()) {
+            Some(mask) => match crate::store::cidr_bounds(mask) {
+                Some((lo, hi)) => (Some(json!(lo)), Some(json!(hi))),
+                None => (None, None),
+            },
+            None => (range.get("from").cloned(), range.get("to").cloned()),
+        };
+        let mut clause = serde_json::Map::new();
+        if let Some(f) = from.as_ref().filter(|v| !v.is_null()) {
+            clause.insert("gte".into(), f.clone());
+        }
+        if let Some(t) = to.as_ref().filter(|v| !v.is_null()) {
+            clause.insert("lt".into(), t.clone());
+        }
+        let filter = if clause.is_empty() {
+            json!({"exists": {"field": field}})
+        } else {
+            json!({"range": {field.clone(): Value::Object(clause)}})
+        };
+        let combined = combine(main_query, Some(filter));
+        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+
+        let text = |v: &Option<Value>| match v {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) if !other.is_null() => other.to_string(),
+            _ => "*".to_string(),
+        };
+        let key = range
+            .get("key")
+            .and_then(|k| k.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| range.get("mask").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{}-{}", text(&from), text(&to)));
+        let mut b = json!({"key": key.clone(), "doc_count": count});
+        if let Some(f) = from.as_ref().filter(|v| !v.is_null()) {
+            b["from"] = f.clone();
+        }
+        if let Some(t) = to.as_ref().filter(|v| !v.is_null()) {
+            b["to"] = t.clone();
+        }
+        if let Some(Value::Object(o)) = sub {
+            for (k, v) in o {
+                b[k] = v;
+            }
+        }
+        if keyed {
+            keyed_out.insert(key, b);
+        } else {
+            buckets.push(b);
+        }
+    }
+    if keyed {
+        return Ok(json!({"buckets": Value::Object(keyed_out)}));
+    }
+    Ok(json!({"buckets": buckets}))
+}
+
+/// `adjacency_matrix`: how the named filters overlap.
+///
+/// One bucket per filter, and one per pair of filters for the documents both
+/// select. Pairs that select nothing are left out.
+fn run_adjacency_matrix_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("adjacency_matrix").cloned().unwrap_or(json!({}));
+    let separator = spec
+        .get("separator")
+        .and_then(|v| v.as_str())
+        .unwrap_or("&")
+        .to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let Some(filters) = spec.get("filters").and_then(|f| f.as_object()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[filters] cannot be empty",
+        ));
+    };
+    let named: Vec<(String, Value)> =
+        filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let mut buckets = Vec::new();
+    let mut push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
+        let combined = combine(main_query, Some(filter));
+        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        if count == 0 {
+            return Ok(());
+        }
+        let mut b = json!({"key": key, "doc_count": count});
+        if let Some(Value::Object(o)) = sub {
+            for (k, v) in o {
+                b[k] = v;
+            }
+        }
+        buckets.push(b);
+        Ok(())
+    };
+    for (name, filter) in &named {
+        push(name.clone(), filter.clone(), &mut buckets)?;
+    }
+    for i in 0..named.len() {
+        for j in (i + 1)..named.len() {
+            let (a, b) = (&named[i], &named[j]);
+            let both = json!({"bool": {"filter": [a.1.clone(), b.1.clone()]}});
+            push(format!("{}{separator}{}", a.0, b.0), both, &mut buckets)?;
+        }
+    }
+    buckets.sort_by(|a, b| {
+        let k = |v: &Value| v.get("key").and_then(|s| s.as_str()).unwrap_or("").to_string();
+        k(a).cmp(&k(b))
+    });
+    Ok(json!({"buckets": buckets}))
+}
 
 /// `rare_terms`: the terms few documents carry.
 ///
@@ -3332,6 +3628,9 @@ fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
     };
     buckets
         .iter()
+        // an empty bucket has no value to contribute, which is what the
+        // default gap policy asks for
+        .filter(|b| b.get("doc_count").and_then(|c| c.as_u64()).map(|c| c > 0).unwrap_or(true))
         .filter_map(|b| {
             let mut cur = b;
             for seg in &rest {
