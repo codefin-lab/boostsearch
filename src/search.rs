@@ -631,6 +631,50 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
     let Some(o) = node.as_object() else { return Ok(()) };
     for (name, def) in o {
         check_agg_params(name, def, owner)?;
+        // `terms` is also the name of a query, which appears inside filter
+        // aggregations and inside multi_terms; only an object made entirely of
+        // terms-aggregation options is one of those
+        const TERMS_AGG_OPTIONS: &[&str] = &[
+            "field", "script", "size", "shard_size", "order", "include", "exclude",
+            "min_doc_count", "shard_min_doc_count", "missing", "execution_hint",
+            "collect_mode", "value_type", "format", "show_term_doc_count_error",
+        ];
+        if name == "terms" && def.get("field").is_none() && def.get("script").is_none() {
+            let all_options = def
+                .as_object()
+                .map(|o| !o.is_empty() && o.keys().all(|k| TERMS_AGG_OPTIONS.contains(&k.as_str())))
+                .unwrap_or(false);
+            if all_options {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "Required one of fields [field, script], but none were specified. ",
+                ));
+            }
+        }
+        if name == "terms" {
+            for pass in ["include", "exclude"] {
+                if !matches!(def.get(pass), Some(Value::String(_))) {
+                    continue;
+                }
+                let field = def.get("field").and_then(|f| f.as_str()).unwrap_or("");
+                let base = field.strip_suffix(".keyword").unwrap_or(field);
+                if !matches!(
+                    ctx.mapping.type_of(base),
+                    None | Some("keyword" | "text" | "wildcard")
+                ) {
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "illegal_argument_exception",
+                        format!(
+                            "Aggregation [{owner}] cannot support regular expression style \
+                             include/exclude settings as they can only be applied to string \
+                             fields. Use an array of values for include/exclude clauses"
+                        ),
+                    ));
+                }
+            }
+        }
         if NUMERIC_AGGS.contains(&name.as_str()) {
             if let Some(f) = def.get("field").and_then(|v| v.as_str()) {
                 // a field the mapping never named is still a text field if
@@ -1031,11 +1075,13 @@ fn profiled_agg_search(
     aggs: Aggregations,
     ctxp: AggContextParams,
     ctx: &Ctx,
+    request: Option<&Value>,
 ) -> (tantivy::Result<IntermediateAggregationResults>, Value) {
     use std::time::Instant;
     use tantivy::collector::{Collector, SegmentCollector};
 
     let mut ns = std::collections::BTreeMap::new();
+    let mut collected = 0u64;
     let t = Instant::now();
     let collector = DistributedAggregationCollector::from_aggs(aggs.clone(), ctxp);
     ns.insert("initialize", t.elapsed().as_nanos() as u64);
@@ -1052,6 +1098,7 @@ fn profiled_agg_search(
 
             let t = Instant::now();
             weight.for_each_no_score(reader, &mut |docs| {
+                collected += docs.len() as u64;
                 for d in docs {
                     child.collect(*d, 0.0);
                 }
@@ -1077,15 +1124,25 @@ fn profiled_agg_search(
     }
     let total: u64 = ns.values().sum();
 
+    let breakdown: serde_json::Map<String, Value> = ns
+        .iter()
+        .map(|(k, v)| (k.to_string(), json!(v)))
+        .chain(std::iter::once(("collect_count".to_string(), json!(collected))))
+        .collect();
     let entries: Vec<Value> = aggs
         .iter()
         .map(|(name, agg)| {
-            let def = serde_json::to_value(agg).unwrap_or(Value::Null);
+            // the parsed model drops the knobs that only steer execution, so
+            // the request itself is consulted for those
+            let def = request
+                .and_then(|r| r.get(name.as_str()))
+                .cloned()
+                .unwrap_or_else(|| serde_json::to_value(agg).unwrap_or(Value::Null));
             json!({
                 "type": agg_profile_type(&def),
                 "description": name,
                 "time_in_nanos": total,
-                "breakdown": ns.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+                "breakdown": breakdown,
                 "debug": agg_profile_debug(&def, ctx),
             })
         })
@@ -1104,7 +1161,20 @@ fn agg_profile_type(def: &Value) -> String {
     let kind = def.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
     match kind.as_str() {
         "cardinality" => "CardinalityAggregator".into(),
-        "terms" => "GlobalOrdinalsStringTermsAggregator".into(),
+        "terms" => {
+            let body = def.get("terms").cloned().unwrap_or(Value::Null);
+            let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+            // the aggregator OpenSearch names depends on where the terms live:
+            // an ordinal map for a keyword column, a hash map when the request
+            // asks for one, and neither for a numeric column
+            if field.starts_with(crate::store::DYN) {
+                "NumericTermsAggregator".into()
+            } else if body.get("execution_hint").and_then(|h| h.as_str()) == Some("map") {
+                "MapStringTermsAggregator".into()
+            } else {
+                "GlobalOrdinalsStringTermsAggregator".into()
+            }
+        }
         "date_histogram" => "DateHistogramAggregator".into(),
         "histogram" => "NumericHistogramAggregator".into(),
         other => format!("{}Aggregator", capitalise_words(other)),
@@ -1132,6 +1202,16 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
     let Some((kind, body)) = def.as_object().and_then(|o| o.iter().next()) else {
         return json!({});
     };
+    if kind == "terms" {
+        // which kind of term was bucketed, which is what the strategy names
+        let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        let strategy = if field.starts_with(crate::store::DYN) {
+            "long_terms"
+        } else {
+            "string_terms"
+        };
+        return json!({"result_strategy": strategy});
+    }
     if kind != "cardinality" {
         return json!({});
     }
@@ -1786,6 +1866,7 @@ pub fn run(
 
         // aggregations, when asked for, run over the same query
         let mut this_agg: Option<Aggregations> = None;
+        let mut agg_request_json: Option<Value> = None;
         if let Some(aj) = &agg_json {
             let mut rewritten = aj.clone();
             normalize_aggs(&mut rewritten, &mut agg_meta, true);
@@ -1793,7 +1874,9 @@ pub fn run(
             normalize_agg_dates(&mut rewritten);
             bucket_orders = extract_bucket_orders(&mut rewritten);
             lower_nested_filters(&mut rewritten, &ctx);
+            strip_untranslatable_term_filters(&mut rewritten, &ctx);
             rewrite_agg_fields(&mut rewritten, &ctx);
+            agg_request_json = Some(rewritten.clone());
             match serde_json::from_value::<Aggregations>(rewritten) {
                 Ok(a) => this_agg = Some(a),
                 Err(e) => {
@@ -1926,7 +2009,14 @@ pub fn run(
         let mut shard_profile = None;
         if let (Some(a), true) = (this_agg, profiling) {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-            let (res, prof) = profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx);
+            let (res, prof) = profiled_agg_search(
+                &searcher,
+                &q,
+                a.clone(),
+                ctxp,
+                &ctx,
+                agg_request_json.as_ref(),
+            );
             shard_profile = Some(prof);
             match res {
                 Ok(res) => {
@@ -2226,6 +2316,18 @@ pub fn run(
             Ok(res) => serde_json::to_value(res).ok().map(|mut v| {
                 recompute_extended_stats(&mut v);
                 normalize_range_keys(&mut v);
+                if let Some(req) = agg_json.as_ref() {
+                    // a search may span indices, so a field's type is whatever
+                    // the first index that names it says
+                    let types: std::collections::HashMap<String, String> = targets
+                        .iter()
+                        .filter_map(|n| store.get(n))
+                        .flat_map(|st| {
+                            st.read().mapping.types.iter().map(|(k, t)| (k.clone(), t.clone())).collect::<Vec<_>>()
+                        })
+                        .collect();
+                    format_terms_keys(&mut v, req, &types);
+                }
                 if weighted {
                     apply_doc_counts(&mut v);
                 }
@@ -2762,6 +2864,123 @@ fn run_hdr_percentiles(
 
 
 
+
+/// Does this field's terms live somewhere include/exclude cannot reach?
+///
+/// Both are matched against the term dictionary. An address is in there, but
+/// as the fixed-width form rather than as it was written; a date is not in
+/// there at all, since a date column is numeric. Either way the filter has to
+/// come off the request and be applied to the answer instead.
+fn term_filter_needs_translating(ty: Option<&str>) -> bool {
+    matches!(ty, Some("ip" | "date" | "date_nanos"))
+}
+
+/// Take include/exclude off the aggregations whose field cannot honour them.
+fn strip_untranslatable_term_filters(node: &mut Value, ctx: &Ctx) {
+    match node {
+        Value::Object(o) => {
+            if let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
+                let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+                let base = field.strip_suffix(".keyword").unwrap_or(&field);
+                if term_filter_needs_translating(ctx.mapping.type_of(base)) {
+                    terms.remove("include");
+                    terms.remove("exclude");
+                }
+            }
+            for (_, v) in o.iter_mut() {
+                strip_untranslatable_term_filters(v, ctx);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|v| strip_untranslatable_term_filters(v, ctx)),
+        _ => {}
+    }
+}
+
+/// Write each `terms` bucket key in the spelling its field is read in.
+///
+/// An address is stored in the fixed-width form that sorts correctly and a
+/// date as text; neither is what the field was given, so the request is walked
+/// alongside the answer to find which field each set of buckets came from.
+fn format_terms_keys(
+    result: &mut Value,
+    req: &Value,
+    types: &std::collections::HashMap<String, String>,
+) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+
+        if defo.contains_key("terms") {
+            let field = defo
+                .get("terms")
+                .and_then(|t| t.get("field"))
+                .and_then(|f| f.as_str())
+                .unwrap_or("");
+            let base = field.strip_suffix(".keyword").unwrap_or(field);
+            let ty = types.get(base).cloned();
+            let listed = |key: &str| -> Option<Vec<String>> {
+                let v = defo.get("terms")?.get(key)?;
+                Some(match v {
+                    Value::Array(a) => a.iter().filter_map(term_filter_text).collect(),
+                    other => term_filter_text(other).into_iter().collect(),
+                })
+            };
+            let translating = term_filter_needs_translating(ty.as_deref());
+            let include = translating.then(|| listed("include")).flatten();
+            let exclude = translating.then(|| listed("exclude")).flatten();
+
+            if let Some(Value::Array(buckets)) = node.get_mut("buckets") {
+                for b in buckets.iter_mut() {
+                    let Some(o) = b.as_object_mut() else { continue };
+                    let Some(raw) = o.get("key").cloned() else { continue };
+                    let (key, as_string) = terms_key_view(raw, ty.as_deref());
+                    o.insert("key".into(), key);
+                    match as_string {
+                        Some(text) => {
+                            o.insert("key_as_string".into(), Value::String(text));
+                        }
+                        None => {
+                            o.remove("key_as_string");
+                        }
+                    }
+                }
+                // the filters that could not be pushed down are applied here
+                if include.is_some() || exclude.is_some() {
+                    buckets.retain(|b| {
+                        let shown = (
+                            b.get("key").cloned().unwrap_or(Value::Null),
+                            b.get("key_as_string")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                        );
+                        let hit = |list: &Vec<String>| {
+                            list.iter()
+                                .any(|want| term_filter_matches(want, &shown, ty.as_deref()))
+                        };
+                        include.as_ref().map(|l| hit(l)).unwrap_or(true)
+                            && !exclude.as_ref().map(|l| hit(l)).unwrap_or(false)
+                    });
+                }
+            }
+        }
+
+        let Some(sub) = defo.get("aggs").or_else(|| defo.get("aggregations")) else { continue };
+        match node.get_mut("buckets") {
+            Some(Value::Array(buckets)) => {
+                for b in buckets.iter_mut() {
+                    format_terms_keys(b, sub, types);
+                }
+            }
+            Some(Value::Object(keyed)) => {
+                for (_, b) in keyed.iter_mut() {
+                    format_terms_keys(b, sub, types);
+                }
+            }
+            _ => format_terms_keys(node, sub, types),
+        }
+    }
+}
 
 /// A numeric range bucket names its bounds as doubles.
 ///
