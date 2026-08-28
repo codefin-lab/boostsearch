@@ -1794,6 +1794,251 @@ fn mark_terms(
     marked.then_some(out)
 }
 
+
+/// Build the `suggest` section of a response.
+///
+/// Two shapes are answered. A completion suggester looks for stored values
+/// that begin with what has been typed so far; a term suggester takes text
+/// that may be misspelled and offers, for each word, the closest word the
+/// index actually holds.
+fn build_suggest(
+    store: &Store,
+    targets: &[String],
+    spec: &Value,
+    typed_keys: bool,
+) -> std::result::Result<Value, Response> {
+    let Some(named) = spec.as_object() else { return Ok(json!({})) };
+    let global_text = named.get("text").and_then(|t| t.as_str()).unwrap_or("");
+    let mut out = serde_json::Map::new();
+
+    for (name, body) in named {
+        if name == "text" {
+            continue;
+        }
+        let Some(b) = body.as_object() else { continue };
+        let text = b.get("text").and_then(|t| t.as_str()).unwrap_or(global_text);
+
+        if let Some(c) = b.get("completion") {
+            let entries = completion_suggest(store, targets, text, c)?;
+            let key = if typed_keys { format!("completion#{name}") } else { name.clone() };
+            out.insert(key, entries);
+        } else if let Some(t) = b.get("term") {
+            let entries = term_suggest(store, targets, text, t)?;
+            let key = if typed_keys { format!("term#{name}") } else { name.clone() };
+            out.insert(key, entries);
+        } else if let Some(p) = b.get("phrase") {
+            // a phrase suggester is answered per whole input rather than per
+            // word; the options come from the same place the terms do
+            let entries = term_suggest(store, targets, text, p)?;
+            let key = if typed_keys { format!("phrase#{name}") } else { name.clone() };
+            out.insert(key, entries);
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Values that begin with what has been typed.
+fn completion_suggest(
+    store: &Store,
+    targets: &[String],
+    text: &str,
+    spec: &Value,
+) -> std::result::Result<Value, Response> {
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let skip_duplicates = spec
+        .get("skip_duplicates")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let prefix = text.to_lowercase();
+
+    let mut options: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let searcher = g.reader.searcher();
+        let all = tantivy::query::AllQuery;
+        let addrs = searcher
+            .search(&all, &tantivy::collector::DocSetCollector)
+            .map_err(|e| {
+                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+            })?;
+        for addr in addrs {
+            let Some((id, source)) = source_of(&searcher, &g, addr) else { continue };
+            // a completion field may hold one value or several
+            // a completion value may be plain text, a list of them, or an
+            // object carrying the inputs and the weight to rank them by
+            let raw = source.pointer(&format!("/{}", field.replace('.', "/")));
+            let texts = |v: &Value| -> Vec<String> {
+                match v {
+                    Value::String(s) => vec![s.clone()],
+                    Value::Array(a) => {
+                        a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            // ... and a list may hold several such objects, each with its own
+            // weight
+            let mut weighted: Vec<(String, f64)> = Vec::new();
+            match raw {
+                Some(Value::Object(o)) => {
+                    let w = o.get("weight").and_then(|x| x.as_f64()).unwrap_or(1.0);
+                    weighted.extend(
+                        o.get("input").map(&texts).unwrap_or_default().into_iter().map(|t| (t, w)),
+                    );
+                }
+                Some(Value::Array(items)) if items.iter().any(|i| i.is_object()) => {
+                    for item in items {
+                        let Some(o) = item.as_object() else {
+                            weighted.extend(texts(item).into_iter().map(|t| (t, 1.0)));
+                            continue;
+                        };
+                        let w = o.get("weight").and_then(|x| x.as_f64()).unwrap_or(1.0);
+                        weighted.extend(
+                            o.get("input")
+                                .map(&texts)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|t| (t, w)),
+                        );
+                    }
+                }
+                Some(other) => weighted.extend(texts(other).into_iter().map(|t| (t, 1.0))),
+                None => {}
+            }
+            for (v, weight) in weighted {
+                if !v.to_lowercase().starts_with(&prefix) {
+                    continue;
+                }
+                if skip_duplicates && !seen.insert(v.clone()) {
+                    continue;
+                }
+                options.push(json!({
+                    "text": v,
+                    "_index": g.name,
+                    "_id": id,
+                    "_score": weight,
+                    "_source": source,
+                }));
+            }
+        }
+    }
+    // the heavier suggestion comes first; the text settles equal weights
+    options.sort_by(|a, b| {
+        let w = |v: &Value| v.get("_score").and_then(|s| s.as_f64()).unwrap_or(1.0);
+        let t = |v: &Value| v.get("text").and_then(|s| s.as_str()).unwrap_or("").to_string();
+        w(b).partial_cmp(&w(a)).unwrap_or(Ordering::Equal).then_with(|| t(a).cmp(&t(b)))
+    });
+    options.truncate(size);
+    Ok(json!([{
+        "text": text,
+        "offset": 0,
+        "length": text.chars().count(),
+        "options": options,
+    }]))
+}
+
+/// For each word, the closest word the index holds.
+fn term_suggest(
+    store: &Store,
+    targets: &[String],
+    text: &str,
+    spec: &Value,
+) -> std::result::Result<Value, Response> {
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+    // every word the field actually holds, gathered once
+    let mut vocabulary: std::collections::HashSet<String> = Default::default();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let searcher = g.reader.searcher();
+        let all = tantivy::query::AllQuery;
+        let Ok(addrs) = searcher.search(&all, &tantivy::collector::DocSetCollector) else {
+            continue;
+        };
+        for addr in addrs {
+            let Some((_, source)) = source_of(&searcher, &g, addr) else { continue };
+            let Some(v) = source.pointer(&format!("/{}", field.replace('.', "/"))) else {
+                continue;
+            };
+            let texts: Vec<String> = match v {
+                Value::String(s) => vec![s.clone()],
+                Value::Array(a) => {
+                    a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                }
+                _ => Vec::new(),
+            };
+            for t in texts {
+                for word in t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+                    vocabulary.insert(word.to_lowercase());
+                }
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    for word in text.split_whitespace() {
+        let start = text[offset..].find(word).map(|i| offset + i).unwrap_or(offset);
+        offset = start + word.len();
+        let lower = word.to_lowercase();
+        // a word the index already has needs no correction
+        let mut options: Vec<(usize, String)> = if vocabulary.contains(&lower) {
+            Vec::new()
+        } else {
+            vocabulary
+                .iter()
+                .filter_map(|cand| {
+                    let d = edit_distance(&lower, cand);
+                    (d > 0 && d <= 2).then(|| (d, cand.clone()))
+                })
+                .collect()
+        };
+        options.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        options.truncate(size);
+        entries.push(json!({
+            "text": word,
+            "offset": start,
+            "length": word.chars().count(),
+            "options": options
+                .into_iter()
+                .map(|(d, t)| json!({
+                    "text": t,
+                    "score": 1.0 - (d as f64) / 10.0,
+                    "freq": 1,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+    }
+    Ok(Value::Array(entries))
+}
+
+/// How many single-character edits turn one word into the other.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -1803,6 +2048,7 @@ pub struct Outcome {
     pub max_score: Option<f32>,
     pub aggs: Option<Value>,
     pub profile: Option<Value>,
+    pub suggest: Option<Value>,
 }
 
 fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value> {
@@ -2618,6 +2864,14 @@ pub fn run(
         }
     }
 
+    let suggest = match body.get("suggest") {
+        Some(spec) => {
+            let typed = p.get("typed_keys").map(|v| v != "false").unwrap_or(false);
+            Some(build_suggest(store, &targets, spec, typed)?)
+        }
+        None => None,
+    };
+
     let date_keys: Vec<bool> = sort_keys
         .iter()
         .map(|k| date_sort_key(store, &targets, &k.field))
@@ -2931,6 +3185,7 @@ pub fn run(
         max_score,
         aggs,
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
+        suggest,
     })
 }
 
@@ -2998,6 +3253,9 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     }
     if let Some(pr) = out.profile {
         resp["profile"] = pr;
+    }
+    if let Some(sg) = out.suggest {
+        resp["suggest"] = sg;
     }
     resp
 }
