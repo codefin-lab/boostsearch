@@ -730,6 +730,40 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
     }
 
+    // a field may be named by pattern, which stands for every field it matches
+    let expanded: Vec<String> = fields
+        .iter()
+        .filter_map(|f| f.as_str())
+        .flat_map(|spec| {
+            let (name, boost) = match spec.split_once('^') {
+                Some((n, b)) => (n, Some(b)),
+                None => (spec, None),
+            };
+            if !name.contains('*') {
+                return vec![spec.to_string()];
+            }
+            let mut hits: Vec<String> = ctx
+                .mapping
+                .types
+                .keys()
+                .chain(ctx.observed_kinds.keys())
+                .filter(|k| crate::store::glob_match(name, k))
+                .map(|k| match boost {
+                    Some(b) => format!("{k}^{b}"),
+                    None => k.clone(),
+                })
+                .collect();
+            hits.sort();
+            hits.dedup();
+            hits
+        })
+        .collect();
+    let fields: Vec<Value> = if expanded.is_empty() {
+        fields
+    } else {
+        expanded.into_iter().map(Value::String).collect()
+    };
+
     let mut subs: Vec<Box<dyn Query>> = Vec::new();
     for f in fields {
         let Some(spec) = f.as_str() else { continue };
