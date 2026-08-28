@@ -98,8 +98,8 @@ fn app(store: Store) -> Router {
         .route("/_cluster/allocation/explain", get(api::acknowledged).post(api::acknowledged))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
         // --- index housekeeping ---
-        .route("/_flush", post(api::shards_ok).get(api::shards_ok))
-        .route("/{index}/_flush", post(api::shards_ok).get(api::shards_ok))
+        .route("/_flush", post(api::flush).get(api::flush))
+        .route("/{index}/_flush", post(api::flush).get(api::flush))
         .route("/_cache/clear", post(api::shards_ok))
         .route("/{index}/_cache/clear", post(api::shards_ok))
         .route("/_upgrade", post(api::shards_ok).get(api::shards_ok))

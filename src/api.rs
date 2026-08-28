@@ -162,6 +162,34 @@ pub async fn index_exists(State(store): State<Store>, Path(index): Path<String>)
     }
 }
 
+/// `_flush` writes what is buffered and makes it searchable.
+///
+/// The distinction OpenSearch draws is between committing to disk and making
+/// documents visible; here committing does both, so a flush is a refresh that
+/// also settles the writer.
+pub async fn flush(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(_p): Query<Params>,
+) -> Response {
+    let targets = match index {
+        Some(Path(i)) => {
+            let t = store.resolve(&i);
+            if t.is_empty() {
+                return no_such_index(&i);
+            }
+            t
+        }
+        None => store.names(),
+    };
+    for n in targets {
+        if let Some(st) = store.get(&n) {
+            let _ = st.write().refresh();
+        }
+    }
+    axum::Json(json!({"_shards": shards()})).into_response()
+}
+
 pub async fn refresh_all(State(store): State<Store>) -> Response {
     for n in store.names() {
         if let Some(st) = store.get(&n) {
@@ -878,11 +906,23 @@ pub async fn bulk(
                 let doc = patch.get("doc").cloned();
                 match (existing, doc) {
                     (Some(mut base), Some(d)) => {
+                        let before = base.clone();
                         merge_into(&mut base, &d);
+                        // an update that changes nothing is reported as such,
+                        // and counted, the same way the single-document API
+                        // reports it
+                        let noop = patch
+                            .get("detect_noop")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true)
+                            && base == before;
+                        if noop {
+                            g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         match write_doc(&mut g, &id, base.clone(), "index") {
                             Ok((body, _)) => {
                                 let mut b = body;
-                                b["result"] = json!("updated");
+                                b["result"] = json!(if noop { "noop" } else { "updated" });
                                 b["status"] = json!(200);
                                 let sel = meta_source
                                     .clone()
@@ -1712,6 +1752,9 @@ pub async fn update_doc(
             let mut merged = base.clone();
             merge_into(&mut merged, d);
             if detect_noop && merged == base {
+                // the write guard is already held here; taking a read on the
+                // same lock would wait for itself
+                g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 (base, "noop")
             } else {
                 (merged, "updated")
@@ -1878,15 +1921,72 @@ pub async fn force_merge(
 
 // --------------------------------------------------------------------- stats
 
-fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
+/// Which fields a `fields=`-style parameter names.
+///
+/// Absent means the caller wants no per-field breakdown at all, which is not
+/// the same as naming none.
+fn stats_field_patterns(p: &Params, specific: &str) -> Option<Vec<String>> {
+    for key in [specific, "fields"] {
+        if let Some(v) = p.get(key) {
+            return Some(
+                v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            );
+        }
+    }
+    None
+}
+
+fn stats_field_wanted(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|pat| {
+        pat == "*" || pat == "_all" || pat == name || crate::store::glob_match(pat, name)
+    })
+}
+
+fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
     let cols = st.field_column_bytes();
     let fielddata_total: u64 = cols.values().sum();
-    let fielddata_fields: serde_json::Map<String, Value> = cols
+    // a per-field breakdown is reported only where the request asked for one,
+    // and a field appears under the statistic its type can carry: fielddata
+    // for a text field, completion for a completion field
+    let is_completion = |name: &str| st.mapping.type_of(name) == Some("completion");
+    let fielddata_fields: Value = match stats_field_patterns(p, "fielddata_fields") {
+        None => Value::Null,
+        Some(pats) => Value::Object(
+            cols.iter()
+                .filter(|(k, _)| !is_completion(k) && stats_field_wanted(&pats, k))
+                .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+                .collect(),
+        ),
+    };
+    let completion_names: Vec<String> = st
+        .mapping
+        .types
         .iter()
-        .map(|(k, v)| (k.clone(), json!({"memory_size_in_bytes": v})))
+        .filter(|(_, t)| t.as_str() == Some("completion"))
+        .map(|(k, _)| k.clone())
         .collect();
+    let completion_total: u64 = completion_names.len() as u64 * 64 * docs.max(1) as u64;
+    let completion_fields: Value = match stats_field_patterns(p, "completion_fields") {
+        None => Value::Null,
+        Some(pats) => Value::Object(
+            completion_names
+                .iter()
+                .filter(|k| stats_field_wanted(&pats, k))
+                .map(|k| (k.clone(), json!({"size_in_bytes": 64 * docs.max(1)})))
+                .collect(),
+        ),
+    };
+    let mut fielddata_stat = json!({"memory_size_in_bytes": fielddata_total, "evictions": 0});
+    if let Value::Object(f) = fielddata_fields {
+        fielddata_stat["fields"] = Value::Object(f);
+    }
+    let mut completion_stat = json!({"size_in_bytes": completion_total});
+    if let Value::Object(f) = completion_fields {
+        completion_stat["fields"] = Value::Object(f);
+    }
+
     // `groups` is only reported for the groups the request named
     let groups: serde_json::Map<String, Value> = st
         .search_groups
@@ -1917,9 +2017,13 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
         "indexing": {"index_total": docs, "index_time_in_millis": 0, "index_current": 0,
                      "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,
-                     "delete_current": 0, "noop_update_total": 0, "is_throttled": false,
+                     "delete_current": 0,
+                     "noop_update_total":
+                         st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
+                     "is_throttled": false,
                      "throttle_time_in_millis": 0},
-        "get": {"total": 0, "time_in_millis": 0, "getTime": "0s", "exists_total": 0,
+        "get": {"total": 0, "time_in_millis": 0, "time": "0s", "getTime": "0s",
+                "exists_total": 0,
                 "exists_time_in_millis": 0, "missing_total": 0,
                 "missing_time_in_millis": 0, "current": 0},
         "search": {"open_contexts": 0, "query_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "query_time_in_millis": 1,
@@ -1937,11 +2041,8 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>) -> Value {
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
-        "fielddata": {
-            "memory_size_in_bytes": fielddata_total, "evictions": 0,
-            "fields": Value::Object(fielddata_fields)
-        },
-        "completion": {"size_in_bytes": 0},
+        "fielddata": fielddata_stat,
+        "completion": completion_stat,
         "segments": {"count": searcher.segment_readers().len(), "memory_in_bytes": 0,
                      "terms_memory_in_bytes": 0, "stored_fields_memory_in_bytes": 0,
                      "term_vectors_memory_in_bytes": 0, "norms_memory_in_bytes": 0,
@@ -1986,6 +2087,8 @@ pub const STATS_METRICS: &[&str] = &[
     "docs", "store", "indexing", "get", "search", "merges", "refresh", "flush", "warmer",
     "query_cache", "fielddata", "completion", "segments", "translog", "request_cache",
     "recovery", "_all",
+    // the section is named `merges` but the metric may be asked for either way
+    "merge",
 ];
 
 pub async fn stats_metric(
@@ -2004,6 +2107,35 @@ pub async fn stats_index_metric(
     stats_filtered(store, index, Some(metric), p)
 }
 
+/// Are these two names a single character apart -- one changed, added, or
+/// dropped? Close enough to be worth suggesting when a metric is not known.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let (long, short) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    let (mut i, mut j, mut edits) = (0, 0, 0);
+    while i < long.len() && j < short.len() {
+        if long[i] == short[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+        if long.len() == short.len() {
+            i += 1;
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    edits + (long.len() - i) <= 1
+}
+
 /// `_stats/{metric}` narrows the report to the sections asked for.
 fn stats_filtered(
     store: Store,
@@ -2012,14 +2144,33 @@ fn stats_filtered(
     p: Params,
 ) -> Response {
     let Some(metric) = metric else { return stats_impl(store, expr, p) };
-    let wanted: Vec<String> =
-        metric.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    let wanted: Vec<String> = metric
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        // the section is called `merges`, and the metric may be asked for
+        // in the singular
+        .map(|m| if m == "merge" { "merges".to_string() } else { m.to_string() })
+        .collect();
     for w in &wanted {
         if !STATS_METRICS.contains(&w.as_str()) {
             return err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("request [/_stats/{metric}] contains unrecognized metric: [{w}]"),
+                {
+                    // a near miss is usually a typo, so the closest known
+                    // metric is offered rather than only the complaint
+                    let close = STATS_METRICS.iter().find(|m| one_edit_apart(m, w));
+                    match close {
+                        Some(m) => format!(
+                            "request [/_stats/{metric}] contains unrecognized metric: \
+                             [{w}] -> did you mean [{m}]?"
+                        ),
+                        None => format!(
+                            "request [/_stats/{metric}] contains unrecognized metric: [{w}]"
+                        ),
+                    }
+                },
             );
         }
     }
@@ -2091,7 +2242,7 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read(), want_groups.as_deref());
+        let s = index_stats(&st.read(), want_groups.as_deref(), &p);
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",

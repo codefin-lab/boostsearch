@@ -33,7 +33,15 @@
 tantivy จึงไม่มี profile entry · `_time order` · `time_zone` ·
 `total_buckets` ต่างกัน 1 (เรานับ bucket ว่างที่เติมด้วย)
 
-## เรียงตามขนาดที่เหลือ (413)
+## indices.stats — 55/58 เหลือ 3
+
+| section | ต้องการอะไร |
+|---|---|
+| `Translog retention` | `translog.size_in_bytes` ต้อง > 0 — เรายังไม่มี translog จริง |
+| `Translog stats on closed indices` | ต้องมี open/close index |
+| `Segment Stats` | ต้องมี open/close index (assertion สุดท้ายคาดว่าปิดแล้ว segment count เป็น 0) |
+
+## เรียงตามขนาดที่เหลือ (387)
 
 | จำนวน | กลุ่ม | หมายเหตุ |
 |---:|---|---|

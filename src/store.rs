@@ -470,6 +470,8 @@ pub struct IdxState {
     pub kinds_complete: bool,
     /// Whether any document here carries an explicit `_doc_count`.
     pub has_doc_count: bool,
+    /// Updates that changed nothing, which the stats report separately.
+    pub noop_updates: std::sync::atomic::AtomicU64,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -1335,6 +1337,7 @@ impl Store {
             observed_kinds: HashMap::new(),
             kinds_complete: true,
             has_doc_count: false,
+            noop_updates: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),
