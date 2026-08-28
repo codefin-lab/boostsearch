@@ -2317,6 +2317,7 @@ pub fn run(
                 recompute_extended_stats(&mut v);
                 normalize_range_keys(&mut v);
                 if let Some(req) = agg_json.as_ref() {
+                    apply_bucket_formats(&mut v, req);
                     // a search may span indices, so a field's type is whatever
                     // the first index that names it says
                     let types: std::collections::HashMap<String, String> = targets
@@ -2355,6 +2356,28 @@ pub fn run(
         }
         Some(base)
     };
+
+    // the profile is written while the aggregation runs, before there are any
+    // buckets to count, so the count is filled in from the finished answer
+    if let (Some(a), false) = (aggs.as_ref(), shard_profiles.is_empty()) {
+        for shard in shard_profiles.iter_mut() {
+            let Some(entries) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut()) else {
+                continue;
+            };
+            for entry in entries.iter_mut() {
+                let Some(name) = entry.get("description").and_then(|d| d.as_str()) else { continue };
+                let n = a
+                    .get(name)
+                    .and_then(|v| v.get("buckets"))
+                    .and_then(|b| b.as_array())
+                    .map(|b| b.len())
+                    .unwrap_or(0);
+                if let Some(debug) = entry.get_mut("debug").and_then(|d| d.as_object_mut()) {
+                    debug.insert("total_buckets".into(), json!(n));
+                }
+            }
+        }
+    }
 
     let aggs = if pipeline_aggs.is_empty() {
         aggs
@@ -2894,6 +2917,56 @@ fn strip_untranslatable_term_filters(node: &mut Value, ctx: &Ctx) {
         Value::Array(a) => a.iter_mut().for_each(|v| strip_untranslatable_term_filters(v, ctx)),
         _ => {}
     }
+}
+
+/// Render bucket keys through the `format` an aggregation asked for.
+///
+/// The pattern is Java's decimal format. Only the shape that appears in
+/// practice is handled -- literal text around a run of `#` and `0`, where the
+/// zeros after the point set how many decimals to show -- rather than the
+/// whole grammar.
+fn apply_bucket_formats(result: &mut Value, req: &Value) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+        let format = defo
+            .values()
+            .next()
+            .and_then(|body| body.get("format"))
+            .and_then(|f| f.as_str())
+            .map(|s| s.to_string());
+        if let (Some(fmt), Some(Value::Array(buckets))) = (&format, node.get_mut("buckets")) {
+            for b in buckets.iter_mut() {
+                let Some(o) = b.as_object_mut() else { continue };
+                let Some(n) = o.get("key").and_then(|k| k.as_f64()) else { continue };
+                if let Some(text) = decimal_format(fmt, n) {
+                    o.insert("key_as_string".into(), Value::String(text));
+                }
+            }
+        }
+        let Some(sub) = defo.get("aggs").or_else(|| defo.get("aggregations")) else { continue };
+        match node.get_mut("buckets") {
+            Some(Value::Array(buckets)) => {
+                for b in buckets.iter_mut() {
+                    apply_bucket_formats(b, sub);
+                }
+            }
+            _ => apply_bucket_formats(node, sub),
+        }
+    }
+}
+
+/// `Value is ##0.0` applied to 50 gives `Value is 50.0`.
+fn decimal_format(pattern: &str, value: f64) -> Option<String> {
+    let start = pattern.find(['#', '0'])?;
+    let end = pattern.rfind(['#', '0'])? + 1;
+    let (prefix, numeric, suffix) = (&pattern[..start], &pattern[start..end], &pattern[end..]);
+    let decimals = match numeric.split_once('.') {
+        Some((_, frac)) => frac.chars().filter(|c| *c == '0').count(),
+        None => 0,
+    };
+    Some(format!("{prefix}{value:.decimals$}{suffix}"))
 }
 
 /// Write each `terms` bucket key in the spelling its field is read in.
@@ -4158,7 +4231,21 @@ fn run_calendar_histogram(
         };
         (lo_ns, hi_ns) = (a, b);
     } else if bounds.is_none() {
-        return Ok(json!({"buckets": []}));
+        // a range field has no single value, but the endpoints it stores do:
+        // the span runs from the earliest start to the latest end
+        let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        let probe = json!({
+            "__min": {"min": {"field": format!("{field}.gte")}},
+            "__max": {"max": {"field": format!("{field}.lte")}},
+        });
+        let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+        let read = |k: &str| -> Option<f64> {
+            extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+        };
+        match (read("__min"), read("__max")) {
+            (Some(a), Some(b)) => (lo_ns, hi_ns) = (a, b),
+            _ => return Ok(json!({"buckets": []})),
+        }
     }
     // bounds are written the way a document would be, so they arrive in
     // milliseconds and have to meet the column's nanoseconds

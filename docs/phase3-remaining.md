@@ -19,7 +19,21 @@
 | `Date range unmapped with children` | ยังไม่ได้ไล่ |
 | `Double range profiler shows filter rewrite info` | counter ภายในของ Lucene filter-rewrite เหมือนกลุ่มที่ Phase 1 ไปไม่ถึง |
 
-## เรียงตามขนาดที่เหลือ (420)
+## aggregation ที่ไล่แล้วเหลือ
+
+**`20_terms` 16/26** — `partitioned terms` (2) · `unmapped booleans` (1) ·
+`mixing longs and doubles` (2) · `deprecated _term order` (1) ·
+`fielddata memory_size_in_bytes` (1) · `unmapped dates` (1) ·
+`deferred_aggregators` (2) — **ไม่รายงานโดยตั้งใจ** เพราะมันอธิบายการเลื่อน
+คำนวณ sub-agg แบบสองเฟสที่เราไม่ได้ทำ
+
+**`10_histogram` 4/11** — `histogram with hard bounds` บน range field
+(ต้อง peel `histogram` เหมือนที่ทำกับ calendar date_histogram) ·
+`date_histogram profiler` (2) — calendar_interval ถูก peel ออกไปก่อนถึง
+tantivy จึงไม่มี profile entry · `_time order` · `time_zone` ·
+`total_buckets` ต่างกัน 1 (เรานับ bucket ว่างที่เติมด้วย)
+
+## เรียงตามขนาดที่เหลือ (413)
 
 | จำนวน | กลุ่ม | หมายเหตุ |
 |---:|---|---|
