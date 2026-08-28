@@ -412,7 +412,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 if n != s {
                     let hit = any_of(term_for(f, &path, &Value::String(n)));
                     return Ok(if view == View::Raw {
-                        Box::new(tantivy::query::ConstScoreQuery::new(hit, 1.0))
+                        Box::new(ConstScore::new(hit, 1.0))
                     } else {
                         hit
                     });
@@ -425,7 +425,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             // an exact match on a field that is not analysed has nothing to
             // rank by: every match is equally exact, so each scores one
             if view == View::Raw {
-                Box::new(tantivy::query::ConstScoreQuery::new(exact, 1.0))
+                Box::new(ConstScore::new(exact, 1.0))
             } else {
                 exact
             }
@@ -545,7 +545,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
             let boost = body.get("boost").and_then(|b| b.as_f64()).unwrap_or(1.0) as f32;
             Box::new(BoostQuery::new(
-                Box::new(tantivy::query::ConstScoreQuery::new(build(ctx, f)?, 1.0)),
+                Box::new(ConstScore::new(build(ctx, f)?, 1.0)),
                 boost,
             ))
         }
@@ -592,7 +592,7 @@ fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         for item in list {
             let sub = build(ctx, &item)?;
             let sub: Box<dyn Query> = if key == "filter" {
-                Box::new(tantivy::query::ConstScoreQuery::new(sub, 0.0))
+                Box::new(ConstScore::new(sub, 0.0))
             } else {
                 sub
             };
@@ -1588,4 +1588,115 @@ fn parse_range_token(value: &str) -> Option<Value> {
         spec.insert(if inclusive_hi { "lte" } else { "lt" }.into(), v);
     }
     Some(Value::Object(spec))
+}
+
+/// A constant score over another query.
+///
+/// tantivy has one of these already, but its weight leaves `for_each_pruning`
+/// to the blanket implementation, which walks every matching document. That
+/// throws away the block-skipping a term query would otherwise do, and a term
+/// query is exactly what gets wrapped here.
+///
+/// A constant score makes pruning simpler than block-WAND, not harder: every
+/// document scores the same, so once the collector's threshold has reached
+/// that score its heap is full of ties and nothing later can displace them.
+/// The walk stops there. Ties go to the lower document id either way, which
+/// is what the blanket implementation would have arrived at the slow way.
+pub struct ConstScore {
+    query: Box<dyn Query>,
+    score: tantivy::Score,
+}
+
+impl ConstScore {
+    pub fn new(query: Box<dyn Query>, score: tantivy::Score) -> Self {
+        ConstScore { query, score }
+    }
+}
+
+impl std::fmt::Debug for ConstScore {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Const(score={}, query={:?})", self.score, self.query)
+    }
+}
+
+impl Clone for ConstScore {
+    fn clone(&self) -> Self {
+        ConstScore {
+            query: self.query.box_clone(),
+            score: self.score,
+        }
+    }
+}
+
+impl Query for ConstScore {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        let inner = self.query.weight(enable_scoring)?;
+        // with scoring off the score is never read, so the wrapper is pure cost
+        Ok(if enable_scoring.is_scoring_enabled() {
+            Box::new(ConstWeight { inner, score: self.score })
+        } else {
+            inner
+        })
+    }
+
+    fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
+        self.query.query_terms(visitor);
+    }
+}
+
+struct ConstWeight {
+    inner: Box<dyn Weight>,
+    score: tantivy::Score,
+}
+
+impl Weight for ConstWeight {
+    fn scorer(
+        &self,
+        reader: &tantivy::SegmentReader,
+        boost: tantivy::Score,
+    ) -> tantivy::Result<Box<dyn tantivy::query::Scorer>> {
+        let inner = self.inner.scorer(reader, boost)?;
+        Ok(Box::new(tantivy::query::ConstScorer::new(
+            inner,
+            boost * self.score,
+        )))
+    }
+
+    fn explain(
+        &self,
+        reader: &tantivy::SegmentReader,
+        doc: tantivy::DocId,
+    ) -> tantivy::Result<tantivy::query::Explanation> {
+        let mut ex = tantivy::query::Explanation::new("Const", self.score);
+        ex.add_detail(self.inner.explain(reader, doc)?);
+        Ok(ex)
+    }
+
+    fn count(&self, reader: &tantivy::SegmentReader) -> tantivy::Result<u32> {
+        self.inner.count(reader)
+    }
+
+    fn for_each_pruning(
+        &self,
+        threshold: tantivy::Score,
+        reader: &tantivy::SegmentReader,
+        callback: &mut dyn FnMut(tantivy::DocId, tantivy::Score) -> tantivy::Score,
+    ) -> tantivy::Result<()> {
+        use tantivy::DocSet;
+        // nothing here can beat what the collector already holds
+        if threshold >= self.score {
+            return Ok(());
+        }
+        // the inner scorer is walked for its documents alone; the score it
+        // would compute is discarded, so ask for the cheaper unscored form
+        let mut scorer = self.inner.scorer(reader, 1.0)?;
+        let mut doc = scorer.doc();
+        while doc != tantivy::TERMINATED {
+            if callback(doc, self.score) >= self.score {
+                return Ok(());
+            }
+            doc = scorer.advance();
+        }
+        Ok(())
+    }
 }
