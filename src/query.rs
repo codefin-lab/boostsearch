@@ -400,7 +400,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "match_none" => Box::new(EmptyQuery),
         "term" => {
             let (field, val, opts) = field_and_value(&body)?;
-            let (f, path, _) = ctx.resolve(&field, false);
+            let (f, path, view) = ctx.resolve(&field, false);
             if is_true(opts.get("case_insensitive")) {
                 if let Some(s) = val.as_str() {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
@@ -410,13 +410,25 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             if let Some(s) = val.as_str() {
                 let n = normalized(ctx, &field, s);
                 if n != s {
-                    return Ok(any_of(term_for(f, &path, &Value::String(n))));
+                    let hit = any_of(term_for(f, &path, &Value::String(n)));
+                    return Ok(if view == View::Raw {
+                        Box::new(tantivy::query::ConstScoreQuery::new(hit, 1.0))
+                    } else {
+                        hit
+                    });
                 }
             }
             if let Some(q) = ip_term_query(ctx, &field, f, &path, &val) {
                 return Ok(q);
             }
-            any_of(term_for(f, &path, &val))
+            let exact = any_of(term_for(f, &path, &val));
+            // an exact match on a field that is not analysed has nothing to
+            // rank by: every match is equally exact, so each scores one
+            if view == View::Raw {
+                Box::new(tantivy::query::ConstScoreQuery::new(exact, 1.0))
+            } else {
+                exact
+            }
         }
         "terms" => {
             let (field, vals) = single_key(&body)?;

@@ -2205,9 +2205,80 @@ pub fn run(
     }
 
     prune(&mut cands, page_want, &sort_keys);
+    // `indices_boost` weights whole indices against each other, so it is
+    // applied to the scores before they are ranked. An alias may name the
+    // index instead of the index naming itself.
+    if let Some(boosts) = body.get("indices_boost") {
+        let mut pairs: Vec<(String, f32)> = Vec::new();
+        let mut take = |o: &serde_json::Map<String, Value>| {
+            for (k, v) in o {
+                if let Some(b) = v.as_f64() {
+                    pairs.push((k.clone(), b as f32));
+                }
+            }
+        };
+        match boosts {
+            Value::Object(o) => take(o),
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(o) = item.as_object() {
+                        take(o);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // a boost naming nothing is a request for an index that is not there,
+        // unless the caller said to pass over what is missing
+        let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
+        if !lenient {
+            for (pat, _) in &pairs {
+                let known = pat.contains('*')
+                    || store.exists(pat)
+                    || store.get(pat).is_some();
+                if !known {
+                    return Err(err(
+                        StatusCode::NOT_FOUND,
+                        "index_not_found_exception",
+                        format!("no such index [{pat}]"),
+                    ));
+                }
+            }
+        }
+        if !pairs.is_empty() {
+            let names: Vec<String> = searchers.iter().map(|(n, _, _)| n.clone()).collect();
+            let factor: Vec<f32> = names
+                .iter()
+                .map(|n| {
+                    pairs
+                        .iter()
+                        .find(|(pat, _)| {
+                            pat == n
+                                || crate::store::glob_match(pat, n)
+                                || store
+                                    .get(pat)
+                                    .map(|st| st.read().name == *n)
+                                    .unwrap_or(false)
+                        })
+                        .map(|(_, b)| *b)
+                        .unwrap_or(1.0)
+                })
+                .collect();
+            for c in cands.iter_mut() {
+                if let Some(f) = factor.get(c.shard) {
+                    c.score *= f;
+                }
+            }
+        }
+    }
+
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
-    let max_score = if sort_keys.is_empty() {
+    // a score is only the best score when the ranking is by score descending;
+    // any other order makes the top hit's score arbitrary
+    let ranked_by_score = sort_keys.is_empty()
+        || sort_keys.first().map(|k| k.field == "_score" && k.desc).unwrap_or(false);
+    let max_score = if ranked_by_score {
         cands.iter().map(|c| c.score).fold(None::<f32>, |acc, s| Some(acc.map_or(s, |a| a.max(s))))
     } else {
         None
