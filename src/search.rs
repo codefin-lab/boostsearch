@@ -310,6 +310,7 @@ struct Hit {
     sort: Vec<SortValue>,
     version: u64,
     ignored: Option<Value>,
+    seq: u64,
 }
 
 /// What one sort key reads out of a segment.
@@ -493,6 +494,7 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
                 addr: DocAddress::new(self.segment_ord, doc),
                 score: 1.0,
                 sort: vec![v],
+                seq: u64::MAX,
             });
             if self.limit > 0 && self.buf.len() >= self.limit.saturating_mul(4).max(512) {
                 self.prune();
@@ -539,7 +541,13 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
                 return;
             }
         }
-        self.buf.push(Cand { shard: 0, addr: DocAddress::new(self.segment_ord, doc), score, sort });
+        self.buf.push(Cand {
+            shard: 0,
+            addr: DocAddress::new(self.segment_ord, doc),
+            score,
+            sort,
+            seq: u64::MAX,
+        });
         if self.limit > 0 && self.buf.len() >= self.limit.saturating_mul(4).max(512) {
             self.prune();
         }
@@ -558,6 +566,9 @@ struct Cand {
     addr: DocAddress,
     score: f32,
     sort: Vec<SortValue>,
+    /// the order this document's write arrived in; filled once the candidates
+    /// from every segment are together, and only used to settle ties
+    seq: u64,
 }
 
 /// Is this sort key a date field, whose values need rescaling on the way out?
@@ -582,6 +593,32 @@ fn sort_value_from_json(v: &Value, is_date: bool) -> SortValue {
     }
 }
 
+/// Read each candidate's arrival order out of the index.
+///
+/// The writer spreads one bulk request across its worker threads, so which
+/// segment a document lands in -- and what doc id it gets there -- does not
+/// follow the order it was sent in. `_seq` does, and reading it here rather
+/// than while collecting keeps it off the path every matching document walks:
+/// by now the field is only read for the handful of candidates that survived.
+fn fill_seq(
+    cands: &mut [Cand],
+    searchers: &[(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+) {
+    let mut cols: std::collections::HashMap<(usize, u32), Option<tantivy::columnar::Column<u64>>> =
+        std::collections::HashMap::new();
+    for c in cands.iter_mut() {
+        let (shard, seg) = (c.shard, c.addr.segment_ord);
+        let col = cols.entry((shard, seg)).or_insert_with(|| {
+            let (_, searcher, _) = searchers.get(shard)?;
+            let reader = searcher.segment_readers().get(seg as usize)?;
+            reader.fast_fields().u64("_seq").ok()
+        });
+        if let Some(col) = col {
+            c.seq = col.first(c.addr.doc_id).unwrap_or(u64::MAX);
+        }
+    }
+}
+
 fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
     // ties fall back to document order, which is insertion order within a
     // shard -- otherwise equally-scored hits come back in a different order
@@ -589,6 +626,7 @@ fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
     let by_doc = || {
         a.shard
             .cmp(&b.shard)
+            .then(a.seq.cmp(&b.seq))
             .then(a.addr.segment_ord.cmp(&b.addr.segment_ord))
             .then(a.addr.doc_id.cmp(&b.addr.doc_id))
     };
@@ -2545,6 +2583,7 @@ pub fn run(
                         addr,
                         score,
                         sort: Vec::new(),
+                        seq: u64::MAX,
                     })
                     .collect::<Vec<_>>();
                 let count = count_matches(&searcher, &q)?;
@@ -2563,6 +2602,7 @@ pub fn run(
                         addr,
                         score,
                         sort: Vec::new(),
+                        seq: u64::MAX,
                     })
                     .collect::<Vec<_>>();
                 (c, cands, agg)
@@ -2782,6 +2822,7 @@ pub fn run(
         }
     }
 
+    fill_seq(&mut cands, &searchers);
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
     // a score is only the best score when the ranking is by score descending;
@@ -2804,6 +2845,7 @@ pub fn run(
         let ignored = src.as_object_mut().and_then(|o| o.remove("_ignored"));
         let version = g.version_of(&id);
         all_hits.push(Hit {
+            seq: c.seq,
             shard_idx: c.shard,
             index: name.clone(),
             id,
@@ -3007,8 +3049,11 @@ pub fn run(
             if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
                 hit["_version"] = json!(h.version);
             }
-            if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
-                hit["_seq_no"] = json!(0);
+            if body_or_param(body, p, "seq_no_primary_term")
+                .map(|v| v == json!(true) || v == json!("true"))
+                .unwrap_or(false)
+            {
+                hit["_seq_no"] = json!(h.seq);
                 hit["_primary_term"] = json!(1);
             }
             hit

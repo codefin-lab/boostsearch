@@ -20,6 +20,9 @@ pub struct Fields {
     pub dynamic: Field,
     /// raw (untokenised) JSON view -- backs `keyword` fields, sorts and term aggs
     pub raw: Field,
+    /// the order the write arrived in, which is what `_seq_no` reports and
+    /// what settles ties between equally-ranked documents
+    pub seq: Field,
 }
 
 /// How much un-refreshed document source may sit in memory before the writer
@@ -95,7 +98,12 @@ pub fn build_schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
-    (sb.build(), Fields { id, source, dynamic, raw })
+    // The writer spreads one bulk request across its worker threads, so a
+    // document's segment and doc id do not follow the order it was sent in.
+    // Recording that order is what lets two equally-scored hits come back the
+    // same way twice.
+    let seq = sb.add_u64_field("_seq", FAST);
+    (sb.build(), Fields { id, source, dynamic, raw, seq })
 }
 
 /// Declared field types, flattened to dotted paths (`user.name` -> `keyword`).
@@ -442,6 +450,8 @@ pub struct IdxState {
     /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
     /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
     pub pending: HashMap<String, Option<String>>,
+    /// arrival order of the writes not yet visible to the refreshed reader
+    pub pending_seq: HashMap<String, u64>,
     pub pending_bytes: usize,
     /// A second reader that IS advanced when the buffer is flushed, so GET stays
     /// realtime while search still only moves on an explicit refresh.
@@ -506,12 +516,17 @@ impl IdxState {
         self.reader.reload()?;
         self.realtime.reload()?;
         self.pending.clear();
+        self.pending_seq.clear();
         self.pending_bytes = 0;
         Ok(())
     }
 
     /// Bound how much un-refreshed source we hold in memory. Flushing advances
     /// only the realtime reader, so search visibility is unchanged.
+    pub fn note_pending_seq(&mut self, id: &str, seq: u64) {
+        self.pending_seq.insert(id.to_string(), seq);
+    }
+
     pub fn note_pending(&mut self, id: &str, source: Option<String>) {
         self.pending_bytes += id.len() + source.as_ref().map(|s| s.len()).unwrap_or(0) + 48;
         self.pending.insert(id.to_string(), source);
@@ -587,6 +602,7 @@ impl IdxState {
         // a write must stay invisible to search until an explicit refresh.
         let _ = self.realtime.reload();
         self.pending.clear();
+        self.pending_seq.clear();
         self.pending_bytes = 0;
         release_freed_memory();
         true
@@ -1352,6 +1368,7 @@ impl Store {
             versions: HashMap::new(),
             live_ids: Default::default(),
             pending: HashMap::new(),
+            pending_seq: HashMap::new(),
             pending_bytes: 0,
             realtime,
             seq_no: 0,
@@ -2167,10 +2184,11 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     out
 }
 
-pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str) -> TantivyDocument {
+pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -> TantivyDocument {
     let mut d = TantivyDocument::default();
     d.add_text(fields.id, id);
     d.add_text(fields.source, raw);
+    d.add_u64(fields.seq, seq);
     if let Value::Object(obj) = source {
         let converted: BTreeMap<String, OwnedValue> =
             obj.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect();

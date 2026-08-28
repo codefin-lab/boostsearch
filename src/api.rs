@@ -399,6 +399,22 @@ fn source_enabled(st: &IdxState) -> bool {
         .unwrap_or(true)
 }
 
+/// The arrival order recorded for a document, which is what `_seq_no` reports.
+pub fn read_seq(st: &IdxState, id: &str) -> Option<u64> {
+    if let Some(seq) = st.pending_seq.get(id) {
+        return Some(*seq);
+    }
+    let searcher = st.realtime.searcher();
+    let q = TermQuery::new(Term::from_field_text(st.fields.id, id), IndexRecordOption::Basic);
+    let hits = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
+    let (_, addr) = hits.first()?;
+    // read from the column rather than the stored document: `_seq` is wanted
+    // on every hit that asks for it, and a stored copy would be paid for on
+    // every write to serve the far rarer read
+    let reader = searcher.segment_readers().get(addr.segment_ord as usize)?;
+    reader.fast_fields().u64("_seq").ok()?.first(addr.doc_id)
+}
+
 pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
     if let Some(p) = st.pending.get(id) {
         return p.as_ref().and_then(|raw| serde_json::from_str(raw).ok());
@@ -507,7 +523,7 @@ pub fn write_doc_raw(
             o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
         }
     }
-    let doc = make_doc(&st.fields, id, indexed, &raw);
+    let doc = make_doc(&st.fields, id, indexed, &raw, seq);
     match st.writer() {
         Ok(w) => {
             if let Err(e) = w.add_document(doc) {
@@ -523,6 +539,7 @@ pub fn write_doc_raw(
         }
     }
     st.note_pending(id, Some(raw));
+    st.note_pending_seq(id, seq);
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
     let body = json!({
         "_index": st.name,
@@ -673,7 +690,7 @@ pub async fn get_doc(
             let mut body = json!({
                 "_index": g.name, "_id": id,
                 "_version": g.version_of(&id),
-                "_seq_no": 0, "_primary_term": 1,
+                "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
                 "found": true,
             });
             if let Some(f) = fields {
@@ -902,6 +919,31 @@ pub async fn bulk(
             }
             "update" => {
                 let existing = read_source(&g, &id);
+                // the same conditional write the single-document update takes,
+                // reported per item rather than as the whole request failing
+                let stale = match (
+                    meta.get("if_seq_no").and_then(|v| v.as_u64()),
+                    existing.is_some(),
+                ) {
+                    (Some(want), true) => Some((want, read_seq(&g, &id).unwrap_or(0)))
+                        .filter(|(want, have)| want != have),
+                    _ => None,
+                };
+                if let Some((want, have)) = stale {
+                    errors = true;
+                    items.push(json!({ "update": {
+                        "_index": idx, "_id": id, "status": 409,
+                        "error": {
+                            "type": "version_conflict_engine_exception",
+                            "reason": format!(
+                                "[{id}]: version conflict, required seqNo [{want}], \
+                                 primary term [1]. current document has seqNo [{have}] \
+                                 and primary term [1]"
+                            )
+                        }
+                    }}));
+                    continue;
+                }
                 let patch = source.unwrap_or_else(|| json!({}));
                 let doc = patch.get("doc").cloned();
                 match (existing, doc) {
@@ -1660,7 +1702,7 @@ pub async fn mget(
                 let mut d = json!({
                     "_index": g.name, "_id": id,
                     "_version": g.version_of(&id),
-                    "_seq_no": 0, "_primary_term": 1, "found": true
+                    "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1, "found": true
                 });
                 let mut wants_source = true;
                 if let Some(spec) = &stored_spec {
@@ -1743,6 +1785,25 @@ pub async fn update_doc(
     };
     let mut g = st.write();
     let existing = read_source(&g, &id);
+    // `if_seq_no` makes the write conditional on the document not having moved
+    // since the caller read it. A document that is not there at all is a
+    // different complaint, and is left to the missing-document path below.
+    if let (Some(want), true) = (
+        p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok()),
+        existing.is_some(),
+    ) {
+        let have = read_seq(&g, &id).unwrap_or(0);
+        if have != want {
+            return err(
+                StatusCode::CONFLICT,
+                "version_conflict_engine_exception",
+                format!(
+                    "[{id}]: version conflict, required seqNo [{want}], primary term [1]. \
+                     current document has seqNo [{have}] and primary term [1]"
+                ),
+            );
+        }
+    }
     let detect_noop =
         patch.get("detect_noop").and_then(|v| v.as_bool()).unwrap_or(true);
     let doc_as_upsert = patch.get("doc_as_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
