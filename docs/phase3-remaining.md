@@ -55,7 +55,23 @@ closed index จึงยังถูกค้นและถูกนับเ�
 ยังเหลือที่ต้องรู้จัก closed: `cluster.state` (3) · `get_mapping` wildcard_expansion (2) ·
 `indices.recovery` (5) · `cat.indices`/`cat.shards` บางส่วน
 
-## เรียงตามขนาดที่เหลือ (376)
+## search_after — ทำแล้ว เหลือรายละเอียด
+
+`search_after` ไม่เคยถูกทำมาก่อน (อยู่แต่ในรายชื่อ key ที่รับได้) ตอนนี้กรอง
+**ตั้งแต่ตอนเก็บ** ไม่ใช่ตอนท้าย เพราะ `prune` ตัดเหลือหน้าเดียวไปก่อนแล้ว —
+และต้องแก้ **สองทาง** เพราะ sort ตัวเลขคอลัมน์เดียวมี fast path แบบ vectorized
+ที่ไม่ผ่าน `collect` ปกติ (พลาดตรงนี้รอบแรก marker เลยไม่มีผลเลย)
+
+เหลือใน `90_search_after` 4 ตัว:
+- `unsigned long` / `numeric skipping` — `hits.total` ไม่ตรง เมื่อ sort มี
+  `missing: "_last"` (เอกสารที่ไม่มีค่าถูกนับหาย)
+- `date` — timestamp เพี้ยนไป 8 ชั่วโมง ⇒ การอ่าน timezone ตอน parse date
+- `date_nanos` — `date_nanos` ต้องคืน sort เป็น nanosecond ส่วน `date` เป็น
+  millisecond เราคืนเหมือนกันทั้งคู่
+
+`95_search_after_shard_doc` (3) ต้องมี point-in-time ก่อน
+
+## เรียงตามขนาดที่เหลือ (375)
 
 | จำนวน | กลุ่ม | หมายเหตุ |
 |---:|---|---|

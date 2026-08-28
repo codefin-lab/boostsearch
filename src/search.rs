@@ -60,6 +60,20 @@ impl SortValue {
         }
     }
 
+    /// A date sort value is stored in nanoseconds and reported in
+    /// milliseconds, which is the unit the field was given in.
+    fn to_json_scaled(&self, is_date: bool) -> Value {
+        if !is_date {
+            return self.to_json();
+        }
+        match self {
+            SortValue::I64(v) => json!(v / 1_000_000),
+            SortValue::U64(v) => json!(v / 1_000_000),
+            SortValue::F64(n) => json!((*n / 1e6) as i64),
+            other => other.to_json(),
+        }
+    }
+
     fn to_json(&self) -> Value {
         match self {
             SortValue::I64(v) => json!(v),
@@ -312,6 +326,9 @@ struct SortCollector {
     sources: Vec<SortSource>,
     desc: Vec<bool>,
     limit: usize,
+    /// Where a previous page ended. Documents up to and including it are not
+    /// collected at all, so the page limit applies to what comes after.
+    after: Option<Vec<SortValue>>,
 }
 
 struct SortSegmentCollector {
@@ -320,6 +337,7 @@ struct SortSegmentCollector {
     columns: Vec<Option<SortColumns>>,
     desc: Vec<bool>,
     limit: usize,
+    after: Option<Vec<SortValue>>,
     buf: Vec<Cand>,
     /// The worst candidate currently kept. A document whose leading sort value
     /// cannot beat it is dropped before anything is allocated for it.
@@ -388,6 +406,7 @@ impl tantivy::collector::Collector for SortCollector {
             columns,
             desc: self.desc.clone(),
             limit: self.limit,
+            after: self.after.clone(),
             buf: Vec::with_capacity(self.limit.saturating_mul(4).max(512).min(4096)),
             cutoff: None,
             block: if single_numeric { Some(Default::default()) } else { None },
@@ -451,8 +470,17 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
         let mut block = self.block.take().unwrap();
         block.fetch_block(docs, &col);
         let desc = self.desc[0];
+        let after = self.after.as_ref().and_then(|a| a.first().cloned());
         for (doc, raw) in block.iter_docid_vals(docs, &col) {
             let Some(v) = decode_col_value(raw, ty) else { continue };
+            // the vectorized path has to honour the page boundary too
+            if let Some(marker) = &after {
+                let ord = v.cmp_asc(marker);
+                let ord = if desc { ord.reverse() } else { ord };
+                if ord != Ordering::Greater {
+                    continue;
+                }
+            }
             if let Some(cut) = &self.cutoff {
                 let ord = v.cmp_asc(cut);
                 let ord = if desc { ord.reverse() } else { ord };
@@ -488,6 +516,29 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
         for i in 1..self.sources.len() {
             sort.push(self.read_key(i, doc, score));
         }
+        // anything at or before where the last page ended is already served
+        if let Some(after) = &self.after {
+            let mut behind = true;
+            for (i, want_desc) in self.desc.iter().enumerate() {
+                let Some(marker) = after.get(i) else { break };
+                let ord = sort[i].cmp_asc(marker);
+                let ord = if *want_desc { ord.reverse() } else { ord };
+                match ord {
+                    Ordering::Greater => {
+                        behind = false;
+                        break;
+                    }
+                    Ordering::Less => {
+                        behind = true;
+                        break;
+                    }
+                    Ordering::Equal => {}
+                }
+            }
+            if behind {
+                return;
+            }
+        }
         self.buf.push(Cand { shard: 0, addr: DocAddress::new(self.segment_ord, doc), score, sort });
         if self.limit > 0 && self.buf.len() >= self.limit.saturating_mul(4).max(512) {
             self.prune();
@@ -507,6 +558,28 @@ struct Cand {
     addr: DocAddress,
     score: f32,
     sort: Vec<SortValue>,
+}
+
+/// Is this sort key a date field, whose values need rescaling on the way out?
+fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
+    targets.iter().filter_map(|n| store.get(n)).any(|st| {
+        matches!(st.read().mapping.type_of(field), Some("date") | Some("date_nanos"))
+    })
+}
+
+/// Read one `search_after` element back into the value the sort produced.
+fn sort_value_from_json(v: &Value, is_date: bool) -> SortValue {
+    match v {
+        // the columns are read as f64, so the marker is put in the same shape
+        // before it is compared with them
+        Value::Number(n) => {
+            let scale = if is_date { 1e6 } else { 1.0 };
+            SortValue::F64(n.as_f64().unwrap_or(0.0) * scale)
+        }
+        Value::String(s) => SortValue::Str(s.clone()),
+        Value::Null => SortValue::Missing,
+        other => SortValue::Str(other.to_string()),
+    }
 }
 
 fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
@@ -1824,6 +1897,17 @@ pub fn run(
         profile: Option<Value>,
     }
 
+    // `search_after` names where the previous page ended
+    let search_after: Option<Vec<SortValue>> = body
+        .get("search_after")
+        .and_then(|v| v.as_array())
+        .filter(|a| a.len() == sort_keys.len() && !a.is_empty())
+        .map(|a| {
+            a.iter()
+                .zip(sort_keys.iter())
+                .map(|(v, k)| sort_value_from_json(v, date_sort_key(store, &targets, &k.field)))
+                .collect()
+        });
     let fanned_out = targets.len() > 1;
     let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
         let Some(st) = store.get(name) else { return Ok(None) };
@@ -1991,7 +2075,12 @@ pub fn run(
             let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
             let collector = (
                 Count,
-                SortCollector { sources, desc, limit: want.max(1) },
+                SortCollector {
+                    sources,
+                    desc,
+                    limit: want.max(1),
+                    after: search_after.clone(),
+                },
                 agg_collector,
             );
             search_shard(&searcher, &q, &collector, fanned_out).map(|(c, mut cands, agg)| {
@@ -2145,6 +2234,10 @@ pub fn run(
         });
     }
 
+    let date_keys: Vec<bool> = sort_keys
+        .iter()
+        .map(|k| date_sort_key(store, &targets, &k.field))
+        .collect();
     let page: Vec<Value> = all_hits
         .into_iter()
         .map(|h| {
@@ -2196,7 +2289,15 @@ pub fn run(
                 hit["_ignored"] = ig.clone();
             }
             if !h.sort.is_empty() {
-                hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
+                // a date column counts in nanoseconds; a sort value is
+                // reported in milliseconds, as the field was written
+                hit["sort"] = Value::Array(
+                    h.sort
+                        .iter()
+                        .zip(date_keys.iter())
+                        .map(|(s, is_date)| s.to_json_scaled(*is_date))
+                        .collect(),
+                );
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
