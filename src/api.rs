@@ -947,6 +947,12 @@ pub async fn reroute(
     respond(&p, out)
 }
 
+/// `_cluster/pending_tasks` -- work the cluster manager has queued, of which
+/// there is never any: everything here finishes before its request returns.
+pub async fn pending_tasks(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"tasks": []}))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -4312,6 +4318,11 @@ fn cluster_state_inner(
                     return no_such_index(part);
                 }
             }
+            // a pattern reaching nothing is an error only when the caller said so
+            let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+            if found.is_empty() && !allow_none {
+                return no_such_index(expr);
+            }
             found
         }
         _ => store.names(),
@@ -4336,8 +4347,12 @@ fn cluster_state_inner(
         out.insert("version".into(), json!(1));
         out.insert("state_uuid".into(), json!("_na_"));
     }
-    if want("master_node") || want("cluster_manager_node") {
+    // the two names are the old and new spellings of one thing, but a
+    // request naming one does not ask for the other
+    if want("master_node") {
         out.insert("master_node".into(), json!("node-0"));
+    }
+    if want("cluster_manager_node") {
         out.insert("cluster_manager_node".into(), json!("node-0"));
     }
     if want("nodes") {
@@ -4356,9 +4371,33 @@ fn cluster_state_inner(
         }));
     }
     if want("blocks") {
-        // one node with nothing held back has no blocks, but the section is
-        // still what was asked for
-        out.insert("blocks".into(), json!({}));
+        // an index held still, or closed, is one the cluster is blocking
+        let mut per_index = serde_json::Map::new();
+        for name in indices.keys() {
+            let Some(st) = store.get(name) else { continue };
+            let g = st.read();
+            let mut held = serde_json::Map::new();
+            if g.closed {
+                held.insert("4".into(), json!({
+                    "description": "index closed", "retryable": false,
+                    "levels": ["read", "write"],
+                }));
+            }
+            if g.setting("blocks.write").as_deref() == Some("true") {
+                held.insert("8".into(), json!({
+                    "description": "index write (api)", "retryable": false,
+                    "levels": ["write"],
+                }));
+            }
+            if !held.is_empty() {
+                per_index.insert(name.clone(), Value::Object(held));
+            }
+        }
+        out.insert("blocks".into(), if per_index.is_empty() {
+            json!({})
+        } else {
+            json!({"indices": Value::Object(per_index)})
+        });
     }
     if want("routing_table") {
         let mut tables = serde_json::Map::new();
@@ -5885,8 +5924,12 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
             cat_render_cols(CAT_TEMPLATE_COLS, rows, &p)
         }
         "shards" => {
-            let rows: Vec<Vec<(&str, String)>> = store
-                .names()
+            // the path names which indices to describe
+            let names = match target.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => store.resolve(t),
+                None => store.names(),
+            };
+            let mut rows: Vec<Vec<(&str, String)>> = names
                 .into_iter()
                 .filter_map(|n| store.get(&n).map(|st| (n, st)))
                 .map(|(n, st)| {
@@ -5899,6 +5942,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                     ]
                 })
                 .collect();
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
             cat_render(rows, &p)
         }
         "segments" => {

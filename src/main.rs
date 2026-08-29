@@ -79,6 +79,7 @@ fn app(store: Store) -> Router {
         .route("/{index}/_clone/{target}", put(api::clone_index).post(api::clone_index))
         .route("/{alias}/_rollover", post(api::rollover))
         .route("/{alias}/_rollover/{new_index}", post(api::rollover))
+        .route("/_cluster/pending_tasks", get(api::pending_tasks))
         .route("/_cluster/stats", get(api::cluster_stats))
         .route("/_cluster/stats/{*rest}", get(api::cluster_stats))
         .route("/_shard_stores", get(api::shard_stores))
@@ -131,7 +132,6 @@ fn app(store: Store) -> Router {
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::reroute))
-        .route("/_cluster/pending_tasks", get(api::acknowledged))
         .route("/_tasks", get(api::list_tasks))
         .route("/_tasks/{id}", get(api::get_task))
         // --- index housekeeping ---
