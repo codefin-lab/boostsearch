@@ -62,6 +62,10 @@ fn app(store: Store) -> Router {
         .route("/_cluster/health", get(api::cluster_health))
         .route("/_cluster/health/{index}", get(api::cluster_health))
         .route("/_list/wlm_stats", get(api::wlm_stats_list))
+        .route(
+            "/_cluster/voting_config_exclusions",
+            post(api::post_voting_config_exclusions).delete(api::delete_voting_config_exclusions),
+        )
         .route("/_cluster/state", get(api::cluster_state))
         .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))

@@ -2916,6 +2916,48 @@ pub async fn cluster_health(
     }))
 }
 
+/// `_cluster/voting_config_exclusions` -- nodes kept out of the vote that
+/// elects a cluster manager.
+///
+/// One node has no election to hold, but the exclusions are still recorded
+/// and reported, since a caller draining a node watches this list to know the
+/// exclusion took.
+pub async fn post_voting_config_exclusions(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+) -> Response {
+    let ids = p.get("node_ids").filter(|v| !v.is_empty());
+    let names = p
+        .get("node_names")
+        .or_else(|| p.get("node_name"))
+        .filter(|v| !v.is_empty());
+    let entries: Vec<Value> = match (ids, names) {
+        (Some(ids), None) => ids
+            .split(',')
+            .map(|n| json!({"node_id": n.trim(), "node_name": "_absent_"}))
+            .collect(),
+        (None, Some(names)) => names
+            .split(',')
+            .map(|n| json!({"node_id": "_absent_", "node_name": n.trim()}))
+            .collect(),
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "Please set node identifiers correctly. One and only one of [node_name], \
+                 [node_names] and [node_ids] has to be set",
+            );
+        }
+    };
+    store.add_voting_exclusions(entries);
+    (StatusCode::OK, axum::Json(json!({}))).into_response()
+}
+
+pub async fn delete_voting_config_exclusions(State(store): State<Store>) -> Response {
+    store.clear_voting_exclusions();
+    (StatusCode::OK, axum::Json(json!({}))).into_response()
+}
+
 /// `/_cluster/state/<metrics>` and `/_cluster/state/<metrics>/<indices>`:
 /// the first path part names which sections to return, the second which
 /// indices the metadata should describe.
@@ -2996,6 +3038,9 @@ fn cluster_state_inner(
             "cluster_uuid": "_na_",
             "templates": store.get_templates(),
             "indices": Value::Object(indices.clone()),
+            "cluster_coordination": {
+                "voting_config_exclusions": store.voting_exclusions(),
+            },
         }));
     }
     if want("blocks") {
@@ -3029,13 +3074,84 @@ fn cluster_state_inner(
     respond(p, Value::Object(out))
 }
 
+/// Walk a settings body into dotted keys with text values, whichever way the
+/// caller wrote it.
+fn flatten_cluster_settings(node: &Value, prefix: &str, out: &mut serde_json::Map<String, Value>) {
+    match node {
+        Value::Object(o) => {
+            for (k, v) in o {
+                let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                flatten_cluster_settings(v, &key, out);
+            }
+        }
+        Value::Null => {
+            out.insert(prefix.to_string(), Value::Null);
+        }
+        Value::String(s) => {
+            out.insert(prefix.to_string(), json!(s));
+        }
+        other => {
+            out.insert(prefix.to_string(), json!(other.to_string()));
+        }
+    }
+}
+
+/// Cluster settings are held with dotted keys and string values, which is the
+/// flat form. `flat_settings=false`, the default, reports them as a tree.
+fn nest_settings(flat: &Value) -> Value {
+    let mut out = json!({});
+    let Some(o) = flat.as_object() else { return out };
+    for (k, v) in o {
+        let path: Vec<&str> = k.split('.').collect();
+        let mut cur = &mut out;
+        for part in &path[..path.len() - 1] {
+            cur = cur
+                .as_object_mut()
+                .unwrap()
+                .entry((*part).to_string())
+                .or_insert_with(|| json!({}));
+            if !cur.is_object() {
+                *cur = json!({});
+            }
+        }
+        if let Some(m) = cur.as_object_mut() {
+            m.insert(path[path.len() - 1].to_string(), v.clone());
+        }
+    }
+    out
+}
+
+/// A setting whose value the cluster refuses rather than stores.
+fn check_cluster_setting(key: &str, value: &Value) -> Option<Response> {
+    if key == "search_backpressure.mode" {
+        let v = value.as_str().unwrap_or("");
+        if !matches!(v, "monitor_only" | "enforced" | "disabled") {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("Invalid SearchBackpressureMode: {v}"),
+            ));
+        }
+    }
+    None
+}
+
 pub async fn cluster_settings_get(
     State(store): State<Store>,
     Query(p): Query<Params>,
 ) -> Response {
-    let mut out = store.cluster_settings();
-    out["defaults"] = json!({});
-    respond(&p, out)
+    let raw = store.cluster_settings();
+    let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
+    let view = |scope: &str| match raw.get(scope) {
+        Some(v) if !flat => nest_settings(v),
+        Some(v) => v.clone(),
+        None => json!({}),
+    };
+    respond(&p, json!({
+        "persistent": view("persistent"),
+        "transient": view("transient"),
+        "defaults": {},
+    }))
 }
 
 pub async fn cluster_settings_put(
@@ -3043,12 +3159,28 @@ pub async fn cluster_settings_put(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let mut body: Value = parse_body(&body).unwrap_or(json!({}));
+    // settings arrive dotted or nested and are held one way: dotted, with the
+    // value as text, which is how they are reported back
+    for scope in ["persistent", "transient"] {
+        let Some(o) = body.get(scope).and_then(|v| v.as_object()).cloned() else { continue };
+        let mut flat = serde_json::Map::new();
+        flatten_cluster_settings(&Value::Object(o), "", &mut flat);
+        for (k, v) in &flat {
+            if let Some(r) = check_cluster_setting(k, v) {
+                return r;
+            }
+        }
+        body[scope] = Value::Object(flat);
+    }
     store.merge_cluster_settings(&body);
+    let echo = |scope: &str| {
+        body.get(scope).map(nest_settings).unwrap_or_else(|| json!({}))
+    };
     respond(&p, json!({
         "acknowledged": true,
-        "persistent": body.get("persistent").cloned().unwrap_or(json!({})),
-        "transient": body.get("transient").cloned().unwrap_or(json!({})),
+        "persistent": echo("persistent"),
+        "transient": echo("transient"),
     }))
 }
 

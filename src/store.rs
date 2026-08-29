@@ -922,6 +922,9 @@ pub struct Store {
     live_writers: Arc<RwLock<Vec<String>>>,
     /// cluster-level settings, which a few APIs read back and one or two enforce
     cluster_settings: Arc<RwLock<Value>>,
+    /// nodes excluded from the voting configuration, which this engine records
+    /// and reports without having a vote to hold
+    voting_exclusions: Arc<RwLock<Vec<Value>>>,
 }
 
 impl Store {
@@ -939,6 +942,23 @@ impl Store {
                 }
             }
         }
+    }
+
+    pub fn add_voting_exclusions(&self, entries: Vec<Value>) {
+        let mut g = self.voting_exclusions.write();
+        for e in entries {
+            if !g.contains(&e) {
+                g.push(e);
+            }
+        }
+    }
+
+    pub fn clear_voting_exclusions(&self) {
+        self.voting_exclusions.write().clear();
+    }
+
+    pub fn voting_exclusions(&self) -> Vec<Value> {
+        self.voting_exclusions.read().clone()
     }
 
     pub fn cluster_settings(&self) -> Value {
@@ -1055,6 +1075,7 @@ impl Store {
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1075,6 +1096,7 @@ impl Store {
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
