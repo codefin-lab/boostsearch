@@ -209,11 +209,16 @@ class Runner:
         url = self.base + path
         resp = self.session.request(method, url, params=query, data=data,
                                     headers=headers, timeout=30)
-        try:
-            parsed = resp.json() if resp.content else None
-        except Exception:
-            # cat APIs answer in plain text; the suite matches on the body itself
-            parsed = resp.text
+        # cat APIs answer in plain text and the suite matches on the body
+        # itself; a one-line table of digits is still text, not a number, so
+        # the content type decides rather than whether it happens to parse
+        if "json" not in resp.headers.get("content-type", ""):
+            parsed = resp.text if resp.content else None
+        else:
+            try:
+                parsed = resp.json() if resp.content else None
+            except Exception:
+                parsed = resp.text
         # HEAD-style APIs return no body and the suite asserts on the outcome
         # itself; a GET that simply answered with an empty body is still a body.
         self.last_req = (method, url, body)

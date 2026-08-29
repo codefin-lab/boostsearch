@@ -5999,6 +5999,26 @@ fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
 /// `_cat` columns answer to their full name, to the part after the last dot,
 /// and to a leading-letter abbreviation -- `a` for `alias`, `rs` for
 /// `routing.search`.
+/// The short names `_cat` gives columns whose own name is nothing like them.
+fn cat_column_alias(column: &str, asked: &str) -> bool {
+    const ALIASES: &[(&str, &str)] = &[
+        // `i` is the index where there is one and the address otherwise; the
+        // row's own column order settles which, since a table with an index
+        // column lists it first
+        ("index", "i"),
+        ("host", "h"),
+        ("ip", "i"),
+        ("port", "po"),
+        ("node_name", "nn"),
+        ("diskAvail", "disk"),
+        ("diskAvail", "d"),
+        ("diskTotal", "dt"),
+        ("diskUsed", "du"),
+        ("diskUsedPercent", "dup"),
+    ];
+    ALIASES.iter().any(|(col, short)| *col == column && *short == asked)
+}
+
 fn cat_column_matches(column: &str, asked: &str) -> bool {
     if column == asked {
         return true;
@@ -6009,14 +6029,7 @@ fn cat_column_matches(column: &str, asked: &str) -> bool {
     }
     // the short names `_cat` accepts for columns whose own name is nothing
     // like them
-    const ALIASES: &[(&str, &str)] = &[
-        ("diskAvail", "disk"),
-        ("diskAvail", "d"),
-        ("diskTotal", "dt"),
-        ("diskUsed", "du"),
-        ("diskUsedPercent", "dup"),
-    ];
-    if ALIASES.iter().any(|(col, short)| *col == column && *short == asked) {
+    if cat_column_alias(column, asked) {
         return true;
     }
     let initials: String = column.split('.').filter_map(|p| p.chars().next()).collect();
@@ -6070,8 +6083,12 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
                             // a column answers to its name or to one of the
                             // short forms `_cat` accepts, and is headed by the
                             // name it was asked for
+                            // an exact name wins, then a short form `_cat`
+                            // names outright, and only then a prefix -- or
+                            // `i` would find `id` before `ip`
                             r.iter()
                                 .find(|(k, _)| k == w)
+                                .or_else(|| r.iter().find(|(k, _)| cat_column_alias(k, w)))
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
                                 .map(|(_, v)| (*w, v.clone()))
                         })
@@ -6317,7 +6334,10 @@ pub async fn cat_plugins(Query(p): Query<Params>) -> Response {
 }
 
 pub const CAT_THREAD_POOL_COLS: &[&str] = &[
-    "node_name", "name", "active", "queue", "rejected", "total_wait_time", "twt",
+    "node_name", "node_id", "id", "pid", "host", "ip", "port", "ephemeral_node_id",
+    "name", "type", "active", "pool_size", "size", "queue",
+    "queue_size", "rejected", "largest", "completed", "core", "min", "max", "keep_alive",
+    "total_wait_time", "twt",
 ];
 
 /// `_cat/thread_pool` -- the pools a search passes through.
@@ -6328,12 +6348,16 @@ pub async fn cat_thread_pool(
     patterns: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let pools = [
-        ("generic", "-1"),
-        ("index_searcher", "0s"),
-        ("search", "0s"),
-        ("search_throttled", "0s"),
-        ("write", "0s"),
+    // the pools a request passes through, and how each is sized: a fixed pool
+    // has a set number of threads, a scaling one grows and shrinks
+    let pools: &[(&str, &str, &str)] = &[
+        ("fetch_shard_started", "scaling", "-1"),
+        ("fetch_shard_store", "scaling", "-1"),
+        ("generic", "scaling", "-1"),
+        ("index_searcher", "fixed", "0s"),
+        ("search", "fixed", "0s"),
+        ("search_throttled", "fixed", "0s"),
+        ("write", "fixed", "0s"),
     ];
     let wanted: Option<Vec<String>> = patterns
         .map(|Path(v)| v)
@@ -6341,18 +6365,39 @@ pub async fn cat_thread_pool(
         .filter(|v| !v.is_empty())
         .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
     let mut rows = Vec::new();
-    for (name, wait) in pools {
+    for (name, kind, wait) in pools {
         if let Some(w) = wanted.as_ref() {
-            if !w.iter().any(|x| x == name) {
+            // a pattern names pools the way an index expression names indices
+            let hit = w.iter().any(|x| {
+                x == name || (x.contains('*') && crate::store::glob_match(x, name))
+            });
+            if !hit {
                 continue;
             }
         }
         rows.push(vec![
             ("node_name", "obsearch".to_string()),
+            ("node_id", "node-0".to_string()),
+            ("id", "node-0".to_string()),
+            ("pid", std::process::id().to_string()),
+            ("host", "127.0.0.1".to_string()),
+            ("ip", "127.0.0.1".to_string()),
+            ("port", "9300".to_string()),
+            ("ephemeral_node_id", "_na_".to_string()),
             ("name", name.to_string()),
+            ("type", kind.to_string()),
             ("active", "0".to_string()),
+            ("pool_size", "1".to_string()),
+            ("size", "1".to_string()),
             ("queue", "0".to_string()),
+            ("queue_size", "-1".to_string()),
             ("rejected", "0".to_string()),
+            ("largest", "0".to_string()),
+            ("completed", "0".to_string()),
+            ("core", "1".to_string()),
+            ("min", "1".to_string()),
+            ("max", "1".to_string()),
+            ("keep_alive", "5m".to_string()),
             ("total_wait_time", wait.to_string()),
             ("twt", wait.to_string()),
         ]);
