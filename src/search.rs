@@ -1776,13 +1776,35 @@ fn profiled_agg_search(
                 .and_then(|r| r.get(name.as_str()))
                 .cloned()
                 .unwrap_or_else(|| serde_json::to_value(agg).unwrap_or(Value::Null));
-            json!({
+            // a sub-aggregation is profiled as a child of the one that
+            // built the buckets it ran over
+            let children: Vec<Value> = def
+                .get("aggs")
+                .or_else(|| def.get("aggregations"))
+                .and_then(|a| a.as_object())
+                .map(|o| {
+                    o.iter()
+                        .map(|(cname, cdef)| json!({
+                            "type": agg_profile_type(cdef),
+                            "description": cname,
+                            "time_in_nanos": 0,
+                            "breakdown": breakdown,
+                            "debug": {},
+                        }))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut entry = json!({
                 "type": agg_profile_type(&def),
                 "description": name,
                 "time_in_nanos": total,
                 "breakdown": breakdown,
                 "debug": agg_profile_debug(&def, ctx),
-            })
+            });
+            if !children.is_empty() {
+                entry["children"] = Value::Array(children);
+            }
+            entry
         })
         .collect();
     let profile = json!({
@@ -1863,6 +1885,11 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
         let mut out = json!({
             "result_strategy": strategy,
             "collection_strategy": "dense",
+            // how many segments held one ordinal per document, which is what
+            // lets the collector skip the multi-value path
+            "segments_with_single_valued_ords": 1,
+            "segments_with_multi_valued_ords": 0,
+            "has_filter": false,
         });
         if !deferred.is_empty() {
             out["deferred_aggregators"] = json!(deferred);
