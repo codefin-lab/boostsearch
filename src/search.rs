@@ -3216,48 +3216,7 @@ pub fn run(
     let mut filters_results: Vec<(String, Value)> = Vec::new();
     for (name, def) in &filters_aggs {
         let own_meta = def.get("meta").cloned();
-        let outcome = if def.get("missing").is_some() {
-            run_missing_agg(store, &targets, &query_json, def)
-        } else if def.get("median_absolute_deviation").is_some() {
-            run_mad_agg(store, &targets, &query_json, def)
-        } else if def.get("percentiles").is_some() {
-            run_hdr_percentiles(store, &targets, &query_json, def)
-        } else if def.get("filter").is_some() {
-            run_filter_agg(store, &targets, &query_json, def)
-        } else if def.get("global").is_some() {
-            // `global` ignores the query and aggregates over every document
-            run_filter_agg(store, &targets, &None, &json!({
-                "filter": {"match_all": {}},
-                "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
-                    .unwrap_or_else(|| json!({}))
-            }))
-        } else if def.get("weighted_avg").is_some() {
-            run_weighted_avg(store, &targets, &query_json, def)
-        } else if def.get("variable_width_histogram").is_some() {
-            run_variable_width_histogram(store, &targets, &query_json, def)
-        } else if def.get("auto_date_histogram").is_some() {
-            run_auto_date_histogram(store, &targets, &query_json, def)
-        } else if def.get("date_range").is_some() {
-            run_date_range_agg(store, &targets, &query_json, def)
-        } else if def.get("histogram").is_some() {
-            run_range_field_histogram(store, &targets, &query_json, def)
-        } else if def.get("ip_range").is_some() {
-            run_ip_range_agg(store, &targets, &query_json, def)
-        } else if def.get("adjacency_matrix").is_some() {
-            run_adjacency_matrix_agg(store, &targets, &query_json, def)
-        } else if def.get("rare_terms").is_some() {
-            run_rare_terms_agg(store, &targets, &query_json, def, weighted, name)
-        } else if def.get("multi_terms").is_some() {
-            run_multi_terms_agg(store, &targets, &query_json, def, weighted)
-        } else if def.get("composite").is_some() {
-            run_composite_agg(store, &targets, &query_json, def, weighted)
-        } else if def.get("date_histogram").is_some() {
-            run_calendar_histogram(store, &targets, &query_json, def)
-        } else if def.get("terms").is_some() {
-            run_index_terms_agg(store, &targets, &query_json, def)
-        } else {
-            run_filters_agg(store, &targets, &query_json, def)
-        };
+        let outcome = run_peeled_agg(store, &targets, &query_json, name, def, weighted);
         match outcome {
             Ok(mut v) => {
                 if let Some(m) = own_meta {
@@ -3561,7 +3520,7 @@ fn run_filters_agg(
     let mut matched_any: Vec<Value> = Vec::new();
     for (name, filter) in &named {
         let combined = combine(main_query, Some(filter.clone()));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         let mut b = json!({"doc_count": count});
         if let Some(sub) = sub {
             if let Some(o) = sub.as_object() {
@@ -3577,7 +3536,7 @@ fn run_filters_agg(
     if other_bucket {
         let none_of = json!({"bool": {"must_not": matched_any}});
         let combined = combine(main_query, Some(none_of));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         let mut b = json!({"doc_count": count});
         if let Some(sub) = sub {
             if let Some(o) = sub.as_object() {
@@ -3607,6 +3566,127 @@ fn combine(main: &Option<Value>, extra: Option<Value>) -> Value {
         (None, Some(e)) => e,
         (None, None) => json!({"match_all": {}}),
     }
+}
+
+/// Run one aggregation that tantivy cannot parse itself.
+///
+/// These are computed by asking a question per bucket rather than by walking
+/// the documents once, so any of them may appear inside any other: what a
+/// bucket narrows to is just another query to ask the next one with.
+fn run_peeled_agg(
+    store: &Store,
+    targets: &[String],
+    query_json: &Option<Value>,
+    name: &str,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    if def.get("missing").is_some() {
+        run_missing_agg(store, targets, query_json, def)
+    } else if def.get("median_absolute_deviation").is_some() {
+        run_mad_agg(store, targets, query_json, def)
+    } else if def.get("percentiles").is_some() {
+        run_hdr_percentiles(store, targets, query_json, def)
+    } else if def.get("filter").is_some() {
+        run_filter_agg(store, targets, query_json, def)
+    } else if def.get("global").is_some() {
+        // `global` ignores the query and aggregates over every document
+        run_filter_agg(store, targets, &None, &json!({
+            "filter": {"match_all": {}},
+            "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
+                .unwrap_or_else(|| json!({}))
+        }))
+    } else if def.get("weighted_avg").is_some() {
+        run_weighted_avg(store, targets, query_json, def)
+    } else if def.get("variable_width_histogram").is_some() {
+        run_variable_width_histogram(store, targets, query_json, def)
+    } else if def.get("auto_date_histogram").is_some() {
+        run_auto_date_histogram(store, targets, query_json, def)
+    } else if def.get("date_range").is_some() {
+        run_date_range_agg(store, targets, query_json, def)
+    } else if def.get("histogram").is_some() {
+        run_range_field_histogram(store, targets, query_json, def)
+    } else if def.get("ip_range").is_some() {
+        run_ip_range_agg(store, targets, query_json, def)
+    } else if def.get("adjacency_matrix").is_some() {
+        run_adjacency_matrix_agg(store, targets, query_json, def)
+    } else if def.get("rare_terms").is_some() {
+        run_rare_terms_agg(store, targets, query_json, def, weighted, name)
+    } else if def.get("multi_terms").is_some() {
+        run_multi_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("composite").is_some() {
+        run_composite_agg(store, targets, query_json, def, weighted)
+    } else if def.get("date_histogram").is_some() {
+        run_calendar_histogram(store, targets, query_json, def)
+    } else if def.get("terms").is_some() {
+        run_index_terms_agg(store, targets, query_json, def)
+    } else {
+        run_filters_agg(store, targets, query_json, def)
+    }
+}
+
+/// Split sub-aggregations into the ones this engine computes itself and the
+/// ones tantivy can parse, so each set can take the path that suits it.
+fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option<Value>) {
+    let Some(o) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
+        return (None, sub_aggs.clone());
+    };
+    let (mine, theirs): (Vec<_>, Vec<_>) = o.iter().partition(|(_, d)| peelable(d));
+    let pack = |v: Vec<(&String, &Value)>| {
+        if v.is_empty() {
+            None
+        } else {
+            Some(Value::Object(v.into_iter().map(|(k, d)| (k.clone(), d.clone())).collect()))
+        }
+    };
+    (pack(mine), pack(theirs))
+}
+
+/// Is this an aggregation tantivy has no parser for, which has to be computed
+/// a bucket at a time here instead?
+fn peelable(def: &Value) -> bool {
+    const OWN: &[&str] = &[
+        "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
+        "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
+        "adjacency_matrix", "rare_terms", "multi_terms", "composite",
+    ];
+    OWN.iter().any(|k| def.get(k).is_some())
+        || def
+            .get("date_histogram")
+            .map(|d| d.get("calendar_interval").is_some())
+            .unwrap_or(false)
+}
+
+/// Count the documents a query matches, and run its sub-aggregations --
+/// including the ones tantivy cannot parse, which are run here against the
+/// same query rather than handed down.
+fn count_with_sub_aggs(
+    store: &Store,
+    targets: &[String],
+    query_json: &Value,
+    sub_aggs: &Option<Value>,
+    weighted: bool,
+) -> std::result::Result<(u64, Option<Value>), Response> {
+    let Some(subs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
+        return filtered_count(store, targets, query_json, sub_aggs);
+    };
+    let (mine, theirs): (Vec<_>, Vec<_>) =
+        subs.iter().partition(|(_, d)| peelable(d));
+    if mine.is_empty() {
+        return filtered_count(store, targets, query_json, sub_aggs);
+    }
+    let rest: Option<Value> = if theirs.is_empty() {
+        None
+    } else {
+        Some(Value::Object(theirs.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
+    };
+    let (count, mut out) = filtered_count(store, targets, query_json, &rest)?;
+    let base = Some(query_json.clone());
+    let mut merged = out.take().and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    for (n, d) in mine {
+        merged.insert(n.clone(), run_peeled_agg(store, targets, &base, n, d, weighted)?);
+    }
+    Ok((count, Some(Value::Object(merged))))
 }
 
 fn filtered_count(
@@ -3689,7 +3769,7 @@ fn run_missing_agg(
     }
     let absent = json!({"bool": {"must_not": [{"exists": {"field": field}}]}});
     let combined = combine(main_query, Some(absent));
-    let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+    let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
     let mut out = json!({"doc_count": count});
     if let Some(sub) = sub {
         if let Some(o) = sub.as_object() {
@@ -3712,7 +3792,7 @@ fn run_filter_agg(
     let filter = def.get("filter").cloned().unwrap_or(json!({"match_all": {}}));
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let combined = combine(main_query, Some(filter));
-    let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+    let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
     let mut out = json!({"doc_count": count});
     if let Some(sub) = sub {
         if let Some(o) = sub.as_object() {
@@ -4168,7 +4248,7 @@ fn run_date_range_agg(
             json!({"range": {field.clone(): Value::Object(clause)}})
         };
         let combined = combine(main_query, Some(filter));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
 
         let key = range
             .get("key")
@@ -4286,7 +4366,7 @@ fn run_range_field_histogram(
             {"range": {format!("{field}.lte"): {"gte": key}}},
             base.clone(),
         ]}});
-        let (count, sub) = filtered_count(store, targets, &overlap, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &overlap, &sub_aggs, false)?;
         if count < min_doc_count {
             continue;
         }
@@ -4341,7 +4421,7 @@ fn run_ip_range_agg(
             json!({"range": {field.clone(): Value::Object(clause)}})
         };
         let combined = combine(main_query, Some(filter));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
 
         let text = |v: &Option<Value>| match v {
             Some(Value::String(s)) => s.clone(),
@@ -4408,7 +4488,7 @@ fn run_adjacency_matrix_agg(
     let mut buckets = Vec::new();
     let mut push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
         let combined = combine(main_query, Some(filter));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count == 0 {
             return Ok(());
         }
@@ -4678,7 +4758,10 @@ fn run_multi_terms_agg(
         ));
     }
 
-    let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+    // an aggregation tantivy cannot parse cannot ride down with the terms
+    // request; it is run per bucket once the buckets are known
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    let mut request = plain_subs.clone().unwrap_or_else(|| json!({}));
     for (i, field) in fields.iter().enumerate().rev() {
         let mut node = json!({"terms": {"field": field, "size": 65_536}});
         // a field the document has no value for still takes part when the
@@ -4766,6 +4849,25 @@ fn run_multi_terms_agg(
         b.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0)
     }).sum();
     buckets.truncate(size);
+    // now that the buckets are settled, each one narrows the query for the
+    // aggregations that had to be left behind
+    if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
+        for b in buckets.iter_mut() {
+            let keys = b.get("key").and_then(|k| k.as_array()).cloned().unwrap_or_default();
+            let mut filters: Vec<Value> = fields
+                .iter()
+                .zip(keys.iter())
+                .map(|(f, k)| json!({"term": {f.clone(): k.clone()}}))
+                .collect();
+            if let Some(q) = main_query.as_ref() {
+                filters.push(q.clone());
+            }
+            let narrowed = Some(json!({"bool": {"filter": filters}}));
+            for (n, d) in peeled {
+                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            }
+        }
+    }
     Ok(json!({
         "doc_count_error_upper_bound": 0,
         "sum_other_doc_count": total.saturating_sub(kept),
@@ -5392,7 +5494,7 @@ fn run_calendar_histogram(
         }
         let range = json!({"range": {field.clone(): spec}});
         let combined = combine(main_query, Some(range));
-        let (count, sub) = filtered_count(store, targets, &combined, &sub_aggs)?;
+        let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count >= min_doc_count {
             let mut b = json!({
                 "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
