@@ -1317,6 +1317,75 @@ fn fold_params_into_body(body: &mut Value, p: &Params) {
     }
 }
 
+/// A keep-alive or scroll timeout as written: a count and a unit.
+fn parse_keep_alive(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit())?;
+    let (n, unit) = s.split_at(split);
+    let n: u64 = n.parse().ok()?;
+    Some(match unit {
+        "ms" => n / 1000,
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
+        _ => return None,
+    })
+}
+
+/// What a scroll refuses before it starts.
+fn check_scroll(store: &Store, body: &Value, p: &Params) -> Option<Response> {
+    let Some(keep) = p.get("scroll") else { return None };
+    if body.get("size").and_then(|v| v.as_i64()) == Some(0)
+        || p.get("size").map(|v| v == "0").unwrap_or(false)
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[size] cannot be [0] in a scroll context",
+        ));
+    }
+    if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[request_cache] cannot be used in a scroll context",
+        ));
+    }
+    // a slice divides the documents between readers, and there is a ceiling on
+    // how finely it may be cut
+    if let Some(max) = body.pointer("/slice/max").and_then(|v| v.as_i64()) {
+        if max > 1024 {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("The number of slices [{max}] is too large. It must be less than [1024]."),
+            ));
+        }
+    }
+    let limit = store
+        .cluster_setting("search.max_keep_alive")
+        .and_then(|v| v.as_str().and_then(parse_keep_alive));
+    if let (Some(limit), Some(want)) = (limit, parse_keep_alive(keep)) {
+        if want > limit {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Keep alive for request ({keep}) is too large. It must be less than ({}). \
+                     This limit can be set by changing the [search.max_keep_alive] cluster level \
+                     setting.",
+                    store
+                        .cluster_setting("search.max_keep_alive")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+    }
+    None
+}
+
 pub async fn search(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -1345,6 +1414,9 @@ pub async fn search(
                 }
             }
         }
+    }
+    if let Some(r) = check_scroll(&store, &body, &p) {
+        return r;
     }
     let scrolling = p.contains_key("scroll");
     match crate::search::run(&store, &expr, &body, &p) {
@@ -1410,6 +1482,30 @@ pub async fn scroll(
             "Validation Failed: 1: scroll_id is missing;",
         );
     };
+    // the ceiling applies every time the scroll is asked to live longer, not
+    // only when it was opened
+    let asked = body.get("scroll").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .or_else(|| p.get("scroll").cloned());
+    if let (Some(keep), Some(limit)) = (
+        asked.as_deref(),
+        store
+            .cluster_setting("search.max_keep_alive")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
+    ) {
+        if let (Some(want), Some(cap)) = (parse_keep_alive(keep), parse_keep_alive(&limit)) {
+            if want > cap {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "Keep alive for request ({keep}) is too large. It must be less than \
+                         ({limit}). This limit can be set by changing the \
+                         [search.max_keep_alive] cluster level setting."
+                    ),
+                );
+            }
+        }
+    }
     let Some(state) = store.read_scroll(&id) else {
         return err(
             StatusCode::NOT_FOUND,
