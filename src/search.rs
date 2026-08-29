@@ -955,6 +955,97 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 
 /// tantivy cannot order a `terms` aggregation by a nested bucket's doc_count,
 /// so strip that order and reapply it to the finished buckets ourselves.
+/// Lucene's `StringHelper.murmurhash3_x86_32`, which is what OpenSearch hashes
+/// a string term with when a terms aggregation is split into partitions.
+fn murmur3_x86_32(data: &[u8], seed: u32) -> i32 {
+    const C1: u32 = 0xcc9e_2d51;
+    const C2: u32 = 0x1b87_3593;
+    let mut h1 = seed;
+    let blocks = data.len() / 4;
+    for i in 0..blocks {
+        let mut k1 = u32::from_le_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
+        k1 = k1.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
+    }
+    let tail = &data[blocks * 4..];
+    let mut k1: u32 = 0;
+    if tail.len() >= 3 {
+        k1 ^= (tail[2] as u32) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= (tail[1] as u32) << 8;
+    }
+    if !tail.is_empty() {
+        k1 ^= tail[0] as u32;
+        k1 = k1.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        h1 ^= k1;
+    }
+    h1 ^= data.len() as u32;
+    h1 ^= h1 >> 16;
+    h1 = h1.wrapping_mul(0x85eb_ca6b);
+    h1 ^= h1 >> 13;
+    h1 = h1.wrapping_mul(0xc2b2_ae35);
+    h1 ^= h1 >> 16;
+    h1 as i32
+}
+
+/// HPPC's `BitMixer.mix64`, the numeric counterpart of the hash above.
+fn mix64(v: i64) -> i64 {
+    let mut z = v as u64;
+    z = (z ^ (z >> 32)).wrapping_mul(0x4cd6_944c_5cc2_0b6d);
+    z = (z ^ (z >> 29)).wrapping_mul(0xfc12_c5b1_9d32_59e9);
+    (z ^ (z >> 32)) as i64
+}
+
+/// Which partition a terms bucket key falls in, hashed the way OpenSearch
+/// hashes it so the same key lands in the same partition here.
+fn term_partition(key: &Value, num: i64) -> i64 {
+    let hash = match key {
+        Value::String(s) => murmur3_x86_32(s.as_bytes(), 31) as i64,
+        Value::Number(n) => mix64(n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64)),
+        Value::Bool(b) => mix64(*b as i64),
+        _ => 0,
+    };
+    hash.rem_euclid(num.max(1))
+}
+
+/// A terms aggregation may ask for one slice of the term space rather than the
+/// whole of it. tantivy has no such notion, so the slice is taken here: the
+/// request goes down without the `include`, asking for enough terms that the
+/// wanted partition is whole, and the rest are dropped from the answer.
+fn extract_partitions(node: &mut Value) -> Vec<(String, i64, i64, usize)> {
+    let mut out = Vec::new();
+    let Some(o) = node.as_object_mut() else { return out };
+    for (name, def) in o.iter_mut() {
+        let Some(terms) = def.get_mut("terms").and_then(|t| t.as_object_mut()) else {
+            continue;
+        };
+        let part = terms.get("include").and_then(|i| i.get("partition")).and_then(|v| v.as_i64());
+        let num = terms
+            .get("include")
+            .and_then(|i| i.get("num_partitions"))
+            .and_then(|v| v.as_i64());
+        let (Some(part), Some(num)) = (part, num) else { continue };
+        let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        terms.remove("include");
+        // ask for the whole term space, since which terms fall in the wanted
+        // partition is not known until they are hashed
+        terms.insert("size".into(), json!(65_536));
+        out.push((name.clone(), part, num, size));
+    }
+    out
+}
+
+fn apply_partitions(result: &mut Value, parts: &[(String, i64, i64, usize)]) {
+    for (name, part, num, size) in parts {
+        let Some(buckets) = result.pointer_mut(&format!("/{name}/buckets")) else { continue };
+        let Some(list) = buckets.as_array_mut() else { continue };
+        list.retain(|b| b.get("key").map(|k| term_partition(k, *num) == *part).unwrap_or(false));
+        list.truncate(*size);
+    }
+}
+
 fn extract_bucket_orders(node: &mut Value) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     let Some(o) = node.as_object_mut() else { return out };
@@ -1065,6 +1156,18 @@ fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>, top: bool)
         if let Some(meta) = d.remove("meta") {
             if top {
                 metas.push((name.clone(), meta));
+            }
+        }
+        // `_term` and `_time` are the old spellings of `_key`, kept working
+        // for the aggregations that were named before it was renamed
+        for agg in d.values_mut() {
+            let Some(order) = agg.get_mut("order").and_then(|o| o.as_object_mut()) else {
+                continue;
+            };
+            for old in ["_term", "_time"] {
+                if let Some(dir) = order.remove(old) {
+                    order.insert("_key".into(), dir);
+                }
             }
         }
         if let Some(sub) = d.get_mut("aggs") {
@@ -2470,6 +2573,12 @@ pub fn run(
     let mut shard_profiles: Vec<Value> = Vec::new();
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
+    // which slice of the term space was asked for is a property of the
+    // request, not of any one shard, so it is read once here
+    let partitions: Vec<(String, i64, i64, usize)> = agg_json
+        .clone()
+        .map(|mut a| extract_partitions(&mut a))
+        .unwrap_or_default();
 
     // One shard's work touches only its own index, so the fan-out runs across
     // cores. Searching many small indices is otherwise bounded by walking them
@@ -2559,6 +2668,7 @@ pub fn run(
             check_agg_types(&rewritten, &ctx)?;
             normalize_agg_dates(&mut rewritten);
             bucket_orders = extract_bucket_orders(&mut rewritten);
+            let _ = extract_partitions(&mut rewritten);
             lower_nested_filters(&mut rewritten, &ctx);
             strip_untranslatable_term_filters(&mut rewritten, &ctx);
             rewrite_agg_fields(&mut rewritten, &ctx);
@@ -3181,6 +3291,7 @@ pub fn run(
                     apply_doc_counts(&mut v);
                 }
                 apply_bucket_orders(&mut v, &bucket_orders);
+                apply_partitions(&mut v, &partitions);
                 reattach_meta(&mut v, &agg_meta);
                 v
             }),
