@@ -442,6 +442,9 @@ pub struct IdxState {
     /// Exact record for ids that need one: anything updated past version 1, and
     /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
+    /// the routing a document was written with, kept only for the documents
+    /// that were given one -- which is the rare case
+    pub routing: HashMap<String, String>,
     /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
     /// false negatives), so the common "is this a new document?" question costs
     /// one hash. A hit is confirmed against the index, which only happens for
@@ -1403,6 +1406,7 @@ impl Store {
             aliases,
             closed: false,
             versions: HashMap::new(),
+            routing: HashMap::new(),
             live_ids: Default::default(),
             pending: HashMap::new(),
             pending_seq: HashMap::new(),

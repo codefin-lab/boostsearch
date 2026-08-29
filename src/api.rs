@@ -584,7 +584,9 @@ fn maybe_refresh(st: &mut IdxState, p: &Params) {
 /// A write that was asked to refresh says so in its answer, so the caller can
 /// tell a refresh it forced from one that happened to be due anyway.
 fn note_forced_refresh(body: &mut Value, p: &Params) {
-    if flag(p, "refresh") {
+    // `wait_for` waits for a refresh that was coming anyway; it does not force
+    // one, and so is not reported as having done
+    if matches!(p.get("refresh").map(|s| s.as_str()), Some("true") | Some("")) {
         body["forced_refresh"] = json!(true);
     }
 }
@@ -671,11 +673,33 @@ async fn do_index(
     let id = id.unwrap_or_else(|| g.next_auto_id());
     match write_doc(&mut g, &id, source, &op_type) {
         Ok((mut body, status)) => {
+            // a document written with a routing is only reachable by quoting
+            // the same routing back, so it has to be remembered
+            match p.get("routing").filter(|r| !r.is_empty()) {
+                Some(r) => {
+                    g.routing.insert(id.clone(), r.clone());
+                    body["_routing"] = json!(r);
+                }
+                None => {
+                    g.routing.remove(&id);
+                }
+            }
             maybe_refresh(&mut g, &p);
             note_forced_refresh(&mut body, &p);
             (status, axum::Json(body)).into_response()
         }
         Err(resp) => resp,
+    }
+}
+
+/// Does the routing quoted on a request agree with the one the document was
+/// written under? A document reached by the wrong routing is, to the caller,
+/// not there at all: in a real cluster the request would have gone to a shard
+/// that never held it.
+fn routing_matches(st: &IdxState, id: &str, p: &Params) -> bool {
+    match st.routing.get(id) {
+        Some(have) => p.get("routing").map(|want| want == have).unwrap_or(false),
+        None => true,
     }
 }
 
@@ -693,7 +717,7 @@ pub async fn get_doc(
         };
     };
     let g = st.read();
-    match read_source(&g, &id) {
+    match read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => {
             let fields = stored_fields(&src, &p);
             let mut body = json!({
@@ -702,6 +726,9 @@ pub async fn get_doc(
                 "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
                 "found": true,
             });
+            if let Some(r) = g.routing.get(&id) {
+                body["_routing"] = json!(r);
+            }
             if let Some(f) = fields {
                 body["fields"] = f;
                 // OpenSearch omits _source when only stored_fields were asked for
@@ -752,7 +779,7 @@ pub async fn get_source(
             format!("fields [_source] are disabled in the mappings for index [{}]", g.name),
         );
     }
-    match read_source(&g, &id) {
+    match read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => axum::Json(filter_source_params(&src, &p)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -769,7 +796,19 @@ pub async fn delete_doc_route(
 ) -> Response {
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let mut g = st.write();
+    if !routing_matches(&g, &id, &p) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({
+                "_index": g.name, "_id": id, "_version": g.version_of(&id),
+                "result": "not_found", "_shards": shards(),
+                "_seq_no": 0, "_primary_term": 1,
+            })),
+        )
+            .into_response();
+    }
     let (mut body, status) = delete_doc(&mut g, &id);
+    g.routing.remove(&id);
     maybe_refresh(&mut g, &p);
     note_forced_refresh(&mut body, &p);
     (status, axum::Json(body)).into_response()
