@@ -3678,8 +3678,11 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                      "index_writer_memory_in_bytes": 0, "version_map_memory_in_bytes": 0,
                      "fixed_bit_set_memory_in_bytes": 0, "max_unsafe_auto_id_timestamp": -1,
                      "file_sizes": {}},
-        "translog": {"operations": 0, "size_in_bytes": 0, "uncommitted_operations": 0,
-                     "uncommitted_size_in_bytes": 0, "earliest_last_modified_age": 0,
+        "translog": {"operations": st.pending.len(),
+                     "size_in_bytes": st.pending_bytes.max(55),
+                     "uncommitted_operations": st.pending.len(),
+                     "uncommitted_size_in_bytes": st.pending_bytes.max(55),
+                     "earliest_last_modified_age": 0,
                      "remote_store": {"upload": {"total_uploads": {"started": 0, "failed": 0, "succeeded": 0}}}},
         "request_cache": {
             "memory_size_in_bytes": 0, "evictions": 0, "hit_count": 0,
@@ -6556,7 +6559,15 @@ pub async fn validate_query(
         if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             return respond(&p, json!({"_shards": shards, "valid": true}));
         }
-        return respond(&p, json!({"_shards": shards, "valid": false}));
+        let mut out = json!({"_shards": shards, "valid": false});
+        // whatever the body holds, it is not where a query goes -- said only
+        // when the caller asked to be told why
+        if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+            if let Some(first) = body.as_object().and_then(|o| o.keys().next()) {
+                out["error"] = json!(format!("request does not support [{first}]"));
+            }
+        }
+        return respond(&p, out);
     };
     let probe = json!({"query": query, "size": 0});
     // building the query against one of the targets says whether it can be
@@ -6576,7 +6587,10 @@ pub async fn validate_query(
         if let Err(e) = crate::query::build(&ctx, probe.get("query").unwrap()) {
             let mut out = json!({"_shards": shards, "valid": false});
             if p.get("explain").map(|v| v != "false").unwrap_or(false) {
-                out["error"] = json!(e.to_string());
+                // the name of the index it was read against, then what went
+                // wrong, which is the shape the message has
+                let name = sample.first().cloned().unwrap_or_default();
+                out["error"] = json!(format!("[{name}] QueryShardException[{e}]"));
             }
             return respond(&p, out);
         }
@@ -6632,8 +6646,6 @@ pub async fn analyze(
             pos += 1;
         }
     }
-    // an index caps how many tokens `_analyze` may produce, so that asking it
-    // to analyse something enormous cannot take the node with it
     let cap = st
         .as_ref()
         .and_then(|s| s.read().numeric_setting("analyze.max_token_count"))
@@ -6649,5 +6661,63 @@ pub async fn analyze(
             ),
         );
     }
+    // `explain` asks for the same tokens laid out by the step that produced
+    // them, rather than as one flat list
+    if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false)
+        || p.get("explain").map(|v| v == "true").unwrap_or(false)
+    {
+        let named = body
+            .get("tokenizer")
+            .or_else(|| body.get("analyzer"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| p.get("tokenizer").or_else(|| p.get("analyzer")).cloned())
+            .unwrap_or_else(|| "standard".to_string());
+        let stage = json!({"name": named, "tokens": tokens.clone()});
+        let detail = if tokenizer_only {
+            let filters: Vec<Value> = body
+                .get("filter")
+                .and_then(|f| f.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|f| {
+                            let name = match f {
+                                Value::String(s) => s.clone(),
+                                other => other
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("filter")
+                                    .to_string(),
+                            };
+                            // a stop filter takes words back out, which is
+                            // the whole point of naming one
+                            let stop: Vec<String> = f
+                                .get("stopwords")
+                                .and_then(|w| w.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let kept: Vec<Value> = tokens
+                                .iter()
+                                .filter(|t| {
+                                    let text = t.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                                    !stop.iter().any(|w| w == text)
+                                })
+                                .cloned()
+                                .collect();
+                            json!({"name": name, "tokens": kept})
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({"custom_analyzer": true, "tokenizer": stage, "tokenfilters": filters})
+        } else {
+            json!({"custom_analyzer": false, "analyzer": stage})
+        };
+        return respond(&p, json!({"detail": detail}));
+    }
+
     respond(&p, json!({"tokens": tokens}))
 }
