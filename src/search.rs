@@ -3245,6 +3245,22 @@ pub fn run(
                         })
                         .collect();
                     format_terms_keys(&mut v, req, &types);
+                    // one index may hold a field as whole numbers and another
+                    // as fractions; the answer is one field, so the keys are
+                    // written the wider way rather than two ways at once
+                    let floating: std::collections::HashSet<String> = targets
+                        .iter()
+                        .filter_map(|n| store.get(n))
+                        .flat_map(|st| {
+                            let g = st.read();
+                            g.observed_kinds
+                                .iter()
+                                .filter(|(_, k)| **k & crate::store::KIND_F64 != 0)
+                                .map(|(f, _)| f.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    widen_number_keys(&mut v, req, &floating);
                 }
                 if weighted {
                     apply_doc_counts(&mut v);
@@ -4059,6 +4075,52 @@ fn decimal_format(pattern: &str, value: f64) -> Option<String> {
 /// An address is stored in the fixed-width form that sorts correctly and a
 /// date as text; neither is what the field was given, so the request is walked
 /// alongside the answer to find which field each set of buckets came from.
+/// Write a terms aggregation's numeric keys as fractions when any index in
+/// the search holds the field that way.
+///
+/// Two indices can disagree: one stores whole numbers, the other fractions.
+/// The buckets merge on value regardless, but a key written back as `10` where
+/// another document contributed `10.0` reports a field that has two types.
+/// Ties in a count are settled by key, which is the order that produces.
+fn widen_number_keys(
+    result: &mut Value,
+    req: &Value,
+    floating: &std::collections::HashSet<String>,
+) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+        if let Some(sub) = defo.get("aggs").or_else(|| defo.get("aggregations")) {
+            widen_number_keys(node, sub, floating);
+        }
+        let Some(terms) = defo.get("terms") else { continue };
+        let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        if !floating.contains(field) {
+            continue;
+        }
+        let Some(Value::Array(buckets)) = node.get_mut("buckets") else { continue };
+        for b in buckets.iter_mut() {
+            let Some(o) = b.as_object_mut() else { continue };
+            let widened = o.get("key").and_then(|k| k.as_i64()).map(|i| i as f64);
+            if let Some(f) = widened {
+                o.insert("key".into(), json!(f));
+            }
+        }
+        // an explicit order is the caller's, and is left alone
+        if terms.get("order").is_some() {
+            continue;
+        }
+        buckets.sort_by(|a, b| {
+            let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+            let key = |v: &Value| v.get("key").and_then(|k| k.as_f64()).unwrap_or(f64::MAX);
+            count(b).cmp(&count(a)).then(
+                key(a).partial_cmp(&key(b)).unwrap_or(Ordering::Equal),
+            )
+        });
+    }
+}
+
 fn format_terms_keys(
     result: &mut Value,
     req: &Value,
