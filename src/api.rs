@@ -6322,6 +6322,7 @@ pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
         ("attr", "shard_indexing_pressure_enabled".to_string()),
         ("value", "true".to_string()),
     ]];
+    let rows = cat_only_default(rows, &["node", "host", "ip", "attr", "value"], &p);
     cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
 }
 
@@ -6674,20 +6675,33 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 Some(t) => store.resolve(t),
                 None => store.names(),
             };
-            let mut rows: Vec<Vec<(&str, String)>> = names
-                .into_iter()
-                .filter_map(|n| store.get(&n).map(|st| (n, st)))
-                .map(|(n, st)| {
-                    let docs = st.read().reader.searcher().num_docs();
-                    vec![
-                        ("index", n), ("shard", "0".into()), ("prirep", "p".into()),
-                        ("state", "STARTED".into()), ("docs", docs.to_string()),
-                        ("store", "0b".into()), ("ip", "127.0.0.1".into()),
+            // an index is listed shard by shard, and every one of them is
+            // started here since the node holds them all
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for n in names {
+                let Some(st) = store.get(&n) else { continue };
+                let g = st.read();
+                let docs = g.reader.searcher().num_docs();
+                let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+                for shard in 0..shards {
+                    rows.push(vec![
+                        ("index", n.clone()),
+                        ("shard", shard.to_string()),
+                        ("prirep", "p".into()),
+                        ("state", "STARTED".into()),
+                        // the documents all sit in the one shard that exists
+                        ("docs", if shard == 0 { docs.to_string() } else { "0".into() }),
+                        ("store", "0b".into()),
+                        ("ip", "127.0.0.1".into()),
+                        ("id", "node-0".into()),
                         ("node", "obsearch".into()),
-                    ]
-                })
-                .collect();
+                    ]);
+                }
+            }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            let rows = cat_only_default(rows, &[
+                "index", "shard", "prirep", "state", "docs", "store", "ip", "node",
+            ], &p);
             cat_render(rows, &p)
         }
         "segments" => {
