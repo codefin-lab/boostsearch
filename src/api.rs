@@ -941,6 +941,19 @@ pub async fn mtermvectors(
             listed.into_iter().map(|id| json!({"_id": id})).collect()
         }
     };
+    // the camel-cased spellings, and the ones that moved onto the request,
+    // are no longer read from a document
+    for d in &docs {
+        for gone in ["version", "versionType", "version_type", "_version", "routing", "_routing"] {
+            if d.get(gone).is_some() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "action_request_validation_exception",
+                    format!("Validation Failed: 1: unknown field [{gone}];"),
+                );
+            }
+        }
+    }
     let mut out = Vec::new();
     for d in docs {
         let idx = d
@@ -954,11 +967,19 @@ pub async fn mtermvectors(
         });
         let Some(id) = id else { continue };
         let Some(st) = store.get(&idx) else {
+            let reason = format!("no such index [{idx}]");
+            let cause = json!({
+                "type": "index_not_found_exception", "reason": reason,
+                "index": idx, "resource.type": "index_expression",
+                "resource.id": idx, "index_uuid": "_na_",
+            });
             out.push(json!({
                 "_index": idx, "_id": id, "found": false,
                 "error": {
-                    "type": "index_not_found_exception",
-                    "reason": format!("no such index [{idx}]"), "index": idx,
+                    "type": "index_not_found_exception", "reason": reason,
+                    "index": idx, "resource.type": "index_expression",
+                    "resource.id": idx, "index_uuid": "_na_",
+                    "root_cause": [cause],
                 }
             }));
             continue;
@@ -2231,8 +2252,12 @@ pub async fn head_doc(
     let Some(st) = store.get(&index) else { return StatusCode::NOT_FOUND.into_response() };
     let g = st.read();
     // the same view a `_get` would take, so `realtime=false` says whether a
-    // search can see the document rather than whether it was written
-    if read_source_as_asked(&g, &id, &p).is_some() {
+    // search can see the document rather than whether it was written -- and
+    // the wrong routing reaches nothing, here as there
+    if read_source_as_asked(&g, &id, &p)
+        .filter(|_| routing_matches(&g, &id, &p))
+        .is_some()
+    {
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
