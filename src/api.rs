@@ -5629,7 +5629,7 @@ fn cat_named(columns: &[&str], p: &Params) -> Response {
 
 pub const CAT_INDEX_COLS: &[&str] = &[
     "health", "status", "index", "uuid", "pri", "rep", "docs.count", "docs.deleted",
-    "store.size", "pri.store.size",
+    "store.size", "pri.store.size", "creation.date", "creation.date.string",
 ];
 
 pub async fn cat_indices(
@@ -5688,21 +5688,32 @@ pub async fn cat_indices(
         if p.get("health").map(|h| h != health).unwrap_or(false) {
             continue;
         }
+        // a closed index has no shard open to count, so those columns are
+        // blank rather than zero
         let docs = g.reader.searcher().num_docs();
+        let count = |v: String| if g.closed { String::new() } else { v };
         rows.push(vec![
             ("health", health.to_string()),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
             ("index", g.name.clone()),
             ("uuid", g.uuid.clone()),
-            ("pri", "1".to_string()),
-            ("rep", "0".to_string()),
-            ("docs.count", docs.to_string()),
-            ("docs.deleted", "0".to_string()),
-            ("store.size", "0b".to_string()),
-            ("pri.store.size", "0b".to_string()),
+            // what the index was asked for, not what one node can give it
+            ("pri", g.numeric_setting("number_of_shards").unwrap_or(1).to_string()),
+            ("rep", g.numeric_setting("number_of_replicas").unwrap_or(0).to_string()),
+            ("docs.count", count(docs.to_string())),
+            ("docs.deleted", count("0".to_string())),
+            ("store.size", count("0b".to_string())),
+            ("pri.store.size", count("0b".to_string())),
+            // when the index was made, as the epoch and as text
+            ("creation.date", g.created_millis().to_string()),
+            ("creation.date.string", g.created_string()),
         ]);
     }
     rows.sort_by(|a, b| a[2].1.cmp(&b[2].1));
+    let rows = cat_only_default(rows, &[
+        "health", "status", "index", "uuid", "pri", "rep", "docs.count",
+        "docs.deleted", "store.size", "pri.store.size",
+    ], &p);
     cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
 

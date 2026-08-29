@@ -93,6 +93,24 @@ pub fn index_uuid(name: &str) -> String {
     out
 }
 
+/// Round to the nearest value a sixteen-bit float can hold.
+pub fn half_float(v: f64) -> f64 {
+    let bits = (v as f32).to_bits();
+    let sign = bits >> 31;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127;
+    // outside what the exponent can name, the value is kept as it is
+    if !(-14..=15).contains(&exp) {
+        return v;
+    }
+    let mantissa = bits & 0x007f_ffff;
+    // ten bits of mantissa, rounded to nearest with ties going even
+    let shift = 13;
+    let round = (mantissa + (1 << (shift - 1)) + ((mantissa >> shift) & 1)) >> shift;
+    let (exp, round) = if round > 0x3ff { (exp + 1, round >> 1) } else { (exp, round) };
+    let out = (sign << 31) | (((exp + 127) as u32) << 23) | (round << shift);
+    f32::from_bits(out) as f64
+}
+
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("_id", STRING | STORED | FAST);
@@ -467,6 +485,8 @@ pub struct IdxState {
     /// a stable identifier for the index itself, distinct from the id of any
     /// one commit; 22 characters, as the API reports them
     pub uuid: String,
+    /// when the index was made, in milliseconds since the epoch
+    pub created_ms: u64,
     /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
     /// false negatives), so the common "is this a new document?" question costs
     /// one hash. A hit is confirmed against the index, which only happens for
@@ -909,6 +929,24 @@ impl IdxState {
             }
         }
         out
+    }
+
+    pub fn created_millis(&self) -> u64 {
+        // a setting written by hand wins, since a restored index keeps the
+        // date it was first made
+        self.numeric_setting("creation_date").unwrap_or(self.created_ms)
+    }
+
+    /// The creation date as text, which is the other spelling `_cat` offers.
+    pub fn created_string(&self) -> String {
+        let ms = self.created_millis() as i128;
+        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+            .map(|d| format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                d.year(), d.month() as u8, d.day(), d.hour(), d.minute(), d.second(),
+                d.millisecond(),
+            ))
+            .unwrap_or_default()
     }
 
     pub fn numeric_setting(&self, key: &str) -> Option<u64> {
@@ -1368,8 +1406,14 @@ impl Store {
             let part = part.trim();
             if part.contains('*') {
                 let re = wildcard_to_regex(part);
+                // a pattern reaches an index by its own name or by any alias
+                // standing in front of it
                 for n in open_only(self.names()) {
-                    if re.is_match(&n) && !out.contains(&n) {
+                    let by_alias = self
+                        .get(&n)
+                        .map(|st| st.read().aliases.keys().any(|a| re.is_match(a)))
+                        .unwrap_or(false);
+                    if (re.is_match(&n) || by_alias) && !out.contains(&n) {
                         out.push(n);
                     }
                 }
@@ -1584,6 +1628,10 @@ impl Store {
             versions: HashMap::new(),
             routing: HashMap::new(),
             uuid: index_uuid(&name),
+            created_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             live_ids: Default::default(),
             pending: HashMap::new(),
             pending_seq: HashMap::new(),
@@ -1835,6 +1883,16 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
+            }
+            // a half_float holds sixteen bits, so the value it keeps is the
+            // nearest one that fits -- 184.4 becomes 184.375, and a search
+            // paging past that number has to see the same figure the index does
+            if ty == Some("half_float") {
+                if let Some(n) = leaf.as_f64() {
+                    if let Some(q) = serde_json::Number::from_f64(half_float(n)) {
+                        *leaf = Value::Number(q);
+                    }
+                }
             }
         }
     }

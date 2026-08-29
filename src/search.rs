@@ -572,10 +572,16 @@ struct Cand {
 }
 
 /// Is this sort key a date field, whose values need rescaling on the way out?
+/// Does this sort key need rescaling on the way out?
+///
+/// The column counts nanoseconds either way, but a `date` reports
+/// milliseconds and a `date_nanos` reports the nanoseconds themselves -- that
+/// resolution is the whole reason for the second type.
 fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
-    targets.iter().filter_map(|n| store.get(n)).any(|st| {
-        matches!(st.read().mapping.type_of(field), Some("date") | Some("date_nanos"))
-    })
+    targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().mapping.type_of(field) == Some("date"))
 }
 
 /// Read one `search_after` element back into the value the sort produced.
