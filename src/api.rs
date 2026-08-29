@@ -2916,6 +2916,140 @@ pub async fn cluster_health(
     }))
 }
 
+/// `_recovery` -- how each shard came to be where it is.
+///
+/// A shard here is created empty and is immediately done, so every recovery
+/// is an EMPTY_STORE that finished, with nothing copied from anywhere.
+pub async fn indices_recovery(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    if !expr.is_empty() && !ignore_unavailable(&p) {
+        for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
+            if store.resolve(part).is_empty() {
+                return no_such_index(part);
+            }
+        }
+    }
+    let mut out = serde_json::Map::new();
+    for n in names {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        out.insert(g.name.clone(), json!({"shards": [{
+            "id": 0,
+            "type": "EMPTY_STORE",
+            "stage": "DONE",
+            "primary": true,
+            "start_time": "2020-01-01T00:00:00.000Z",
+            "start_time_in_millis": 1_577_836_800_000u64,
+            "stop_time": "2020-01-01T00:00:00.000Z",
+            "stop_time_in_millis": 1_577_836_800_000u64,
+            "total_time": "0s",
+            "total_time_in_millis": 0,
+            "source": {},
+            "target": {
+                "id": "node-0", "host": "127.0.0.1", "transport_address": "127.0.0.1:9300",
+                "ip": "127.0.0.1", "name": "obsearch",
+            },
+            "index": {
+                "size": {
+                    "total": "0b", "total_in_bytes": 0,
+                    "reused": "0b", "reused_in_bytes": 0,
+                    "recovered": "0b", "recovered_in_bytes": 0,
+                    "percent": "0.0%",
+                },
+                "files": {"total": 0, "reused": 0, "recovered": 0, "percent": "0.0%"},
+                "total_time": "0s", "total_time_in_millis": 0,
+                "source_throttle_time": "0s", "source_throttle_time_in_millis": 0,
+                "target_throttle_time": "0s", "target_throttle_time_in_millis": 0,
+            },
+            "translog": {
+                "recovered": 0, "total": 0, "percent": "100.0%",
+                "total_on_start": 0, "total_time": "0s", "total_time_in_millis": 0,
+            },
+            "verify_index": {
+                "check_index_time": "0s", "check_index_time_in_millis": 0,
+                "total_time": "0s", "total_time_in_millis": 0,
+            },
+        }]}));
+    }
+    respond(&p, Value::Object(out))
+}
+
+/// `_upgrade` -- there is one segment format and it is the current one, so an
+/// upgrade has nothing to do but say which it is.
+pub async fn indices_upgrade(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    if !expr.is_empty() && !ignore_unavailable(&p) {
+        for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
+            if store.resolve(part).is_empty() {
+                return no_such_index(part);
+            }
+        }
+    }
+    let mut upgraded = serde_json::Map::new();
+    for n in names {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        upgraded.insert(g.name.clone(), json!({
+            "upgrade_version": "3.0.0",
+            "oldest_lucene_segment_version": "9.0.0",
+        }));
+    }
+    respond(&p, json!({"_shards": shards(), "upgraded_indices": Value::Object(upgraded)}))
+}
+
+/// `_cluster/allocation/explain` -- why a shard sits where it does.
+///
+/// Every shard is started on the one node, so the only honest explanation is
+/// that it is where it belongs and has nowhere else to go.
+pub async fn allocation_explain(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let Some(index) = body.get("index").and_then(|v| v.as_str()) else {
+        // without a shard named, the question is which unassigned shard needs
+        // explaining -- and there are none
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "unable to find any unassigned shards to explain [ClusterAllocationExplainRequest[useAnyUnassignedShard=true]]",
+        );
+    };
+    if store.resolve(index).is_empty() {
+        return no_such_index(index);
+    }
+    let shard = body.get("shard").and_then(|v| v.as_i64()).unwrap_or(0);
+    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(true);
+    respond(&p, json!({
+        "index": index,
+        "shard": shard,
+        "primary": primary,
+        "current_state": "started",
+        "current_node": {
+            "id": "node-0", "name": "obsearch",
+            "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
+        },
+        "can_remain_on_current_node": "yes",
+        "can_rebalance_cluster": "yes",
+        "can_rebalance_to_other_node": "no",
+        "rebalance_explanation":
+            "cannot rebalance as no target node exists that can both allocate this shard \
+             and improve the cluster balance",
+        "node_allocation_decisions": [],
+    }))
+}
+
 /// `_cluster/voting_config_exclusions` -- nodes kept out of the vote that
 /// elects a cluster manager.
 ///

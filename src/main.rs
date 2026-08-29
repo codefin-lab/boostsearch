@@ -66,6 +66,14 @@ fn app(store: Store) -> Router {
             "/_cluster/voting_config_exclusions",
             post(api::post_voting_config_exclusions).delete(api::delete_voting_config_exclusions),
         )
+        .route("/_recovery", get(api::indices_recovery))
+        .route("/{index}/_recovery", get(api::indices_recovery))
+        .route("/_upgrade", post(api::indices_upgrade).get(api::indices_upgrade))
+        .route("/{index}/_upgrade", post(api::indices_upgrade).get(api::indices_upgrade))
+        .route(
+            "/_cluster/allocation/explain",
+            post(api::allocation_explain).get(api::allocation_explain),
+        )
         .route("/_cluster/state", get(api::cluster_state))
         .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
@@ -100,7 +108,6 @@ fn app(store: Store) -> Router {
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::acknowledged))
-        .route("/_cluster/allocation/explain", get(api::acknowledged).post(api::acknowledged))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
         // --- index housekeeping ---
         .route("/_cat/segments", get(api::cat_segments))
@@ -111,10 +118,6 @@ fn app(store: Store) -> Router {
         .route("/{index}/_flush", post(api::flush).get(api::flush))
         .route("/_cache/clear", post(api::shards_ok))
         .route("/{index}/_cache/clear", post(api::shards_ok))
-        .route("/_upgrade", post(api::shards_ok).get(api::shards_ok))
-        .route("/{index}/_upgrade", post(api::shards_ok).get(api::shards_ok))
-        .route("/_recovery", get(api::acknowledged))
-        .route("/{index}/_recovery", get(api::acknowledged))
         .route("/_search_shards", get(api::search_shards).post(api::search_shards))
         .route("/{index}/_search_shards", get(api::search_shards).post(api::search_shards))
         .route("/_validate/query", get(api::validate_query).post(api::validate_query))
