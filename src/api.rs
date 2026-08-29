@@ -205,6 +205,24 @@ pub async fn resize_index(
     let num = |k: &str| {
         setting(k).and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
     };
+    // a target that cannot be written to would be created and then be
+    // unusable, so those blocks are refused on the way in rather than left to
+    // fail the copy
+    for blocked in ["blocks.read_only", "blocks.metadata", "blocks.read_only_allow_delete"] {
+        let set = setting(blocked)
+            .map(|v| v == json!(true) || v == json!("true"))
+            .unwrap_or(false);
+        if set {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                format!(
+                    "Validation Failed: 1: illegal value can not be set [index.{blocked}] on \
+                     the target index;"
+                ),
+            );
+        }
+    }
     let from = src.read().numeric_setting("number_of_shards").unwrap_or(1) as i64;
     if let Some(to) = num("number_of_shards") {
         // a split has to multiply the shard count, a shrink to divide it
@@ -255,6 +273,19 @@ pub async fn resize_index(
     // landing would not be a copy of anything in particular
     {
         let g = src.read();
+        // a read-only source cannot be resized at all: the operation has to
+        // write to it, not only read from it. The request may lift the block
+        // as part of the same call, which is how a caller unwinds one.
+        let lifted = matches!(setting("blocks.read_only"), Some(Value::Null))
+            || setting("blocks.read_only").map(|v| v == json!(false) || v == json!("false"))
+                .unwrap_or(false);
+        if !lifted && g.setting("blocks.read_only").as_deref() == Some("true") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("index [{source}] blocked by: [FORBIDDEN/5/index read-only (api)];"),
+            );
+        }
         if g.setting("blocks.write").as_deref() != Some("true") {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -643,6 +674,10 @@ pub async fn shard_stores(
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if names.is_empty() && !allow_none {
+        return no_such_index(if expr.is_empty() { "_all" } else { &expr });
+    }
     // by default only the shards that are missing a copy are listed, and none
     // here ever are
     let status: Vec<&str> = p
@@ -1788,6 +1823,16 @@ pub fn write_doc_versioned(
                  [{id}].",
                 id.len()
             ),
+        ));
+    }
+    // a create says the document must not be there, which is a version rule
+    // of its own; naming another one asks for two things at once
+    if op_type == "create" && forced.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: create operations do not support \
+             versioning. use index instead;",
         ));
     }
     let existed = exists_doc(st, id);
@@ -4188,6 +4233,20 @@ pub async fn explain(
         Ok(b) => b,
         Err(r) => return r,
     };
+    // a body that holds something other than a query is not asking about one
+    if body.as_object().map(|o| !o.is_empty()).unwrap_or(false)
+        && body.get("query").is_none()
+    {
+        let first = body
+            .as_object()
+            .and_then(|o| o.keys().next().cloned())
+            .unwrap_or_default();
+        return err(
+            StatusCode::BAD_REQUEST,
+            "parsing_exception",
+            format!("request does not support [{first}]"),
+        );
+    }
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let (name, src) = {
         let g = st.read();
@@ -4575,15 +4634,24 @@ pub async fn allocation_explain(
     body: String,
 ) -> Response {
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    let Some(index) = body.get("index").and_then(|v| v.as_str()) else {
-        // without a shard named, the question is which unassigned shard needs
-        // explaining -- and there are none
+    // without a shard named, the question is which unassigned shard needs
+    // explaining: an index asking for more replicas than there are nodes has
+    // some, and otherwise there are none to explain
+    let unassigned = store.names().into_iter().find(|n| {
+        store
+            .get(n)
+            .map(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0)
+            .unwrap_or(false)
+    });
+    let named = body.get("index").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let Some(index) = named.or(unassigned) else {
         return err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
             "unable to find any unassigned shards to explain [ClusterAllocationExplainRequest[useAnyUnassignedShard=true]]",
         );
     };
+    let index = index.as_str();
     if store.resolve(index).is_empty() {
         return no_such_index(index);
     }
