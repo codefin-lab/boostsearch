@@ -3897,6 +3897,30 @@ pub async fn get_template(
             }),
         };
         if hit {
+            // a template reports its settings the way an index does: nested
+            // under `index`, values as text
+            let mut v = v;
+            if let Some(o) = v.as_object_mut() {
+                o.remove("__composable");
+                if let Some(set) = o.get("settings").cloned() {
+                    let nested = template_settings(&set);
+                    let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
+                    o.insert("settings".into(), if flat {
+                        let mut m = serde_json::Map::new();
+                        flatten_cluster_settings(&nested, "", &mut m);
+                        Value::Object(m)
+                    } else {
+                        nested
+                    });
+                }
+                if let Some(Value::Object(aliases)) = o.get("aliases").cloned() {
+                    let expanded: serde_json::Map<String, Value> = aliases
+                        .into_iter()
+                        .map(|(a, def)| (a, crate::store::normalize_alias(&def)))
+                        .collect();
+                    o.insert("aliases".into(), Value::Object(expanded));
+                }
+            }
             out.insert(k, v);
         }
     }
