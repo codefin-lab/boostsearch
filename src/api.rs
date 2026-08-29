@@ -70,6 +70,23 @@ fn shards() -> Value {
     json!({"total": 2, "successful": 1, "failed": 0})
 }
 
+/// A shard tally over a set of indices: every shard they declare, all of them
+/// on the one node and so all of them successful.
+fn shards_over(store: &Store, names: &[String]) -> Value {
+    let total: u64 = names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().numeric_setting("number_of_shards").unwrap_or(1).max(1))
+        .sum();
+    json!({"total": total, "successful": total, "failed": 0})
+}
+
+/// The shards of one index, which is what a write to it reports.
+fn shards_of(st: &IdxState) -> Value {
+    let n = st.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+    json!({"total": n, "successful": n, "failed": 0})
+}
+
 fn flag(p: &Params, key: &str) -> bool {
     matches!(p.get(key).map(|s| s.as_str()), Some("true") | Some("") | Some("wait_for"))
 }
@@ -474,6 +491,138 @@ pub async fn rollover(
     }))
 }
 
+/// `_cluster/stats` -- the cluster in one page.
+pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let names = store.names();
+    let mut docs = 0u64;
+    for n in &names {
+        if let Some(st) = store.get(n) {
+            docs += st.read().reader.searcher().num_docs() as u64;
+        }
+    }
+    let replicated = names.iter().filter_map(|n| store.get(n)).any(|st| {
+        st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0
+    });
+    respond(&p, json!({
+        "_nodes": {"total": 1, "successful": 1, "failed": 0},
+        "cluster_name": "obsearch",
+        "cluster_uuid": "_na_",
+        "timestamp": 1_577_836_800_000u64,
+        "status": if replicated { "yellow" } else { "green" },
+        "indices": {
+            "count": names.len(),
+            "shards": {
+                "total": names.len(), "primaries": names.len(),
+                "replication": 0.0,
+                "index": {
+                    "shards": {"min": 1, "max": 1, "avg": 1.0},
+                    "primaries": {"min": 1, "max": 1, "avg": 1.0},
+                    "replication": {"min": 0.0, "max": 0.0, "avg": 0.0},
+                },
+            },
+            "docs": {"count": docs, "deleted": 0},
+            "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+            "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
+            "query_cache": {
+                "memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
+                "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0,
+            },
+            "completion": {"size_in_bytes": 0},
+            "segments": {
+                "count": 0, "memory_in_bytes": 0, "terms_memory_in_bytes": 0,
+                "stored_fields_memory_in_bytes": 0, "term_vectors_memory_in_bytes": 0,
+                "norms_memory_in_bytes": 0, "points_memory_in_bytes": 0,
+                "doc_values_memory_in_bytes": 0, "index_writer_memory_in_bytes": 0,
+                "version_map_memory_in_bytes": 0, "fixed_bit_set_memory_in_bytes": 0,
+                "max_unsafe_auto_id_timestamp": -1, "file_sizes": {},
+            },
+            "mappings": {"field_types": []},
+            "analysis": {"char_filter_types": [], "tokenizer_types": [],
+                         "filter_types": [], "analyzer_types": [],
+                         "built_in_char_filters": [], "built_in_tokenizers": [],
+                         "built_in_filters": [], "built_in_analyzers": []},
+        },
+        "nodes": {
+            "count": {"total": 1, "cluster_manager": 1, "coordinating_only": 0,
+                      "data": 1, "ingest": 1, "master": 1, "remote_cluster_client": 1,
+                      "search": 0, "warm": 0},
+            "versions": ["3.0.0"],
+            "os": {
+                "available_processors": 1, "allocated_processors": 1,
+                "names": [], "pretty_names": [], "roles": [],
+                "mem": {
+                    "total_in_bytes": 1_073_741_824u64,
+                    "free_in_bytes": 536_870_912u64,
+                    "used_in_bytes": 536_870_912u64,
+                    "free_percent": 50, "used_percent": 50,
+                },
+            },
+            "process": {
+                "cpu": {"percent": 0},
+                "open_file_descriptors": {"min": 0, "max": 0, "avg": 0},
+            },
+            "jvm": {
+                "max_uptime_in_millis": 0, "versions": [],
+                "mem": {"heap_used_in_bytes": 0, "heap_max_in_bytes": 0},
+                "threads": 1,
+            },
+            "fs": {
+                "total_in_bytes": 2_147_483_648u64,
+                "free_in_bytes": 1_073_741_824u64,
+                "available_in_bytes": 1_073_741_824u64,
+            },
+            "plugins": [],
+            "network_types": {
+                "transport_types": {"transport": 1},
+                "http_types": {"http": 1},
+            },
+            "discovery_types": {"single-node": 1},
+            "packaging_types": [],
+            "ingest": {"number_of_pipelines": 0, "processor_stats": {}},
+        },
+    }))
+}
+
+/// `_shard_stores` -- where each shard's copies are.
+///
+/// One node holds one copy of each shard, and it is the primary.
+pub async fn shard_stores(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    // by default only the shards that are missing a copy are listed, and none
+    // here ever are
+    let status: Vec<&str> = p
+        .get("status")
+        .map(|v| v.split(',').map(|s| s.trim()).collect())
+        .unwrap_or_else(|| vec!["yellow", "red"]);
+    let listed = status.iter().any(|s| matches!(*s, "green" | "all"));
+    let mut indices = serde_json::Map::new();
+    if listed {
+        for n in names {
+            let Some(st) = store.get(&n) else { continue };
+            let g = st.read();
+            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+            let mut per = serde_json::Map::new();
+            for i in 0..shards {
+                per.insert(i.to_string(), json!({"stores": [{
+                    "node-0": {
+                        "name": "obsearch", "ephemeral_id": "_na_",
+                        "transport_address": "127.0.0.1:9300", "attributes": {},
+                    },
+                    "allocation_id": "_na_",
+                    "allocation": "primary",
+                }]}));
+            }
+            indices.insert(g.name.clone(), json!({"shards": Value::Object(per)}));
+        }
+    }
+    respond(&p, json!({"indices": Value::Object(indices)}))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -571,25 +720,29 @@ pub async fn flush(
 }
 
 pub async fn refresh_all(State(store): State<Store>) -> Response {
-    for n in store.names() {
-        if let Some(st) = store.get(&n) {
+    let names = store.names();
+    for n in &names {
+        if let Some(st) = store.get(n) {
             let _ = st.write().refresh();
         }
     }
-    axum::Json(json!({"_shards": shards()})).into_response()
+    axum::Json(json!({"_shards": shards_over(&store, &names)})).into_response()
 }
 
 pub async fn refresh_index(State(store): State<Store>, Path(index): Path<String>) -> Response {
     let targets = store.resolve(&index);
-    if targets.is_empty() {
+    // a pattern that reaches nothing has nothing to refresh, which is not an
+    // error; a name given outright must be there
+    if targets.is_empty() && !index.contains('*') && index != "_all" && !index.is_empty() {
         return no_such_index(&index);
     }
+    let tally = shards_over(&store, &targets);
     for n in targets {
         if let Some(st) = store.get(&n) {
             let _ = st.write().refresh();
         }
     }
-    axum::Json(json!({"_shards": shards()})).into_response()
+    axum::Json(json!({"_shards": tally})).into_response()
 }
 
 // ------------------------------------------------------------------ mappings
@@ -938,7 +1091,7 @@ pub fn write_doc_raw(
         "_id": id,
         "_version": version,
         "result": if existed { "updated" } else { "created" },
-        "_shards": shards(),
+        "_shards": shards_of(st),
         "_seq_no": seq,
         "_primary_term": 1,
     });
@@ -960,7 +1113,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
         "_id": id,
         "_version": version,
         "result": if existed { "deleted" } else { "not_found" },
-        "_shards": shards(),
+        "_shards": shards_of(st),
         "_seq_no": seq,
         "_primary_term": 1,
     });
@@ -3778,8 +3931,17 @@ pub async fn cluster_settings_put(
         body[scope] = Value::Object(flat);
     }
     store.merge_cluster_settings(&body);
-    let echo = |scope: &str| {
-        body.get(scope).map(nest_settings).unwrap_or_else(|| json!({}))
+    // the answer is shaped the way the request asked to see settings
+    let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
+    let echo = |scope: &str| match body.get(scope) {
+        Some(v) if flat => {
+            // a key set to null was a removal, and is not in the result
+            let mut o = v.as_object().cloned().unwrap_or_default();
+            o.retain(|_, val| !val.is_null());
+            Value::Object(o)
+        }
+        Some(v) => nest_settings(v),
+        None => json!({}),
     };
     respond(&p, json!({
         "acknowledged": true,
