@@ -3987,7 +3987,12 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
         "fielddata": fielddata_stat,
         "completion": completion_stat,
-        "segments": {"count": searcher.segment_readers().len(), "memory_in_bytes": 0,
+        // a closed index has nothing loaded, so it reports no segments unless
+        // the caller asks for the ones sitting unloaded on disk
+        "segments": {"count": if st.closed
+                        && !p.get("include_unloaded_segments").map(|v| v == "true").unwrap_or(false)
+                    { 0 } else { searcher.segment_readers().len() },
+                     "memory_in_bytes": 0,
                      "terms_memory_in_bytes": 0, "stored_fields_memory_in_bytes": 0,
                      "term_vectors_memory_in_bytes": 0, "norms_memory_in_bytes": 0,
                      "points_memory_in_bytes": 0, "doc_values_memory_in_bytes": 0,
@@ -4994,11 +4999,33 @@ pub async fn cluster_settings_put(
 
 // -------------------------------------------------------------------- aliases
 
-fn alias_view(store: &Store, index_expr: Option<&str>, name_expr: Option<&str>) -> Value {
+fn alias_view(
+    store: &Store,
+    index_expr: Option<&str>,
+    name_expr: Option<&str>,
+    states: Option<&str>,
+) -> Value {
     let targets = match index_expr {
         Some(e) => store.resolve(e),
         None => store.names(),
     };
+    // `expand_wildcards` says which states to include; without it, both
+    let (want_open, want_closed) = match states {
+        None => (true, true),
+        Some(v) => (
+            v.split(',').any(|w| matches!(w.trim(), "open" | "all")),
+            v.split(',').any(|w| matches!(w.trim(), "closed" | "all")),
+        ),
+    };
+    let targets: Vec<String> = targets
+        .into_iter()
+        .filter(|n| {
+            store
+                .get(n)
+                .map(|st| if st.read().closed { want_closed } else { want_open })
+                .unwrap_or(false)
+        })
+        .collect();
     let mut out = serde_json::Map::new();
     for n in targets {
         let Some(st) = store.get(&n) else { continue };
@@ -5127,7 +5154,7 @@ pub async fn index_alias_list(
     if store.resolve(&index).is_empty() {
         return no_such_index(&index);
     }
-    respond(&p, alias_view(&store, Some(&index), None))
+    respond(&p, alias_view(&store, Some(&index), None, p.get("expand_wildcards").map(|v| v.as_str())))
 }
 
 pub async fn get_alias_scoped(
@@ -5141,7 +5168,7 @@ pub async fn get_alias_scoped(
         1 => (None, Some(parts[0].clone())),
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
-    let view = alias_view(&store, idx.as_deref(), name.as_deref());
+    let view = alias_view(&store, idx.as_deref(), name.as_deref(), p.get("expand_wildcards").map(|v| v.as_str()));
     let missing = alias_names_missing(&store, idx.as_deref(), name.as_deref());
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
@@ -5154,7 +5181,7 @@ pub async fn index_alias_get(
     Path((index, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    let view = alias_view(&store, Some(&index), Some(&name));
+    let view = alias_view(&store, Some(&index), Some(&name), p.get("expand_wildcards").map(|v| v.as_str()));
     let missing = alias_names_missing(&store, Some(&index), Some(&name));
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
@@ -5166,7 +5193,7 @@ pub async fn index_alias_head(
     State(store): State<Store>,
     Path((index, name)): Path<(String, String)>,
 ) -> Response {
-    let view = alias_view(&store, Some(&index), Some(&name));
+    let view = alias_view(&store, Some(&index), Some(&name), None);
     let any = view
         .as_object()
         .map(|o| {
@@ -5188,7 +5215,7 @@ pub async fn exists_alias(
         1 => (None, Some(parts[0].clone())),
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
-    let view = alias_view(&store, idx.as_deref(), name.as_deref());
+    let view = alias_view(&store, idx.as_deref(), name.as_deref(), None);
     let any = view.as_object().map(|o| {
         o.values().any(|v| {
             v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
@@ -5522,6 +5549,17 @@ pub async fn put_template(
             "Validation Failed: 1: index patterns are missing;",
         );
     }
+    // `create` says this is a new template, so one already there is not to be
+    // written over
+    if p.get("create").map(|v| v != "false").unwrap_or(false)
+        && store.get_templates().contains_key(&name)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("index_template [{name}] already exists"),
+        );
+    }
     // one pattern may be written without its brackets; a template always
     // reports a list, however few patterns it holds
     if let Some(Value::String(one)) = body.get("index_patterns").cloned() {
@@ -5553,6 +5591,8 @@ pub async fn get_template(
             let mut v = v;
             if let Some(o) = v.as_object_mut() {
                 o.remove("__composable");
+                o.entry("mappings".to_string()).or_insert_with(|| json!({}));
+                o.entry("aliases".to_string()).or_insert_with(|| json!({}));
                 if let Some(set) = o.get("settings").cloned() {
                     let nested = template_settings(&set);
                     let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
@@ -5694,12 +5734,20 @@ pub async fn put_settings(
     }
     // a settings body may arrive wrapped in `index` or flat
     let patch = body.get("index").cloned().unwrap_or_else(|| body.clone());
+    // `preserve_existing` says to fill in only what is not already set
+    let preserve = p.get("preserve_existing").map(|v| v != "false").unwrap_or(false);
     for n in targets {
         let Some(st) = store.get(&n) else { continue };
         let mut g = st.write();
         let mut settings = g.settings.clone();
         if !settings.is_object() {
             settings = json!({});
+        }
+        let mut patch = patch.clone();
+        if preserve {
+            if let Some(o) = patch.as_object_mut() {
+                o.retain(|k, _| g.setting(k).is_none());
+            }
         }
         let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
         crate::store::deep_merge(slot, &patch);
@@ -6757,6 +6805,15 @@ pub async fn put_index_template(
             .map(|(a, def)| (a, crate::store::normalize_alias(&def)))
             .collect();
         kept["template"]["aliases"] = Value::Object(expanded);
+    }
+    if p.get("create").map(|v| v != "false").unwrap_or(false)
+        && store.get_templates().contains_key(&name)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("index_template [{name}] already exists"),
+        );
     }
     flat["__composable"] = kept;
     store.put_template(&name, flat);
