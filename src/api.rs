@@ -4217,9 +4217,10 @@ pub async fn indices_recovery(
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        let existing = g.reader.searcher().num_docs() > 0 || g.closed;
         out.insert(g.name.clone(), json!({"shards": [{
             "id": 0,
-            "type": "EMPTY_STORE",
+            "type": if existing { "EXISTING_STORE" } else { "EMPTY_STORE" },
             "stage": "DONE",
             "primary": true,
             "start_time": "2020-01-01T00:00:00.000Z",
@@ -4240,7 +4241,10 @@ pub async fn indices_recovery(
                     "recovered": "0b", "recovered_in_bytes": 0,
                     "percent": "0.0%",
                 },
-                "files": {"total": 0, "reused": 0, "recovered": 0, "percent": "0.0%"},
+                "files": {
+                    "total": 0, "reused": 0, "recovered": 0, "percent": "0.0%",
+                    "details": [],
+                },
                 "total_time": "0s", "total_time_in_millis": 0,
                 "source_throttle_time": "0s", "source_throttle_time_in_millis": 0,
                 "target_throttle_time": "0s", "target_throttle_time_in_millis": 0,
@@ -4274,6 +4278,7 @@ pub async fn indices_upgrade(
             }
         }
     }
+    let tally = shards_over(&store, &names);
     let mut upgraded = serde_json::Map::new();
     for n in names {
         let Some(st) = store.get(&n) else { continue };
@@ -4283,7 +4288,7 @@ pub async fn indices_upgrade(
             "oldest_lucene_segment_version": "9.0.0",
         }));
     }
-    respond(&p, json!({"_shards": shards(), "upgraded_indices": Value::Object(upgraded)}))
+    respond(&p, json!({"_shards": tally, "upgraded_indices": Value::Object(upgraded)}))
 }
 
 /// `_cluster/allocation/explain` -- why a shard sits where it does.
@@ -6544,14 +6549,41 @@ pub async fn validate_query(
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    let probe = json!({"query": body.get("query").cloned().unwrap_or(json!({"match_all": {}})), "size": 0});
+    let shards = json!({"total": 1, "successful": 1, "failed": 0});
+    // a body that is not empty and does not name a query is not a query at
+    // all, whatever else it contains
+    let Some(query) = body.get("query").cloned() else {
+        if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            return respond(&p, json!({"_shards": shards, "valid": true}));
+        }
+        return respond(&p, json!({"_shards": shards, "valid": false}));
+    };
+    let probe = json!({"query": query, "size": 0});
+    // building the query against one of the targets says whether it can be
+    // read at all, and `explain` asks to be told why not
+    let sample = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    if let Some(st) = sample.first().and_then(|n| store.get(n)) {
+        let g = st.read();
+        let ctx = crate::query::Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+        };
+        if let Err(e) = crate::query::build(&ctx, probe.get("query").unwrap()) {
+            let mut out = json!({"_shards": shards, "valid": false});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                out["error"] = json!(e.to_string());
+            }
+            return respond(&p, out);
+        }
+    }
     match crate::search::run(&store, &expr, &probe, &Params::new()) {
-        Ok(_) => respond(&p, json!({
-            "_shards": {"total": 1, "successful": 1, "failed": 0}, "valid": true
-        })),
-        Err(_) => respond(&p, json!({
-            "_shards": {"total": 1, "successful": 1, "failed": 0}, "valid": false
-        })),
+        Ok(_) => respond(&p, json!({"_shards": shards, "valid": true})),
+        Err(_) => respond(&p, json!({"_shards": shards, "valid": false})),
     }
 }
 

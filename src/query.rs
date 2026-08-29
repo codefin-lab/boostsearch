@@ -603,7 +603,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let subs: Result<Vec<_>> = qs.iter().map(|s| build(ctx, s)).collect();
             Box::new(tantivy::query::DisjunctionMaxQuery::new(subs?))
         }
-        other => return Err(anyhow!("unsupported query type [{other}]")),
+        other => return Err(anyhow!("unknown query [{other}]")),
     };
 
     let boost = q
