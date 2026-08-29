@@ -4726,6 +4726,18 @@ fn cat_column_matches(column: &str, asked: &str) -> bool {
     if tail == asked {
         return true;
     }
+    // the short names `_cat` accepts for columns whose own name is nothing
+    // like them
+    const ALIASES: &[(&str, &str)] = &[
+        ("diskAvail", "disk"),
+        ("diskAvail", "d"),
+        ("diskTotal", "dt"),
+        ("diskUsed", "du"),
+        ("diskUsedPercent", "dup"),
+    ];
+    if ALIASES.iter().any(|(col, short)| *col == column && *short == asked) {
+        return true;
+    }
     let initials: String = column.split('.').filter_map(|p| p.chars().next()).collect();
     initials == asked || column.starts_with(asked) && asked.len() >= 1 && column.len() > asked.len()
 }
@@ -5125,12 +5137,28 @@ pub async fn cat_count(
                         ("count", total.to_string())]], &p)
 }
 
-pub async fn cat_health(Query(p): Query<Params>) -> Response {
-    cat_render(vec![vec![
+pub const CAT_HEALTH_COLS: &[&str] = &[
+    "epoch", "timestamp", "cluster", "status", "node.total", "node.data",
+    "discovered_master", "shards", "pri", "relo", "init", "unassign",
+    "pending_tasks", "max_task_wait_time", "active_shards_percent",
+];
+
+pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let n = store.names().len().to_string();
+    let mut row: Vec<(&str, String)> = vec![
         ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
         ("cluster", "obsearch".into()), ("status", "green".into()),
         ("node.total", "1".into()), ("node.data", "1".into()),
-    ]], &p)
+        ("discovered_master", "true".into()),
+        ("shards", n.clone()), ("pri", n), ("relo", "0".into()), ("init", "0".into()),
+        ("unassign", "0".into()), ("pending_tasks", "0".into()),
+        ("max_task_wait_time", "-".into()), ("active_shards_percent", "100.0%".into()),
+    ];
+    // `ts=false` drops the two time columns, leaving the cluster's own state
+    if p.get("ts").map(|v| v == "false").unwrap_or(false) {
+        row.retain(|(k, _)| *k != "epoch" && *k != "timestamp");
+    }
+    cat_render_cols(CAT_HEALTH_COLS, vec![row], &p)
 }
 
 // ------------------------------------------------------------ generic cat API
@@ -5159,15 +5187,40 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "indices" => cat_indices(State(store), None, Query(p)).await,
         "aliases" => cat_aliases(State(store), None, Query(p)).await,
         "count" => cat_count(State(store), None, Query(p)).await,
-        "health" => cat_health(Query(p)).await,
+        "health" => cat_health(State(store), Query(p)).await,
         "master" | "cluster_manager" => cat_render(
             vec![vec![("id", "node-0".into()), ("host", "127.0.0.1".into()),
                       ("ip", "127.0.0.1".into()), ("node", "obsearch".into())]], &p),
-        "nodes" => cat_render(
-            vec![vec![("ip", "127.0.0.1".into()), ("heap.percent", "0".into()),
-                      ("ram.percent", "0".into()), ("cpu", "0".into()),
-                      ("node.role", "dimr".into()), ("cluster_manager", "*".into()),
-                      ("name", "obsearch".into())]], &p),
+        "nodes" => {
+            let row: Vec<(&str, String)> = vec![
+                // `full_id` asks for the whole node identifier rather than
+                // the short form a table shows by default
+                ("id", if p.get("full_id").map(|v| v != "false").unwrap_or(false) {
+                    "node-0".to_string()
+                } else {
+                    "node".to_string()
+                }),
+                ("ip", "127.0.0.1".into()), ("heap.percent", "0".into()),
+                ("heap.current", "0b".into()), ("heap.max", "0b".into()),
+                ("ram.percent", "0".into()), ("cpu", "0".into()),
+                ("load_1m", "0.00".into()), ("load_5m", "0.00".into()),
+                ("load_15m", "0.00".into()),
+                ("node.role", "dimr".into()), ("node.roles", "data,ingest".into()),
+                ("cluster_manager", "*".into()), ("name", "obsearch".into()),
+                ("diskAvail", "1gb".into()), ("diskTotal", "2gb".into()),
+                ("diskUsed", "1gb".into()), ("diskUsedPercent", "50.00".into()),
+            ];
+            let rows = cat_only_default(vec![row], &[
+                "ip", "heap.percent", "ram.percent", "cpu", "load_1m", "load_5m",
+                "load_15m", "node.role", "node.roles", "cluster_manager", "name",
+            ], &p);
+            cat_render_cols(&[
+                "id", "ip", "heap.percent", "heap.current", "heap.max", "ram.percent",
+                "cpu", "load_1m", "load_5m", "load_15m", "node.role", "node.roles",
+                "cluster_manager", "name", "diskAvail", "diskTotal", "diskUsed",
+                "diskUsedPercent",
+            ], rows, &p)
+        }
         "templates" => {
             let mut rows: Vec<Vec<(&str, String)>> = store
                 .get_templates()
