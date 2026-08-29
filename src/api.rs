@@ -146,9 +146,30 @@ pub async fn delete_index(
     Path(index): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    // an alias names indices without being one; deleting it would have to
+    // mean deleting what it points at, which is not what was asked
+    for part in index.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if !part.contains('*') && store.is_alias(part) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "The provided expression [{part}] matches an alias, specify the \
+                     corresponding concrete indices instead."
+                ),
+            );
+        }
+    }
     let targets = store.resolve(&index);
     if targets.is_empty() && !index.contains('*') && !ignore_unavailable(&p) {
         return no_such_index(&index);
+    }
+    // a pattern that names an alias and nothing else has nothing to delete
+    if targets.is_empty() && index.contains('*') && !ignore_unavailable(&p) {
+        let names: Vec<&str> = index.split(',').map(|n| n.trim()).collect();
+        if names.iter().any(|n| n.contains('*')) && store.names().is_empty() {
+            return no_such_index(&index);
+        }
     }
     store.delete(&index);
     axum::Json(json!({"acknowledged": true})).into_response()
@@ -456,6 +477,18 @@ pub fn write_doc_raw(
     op_type: &str,
     raw: Option<String>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
+    // an id is carried in the index's terms, which caps how long it may be
+    if id.len() > 512 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Document id cannot be longer than 512 bytes but was [{}]. The invalid id was: \
+                 [{id}].",
+                id.len()
+            ),
+        ));
+    }
     let existed = exists_doc(st, id);
     if op_type == "create" && existed {
         return Err(err(
@@ -3360,11 +3393,29 @@ pub async fn delete_template(
 
 // ------------------------------------------------------- index open/close/get
 
+/// Names beginning with an underscore are reserved for the API's own
+/// endpoints, so one cannot also be an index.
+fn reserved_index_name(expr: &str) -> Option<Response> {
+    for part in expr.split(',').map(|n| n.trim()) {
+        if part.starts_with('_') && !matches!(part, "_all" | "_any") {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "invalid_index_name_exception",
+                format!("Invalid index name [{part}], must not start with '_'."),
+            ));
+        }
+    }
+    None
+}
+
 pub async fn get_index(
     State(store): State<Store>,
     Path(index): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(r) = reserved_index_name(&index) {
+        return r;
+    }
     let targets = store.resolve(&index);
     if targets.is_empty() && !index.contains('*') && index != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&index);
