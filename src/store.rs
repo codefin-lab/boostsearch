@@ -2381,6 +2381,12 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
             Ok(n) if format.is_some() => {
                 tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
             }
+            // `2019` is a year before it is a count of milliseconds, so the
+            // date reading is tried first and the epoch only where nothing
+            // else could be read from the digits
+            Ok(n) => parse_date_lenient(s).or_else(|| {
+                tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
+            })?,
             _ => parse_date_lenient(s)?,
         },
         _ => return None,

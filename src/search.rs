@@ -2829,7 +2829,7 @@ pub fn run(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
                 format!(
-                    "The same entry [{both}] cannot be both included and excluded in _source"
+                    "The same entry [{both}] cannot be both included and excluded in _source."
                 ),
             ));
         }
