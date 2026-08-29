@@ -4495,8 +4495,15 @@ fn run_date_range_agg(
             .and_then(|s| crate::store::parse_date_lenient(&s))
             .map(|d| (d.unix_timestamp_nanos() / 1_000_000) as i64)
     };
+    // a bound is named in the key the way it is reported beside it, not the
+    // way the request happened to spell it
     let shown = |v: &Option<Value>| match v {
-        Some(Value::String(s)) => s.clone(),
+        // a bound written as a date is named in the key the way it is
+        // reported beside it; one written as a number is a number
+        Some(Value::String(s)) => iso(&json!(s))
+            .and_then(|t| crate::store::parse_date_lenient(&t))
+            .map(iso_millis)
+            .unwrap_or_else(|| s.clone()),
         Some(other) if !other.is_null() => other.to_string(),
         _ => "*".to_string(),
     };

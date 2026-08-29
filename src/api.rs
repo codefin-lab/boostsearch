@@ -5807,12 +5807,23 @@ pub async fn analyze(
         .or_else(|| p.get("analyzer").map(|s| s.as_str()));
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let st = store.resolve(&expr).into_iter().next().and_then(|n| store.get(&n));
+    // a tokenizer only splits; folding case is a filter, and naming one
+    // without the other asks for the split alone
+    let tokenizer_only = analyzer.is_none()
+        && (body.get("tokenizer").is_some() || p.contains_key("tokenizer"));
     let mut tokens = Vec::new();
     let mut pos = 0usize;
     for t in &text {
-        let parts = match &st {
-            Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer),
-            None => t.split_whitespace().map(|w| w.to_lowercase()).collect(),
+        let parts = if tokenizer_only {
+            t.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_string())
+                .collect()
+        } else {
+            match &st {
+                Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer),
+                None => t.split_whitespace().map(|w| w.to_lowercase()).collect(),
+            }
         };
         for tok in parts {
             tokens.push(json!({
@@ -5821,6 +5832,23 @@ pub async fn analyze(
             }));
             pos += 1;
         }
+    }
+    // an index caps how many tokens `_analyze` may produce, so that asking it
+    // to analyse something enormous cannot take the node with it
+    let cap = st
+        .as_ref()
+        .and_then(|s| s.read().numeric_setting("analyze.max_token_count"))
+        .unwrap_or(10_000) as usize;
+    if tokens.len() > cap {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "The number of tokens produced by calling _analyze has exceeded the allowed \
+                 maximum of [{cap}]. This limit can be set by changing the \
+                 [index.analyze.max_token_count] index level setting."
+            ),
+        );
     }
     respond(&p, json!({"tokens": tokens}))
 }
