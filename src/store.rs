@@ -352,7 +352,27 @@ impl Mapping {
                         .or_insert_with(|| serde_json::json!({}));
                     if let Some(existing) = slot.as_object_mut() {
                         for (k, v) in props {
-                            existing.insert(k.clone(), v.clone());
+                            // a dotted name is an object with one field in it,
+                            // written short; the mapping holds the long form
+                            match k.split_once('.') {
+                                Some((head, rest)) => {
+                                    let parent = existing
+                                        .entry(head.to_string())
+                                        .or_insert_with(|| serde_json::json!({}));
+                                    let inner = parent
+                                        .as_object_mut()
+                                        .map(|o| {
+                                            o.entry("properties".to_string())
+                                                .or_insert_with(|| serde_json::json!({}))
+                                        });
+                                    if let Some(inner) = inner.and_then(|i| i.as_object_mut()) {
+                                        inner.insert(rest.to_string(), v.clone());
+                                    }
+                                }
+                                None => {
+                                    existing.insert(k.clone(), v.clone());
+                                }
+                            }
                         }
                     }
                 }

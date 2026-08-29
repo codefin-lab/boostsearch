@@ -3186,6 +3186,17 @@ pub async fn get_field_mapping(
                 .cloned()
                 .unwrap_or_else(|| json!({"type": kind}));
             let leaf = path_name.rsplit('.').next().unwrap_or(&path_name).to_string();
+            // `include_defaults` fills in what the field would use where it
+            // did not say, which for a text field is the default analyzer
+            let mut def = def;
+            if flag(&p, "include_defaults") {
+                if let Some(o) = def.as_object_mut() {
+                    if o.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        o.entry("analyzer".to_string())
+                            .or_insert_with(|| json!("default"));
+                    }
+                }
+            }
             mappings.insert(path_name.clone(), json!({
                 "full_name": path_name,
                 "mapping": { leaf: def }
