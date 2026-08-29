@@ -436,16 +436,34 @@ pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Respon
     }))
 }
 
-pub async fn list_tasks(Query(p): Query<Params>) -> Response {
+pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) -> Response {
+    // the header a caller tags its request with comes back on the task
+    let mut task_headers = serde_json::Map::new();
+    if let Some(v) = headers.get("x-opaque-id").and_then(|v| v.to_str().ok()) {
+        task_headers.insert("X-Opaque-Id".into(), json!(v));
+    }
     // the request asking is itself a task, which is the one every caller of
     // this endpoint sees
     let task = json!({
         "node": "node-0", "id": 1, "type": "transport",
         "action": "cluster:monitor/tasks/lists", "start_time_in_millis": 0,
         "running_time_in_nanos": 0, "cancellable": false, "headers": {},
-        "resource_stats": {"average": {}, "total": {}, "min": {}, "max": {},
-                           "thread_info": {"thread_executions": 1, "active_threads": 1}},
+        "resource_stats": {
+            "average": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},
+            "total": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},
+            "min": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},
+            "max": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},
+            "thread_info": {"thread_executions": 1, "active_threads": 1},
+        },
     });
+    // `group_by` says how to arrange them: under the node that runs them, or
+    // flat when the caller wants to walk parents instead
+    match p.get("group_by").map(|v| v.as_str()) {
+        // `none` asks for them in a plain list, `parents` keyed by their id
+        Some("none") => return respond(&p, json!({"tasks": [task]})),
+        Some("parents") => return respond(&p, json!({"tasks": {"node-0:1": task}})),
+        _ => {}
+    }
     respond(&p, json!({
         "nodes": {"node-0": {
             "name": "obsearch", "transport_address": "127.0.0.1:9300",
@@ -3599,7 +3617,8 @@ pub async fn update_doc(
         }
     };
     let mut g = st.write();
-    let existing = read_source(&g, &id);
+    // the wrong routing reaches nothing, so there is no document to update
+    let existing = read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p));
     // `if_seq_no` makes the write conditional on the document not having moved
     // since the caller read it. A document that is not there at all is a
     // different complaint, and is left to the missing-document path below.
@@ -5929,7 +5948,9 @@ pub async fn put_settings(
         let mut patch = patch.clone();
         if preserve {
             if let Some(o) = patch.as_object_mut() {
-                o.retain(|k, _| g.setting(k).is_none());
+                // a key may be written with the `index.` prefix the setting
+                // lookup adds for itself
+                o.retain(|k, _| g.setting(k.strip_prefix("index.").unwrap_or(k)).is_none());
             }
         }
         let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
