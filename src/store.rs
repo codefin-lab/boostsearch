@@ -925,6 +925,9 @@ pub struct Store {
     /// nodes excluded from the voting configuration, which this engine records
     /// and reports without having a vote to hold
     voting_exclusions: Arc<RwLock<Vec<Value>>>,
+    /// component templates: settings and mappings named once and composed
+    /// into whichever index templates ask for them
+    components: Arc<RwLock<HashMap<String, Value>>>,
 }
 
 impl Store {
@@ -942,6 +945,18 @@ impl Store {
                 }
             }
         }
+    }
+
+    pub fn put_component(&self, name: &str, body: Value) {
+        self.components.write().insert(name.to_string(), body);
+    }
+
+    pub fn get_components(&self) -> HashMap<String, Value> {
+        self.components.read().clone()
+    }
+
+    pub fn delete_component(&self, name: &str) -> bool {
+        self.components.write().remove(name).is_some()
     }
 
     pub fn add_voting_exclusions(&self, entries: Vec<Value>) {
@@ -1076,6 +1091,7 @@ impl Store {
             live_writers: Arc::new(RwLock::new(Vec::new())),
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            components: Arc::new(RwLock::new(HashMap::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1097,6 +1113,7 @@ impl Store {
             live_writers: Arc::new(RwLock::new(Vec::new())),
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            components: Arc::new(RwLock::new(HashMap::new())),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

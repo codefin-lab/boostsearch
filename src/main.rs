@@ -102,8 +102,15 @@ fn app(store: Store) -> Router {
                    .get(api::get_index_template).delete(api::delete_index_template))
         .route("/_index_template", get(api::get_index_template))
         .route("/_component_template/{name}",
-               put(api::put_index_template).get(api::get_index_template)
-                   .delete(api::delete_index_template))
+               put(api::put_component_template).get(api::get_component_template)
+                   .delete(api::delete_component_template))
+        .route("/_component_template", get(api::get_component_template))
+        .route("/_index_template/_simulate",
+               post(api::simulate_template).put(api::simulate_template))
+        .route("/_index_template/_simulate/{name}",
+               post(api::simulate_template).put(api::simulate_template))
+        .route("/_index_template/_simulate_index/{index}",
+               post(api::simulate_index_template).put(api::simulate_index_template))
         // --- nodes and cluster housekeeping ---
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
