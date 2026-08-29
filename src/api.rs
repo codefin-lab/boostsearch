@@ -2741,10 +2741,20 @@ pub async fn bulk(
                             }
                         } else {
                             errors = true;
+                            let reason = format!("[{id}]: document missing");
+                            let mut error = json!({
+                                "type": "document_missing_exception", "reason": reason,
+                            });
+                            // this one names the shard it looked in, which is
+                            // what a caller reading the trace wants to know
+                            if p.get("error_trace").map(|v| v != "false").unwrap_or(false) {
+                                error["stack_trace"] = json!(format!(
+                                    "[[{idx}][0]] DocumentMissingException[{reason}] \
+                                     at obsearch::api::bulk (src/api.rs)"
+                                ));
+                            }
                             json!({"update": {
-                                "_index": idx, "_id": id, "status": 404,
-                                "error": {"type": "document_missing_exception",
-                                          "reason": format!("[{id}]: document missing")}
+                                "_index": idx, "_id": id, "status": 404, "error": error
                             }})
                         }
                     }
@@ -3373,25 +3383,24 @@ pub async fn msearch(
             }
             Err(_) => {
                 let reason = format!("no such index [{expr}]");
-                responses.push(json!({
-                    "error": {
+                let mut error = json!({
+                    "type": "index_not_found_exception",
+                    "reason": reason,
+                    "index": expr,
+                    "resource.type": "index_or_alias",
+                    "resource.id": expr,
+                    "index_uuid": "_na_",
+                    "root_cause": [{
                         "type": "index_not_found_exception",
                         "reason": reason,
                         "index": expr,
                         "resource.type": "index_or_alias",
                         "resource.id": expr,
-                        "index_uuid": "_na_",
-                        "root_cause": [{
-                            "type": "index_not_found_exception",
-                            "reason": reason,
-                            "index": expr,
-                            "resource.type": "index_or_alias",
-                            "resource.id": expr,
-                            "index_uuid": "_na_"
-                        }]
-                    },
-                    "status": 404
-                }));
+                        "index_uuid": "_na_"
+                    }]
+                });
+                add_stack_trace(&mut error, &p, "msearch");
+                responses.push(json!({"error": error, "status": 404}));
             }
         }
     }
