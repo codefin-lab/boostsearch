@@ -400,6 +400,18 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "match_none" => Box::new(EmptyQuery),
         "term" => {
             let (field, val, opts) = field_and_value(&body)?;
+            // `_id` is a field of its own, not part of either JSON view, so a
+            // term naming it has to be built against that field directly
+            if field == "_id" {
+                let text = match &val {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Ok(Box::new(ConstScore::new(
+                    any_of(vec![Term::from_field_text(ctx.fields.id, &text)]),
+                    1.0,
+                )));
+            }
             let (f, path, view) = ctx.resolve(&field, false);
             if is_true(opts.get("case_insensitive")) {
                 if let Some(s) = val.as_str() {
@@ -432,6 +444,21 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "terms" => {
             let (field, vals) = single_key(&body)?;
+            if field == "_id" {
+                let items: Vec<Value> = match &vals {
+                    Value::Array(a) => a.clone(),
+                    other => vec![other.clone()],
+                };
+                let terms: Vec<Term> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .map(|s| Term::from_field_text(ctx.fields.id, &s))
+                    .collect();
+                return Ok(Box::new(ConstScore::new(any_of(terms), 1.0)));
+            }
             if let Some(n) = vals.as_array().map(|a| a.len()) {
                 if n > ctx.max_terms_count {
                     return Err(anyhow!(

@@ -581,6 +581,14 @@ fn maybe_refresh(st: &mut IdxState, p: &Params) {
     }
 }
 
+/// A write that was asked to refresh says so in its answer, so the caller can
+/// tell a refresh it forced from one that happened to be due anyway.
+fn note_forced_refresh(body: &mut Value, p: &Params) {
+    if flag(p, "refresh") {
+        body["forced_refresh"] = json!(true);
+    }
+}
+
 /// `require_alias` says the write is only meant for an alias, so a name that
 /// is not one is treated as absent rather than created on the spot.
 fn refuse_unless_alias(store: &Store, index: &str, p: &Params) -> Option<Response> {
@@ -662,8 +670,9 @@ async fn do_index(
     let mut g = st.write();
     let id = id.unwrap_or_else(|| g.next_auto_id());
     match write_doc(&mut g, &id, source, &op_type) {
-        Ok((body, status)) => {
+        Ok((mut body, status)) => {
             maybe_refresh(&mut g, &p);
+            note_forced_refresh(&mut body, &p);
             (status, axum::Json(body)).into_response()
         }
         Err(resp) => resp,
@@ -760,8 +769,9 @@ pub async fn delete_doc_route(
 ) -> Response {
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let mut g = st.write();
-    let (body, status) = delete_doc(&mut g, &id);
+    let (mut body, status) = delete_doc(&mut g, &id);
     maybe_refresh(&mut g, &p);
+    note_forced_refresh(&mut body, &p);
     (status, axum::Json(body)).into_response()
 }
 
@@ -1861,6 +1871,7 @@ pub async fn update_doc(
         body_out["get"] = json!({"_source": apply_source_selector(&next, sel), "found": true});
     }
     maybe_refresh(&mut g, &p);
+    note_forced_refresh(&mut body_out, &p);
     let status = if result == "created" { StatusCode::CREATED } else { StatusCode::OK };
     (status, axum::Json(body_out)).into_response()
 }
@@ -3242,6 +3253,11 @@ pub async fn put_template(
             "Validation Failed: 1: index patterns are missing;",
         );
     }
+    // one pattern may be written without its brackets; a template always
+    // reports a list, however few patterns it holds
+    if let Some(Value::String(one)) = body.get("index_patterns").cloned() {
+        body["index_patterns"] = json!([one]);
+    }
     store.put_template(&name, body);
     respond(&p, json!({"acknowledged": true}))
 }
@@ -3771,7 +3787,11 @@ pub async fn put_index_template(
         );
     }
     // the composable form nests settings/mappings/aliases under `template`
-    let mut flat = json!({"index_patterns": body["index_patterns"].clone()});
+    let patterns = match body["index_patterns"].clone() {
+        Value::String(one) => json!([one]),
+        other => other,
+    };
+    let mut flat = json!({"index_patterns": patterns});
     if let Some(order) = body.get("priority").or_else(|| body.get("order")) {
         flat["order"] = order.clone();
     }
