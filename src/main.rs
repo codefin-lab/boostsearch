@@ -74,6 +74,9 @@ fn app(store: Store) -> Router {
             "/_cluster/allocation/explain",
             post(api::allocation_explain).get(api::allocation_explain),
         )
+        .route("/{index}/_split/{target}", put(api::split_index).post(api::split_index))
+        .route("/{index}/_shrink/{target}", put(api::shrink_index).post(api::shrink_index))
+        .route("/{index}/_clone/{target}", put(api::clone_index).post(api::clone_index))
         .route("/_cluster/state", get(api::cluster_state))
         .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
@@ -116,6 +119,8 @@ fn app(store: Store) -> Router {
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::acknowledged))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
+        .route("/_tasks", get(api::list_tasks))
+        .route("/_tasks/{id}", get(api::get_task))
         // --- index housekeeping ---
         .route("/_cat/segments", get(api::cat_segments))
         .route("/_cat/segments/{index}", get(api::cat_segments))

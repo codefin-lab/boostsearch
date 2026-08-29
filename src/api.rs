@@ -141,6 +141,223 @@ pub async fn create_index(
     }
 }
 
+/// `_split`, `_shrink` and `_clone` -- make a new index out of an existing
+/// one.
+///
+/// All three mean the same thing to an engine holding one shard per index: a
+/// copy of every document under whatever settings the target is given. What
+/// differs between them is only which shard counts are allowed, and that is
+/// checked rather than acted on.
+pub async fn resize_index(
+    State(store): State<Store>,
+    Path((source, target)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+    kind: &'static str,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let Some(src) = store.get(&source) else { return no_such_index(&source) };
+    if store.exists(&target) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "resource_already_exists_exception",
+            format!("index [{target}] already exists"),
+        );
+    }
+    let setting = |k: &str| -> Option<Value> {
+        body.pointer(&format!("/settings/index/{k}"))
+            .or_else(|| body.pointer(&format!("/settings/index.{k}")))
+            .cloned()
+    };
+    let num = |k: &str| {
+        setting(k).and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    };
+    let from = src.read().numeric_setting("number_of_shards").unwrap_or(1) as i64;
+    if let Some(to) = num("number_of_shards") {
+        // a split has to multiply the shard count, a shrink to divide it
+        match kind {
+            "split" => {
+                if setting("number_of_routing_shards").is_some() {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "cannot provide index.number_of_routing_shards on resize",
+                    );
+                }
+                if to <= from || to % from != 0 {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_state_exception",
+                        format!(
+                            "the number of source shards [{from}] must be a factor of [{to}]"
+                        ),
+                    );
+                }
+            }
+            "shrink" => {
+                if to >= from || from % to != 0 {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_state_exception",
+                        format!(
+                            "the number of source shards [{from}] must be a multiple of [{to}]"
+                        ),
+                    );
+                }
+            }
+            _ => {
+                if to != from {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "the number of source shards [{from}] must be equal to [{to}]"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    // the source has to be held still first: a copy taken while writes are
+    // landing would not be a copy of anything in particular
+    {
+        let g = src.read();
+        if g.setting("blocks.write").as_deref() != Some("true") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_state_exception",
+                format!(
+                    "index {source} must be read-only to resize index. use \
+                     \"index.blocks.write=true\""
+                ),
+            );
+        }
+    }
+    // the target starts from the source's shape, with what the request says
+    // laid over it
+    let (mapping, aliases, ids, inherited) = {
+        let g = src.read();
+        let ids: Vec<String> = g.all_ids();
+        // the new index is the old one under another name, so it starts from
+        // the source's settings and takes the request's over the top
+        let mut inherited = g.effective_settings();
+        if let Some(o) = inherited.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
+            for k in ["provided_name", "uuid", "creation_date", "blocks"] {
+                o.remove(k);
+            }
+        }
+        (g.mapping.raw.clone(), body.get("aliases").cloned(), ids, inherited)
+    };
+    let mut create = json!({"mappings": mapping});
+    // settings always follow the index now; asking for them not to is asking
+    // for behaviour that no longer exists
+    if p.get("copy_settings").map(|v| v == "false").unwrap_or(false) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "parameter [copy_settings] can not be explicitly set to [false]",
+        );
+    }
+    let copy = true;
+    let mut settings = if copy { inherited } else { json!({}) };
+    if let Some(set) = body.get("settings") {
+        crate::store::deep_merge(&mut settings, set);
+    }
+    // `max_shard_size` asks for as many shards as the data needs rather than
+    // for a number; what this much data needs is one
+    if p.contains_key("max_shard_size") && num("number_of_shards").is_none() {
+        if let Some(o) = settings.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
+            o.insert("number_of_shards".into(), json!("1"));
+        }
+    }
+    if settings.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+        create["settings"] = settings;
+    }
+    if let Some(a) = aliases {
+        create["aliases"] = a;
+    }
+    if let Err(e) = store.create(&target, &create) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
+    }
+    let Some(dst) = store.get(&target) else { return no_such_index(&target) };
+    for id in ids {
+        let doc = { src.read().pending.get(&id).cloned().flatten() };
+        let source_doc = match doc {
+            Some(raw) => serde_json::from_str(&raw).ok(),
+            None => read_source(&src.read(), &id),
+        };
+        let Some(v) = source_doc else { continue };
+        let mut g = dst.write();
+        let _ = write_doc(&mut g, &id, v, "index");
+    }
+    {
+        let mut g = dst.write();
+        let _ = g.refresh();
+    }
+    // `wait_for_completion=false` asks for the work to be tracked rather than
+    // waited on; the copy is already done, so the task is a finished one
+    if p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false) {
+        return respond(&p, json!({
+            "task": format!("node-0:{kind} from [{source}] to [{target}]")
+        }));
+    }
+    respond(&p, json!({
+        "acknowledged": true, "shards_acknowledged": true, "index": target
+    }))
+}
+
+pub async fn split_index(
+    state: State<Store>,
+    path: Path<(String, String)>,
+    q: Query<Params>,
+    body: String,
+) -> Response {
+    resize_index(state, path, q, body, "split").await
+}
+
+pub async fn shrink_index(
+    state: State<Store>,
+    path: Path<(String, String)>,
+    q: Query<Params>,
+    body: String,
+) -> Response {
+    resize_index(state, path, q, body, "shrink").await
+}
+
+pub async fn clone_index(
+    state: State<Store>,
+    path: Path<(String, String)>,
+    q: Query<Params>,
+    body: String,
+) -> Response {
+    resize_index(state, path, q, body, "clone").await
+}
+
+/// `_tasks/{id}` -- what became of a task.
+///
+/// Everything this engine is asked to do finishes before the request returns,
+/// so a task named here is one that has already completed.
+pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
+    respond(&p, json!({
+        "completed": true,
+        "task": {
+            "node": "node-0", "id": 1, "type": "transport",
+            "action": "indices:admin/resize",
+            // the id carries what the task was, after the node that ran it
+            "description": id.split_once(':').map(|(_, d)| d).unwrap_or(&id),
+            "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
+        },
+        "response": {"acknowledged": true, "shards_acknowledged": true},
+    }))
+}
+
+pub async fn list_tasks(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"nodes": {"node-0": {
+        "name": "obsearch", "transport_address": "127.0.0.1:9300",
+        "host": "127.0.0.1", "ip": "127.0.0.1", "tasks": {},
+    }}}))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,

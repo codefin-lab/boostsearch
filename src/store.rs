@@ -864,7 +864,37 @@ impl IdxState {
             .filter(|v| !v.is_null())
     }
 
-    fn numeric_setting(&self, key: &str) -> Option<u64> {
+    /// Every live document's id, in the order the segments hold them.
+    pub fn all_ids(&self) -> Vec<String> {
+        let searcher = self.realtime.searcher();
+        let mut out = Vec::new();
+        for reader in searcher.segment_readers() {
+            let Ok(col) = reader.fast_fields().str("_id") else { continue };
+            let Some(col) = col else { continue };
+            let alive = reader.alive_bitset();
+            for doc in 0..reader.max_doc() {
+                if alive.map(|a| a.is_deleted(doc)).unwrap_or(false) {
+                    continue;
+                }
+                for ord in col.term_ords(doc) {
+                    let mut buf = String::new();
+                    if col.ord_to_str(ord, &mut buf).is_ok() {
+                        out.push(buf);
+                    }
+                    break;
+                }
+            }
+        }
+        // a write not yet visible to the reader is still part of the index
+        for (id, held) in &self.pending {
+            if held.is_some() && !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        out
+    }
+
+    pub fn numeric_setting(&self, key: &str) -> Option<u64> {
         match self.raw_setting(key)? {
             Value::String(s) => s.parse().ok(),
             Value::Number(n) => n.as_u64(),
