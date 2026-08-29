@@ -1340,6 +1340,19 @@ impl Store {
         self.get(name).map(|st| st.read().closed).unwrap_or(false)
     }
 
+    /// Every index carrying this alias, in name order.
+    pub fn indices_for_alias(&self, alias: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .inner
+            .read()
+            .iter()
+            .filter(|(_, st)| st.read().aliases.contains_key(alias))
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     fn resolve_with(&self, expr: &str, include_closed: bool) -> Vec<String> {
         let open_only = |names: Vec<String>| -> Vec<String> {
             if include_closed {
@@ -1364,10 +1377,21 @@ impl Store {
                 if !out.contains(&part.to_string()) {
                     out.push(part.to_string());
                 }
-            } else if let Some(st) = self.get(part) {
-                let n = st.read().name.clone();
-                if !out.contains(&n) {
-                    out.push(n);
+            } else {
+                // an alias may stand in front of several indices, and names
+                // all of them; `get` would answer with whichever it found
+                // first, which is how a search over an alias came to miss
+                // every index but one
+                let mut named = self.indices_for_alias(part);
+                if named.is_empty() {
+                    if let Some(st) = self.get(part) {
+                        named.push(st.read().name.clone());
+                    }
+                }
+                for n in open_only(named) {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
                 }
             }
         }

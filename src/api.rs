@@ -2118,6 +2118,40 @@ pub async fn bulk(
             }}));
             continue;
         }
+        // an alias standing in front of several indices has no one place to
+        // write to unless one of them was named the write index
+        if store.is_alias(&idx) {
+            let behind = store.resolve(&idx);
+            let has_write = behind.iter().any(|n| {
+                store
+                    .get(n)
+                    .map(|st| {
+                        st.read()
+                            .aliases
+                            .get(&idx)
+                            .and_then(|d| d.get("is_write_index"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            });
+            if behind.len() > 1 && !has_write {
+                errors = true;
+                items.push(json!({ op.clone(): {
+                    "_index": idx, "_id": id_opt.clone().unwrap_or_default(), "status": 400,
+                    "error": {
+                        "type": "illegal_argument_exception",
+                        "reason": format!(
+                            "no write index is defined for alias [{idx}]. The write index may \
+                             be explicitly disabled using is_write_index=false or the alias \
+                             points to multiple indices without one being designated as a \
+                             write index"
+                        )
+                    }
+                }}));
+                continue;
+            }
+        }
         // `require_alias` says the write is meant for an alias, so a name that
         // is not one is treated as absent rather than created on the spot
         // the action's own flag answers for it; the request's applies to the
@@ -3625,6 +3659,8 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                 .collect(),
         ),
     };
+    // nothing is held in a fielddata cache here: term lookups read the
+    // column directly, so there is no memory to report against it
     let mut fielddata_stat = json!({"memory_size_in_bytes": fielddata_total, "evictions": 0});
     if let Value::Object(f) = fielddata_fields {
         fielddata_stat["fields"] = Value::Object(f);
@@ -6419,6 +6455,14 @@ pub async fn put_index_template(
     kept["index_patterns"] = flat["index_patterns"].clone();
     if let Some(set) = kept.pointer("/template/settings").cloned() {
         kept["template"]["settings"] = template_settings(&set);
+    }
+    // an alias's routing stands for both halves of it
+    if let Some(Value::Object(aliases)) = kept.pointer("/template/aliases").cloned() {
+        let expanded: serde_json::Map<String, Value> = aliases
+            .into_iter()
+            .map(|(a, def)| (a, crate::store::normalize_alias(&def)))
+            .collect();
+        kept["template"]["aliases"] = Value::Object(expanded);
     }
     flat["__composable"] = kept;
     store.put_template(&name, flat);

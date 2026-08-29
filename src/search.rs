@@ -2730,6 +2730,14 @@ pub fn run(
     {
         return Err(no_such_index(expr));
     }
+    // `allow_no_indices=false` makes an expression that reaches nothing an
+    // error rather than a search with nothing to search
+    if targets.is_empty()
+        && !expr.is_empty()
+        && p.get("allow_no_indices").map(|v| v == "false").unwrap_or(false)
+    {
+        return Err(no_such_index(expr));
+    }
     // a `terms` lookup names a document to read the term list from
     let mut query_json = body.get("query").cloned();
     if let Some(q) = query_json.as_mut() {
@@ -3601,6 +3609,19 @@ pub fn run(
                     })
                     .collect();
                 let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a format asks for the value written that way rather than
+                // as the number it is
+                for (name, fmt) in specs.iter() {
+                    let Some(fmt) = fmt else { continue };
+                    let Some(Value::Array(items)) = f.get_mut(name) else { continue };
+                    for v in items.iter_mut() {
+                        if let Some(n) = v.as_f64() {
+                            if let Some(text) = decimal_format(fmt, n) {
+                                *v = json!(text);
+                            }
+                        }
+                    }
+                }
                 // a token_count field stores the text but reports the count
                 for (name, vals) in f.iter_mut() {
                     if g.mapping.type_of(name) != Some("token_count") {
