@@ -1258,7 +1258,44 @@ fn reattach_meta(result: &mut Value, metas: &[(String, Value)]) {
 /// A bitmap is how a caller sends a very long terms list compactly: the ids
 /// are grouped by their high sixteen bits, and each group is written either as
 /// a sorted array of the low bits or as a bitset over them.
+/// The 64-bit form: a count of high words, then each high word followed by an
+/// ordinary 32-bit bitmap of the low half.
+fn decode_roaring64(bytes: &[u8]) -> Option<Vec<i64>> {
+    let u32_at = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes([
+            *bytes.get(i)?,
+            *bytes.get(i + 1)?,
+            *bytes.get(i + 2)?,
+            *bytes.get(i + 3)?,
+        ]))
+    };
+    let count = u32_at(0)? as usize;
+    // the count is written as eight bytes, whose upper half is always zero
+    if u32_at(4)? != 0 {
+        return None;
+    }
+    let mut at = 8;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let high = u32_at(at)? as i64;
+        at += 4;
+        let (low, used) = decode_roaring_at(bytes, at)?;
+        at += used;
+        out.extend(low.into_iter().map(|v| high << 32 | v));
+    }
+    Some(out)
+}
+
 fn decode_roaring(bytes: &[u8]) -> Option<Vec<i64>> {
+    decode_roaring_at(bytes, 0).map(|(v, _)| v)
+}
+
+fn decode_roaring_at(bytes: &[u8], start: usize) -> Option<(Vec<i64>, usize)> {
+    let bytes = bytes.get(start..)?;
+    decode_roaring_inner(bytes)
+}
+
+fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
     let u16_at = |i: usize| -> Option<u16> {
         Some(u16::from_le_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]))
     };
@@ -1336,7 +1373,7 @@ fn decode_roaring(bytes: &[u8]) -> Option<Vec<i64>> {
             at += 8192;
         }
     }
-    Some(out)
+    Some((out, at))
 }
 
 /// A `terms` clause may carry its list as a bitmap rather than as an array.
@@ -1360,8 +1397,11 @@ fn expand_bitmap_terms(node: &mut Value) {
                     _ => None,
                 };
                 let Some(encoded) = encoded else { continue };
-                let Some(values) = base64_decode(&encoded).as_deref().and_then(decode_roaring)
-                else {
+                // the 32-bit form starts with its cookie; the 64-bit form
+                // starts with a count of the high words it groups by
+                let Some(values) = base64_decode(&encoded).as_deref().and_then(|b| {
+                    decode_roaring(b).or_else(|| decode_roaring64(b))
+                }) else {
                     continue;
                 };
                 terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
@@ -3190,6 +3230,29 @@ pub fn run(
     } else {
         None
     };
+
+    // `collapse` keeps one hit per distinct value of a field: the best one,
+    // which after the sort is the first each value is seen at. It has to run
+    // before the page is cut, or a page could be all one value's worth
+    if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let path = format!("/{}", field.replace('.', "/"));
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let value = source_of(searcher, &g, c.addr)
+                .and_then(|(_, src)| src.pointer(&path).cloned())
+                .map(|v| match v {
+                    Value::String(s) => s,
+                    other => other.to_string(),
+                });
+            match value {
+                Some(v) => seen.insert(v),
+                // a document with no value there collapses with nothing
+                None => true,
+            }
+        });
+    }
 
     // now, and only now, read stored fields -- for at most `size` documents
     let mut all_hits: Vec<Hit> = Vec::new();
