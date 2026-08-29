@@ -6962,11 +6962,43 @@ pub async fn cancel_tasks(Query(p): Query<Params>) -> Response {
     respond(&p, json!({"nodes": {}, "node_failures": [], "tasks": []}))
 }
 
+/// A filter written the short way, spelled out.
+///
+/// `{"term": {"field": "value"}}` and `{"term": {"field": {"value": "value"}}}`
+/// mean the same thing; the long form is what a filter is reported as, since
+/// it is where the boost would go.
+fn expand_filter(f: &Value) -> Value {
+    let Some(o) = f.as_object() else { return f.clone() };
+    let mut out = serde_json::Map::new();
+    for (kind, body) in o {
+        if !matches!(kind.as_str(), "term" | "prefix" | "wildcard" | "regexp" | "fuzzy") {
+            out.insert(kind.clone(), body.clone());
+            continue;
+        }
+        let Some(fields) = body.as_object() else {
+            out.insert(kind.clone(), body.clone());
+            continue;
+        };
+        let mut spelled = serde_json::Map::new();
+        for (field, v) in fields {
+            let long = match v {
+                Value::Object(_) => v.clone(),
+                other => json!({"value": other, "boost": 1.0}),
+            };
+            spelled.insert(field.clone(), long);
+        }
+        out.insert(kind.clone(), Value::Object(spelled));
+    }
+    Value::Object(out)
+}
+
 pub async fn search_shards(
     State(store): State<Store>,
     index: Option<Path<String>>,
     Query(p): Query<Params>,
+    body: String,
 ) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
     let expr = index.map(|Path(i)| i);
     let names = match expr.as_deref() {
         Some(e) => store.resolve(e),
@@ -6974,20 +7006,63 @@ pub async fn search_shards(
     };
     // an index reached through an alias reports which alias led to it, since
     // an alias may carry a filter the caller needs to know about
-    let via: Vec<String> = expr
-        .as_deref()
-        .map(|e| {
-            e.split(',')
-                .map(|n| n.trim().to_string())
-                .filter(|n| store.is_alias(n))
-                .collect()
+    let mut via: Vec<String> = Vec::new();
+    if let Some(e) = expr.as_deref() {
+        // every alias the expression names, whether outright or by pattern
+        let all: Vec<String> = store
+            .names()
+            .iter()
+            .filter_map(|n| store.get(n))
+            .flat_map(|st| st.read().aliases.keys().cloned().collect::<Vec<_>>())
+            .collect();
+        for part in e.split(',').map(|n| n.trim()) {
+            if part.contains('*') {
+                for a in &all {
+                    if crate::store::glob_match(part, a) && !via.contains(a) {
+                        via.push(a.clone());
+                    }
+                }
+            } else if store.is_alias(part) && !via.contains(&part.to_string()) {
+                via.push(part.to_string());
+            }
+        }
+        via.sort();
+        via.dedup();
+    }
+    // an index is listed shard by shard; a slice takes every `max`th of them,
+    // which is how several readers divide one index between them
+    let slice = body.get("slice");
+    let slice_id = slice.and_then(|s| s.get("id")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let slice_max = slice.and_then(|s| s.get("max")).and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+    // `preference: _shards:...` narrows to the shards it names before
+    // anything else looks at the list
+    let preferred: Option<Vec<u64>> = p.get("preference").and_then(|v| {
+        v.strip_prefix("_shards:").map(|list| {
+            list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect()
         })
-        .unwrap_or_default();
-    let shards: Vec<Value> = names
-        .iter()
-        .map(|n| json!([{
+    });
+    let mut listed: Vec<(String, u64)> = Vec::new();
+    for n in &names {
+        let count = store
+            .get(n)
+            .map(|st| st.read().numeric_setting("number_of_shards").unwrap_or(1).max(1))
+            .unwrap_or(1);
+        for shard in 0..count {
+            if preferred.as_ref().map(|w| !w.contains(&shard)).unwrap_or(false) {
+                continue;
+            }
+            listed.push((n.clone(), shard));
+        }
+    }
+    // a slice takes every `max`th of what is left, counted by position rather
+    // than by shard number -- the two differ once a preference has narrowed it
+    let shards: Vec<Value> = listed
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| slice.is_none() || *i as u64 % slice_max == slice_id)
+        .map(|(_, (n, shard))| json!([{
             "state": "STARTED", "primary": true, "node": "node-0",
-            "relocating_node": null, "shard": 0, "index": n,
+            "relocating_node": null, "shard": shard, "index": n,
             "allocation_id": {"id": "_na_"}
         }]))
         .collect();
@@ -7008,9 +7083,28 @@ pub async fn search_shards(
                     // routing its own search needs that filter
                     if let Some(st) = store.get(n) {
                         let g = st.read();
-                        for a in &own {
-                            if let Some(f) = g.aliases.get(a).and_then(|d| d.get("filter")) {
-                                entry["filter"] = f.clone();
+                        // several aliases reaching the same index each narrow
+                        // it, and a document matching any of them is visible
+                        let filters: Vec<Value> = own
+                            .iter()
+                            .filter_map(|a| g.aliases.get(a).and_then(|d| d.get("filter")))
+                            .map(expand_filter)
+                            .collect();
+                        // an alias with no filter of its own opens the index
+                        // up again, so there is nothing left to narrow
+                        if filters.len() == own.len() {
+                            match filters.len() {
+                                0 => {}
+                                1 => entry["filter"] = filters[0].clone(),
+                                // the bool a combined filter becomes carries
+                                // the defaults a bool query is built with
+                                _ => {
+                                    entry["filter"] = json!({"bool": {
+                                        "should": filters,
+                                        "adjust_pure_negative": true,
+                                        "boost": 1.0,
+                                    }})
+                                }
                             }
                         }
                     }
