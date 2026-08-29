@@ -4503,7 +4503,27 @@ pub async fn explain(
     };
 
     // decide matched by running the query restricted to this document
-    let q = body.get("query").cloned().unwrap_or(json!({"match_all": {}}));
+    // `q` names a query string on the URL, with `df` saying which field it
+    // reads by default and `default_operator` how its words are joined
+    let q = match body.get("query").cloned() {
+        Some(q) => q,
+        None => match p.get("q").filter(|v| !v.is_empty()) {
+            Some(text) => {
+                let mut qs = json!({"query": text});
+                if let Some(df) = p.get("df") {
+                    qs["default_field"] = json!(df);
+                }
+                if let Some(op) = p.get("default_operator") {
+                    qs["default_operator"] = json!(op);
+                }
+                if p.get("lenient").map(|v| v != "false").unwrap_or(false) {
+                    qs["lenient"] = json!(true);
+                }
+                json!({"query_string": qs})
+            }
+            None => json!({"match_all": {}}),
+        },
+    };
     let scoped = json!({"bool": {"must": [q], "filter": [{"ids": {"values": [id]}}]}});
     let probe = json!({"query": scoped, "size": 1});
     let matched = crate::search::run(&store, &name, &probe, &Params::new())
@@ -4992,11 +5012,21 @@ fn cluster_state_inner(
     // every index there is
     let names = match index_expr {
         Some(expr) if expr != "_all" => {
-            let open_only = p
-                .get("expand_wildcards")
-                .map(|v| v.split(',').all(|w| w != "closed" && w != "all"))
-                .unwrap_or(false);
-            let found = if open_only { store.resolve_open(expr) } else { store.resolve(expr) };
+            // `expand_wildcards` names the states a pattern reaches, and
+            // naming only one of them leaves the other out
+            let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open,closed");
+            let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
+            let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
+            let found: Vec<String> = store
+                .resolve(expr)
+                .into_iter()
+                .filter(|n| {
+                    store
+                        .get(n)
+                        .map(|st| if st.read().closed { want_closed } else { want_open })
+                        .unwrap_or(false)
+                })
+                .collect();
             for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
                 if !found.iter().any(|n| n == part) && !ignore_unavailable(p) {
                     return no_such_index(part);
