@@ -130,7 +130,7 @@ fn app(store: Store) -> Router {
         // --- nodes and cluster housekeeping ---
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
-        .route("/_cluster/reroute", post(api::acknowledged))
+        .route("/_cluster/reroute", post(api::reroute))
         .route("/_cluster/pending_tasks", get(api::acknowledged))
         .route("/_tasks", get(api::list_tasks))
         .route("/_tasks/{id}", get(api::get_task))

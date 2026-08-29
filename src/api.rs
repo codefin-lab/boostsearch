@@ -895,6 +895,58 @@ pub async fn mtermvectors(
     respond(&p, json!({"docs": out}))
 }
 
+/// `_cluster/reroute` -- move shards about. There is one node, so there is
+/// nowhere to move them, and the answer is the state as it stands.
+pub async fn reroute(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let _ = parse_body(&body);
+    let mut out = json!({"acknowledged": true, "explanations": []});
+    // `metric` names which parts of the state to send back; without it the
+    // state is left out entirely
+    let metrics: Vec<String> = p
+        .get("metric")
+        .map(|m| m.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    let want = |name: &str| metrics.iter().any(|m| m == name || m == "_all");
+    if !metrics.is_empty() && !metrics.iter().any(|m| m == "none") {
+        let mut indices = serde_json::Map::new();
+        for n in store.names() {
+            let Some(st) = store.get(&n) else { continue };
+            let g = st.read();
+            indices.insert(g.name.clone(), json!({
+                "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
+                "mappings": g.mapping.raw,
+                "settings": g.effective_settings(),
+                "state": if g.closed { "close" } else { "open" },
+            }));
+        }
+        let mut state = json!({
+            "cluster_name": "obsearch", "cluster_uuid": "_na_",
+            "version": 1, "state_uuid": "_na_",
+        });
+        if want("master_node") || want("cluster_manager_node") {
+            state["master_node"] = json!("node-0");
+            state["cluster_manager_node"] = json!("node-0");
+        }
+        if want("nodes") {
+            state["nodes"] = json!({"node-0": {
+                "name": "obsearch", "ephemeral_id": "_na_",
+                "transport_address": "127.0.0.1:9300", "attributes": {}}});
+        }
+        if want("metadata") {
+            state["metadata"] = json!({
+                "cluster_uuid": "_na_", "templates": store.get_templates(),
+                "indices": Value::Object(indices),
+            });
+        }
+        out["state"] = state;
+    }
+    respond(&p, out)
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -6279,7 +6331,22 @@ pub async fn search_shards(
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let names = index.map(|Path(i)| store.resolve(&i)).unwrap_or_else(|| store.names());
+    let expr = index.map(|Path(i)| i);
+    let names = match expr.as_deref() {
+        Some(e) => store.resolve(e),
+        None => store.names(),
+    };
+    // an index reached through an alias reports which alias led to it, since
+    // an alias may carry a filter the caller needs to know about
+    let via: Vec<String> = expr
+        .as_deref()
+        .map(|e| {
+            e.split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| store.is_alias(n))
+                .collect()
+        })
+        .unwrap_or_default();
     let shards: Vec<Value> = names
         .iter()
         .map(|n| json!([{
@@ -6291,7 +6358,31 @@ pub async fn search_shards(
     respond(&p, json!({
         "nodes": {"node-0": {"name": "obsearch", "ephemeral_id": "_na_",
                              "transport_address": "127.0.0.1:9300", "attributes": {}}},
-        "indices": names.iter().map(|n| (n.clone(), json!({}))).collect::<serde_json::Map<_, _>>(),
+        "indices": names
+            .iter()
+            .map(|n| {
+                let mut entry = json!({});
+                let own: Vec<String> = via
+                    .iter()
+                    .filter(|a| store.resolve(a).iter().any(|r| r == n))
+                    .cloned()
+                    .collect();
+                if !own.is_empty() {
+                    // an alias may narrow what the index shows, and a caller
+                    // routing its own search needs that filter
+                    if let Some(st) = store.get(n) {
+                        let g = st.read();
+                        for a in &own {
+                            if let Some(f) = g.aliases.get(a).and_then(|d| d.get("filter")) {
+                                entry["filter"] = f.clone();
+                            }
+                        }
+                    }
+                    entry["aliases"] = json!(own);
+                }
+                (n.clone(), entry)
+            })
+            .collect::<serde_json::Map<_, _>>(),
         "shards": shards,
     }))
 }
