@@ -2473,6 +2473,16 @@ pub fn run(
                         .and_then(|f| f.as_str())
                         .map(|f| range_field(store, &targets, f))
                         .unwrap_or(false)
+                    // a field no document has, standing in for every document
+                    || def
+                        .get("terms")
+                        .and_then(|t| t.get("field"))
+                        .and_then(|f| f.as_str())
+                        .map(|f| {
+                            def.pointer("/terms/missing").is_some()
+                                && unmapped_field(store, &targets, f)
+                        })
+                        .unwrap_or(false)
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -3627,6 +3637,16 @@ fn run_peeled_agg(
         run_auto_date_histogram(store, targets, query_json, def)
     } else if def.get("date_range").is_some() {
         run_date_range_agg(store, targets, query_json, def)
+    } else if def
+        .get("terms")
+        .and_then(|t| t.get("field"))
+        .and_then(|f| f.as_str())
+        .map(|f| {
+            def.pointer("/terms/missing").is_some() && unmapped_field(store, targets, f)
+        })
+        .unwrap_or(false)
+    {
+        run_missing_terms_agg(store, targets, query_json, def)
     } else if def.get("histogram").is_some() {
         run_range_field_histogram(store, targets, query_json, def)
     } else if def.get("ip_range").is_some() {
@@ -4362,6 +4382,77 @@ fn run_date_range_agg(
 ///
 /// Each range is a filter on the field, so the ordinary query path answers it;
 /// `from` is included and `to` is not, and either may be left open.
+/// Is this a field no index in the search knows anything about -- neither
+/// mapped nor ever seen in a document?
+fn unmapped_field(store: &Store, targets: &[String], field: &str) -> bool {
+    !targets.iter().filter_map(|n| store.get(n)).any(|st| {
+        let g = st.read();
+        g.mapping.type_of(field).is_some() || g.observed_kinds.contains_key(field)
+    })
+}
+
+/// A terms aggregation over a field no document has.
+///
+/// With `missing` given, every document takes that one value, so there is one
+/// bucket holding all of them. `value_type` says how the key is written --
+/// what the field would have been, had anything ever put a value in it.
+fn run_missing_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("terms").cloned().unwrap_or_else(|| json!({}));
+    let missing = spec.get("missing").cloned().unwrap_or(Value::Null);
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let (count, sub) = count_with_sub_aggs(store, targets, &base, &sub_aggs, false)?;
+    if count == 0 {
+        return Ok(json!({
+            "doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": []
+        }));
+    }
+    let ty = spec.get("value_type").and_then(|v| v.as_str()).unwrap_or("");
+    let (key, as_string) = match ty {
+        "boolean" => {
+            let b = match &missing {
+                Value::Bool(b) => *b,
+                Value::String(s) => s == "true",
+                Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+                _ => false,
+            };
+            (json!(if b { 1 } else { 0 }), Some(b.to_string()))
+        }
+        "date" => {
+            let text = missing.as_str().unwrap_or_default().to_string();
+            match crate::store::canonical_date(&missing)
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+            {
+                Some(d) => {
+                    let ms = (d.unix_timestamp_nanos() / 1_000_000) as i64;
+                    (json!(ms), Some(iso_millis(d)))
+                }
+                None => (json!(text), None),
+            }
+        }
+        _ => (missing.clone(), None),
+    };
+    let mut bucket = json!({"key": key, "doc_count": count});
+    if let Some(text) = as_string {
+        bucket["key_as_string"] = json!(text);
+    }
+    if let Some(Value::Object(o)) = sub {
+        for (k, v) in o {
+            bucket[k] = v;
+        }
+    }
+    Ok(json!({
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [bucket],
+    }))
+}
+
 /// Is this field one of the range types, which store two endpoints per
 /// document rather than one value?
 fn range_field(store: &Store, targets: &[String], field: &str) -> bool {
