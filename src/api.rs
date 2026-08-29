@@ -2212,6 +2212,68 @@ pub async fn cat_segments(
     cat_render_cols(CAT_SEGMENT_COLS, rows, &p)
 }
 
+/// `_list/wlm_stats` -- workload group statistics as a table.
+///
+/// This engine runs one node and does not divide work between workload
+/// groups, so there is one group with nothing rejected. The parameters are
+/// still checked, since a caller paging through the list needs to be told
+/// when it has asked for something the list cannot give.
+pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
+    let bad = |reason: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": {"type": "illegal_argument_exception", "reason": reason},
+                "status": 400,
+            })),
+        )
+            .into_response()
+    };
+    if let Some(sort) = p.get("sort") {
+        if !matches!(sort.as_str(), "node_id" | "workload_group") {
+            return bad("Invalid value for 'sort'. Allowed: 'node_id', 'workload_group'".into());
+        }
+    }
+    if let Some(order) = p.get("order") {
+        if !matches!(order.as_str(), "asc" | "desc") {
+            return bad("Invalid value for 'order'. Allowed: 'asc', 'desc'".into());
+        }
+    }
+    if let Some(size) = p.get("size") {
+        let n = size.parse::<i64>().unwrap_or(-1);
+        if !(1..=100).contains(&n) {
+            return bad("Invalid value for 'size'. Allowed range: 1 to 100".into());
+        }
+    }
+    if p.contains_key("next_token") {
+        // there is one page and it never moves, so any token names a state
+        // that this list cannot have been in
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "Pagination state has changed (e.g., new workload groups added or \
+                          removed). Please restart pagination from the beginning by omitting \
+                          the 'next_token' parameter.",
+                "status": 400,
+            })),
+        )
+            .into_response();
+    }
+    let cols = [
+        "NODE_ID", "WORKLOAD_GROUP_ID", "TOTAL_COMPLETIONS", "TOTAL_REJECTIONS",
+        "TOTAL_CANCELLATIONS", "CPU_USAGE", "MEMORY_USAGE",
+    ];
+    let row = ["node-0", "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
+    let mut out = String::new();
+    if p.get("v").map(|v| v != "false").unwrap_or(false) {
+        out.push_str(&cols.join(" "));
+        out.push('\n');
+    }
+    out.push_str(&row.join(" "));
+    out.push('\n');
+    ([("content-type", "text/plain; charset=UTF-8")], out).into_response()
+}
+
 /// `_segments` -- what each shard is made of.
 ///
 /// One shard per index here, and tantivy names its segments by ordinal, so
@@ -3819,25 +3881,74 @@ fn cat_named(columns: &[&str], p: &Params) -> Response {
 
 pub const CAT_INDEX_COLS: &[&str] = &[
     "health", "status", "index", "uuid", "pri", "rep", "docs.count", "docs.deleted",
+    "store.size", "pri.store.size",
 ];
 
-pub async fn cat_indices(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+pub async fn cat_indices(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    // one node holding every shard it was given is green, so any other health
+    // asked for selects nothing rather than being an error
+    if let Some(h) = p.get("health") {
+        if !matches!(h.as_str(), "green" | "yellow" | "red") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Invalid health value [{h}], allowed values are [green, yellow, red]"
+                ),
+            );
+        }
+        if h != "green" {
+            return cat_render_cols(CAT_INDEX_COLS, Vec::new(), &p);
+        }
+    }
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    // a name given outright must resolve to something -- it may be an alias,
+    // whose own name never appears among the indices it stands for
+    if !expr.is_empty() && !ignore_unavailable(&p) {
+        for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
+            if store.resolve(part).is_empty() {
+                return no_such_index(part);
+            }
+        }
+    }
+    // a hidden index answers to its own name but stays out of a sweep, unless
+    // the sweep says it wants hidden ones
+    let named_outright = !expr.is_empty() && !expr.contains('*');
+    let asked_for_hidden = p
+        .get("expand_wildcards")
+        .map(|v| v.split(',').any(|w| matches!(w.trim(), "hidden" | "all")))
+        .unwrap_or(false);
+    // a pattern written with a leading dot is reaching for the dot-prefixed
+    // indices, which are the hidden ones by convention
+    let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
+    let show_hidden = named_outright || asked_for_hidden || dot_pattern;
     let mut rows = Vec::new();
-    for n in store.names() {
+    for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
+            continue;
+        }
         let docs = g.reader.searcher().num_docs();
         rows.push(vec![
             ("health", "green".to_string()),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
-            ("index", n.clone()),
-            ("uuid", "_na_".to_string()),
+            ("index", g.name.clone()),
+            ("uuid", g.uuid.clone()),
             ("pri", "1".to_string()),
             ("rep", "0".to_string()),
             ("docs.count", docs.to_string()),
             ("docs.deleted", "0".to_string()),
+            ("store.size", "0b".to_string()),
+            ("pri.store.size", "0b".to_string()),
         ]);
     }
+    rows.sort_by(|a, b| a[2].1.cmp(&b[2].1));
     cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
 
@@ -3946,7 +4057,7 @@ pub async fn cat_dispatch(
 async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
-        "indices" => cat_indices(State(store), Query(p)).await,
+        "indices" => cat_indices(State(store), None, Query(p)).await,
         "aliases" => cat_aliases(State(store), None, Query(p)).await,
         "count" => cat_count(State(store), None, Query(p)).await,
         "health" => cat_health(Query(p)).await,

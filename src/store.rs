@@ -74,6 +74,25 @@ pub fn id_fingerprint(id: &str) -> u64 {
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
 
+/// A stable 22-character identifier derived from the index name, in the
+/// alphabet the API uses for these.
+pub fn index_uuid(name: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let mut g: u64 = h ^ 0x9e37_79b9_7f4a_7c15;
+    let mut out = String::with_capacity(22);
+    for i in 0..22 {
+        let src = if i % 2 == 0 { &mut h } else { &mut g };
+        *src = src.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        out.push(ALPHABET[((*src >> 58) & 63) as usize] as char);
+    }
+    out
+}
+
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("_id", STRING | STORED | FAST);
@@ -445,6 +464,9 @@ pub struct IdxState {
     /// the routing a document was written with, kept only for the documents
     /// that were given one -- which is the rare case
     pub routing: HashMap<String, String>,
+    /// a stable identifier for the index itself, distinct from the id of any
+    /// one commit; 22 characters, as the API reports them
+    pub uuid: String,
     /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
     /// false negatives), so the common "is this a new document?" question costs
     /// one hash. A hit is confirmed against the index, which only happens for
@@ -1407,6 +1429,7 @@ impl Store {
             closed: false,
             versions: HashMap::new(),
             routing: HashMap::new(),
+            uuid: index_uuid(&name),
             live_ids: Default::default(),
             pending: HashMap::new(),
             pending_seq: HashMap::new(),
