@@ -77,6 +77,8 @@ fn app(store: Store) -> Router {
         .route("/{index}/_split/{target}", put(api::split_index).post(api::split_index))
         .route("/{index}/_shrink/{target}", put(api::shrink_index).post(api::shrink_index))
         .route("/{index}/_clone/{target}", put(api::clone_index).post(api::clone_index))
+        .route("/{alias}/_rollover", post(api::rollover))
+        .route("/{alias}/_rollover/{new_index}", post(api::rollover))
         .route("/_cluster/state", get(api::cluster_state))
         .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))

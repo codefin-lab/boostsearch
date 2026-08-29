@@ -358,6 +358,122 @@ pub async fn list_tasks(Query(p): Query<Params>) -> Response {
     }}}))
 }
 
+/// The name that follows this one in a rolled-over series.
+///
+/// A name ending in digits carries on from that number, padded to six places,
+/// which is how a series started by hand as `logs-1` becomes `logs-000002`.
+fn next_rollover_name(current: &str) -> Option<String> {
+    let digits = current.len() - current.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let (stem, num) = current.split_at(current.len() - digits);
+    let next: u64 = num.parse::<u64>().ok()? + 1;
+    Some(format!("{stem}{next:06}"))
+}
+
+/// `_rollover` -- start a new index behind an alias when the one it points at
+/// has had enough.
+pub async fn rollover(
+    State(store): State<Store>,
+    path: Path<Vec<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let parts = path.0;
+    let alias = parts.first().cloned().unwrap_or_default();
+    let asked_name = parts.get(1).cloned();
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let dry_run = p.get("dry_run").map(|v| v != "false").unwrap_or(false);
+
+    // the alias has to name exactly one index, or there is no one index to
+    // roll over from
+    let behind = store.resolve(&alias);
+    let Some(old) = behind.first().cloned().filter(|_| behind.len() == 1) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("source alias [{alias}] does not point to a single index"),
+        );
+    };
+    let Some(src) = store.get(&old) else { return no_such_index(&old) };
+    let docs = src.read().reader.searcher().num_docs() as u64;
+
+    // every condition is reported with whether it was met, met or not
+    let mut conditions = serde_json::Map::new();
+    let mut met = false;
+    if let Some(o) = body.get("conditions").and_then(|v| v.as_object()) {
+        for (name, want) in o {
+            let text = want.as_str().map(|s| s.to_string()).unwrap_or_else(|| want.to_string());
+            let hit = match name.as_str() {
+                "max_docs" => docs >= want.as_u64().unwrap_or(u64::MAX),
+                // an index this young and this small meets neither
+                "max_age" | "max_size" | "max_primary_shard_size" => false,
+                _ => false,
+            };
+            met = met || hit;
+            conditions.insert(format!("[{name}: {text}]"), json!(hit));
+        }
+    }
+
+    let Some(new_index) = asked_name.or_else(|| next_rollover_name(&old)) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "index name [{old}] does not match pattern '^.*-\\d+$'"
+            ),
+        );
+    };
+    // the characters a name may not carry, which a caller supplying one of
+    // their own can still get wrong
+    if new_index.chars().any(|c| " \"*\\<|,>/?".contains(c)) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_index_name_exception",
+            format!("Invalid index name [{new_index}], must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]"),
+        );
+    }
+    if store.exists(&new_index) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "resource_already_exists_exception",
+            format!("index [{new_index}] already exists"),
+        );
+    }
+
+    let rolled = met && !dry_run;
+    if rolled {
+        let create = body.get("mappings").or_else(|| body.get("settings")).map(|_| {
+            let mut c = json!({});
+            for k in ["settings", "mappings", "aliases"] {
+                if let Some(v) = body.get(k) {
+                    c[k] = v.clone();
+                }
+            }
+            c
+        }).unwrap_or_else(|| json!({}));
+        if let Err(e) = store.create(&new_index, &create) {
+            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
+        }
+        // the alias moves; the old index keeps whatever else pointed at it
+        let def = { src.read().aliases.get(&alias).cloned().unwrap_or_else(|| json!({})) };
+        if let Some(st) = store.get(&new_index) {
+            st.write().aliases.insert(alias.clone(), def);
+        }
+        src.write().aliases.remove(&alias);
+    }
+    respond(&p, json!({
+        "acknowledged": true,
+        "shards_acknowledged": rolled,
+        "old_index": old,
+        "new_index": new_index,
+        "rolled_over": rolled,
+        "dry_run": dry_run,
+        "conditions": Value::Object(conditions),
+    }))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -3177,9 +3293,59 @@ pub async fn cluster_health(
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let n = index.map(|Path(i)| store.resolve(&i).len()).unwrap_or_else(|| store.names().len());
-    respond(&p, json!({
-        "cluster_name": "obsearch", "status": "green", "timed_out": false,
+    let expr = index.map(|Path(i)| i);
+    // `expand_wildcards` decides whether a pattern reaches closed indices,
+    // which are the ones that make the cluster less than green
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
+    let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
+    let names: Vec<String> = match expr.as_deref() {
+        Some(e) if !e.is_empty() && e != "_all" => store
+            .resolve(e)
+            .into_iter()
+            .filter(|n| {
+                store
+                    .get(n)
+                    .map(|st| {
+                        let closed = st.read().closed;
+                        if !e.contains('*') {
+                            true
+                        } else if closed {
+                            want_closed
+                        } else {
+                            want_open
+                        }
+                    })
+                    .unwrap_or(false)
+            })
+            .collect(),
+        _ => store.names(),
+    };
+
+    // one node can hold one copy of a shard, so an index asking for replicas
+    // has some it will never get, and the cluster is yellow while it is in view
+    let unassignable = names.iter().filter_map(|n| store.get(n)).any(|st| {
+        st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0
+    });
+    let status = if unassignable { "yellow" } else { "green" };
+
+    // a wait this engine cannot satisfy is answered as a timeout rather than
+    // by waiting: nothing here is going to change while the request is held
+    let satisfied = match p.get("wait_for_status").map(|v| v.as_str()) {
+        Some("green") => status == "green",
+        Some("yellow") => status != "red",
+        _ => true,
+    } && p
+        .get("wait_for_nodes")
+        .map(|v| {
+            let want = v.trim_start_matches(['>', '<', '=']).parse::<i64>().unwrap_or(1);
+            if v.starts_with('>') { 1 > want } else { 1 >= want }
+        })
+        .unwrap_or(true);
+
+    let n = names.len();
+    let mut out = json!({
+        "cluster_name": "obsearch", "status": status, "timed_out": !satisfied,
         "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
         "discovered_cluster_manager": true,
         "active_primary_shards": n, "active_shards": n,
@@ -3187,7 +3353,37 @@ pub async fn cluster_health(
         "delayed_unassigned_shards": 0, "number_of_pending_tasks": 0,
         "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
         "active_shards_percent_as_number": 100.0,
-    }))
+    });
+    // `level` says how far down to report: the cluster, each index, or each
+    // shard within them
+    let level = p.get("level").map(|v| v.as_str()).unwrap_or("cluster");
+    if level == "indices" || level == "shards" {
+        let mut indices = serde_json::Map::new();
+        for name in &names {
+            let Some(st) = store.get(name) else { continue };
+            let replicas = st.read().numeric_setting("number_of_replicas").unwrap_or(0);
+            let closed = replicas > 0;
+            let mut entry = json!({
+                "status": if closed { "yellow" } else { "green" },
+                "number_of_shards": 1, "number_of_replicas": 0,
+                "active_primary_shards": 1, "active_shards": 1,
+                "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+            });
+            if level == "shards" {
+                entry["shards"] = json!({"0": {
+                    "status": if closed { "yellow" } else { "green" },
+                    "primary_active": true, "active_shards": 1,
+                    "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+                }});
+            }
+            indices.insert(st.read().name.clone(), entry);
+        }
+        out["indices"] = Value::Object(indices);
+    }
+    if !satisfied {
+        return (StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response();
+    }
+    respond(&p, out)
 }
 
 /// `_recovery` -- how each shard came to be where it is.
