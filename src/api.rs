@@ -17,6 +17,53 @@ use tantivy::TantivyDocument;
 
 pub type Params = HashMap<String, String>;
 
+/// The trace `error_trace` asks for.
+///
+/// OpenSearch answers this with a Java stack trace; this engine has its own,
+/// and names the error the way the API already names it -- `type` is that
+/// same name in snake case, so the two agree about what went wrong and differ
+/// only about which language it went wrong in.
+pub fn stack_trace_for(kind: &str, reason: &str, at: &str) -> String {
+    let class: String = kind
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    // the reason names the resource, and the class name follows it, which is
+    // the order the older Java form put them in
+    format!("{reason} -- {class} at obsearch::api::{at} (src/api.rs)")
+}
+
+/// Attach a trace to an error a caller asked to see the inside of.
+pub fn add_stack_trace(node: &mut Value, p: &Params, at: &str) {
+    if !p.get("error_trace").map(|v| v != "false").unwrap_or(false) {
+        return;
+    }
+    let (kind, reason) = match (
+        node.pointer("/type").and_then(|v| v.as_str()),
+        node.pointer("/reason").and_then(|v| v.as_str()),
+    ) {
+        (Some(k), Some(r)) => (k.to_string(), r.to_string()),
+        _ => return,
+    };
+    let trace = stack_trace_for(&kind, &reason, at);
+    if let Some(o) = node.as_object_mut() {
+        o.insert("stack_trace".into(), json!(trace));
+        if let Some(causes) = o.get_mut("root_cause").and_then(|c| c.as_array_mut()) {
+            for c in causes {
+                if let Some(co) = c.as_object_mut() {
+                    co.insert("stack_trace".into(), json!(trace));
+                }
+            }
+        }
+    }
+}
+
 pub fn err(status: StatusCode, kind: &str, reason: impl Into<String>) -> Response {
     let reason = reason.into();
     (
@@ -1000,15 +1047,14 @@ pub async fn mtermvectors(
                 "index": idx, "resource.type": "index_expression",
                 "resource.id": idx, "index_uuid": "_na_",
             });
-            out.push(json!({
-                "_index": idx, "_id": id, "found": false,
-                "error": {
-                    "type": "index_not_found_exception", "reason": reason,
-                    "index": idx, "resource.type": "index_expression",
-                    "resource.id": idx, "index_uuid": "_na_",
-                    "root_cause": [cause],
-                }
-            }));
+            let mut error = json!({
+                "type": "index_not_found_exception", "reason": reason,
+                "index": idx, "resource.type": "index_expression",
+                "resource.id": idx, "index_uuid": "_na_",
+                "root_cause": [cause],
+            });
+            add_stack_trace(&mut error, &p, "mtermvectors");
+            out.push(json!({"_index": idx, "_id": id, "found": false, "error": error}));
             continue;
         };
         let g = st.read();
@@ -3475,16 +3521,15 @@ pub async fn mget(
                 "index": idx, "resource.type": "index_expression", "resource.id": idx,
                 "index_uuid": "_na_"
             });
-            docs.push(json!({
-                "_index": idx, "_id": id,
-                "error": {
-                    "type": "index_not_found_exception",
-                    "reason": reason,
-                    "index": idx, "resource.type": "index_expression", "resource.id": idx,
-                    "index_uuid": "_na_",
-                    "root_cause": [cause]
-                }
-            }));
+            let mut error = json!({
+                "type": "index_not_found_exception",
+                "reason": reason,
+                "index": idx, "resource.type": "index_expression", "resource.id": idx,
+                "index_uuid": "_na_",
+                "root_cause": [cause]
+            });
+            add_stack_trace(&mut error, &p, "mget");
+            docs.push(json!({"_index": idx, "_id": id, "error": error}));
             continue;
         };
         // an alias in front of several indices names no one document, so a
