@@ -2854,26 +2854,117 @@ pub async fn cluster_health(
     }))
 }
 
+/// `/_cluster/state/<metrics>` and `/_cluster/state/<metrics>/<indices>`:
+/// the first path part names which sections to return, the second which
+/// indices the metadata should describe.
+pub async fn cluster_state_filtered(
+    State(store): State<Store>,
+    Path(rest): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let mut parts = rest.splitn(2, '/');
+    let metrics = parts.next().unwrap_or("_all").to_string();
+    let indices = parts.next().map(|s| s.to_string());
+    cluster_state_inner(&store, &p, Some(&metrics), indices.as_deref())
+}
+
 pub async fn cluster_state(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    cluster_state_inner(&store, &p, None, None)
+}
+
+fn cluster_state_inner(
+    store: &Store,
+    p: &Params,
+    metrics: Option<&str>,
+    index_expr: Option<&str>,
+) -> Response {
+    let all = metrics.map(|m| m == "_all").unwrap_or(true);
+    let wanted: Vec<&str> = metrics.map(|m| m.split(',').collect()).unwrap_or_default();
+    let want = |name: &str| all || wanted.contains(&name);
+
+    // which indices the metadata should describe; without an expression it is
+    // every index there is
+    let names = match index_expr {
+        Some(expr) if expr != "_all" => {
+            let open_only = p
+                .get("expand_wildcards")
+                .map(|v| v.split(',').all(|w| w != "closed" && w != "all"))
+                .unwrap_or(false);
+            let found = if open_only { store.resolve_open(expr) } else { store.resolve(expr) };
+            for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
+                if !found.iter().any(|n| n == part) && !ignore_unavailable(p) {
+                    return no_such_index(part);
+                }
+            }
+            found
+        }
+        _ => store.names(),
+    };
+
     let mut indices = serde_json::Map::new();
-    for n in store.names() {
+    for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
-        indices.insert(n.clone(), json!({
+        indices.insert(g.name.clone(), json!({
             "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
             "mappings": g.mapping.raw,
             "settings": g.effective_settings(),
             "state": if g.closed { "close" } else { "open" },
         }));
     }
-    respond(&p, json!({
-        "cluster_name": "obsearch", "cluster_uuid": "_na_", "version": 1, "state_uuid": "_na_",
-        "master_node": "node-0", "cluster_manager_node": "node-0",
-        "nodes": {"node-0": {"name": "obsearch", "ephemeral_id": "_na_",
-                             "transport_address": "127.0.0.1:9300", "attributes": {}}},
-        "metadata": {"cluster_uuid": "_na_", "templates": store.get_templates(),
-                     "indices": Value::Object(indices)},
-    }))
+
+    let mut out = serde_json::Map::new();
+    out.insert("cluster_name".into(), json!("obsearch"));
+    out.insert("cluster_uuid".into(), json!("_na_"));
+    if want("version") || all {
+        out.insert("version".into(), json!(1));
+        out.insert("state_uuid".into(), json!("_na_"));
+    }
+    if want("master_node") || want("cluster_manager_node") {
+        out.insert("master_node".into(), json!("node-0"));
+        out.insert("cluster_manager_node".into(), json!("node-0"));
+    }
+    if want("nodes") {
+        out.insert("nodes".into(), json!({"node-0": {
+            "name": "obsearch", "ephemeral_id": "_na_",
+            "transport_address": "127.0.0.1:9300", "attributes": {}}}));
+    }
+    if want("metadata") {
+        out.insert("metadata".into(), json!({
+            "cluster_uuid": "_na_",
+            "templates": store.get_templates(),
+            "indices": Value::Object(indices.clone()),
+        }));
+    }
+    if want("blocks") {
+        // one node with nothing held back has no blocks, but the section is
+        // still what was asked for
+        out.insert("blocks".into(), json!({}));
+    }
+    if want("routing_table") {
+        let mut tables = serde_json::Map::new();
+        for name in indices.keys() {
+            tables.insert(name.clone(), json!({"shards": {"0": [{
+                "state": "STARTED", "primary": true, "node": "node-0",
+                "relocating_node": Value::Null, "shard": 0, "index": name,
+            }]}}));
+        }
+        out.insert("routing_table".into(), json!({"indices": Value::Object(tables)}));
+    }
+    if want("routing_nodes") {
+        let shards: Vec<Value> = indices
+            .keys()
+            .map(|name| json!({
+                "state": "STARTED", "primary": true, "node": "node-0",
+                "relocating_node": Value::Null, "shard": 0, "index": name,
+            }))
+            .collect();
+        out.insert(
+            "routing_nodes".into(),
+            json!({"unassigned": [], "nodes": {"node-0": shards}}),
+        );
+    }
+    respond(p, Value::Object(out))
 }
 
 pub async fn cluster_settings_get(
