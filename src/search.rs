@@ -1252,6 +1252,151 @@ fn reattach_meta(result: &mut Value, metas: &[(String, Value)]) {
 
 /// Replace `terms: {field: {index, id, path}}` with the terms held by that
 /// document, the way OpenSearch resolves a terms lookup before searching.
+/// Read a RoaringBitmap in its portable serialisation back into the integers
+/// it holds.
+///
+/// A bitmap is how a caller sends a very long terms list compactly: the ids
+/// are grouped by their high sixteen bits, and each group is written either as
+/// a sorted array of the low bits or as a bitset over them.
+fn decode_roaring(bytes: &[u8]) -> Option<Vec<i64>> {
+    let u16_at = |i: usize| -> Option<u16> {
+        Some(u16::from_le_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]))
+    };
+    let u32_at = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes([
+            *bytes.get(i)?,
+            *bytes.get(i + 1)?,
+            *bytes.get(i + 2)?,
+            *bytes.get(i + 3)?,
+        ]))
+    };
+    let cookie = u32_at(0)?;
+    let mut at = 4;
+    // the older cookie carries the container count separately; the newer one
+    // packs it into the cookie and is followed by a bitset saying which
+    // containers are run-encoded
+    let (count, has_runs) = if cookie & 0xffff == 12_347 {
+        (((cookie >> 16) + 1) as usize, true)
+    } else if cookie == 12_346 {
+        let n = u32_at(at)? as usize;
+        at += 4;
+        (n, false)
+    } else {
+        return None;
+    };
+    let mut runs = vec![false; count];
+    if has_runs {
+        let bytes_needed = count.div_ceil(8);
+        for (i, run) in runs.iter_mut().enumerate() {
+            *run = bytes.get(at + i / 8).map(|b| b >> (i % 8) & 1 == 1).unwrap_or(false);
+        }
+        at += bytes_needed;
+    }
+    let mut keys = Vec::with_capacity(count);
+    for i in 0..count {
+        keys.push((u16_at(at + i * 4)?, u16_at(at + i * 4 + 2)? as u32 + 1));
+    }
+    at += count * 4;
+    // the offset header is only written when there are no runs, and the
+    // containers follow it either way
+    if !has_runs || count >= 4 {
+        at += count * 4;
+    }
+    let mut out = Vec::new();
+    for (i, (key, card)) in keys.iter().enumerate() {
+        let high = (*key as i64) << 16;
+        if runs[i] {
+            let n = u16_at(at)? as usize;
+            at += 2;
+            for _ in 0..n {
+                let start = u16_at(at)? as i64;
+                let len = u16_at(at + 2)? as i64;
+                at += 4;
+                for v in start..=start + len {
+                    out.push(high | v);
+                }
+            }
+        } else if *card <= 4096 {
+            for _ in 0..*card {
+                out.push(high | u16_at(at)? as i64);
+                at += 2;
+            }
+        } else {
+            for word in 0..1024 {
+                let mut bits = 0u64;
+                for b in 0..8 {
+                    bits |= (*bytes.get(at + word * 8 + b)? as u64) << (b * 8);
+                }
+                for bit in 0..64 {
+                    if bits >> bit & 1 == 1 {
+                        out.push(high | (word as i64 * 64 + bit));
+                    }
+                }
+            }
+            at += 8192;
+        }
+    }
+    Some(out)
+}
+
+/// A `terms` clause may carry its list as a bitmap rather than as an array.
+fn expand_bitmap_terms(node: &mut Value) {
+    let Some(o) = node.as_object_mut() else { return };
+    let is_bitmap = o
+        .get("terms")
+        .and_then(|t| t.get("value_type"))
+        .and_then(|v| v.as_str())
+        == Some("bitmap");
+    if is_bitmap {
+        if let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
+            terms.remove("value_type");
+            let fields: Vec<String> = terms.keys().cloned().collect();
+            for f in fields {
+                let encoded = match terms.get(&f) {
+                    Some(Value::String(b)) => Some(b.clone()),
+                    Some(Value::Array(a)) if a.len() == 1 => {
+                        a[0].as_str().map(|s| s.to_string())
+                    }
+                    _ => None,
+                };
+                let Some(encoded) = encoded else { continue };
+                let Some(values) = base64_decode(&encoded).as_deref().and_then(decode_roaring)
+                else {
+                    continue;
+                };
+                terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
+            }
+        }
+    }
+    for (_, v) in o.iter_mut() {
+        match v {
+            Value::Object(_) => expand_bitmap_terms(v),
+            Value::Array(a) => a.iter_mut().for_each(expand_bitmap_terms),
+            _ => {}
+        }
+    }
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    let mut out = Vec::new();
+    for c in text.bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        let v = TABLE.iter().position(|t| *t == c)? as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result<(), Response> {
     match node {
         Value::Object(o) => {
@@ -1278,7 +1423,14 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                         Value::Array(a) => a,
                         other => vec![other],
                     };
-                    o.insert("terms".into(), json!({ field: list }));
+                    // a lookup may point at a bitmap, whose value_type sits
+                    // beside the field rather than inside it
+                    let vt = o.get("terms").and_then(|t| t.get("value_type")).cloned();
+                    let mut terms = json!({ field: list });
+                    if let Some(vt) = vt {
+                        terms["value_type"] = vt;
+                    }
+                    o.insert("terms".into(), terms);
                 }
             }
             for (_, v) in o.iter_mut() {
@@ -2379,6 +2531,7 @@ pub fn run(
         if let Err(r) = resolve_terms_lookups(store, q) {
             return Err(r);
         }
+        expand_bitmap_terms(q);
     }
 
     // `_shard_doc` orders by where a document sits within a shard, which only
