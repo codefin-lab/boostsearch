@@ -149,6 +149,22 @@ pub async fn create_index(
             ),
         );
     }
+    if body
+        .get("mappings")
+        .map(|m| {
+            m.get("properties")
+                .and_then(|p| p.as_object())
+                .map(|o| o.keys().any(|k| k.trim().is_empty()))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "field name cannot be an empty string",
+        );
+    }
     match store.create(&index, &body) {
         Ok(()) => axum::Json(json!({
             "acknowledged": true, "shards_acknowledged": true, "index": index
@@ -1031,6 +1047,17 @@ pub async fn flush(
     index: Option<Path<String>>,
     Query(_p): Query<Params>,
 ) -> Response {
+    // a forced flush has to be allowed to wait for one already running, or it
+    // would have to refuse to do the thing it was asked for
+    if _p.get("force").map(|v| v != "false").unwrap_or(false)
+        && _p.get("wait_if_ongoing").map(|v| v == "false").unwrap_or(false)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: wait_if_ongoing must be true for a force flush;",
+        );
+    }
     let targets = match index {
         Some(Path(i)) => {
             let t = store.resolve(&i);
@@ -1041,12 +1068,15 @@ pub async fn flush(
         }
         None => store.names(),
     };
+    let tally = shards_over(&store, &targets);
     for n in targets {
         if let Some(st) = store.get(&n) {
-            let _ = st.write().refresh();
+            let mut g = st.write();
+            let _ = g.refresh();
+            g.flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    axum::Json(json!({"_shards": shards()})).into_response()
+    axum::Json(json!({"_shards": tally})).into_response()
 }
 
 pub async fn refresh_all(State(store): State<Store>) -> Response {
@@ -3570,7 +3600,8 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                    "total_size_in_bytes": 0},
         "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
                     "external_total_time_in_millis": 0, "listeners": 0},
-        "flush": {"total": 0, "periodic": 0, "total_time_in_millis": 0},
+        "flush": {"total": st.flushes.load(std::sync::atomic::Ordering::Relaxed),
+                  "periodic": 0, "total_time_in_millis": 0},
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
@@ -4337,6 +4368,8 @@ fn cluster_state_inner(
             "mappings": g.mapping.raw,
             "settings": g.effective_settings(),
             "state": if g.closed { "close" } else { "open" },
+            // the space a shard count can be split into later
+            "routing_num_shards": 1024,
         }));
     }
 
@@ -4797,7 +4830,15 @@ async fn put_alias_inner(
         }
         None
     };
-    let index = index.filter(|s| !s.is_empty()).or_else(|| from_body(&["index", "indices"]));
+    // the body may name the index too, and does so when the path names one
+    // that is not there
+    let from_path = index.filter(|s| !s.is_empty());
+    let from_body_index = from_body(&["index", "indices"]);
+    let index = match (&from_path, &from_body_index) {
+        (Some(p), Some(b)) if store.resolve(p).is_empty() => Some(b.clone()),
+        (Some(p), _) => Some(p.clone()),
+        (None, b) => b.clone(),
+    };
     let name = name.filter(|s| !s.is_empty()).or_else(|| from_body(&["alias", "aliases"]));
 
     let (Some(index), Some(name)) = (index, name) else {
