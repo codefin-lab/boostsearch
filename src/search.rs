@@ -2828,7 +2828,9 @@ pub fn run(
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("field [{both}] is both included and excluded"),
+                format!(
+                    "The same entry [{both}] cannot be both included and excluded in _source"
+                ),
             ));
         }
     }

@@ -1534,6 +1534,29 @@ fn flatten_settings(v: &Value, prefix: &str, out: &mut serde_json::Map<String, V
     }
 }
 
+/// `human` asks for a readable form beside each machine one.
+fn add_human_settings(view: &mut Value, st: &IdxState) {
+    let created = st.created_millis();
+    let text = st.created_string();
+    if let Some(o) = view.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
+        o.insert("creation_date_string".into(), json!(text));
+        o.entry("creation_date".to_string()).or_insert_with(|| json!(created.to_string()));
+        // the version an index was made under is reported the same two ways
+        let ver = o
+            .get("version")
+            .and_then(|v| v.get("created"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "136407827".to_string());
+        o.insert("version".into(), json!({
+            "created": ver, "created_string": "3.9.0",
+        }));
+    } else if let Some(o) = view.as_object_mut() {
+        o.insert("index.creation_date_string".into(), json!(text));
+        o.entry("index.creation_date".to_string())
+            .or_insert_with(|| json!(created.to_string()));
+    }
+}
+
 fn settings_view(raw: &Value, name: Option<&str>, flat: bool) -> Value {
     let mut flat_map = serde_json::Map::new();
     flatten_settings(raw, "", &mut flat_map);
@@ -1608,6 +1631,9 @@ fn settings_response(
         let Some(st) = store.get(&n) else { continue };
         let raw = st.read().effective_settings();
         let mut entry = json!({ "settings": settings_view(&raw, name.as_deref(), flat) });
+        if flag(&p, "human") {
+            add_human_settings(&mut entry["settings"], &st.read());
+        }
         if flag(&p, "include_defaults") {
             entry["defaults"] = settings_view(&default_settings(), name.as_deref(), flat);
         }
@@ -4825,7 +4851,7 @@ fn cluster_state_inner(
         // the space a shard count can be split into later: the power-of-two
         // multiple of the shards the index was given
         let mut routing_shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
-        while routing_shards < 1024 {
+        while routing_shards * 2 <= 1024 {
             routing_shards *= 2;
         }
         indices.insert(g.name.clone(), json!({
@@ -5771,10 +5797,14 @@ pub async fn get_index(
         for (a, def) in &g.aliases {
             aliases.insert(a.clone(), def.clone());
         }
+        let mut settings = g.effective_settings();
+        if flag(&p, "human") {
+            add_human_settings(&mut settings, &g);
+        }
         out.insert(n.clone(), json!({
             "aliases": Value::Object(aliases),
             "mappings": if g.mapping.raw.is_null() { json!({}) } else { g.mapping.raw.clone() },
-            "settings": g.effective_settings(),
+            "settings": settings,
         }));
     }
     respond(&p, Value::Object(out))
