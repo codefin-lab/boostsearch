@@ -1601,9 +1601,8 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
             if let Some(Value::Object(spec)) = o.get("terms").cloned().map(|v| v) {
                 for (field, def) in spec {
                     let Some(d) = def.as_object() else { continue };
-                    let (Some(index), Some(id), Some(path)) = (
+                    let (Some(index), Some(path)) = (
                         d.get("index").and_then(|v| v.as_str()),
-                        d.get("id").and_then(|v| v.as_str()),
                         d.get("path").and_then(|v| v.as_str()),
                     ) else {
                         continue;
@@ -1611,15 +1610,61 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                     let Some(st) = store.get(index) else {
                         return Err(no_such_index(index));
                     };
-                    let g = st.read();
-                    let values = crate::api::read_source(&g, id)
-                        .and_then(|src| {
-                            src.pointer(&format!("/{}", path.replace('.', "/"))).cloned()
-                        })
-                        .unwrap_or(Value::Array(vec![]));
-                    let list = match values {
-                        Value::Array(a) => a,
-                        other => vec![other],
+                    let pointer = format!("/{}", path.replace('.', "/"));
+                    // the terms come from one named document, or from every
+                    // document a query finds -- the second is how a caller
+                    // says "whatever this group follows"
+                    let list: Vec<Value> = if let Some(id) = d.get("id").and_then(|v| v.as_str()) {
+                        let g = st.read();
+                        let values = crate::api::read_source(&g, id)
+                            .and_then(|src| src.pointer(&pointer).cloned())
+                            .unwrap_or(Value::Array(vec![]));
+                        match values {
+                            Value::Array(a) => a,
+                            other => vec![other],
+                        }
+                    } else if let Some(q) = d.get("query") {
+                        let g = st.read();
+                        let ctx = Ctx {
+                            fields: &g.fields,
+                            mapping: &g.mapping,
+                            index: &g.index,
+                            max_terms_count: g.max_terms_count(),
+                            observed_kinds: &g.observed_kinds,
+                            kinds_complete: g.kinds_complete,
+                            stats: &g.stats,
+                        };
+                        let built = crate::query::build(&ctx, q).map_err(|e| {
+                            err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string())
+                        })?;
+                        let searcher = g.reader.searcher();
+                        let hits = searcher
+                            .search(&built, &TopDocs::with_limit(g.max_terms_count()).order_by_score())
+                            .map_err(|e| {
+                                err(
+                                    StatusCode::BAD_REQUEST,
+                                    "search_phase_execution_exception",
+                                    e.to_string(),
+                                )
+                            })?;
+                        let mut out: Vec<Value> = Vec::new();
+                        for (_, addr) in hits {
+                            let Some((_, src)) = source_of(&searcher, &g, addr) else { continue };
+                            // a document with nothing at that path contributes
+                            // nothing, which is not the same as contributing a null
+                            match src.pointer(&pointer) {
+                                Some(Value::Array(a)) => {
+                                    out.extend(a.iter().filter(|v| !v.is_null()).cloned())
+                                }
+                                Some(Value::Null) | None => {}
+                                Some(one) => out.push(one.clone()),
+                            }
+                        }
+                        out.sort_by_key(|v| v.to_string());
+                        out.dedup();
+                        out
+                    } else {
+                        continue;
                     };
                     // a lookup may point at a bitmap, whose value_type sits
                     // beside the field rather than inside it
@@ -2715,6 +2760,23 @@ pub fn run(
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
+    // `expand_wildcards` naming closed indices means a pattern reaches them,
+    // and a closed index cannot be searched whichever way it was reached
+    let wants_closed = p
+        .get("expand_wildcards")
+        .map(|v| v.split(',').any(|w| matches!(w.trim(), "closed" | "all")))
+        .unwrap_or(false);
+    if wants_closed && !lenient {
+        for name in store.resolve(expr) {
+            if store.is_closed(&name) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "index_closed_exception",
+                    format!("closed index [{name}]"),
+                ));
+            }
+        }
+    }
     for name in expr
         .split(',')
         .map(|n| n.trim())
