@@ -1831,8 +1831,8 @@ pub fn write_doc_versioned(
         return Err(err(
             StatusCode::BAD_REQUEST,
             "action_request_validation_exception",
-            "Validation Failed: 1: create operations do not support \
-             versioning. use index instead;",
+            "Validation Failed: 1: create operations only support internal versioning. \
+             use index instead;",
         ));
     }
     let existed = exists_doc(st, id);
@@ -2113,6 +2113,20 @@ pub async fn get_doc(
         };
     };
     let g = st.read();
+    // a version named on a read is a condition: the document must be at it
+    if let Some(want) = p.get("version").and_then(|v| v.parse::<u64>().ok()) {
+        if exists_doc(&g, &id) && g.version_of(&id) != want {
+            return err(
+                StatusCode::CONFLICT,
+                "version_conflict_engine_exception",
+                format!(
+                    "[{id}]: version conflict, current version [{}] is different than the one \
+                     provided [{want}]",
+                    g.version_of(&id)
+                ),
+            );
+        }
+    }
     match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => {
             let fields = stored_fields(&src, &p);
@@ -3632,6 +3646,23 @@ pub async fn force_merge(
     if targets.is_empty() && !expr.contains('*') && expr != "_all" {
         return no_such_index(&expr);
     }
+    // a merge reaches every copy of a shard unless told to keep to the
+    // primaries, and a replica is a copy this node does not hold
+    let primary_only = p.get("primary_only").map(|v| v != "false").unwrap_or(false);
+    let touched: u64 = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| {
+            let g = st.read();
+            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+            let copies = if primary_only {
+                1
+            } else {
+                1 + g.numeric_setting("number_of_replicas").unwrap_or(0)
+            };
+            shards * copies
+        })
+        .sum();
     let max_segments: usize = p
         .get("max_num_segments")
         .and_then(|v| v.parse().ok())
@@ -3668,7 +3699,9 @@ pub async fn force_merge(
             let _ = g.refresh();
         }
     }
-    respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
+    respond(&p, json!({
+        "_shards": {"total": touched, "successful": touched, "failed": 0}
+    }))
 }
 
 const CAT_SEGMENT_COLS: &[&str] = &[
@@ -4779,13 +4812,18 @@ fn cluster_state_inner(
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        // the space a shard count can be split into later: the power-of-two
+        // multiple of the shards the index was given
+        let mut routing_shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+        while routing_shards < 1024 {
+            routing_shards *= 2;
+        }
         indices.insert(g.name.clone(), json!({
             "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
             "mappings": g.mapping.raw,
             "settings": g.effective_settings(),
             "state": if g.closed { "close" } else { "open" },
-            // the space a shard count can be split into later
-            "routing_num_shards": 1024,
+            "routing_num_shards": routing_shards,
         }));
     }
 
@@ -4926,6 +4964,21 @@ fn check_cluster_setting(key: &str, value: &Value) -> Option<Response> {
     // a null is a removal, not a value, and nothing about it can be wrong
     if value.is_null() {
         return None;
+    }
+    // a cancellation rate or ratio of zero would cancel nothing, which is not
+    // a setting so much as a way of turning the feature off by halves
+    if key.starts_with("search_backpressure.") && key.contains("cancellation_") {
+        let n = value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(1.0);
+        if n <= 0.0 {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("{key} must be > 0"),
+            ));
+        }
     }
     if key == "search_backpressure.mode" {
         let v = value.as_str().unwrap_or("");
@@ -6902,6 +6955,11 @@ pub async fn acknowledged(Query(p): Query<Params>) -> Response {
 
 pub async fn shards_ok(Query(p): Query<Params>) -> Response {
     respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
+}
+
+/// `_tasks/_cancel` -- nothing here runs long enough to be cancelled.
+pub async fn cancel_tasks(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"nodes": {}, "node_failures": [], "tasks": []}))
 }
 
 pub async fn search_shards(

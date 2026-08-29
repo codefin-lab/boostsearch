@@ -140,6 +140,8 @@ fn app(store: Store) -> Router {
         .route("/_cluster/reroute", post(api::reroute))
         .route("/_script_context", get(api::script_contexts))
         .route("/_script_language", get(api::script_languages))
+        .route("/_tasks/_cancel", post(api::cancel_tasks))
+        .route("/_tasks/{id}/_cancel", post(api::cancel_tasks))
         .route("/_tasks", get(api::list_tasks))
         .route("/_tasks/{id}", get(api::get_task))
         // --- index housekeeping ---

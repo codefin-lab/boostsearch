@@ -2754,6 +2754,21 @@ pub fn run(
         expand_more_like_this(store, &targets, q);
     }
 
+    // a field cannot be both kept and dropped: naming it in both lists asks
+    // for two answers about the same field
+    if let (Some(inc), Some(exc)) = (
+        body.pointer("/_source/includes").and_then(|v| v.as_array()),
+        body.pointer("/_source/excludes").and_then(|v| v.as_array()),
+    ) {
+        if let Some(both) = inc.iter().find(|i| exc.contains(i)).and_then(|v| v.as_str()) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("field [{both}] is both included and excluded"),
+            ));
+        }
+    }
+
     // `_shard_doc` orders by where a document sits within a shard, which only
     // holds still while a point-in-time is open; without one the order it
     // names does not exist
