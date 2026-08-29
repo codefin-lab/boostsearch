@@ -259,9 +259,7 @@ pub async fn resize_index(
         // the source's settings and takes the request's over the top
         let mut inherited = g.effective_settings();
         if let Some(o) = inherited.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
-            for k in ["provided_name", "uuid", "creation_date", "blocks"] {
-                o.remove(k);
-            }
+            o.retain(|k, _| !matches!(k.as_str(), "provided_name" | "uuid" | "creation_date"));
         }
         (g.mapping.raw.clone(), body.get("aliases").cloned(), ids, inherited)
     };
@@ -287,6 +285,19 @@ pub async fn resize_index(
             o.insert("number_of_shards".into(), json!("1"));
         }
     }
+    // the block that held the source still is carried over, but not until the
+    // documents are: the copy goes through the write path, which the block
+    // would otherwise refuse
+    let mut held_back = serde_json::Map::new();
+    if let Some(o) = settings.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
+        let blocked: Vec<String> =
+            o.keys().filter(|k| k.starts_with("blocks")).cloned().collect();
+        for k in blocked {
+            if let Some(v) = o.remove(&k) {
+                held_back.insert(k, v);
+            }
+        }
+    }
     if settings.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
         create["settings"] = settings;
     }
@@ -310,6 +321,16 @@ pub async fn resize_index(
     {
         let mut g = dst.write();
         let _ = g.refresh();
+        if !held_back.is_empty() {
+            let mut set = g.settings.clone();
+            if !set.is_object() {
+                set = json!({});
+            }
+            let slot = set.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+            crate::store::deep_merge(slot, &Value::Object(held_back));
+            g.settings = set;
+            g.save_meta();
+        }
     }
     // `wait_for_completion=false` asks for the work to be tracked rather than
     // waited on; the copy is already done, so the task is a finished one
@@ -621,6 +642,91 @@ pub async fn shard_stores(
         }
     }
     respond(&p, json!({"indices": Value::Object(indices)}))
+}
+
+/// `_resolve/index` -- what a name or pattern actually reaches.
+pub async fn resolve_index(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let mut indices = Vec::new();
+    let mut aliases: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut names = store.names();
+    names.sort();
+    for n in names {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut own: Vec<String> = g.aliases.keys().cloned().collect();
+        own.sort();
+        for a in &own {
+            aliases.entry(a.clone()).or_default().push(g.name.clone());
+        }
+        let hit = name.split(',').any(|pat| {
+            let pat = pat.trim();
+            pat == "*" || pat == "_all" || pat == g.name || crate::store::glob_match(pat, &g.name)
+                || own.iter().any(|a| a == pat || crate::store::glob_match(pat, a))
+        });
+        if hit {
+            indices.push(json!({
+                "name": g.name,
+                "aliases": own,
+                "attributes": [if g.closed { "closed" } else { "open" }],
+            }));
+        }
+    }
+    let alias_list: Vec<Value> = aliases
+        .into_iter()
+        .filter(|(a, _)| {
+            name.split(',').any(|pat| {
+                let pat = pat.trim();
+                pat == "*" || pat == "_all" || pat == a || crate::store::glob_match(pat, a)
+            })
+        })
+        .map(|(a, mut idx)| {
+            idx.sort();
+            json!({"name": a, "indices": idx})
+        })
+        .collect();
+    respond(&p, json!({
+        "indices": indices, "aliases": alias_list, "data_streams": [],
+    }))
+}
+
+/// `_remote/info` -- the clusters this one is connected to, of which there
+/// are none.
+pub async fn remote_info(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({}))
+}
+
+/// `_block/{block}` -- hold an index still without closing it.
+pub async fn add_block(
+    State(store): State<Store>,
+    Path((index, block)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    let targets = store.resolve(&index);
+    if targets.is_empty() {
+        return no_such_index(&index);
+    }
+    let mut blocked = Vec::new();
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let mut g = st.write();
+        let mut settings = g.settings.clone();
+        if !settings.is_object() {
+            settings = json!({});
+        }
+        let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+        crate::store::deep_merge(slot, &json!({format!("blocks.{block}"): "true"}));
+        g.settings = settings;
+        g.save_meta();
+        blocked.push(json!({"name": g.name.clone(), "blocked": true}));
+    }
+    respond(&p, json!({
+        "acknowledged": true, "shards_acknowledged": true, "indices": blocked
+    }))
 }
 
 pub async fn delete_index(
@@ -1013,6 +1119,17 @@ pub fn write_doc_raw(
     op_type: &str,
     raw: Option<String>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
+    // an index held still refuses writes until the block is lifted
+    if st.setting("blocks.write").as_deref() == Some("true") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "cluster_block_exception",
+            format!(
+                "index [{}] blocked by: [FORBIDDEN/8/index write (api)];",
+                st.name
+            ),
+        ));
+    }
     // an id is carried in the index's terms, which caps how long it may be
     if id.len() > 512 {
         return Err(err(
