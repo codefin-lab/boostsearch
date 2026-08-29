@@ -717,11 +717,19 @@ pub async fn resolve_index(
     let mut indices = Vec::new();
     let mut aliases: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
+    // a pattern reaches the states `expand_wildcards` names, which is open
+    // ones unless the caller says otherwise
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
+    let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let mut names = store.names();
     names.sort();
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        if (g.closed && !want_closed) || (!g.closed && !want_open) {
+            continue;
+        }
         let mut own: Vec<String> = g.aliases.keys().cloned().collect();
         own.sort();
         for a in &own {
@@ -1038,8 +1046,10 @@ pub async fn reroute(
             "cluster_name": "obsearch", "cluster_uuid": "_na_",
             "version": 1, "state_uuid": "_na_",
         });
-        if want("master_node") || want("cluster_manager_node") {
+        if want("master_node") {
             state["master_node"] = json!("node-0");
+        }
+        if want("cluster_manager_node") {
             state["cluster_manager_node"] = json!("node-0");
         }
         if want("nodes") {
@@ -7250,7 +7260,20 @@ pub async fn validate_query(
     // all, whatever else it contains
     let Some(query) = body.get("query").cloned() else {
         if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            return respond(&p, json!({"_shards": shards, "valid": true}));
+            let mut out = json!({"_shards": shards, "valid": true});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                let sample = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+                out["explanations"] = json!(
+                    sample
+                        .iter()
+                        .map(|n| json!({
+                            "index": n, "valid": true,
+                            "explanation": describe_query(&json!({"match_all": {}})),
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            return respond(&p, out);
         }
         let mut out = json!({"_shards": shards, "valid": false});
         // whatever the body holds, it is not where a query goes -- said only
@@ -7289,8 +7312,53 @@ pub async fn validate_query(
         }
     }
     match crate::search::run(&store, &expr, &probe, &Params::new()) {
-        Ok(_) => respond(&p, json!({"_shards": shards, "valid": true})),
+        Ok(_) => {
+            let mut out = json!({"_shards": shards, "valid": true});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                out["explanations"] = json!(
+                    sample
+                        .iter()
+                        .map(|n| json!({
+                            "index": n, "valid": true,
+                            "explanation": describe_query(probe.get("query").unwrap()),
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            respond(&p, out)
+        }
         Err(_) => respond(&p, json!({"_shards": shards, "valid": false})),
+    }
+}
+
+/// How a query reads once it has been rewritten, in the shape the engine
+/// names its own queries.
+fn describe_query(q: &Value) -> String {
+    let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
+        return "*:*".to_string();
+    };
+    match kind.as_str() {
+        "match_all" => {
+            "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
+                .to_string()
+        }
+        "term" | "match" => body
+            .as_object()
+            .and_then(|o| o.iter().next())
+            .map(|(f, v)| {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Object(o) => o
+                        .get("value")
+                        .or_else(|| o.get("query"))
+                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                        .unwrap_or_default(),
+                    other => other.to_string(),
+                };
+                format!("{f}:{text}")
+            })
+            .unwrap_or_else(|| "*:*".to_string()),
+        other => other.to_string(),
     }
 }
 
