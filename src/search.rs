@@ -2796,7 +2796,9 @@ pub fn run(
         && !expr.is_empty()
         && !lenient
     {
-        return Err(no_such_index(expr));
+        // a date-math name is reported as the index it stands for, since that
+        // is the one that was not there
+        return Err(no_such_index(&crate::store::resolve_date_math_name(expr)));
     }
     // `allow_no_indices=false` makes an expression that reaches nothing an
     // error rather than a search with nothing to search

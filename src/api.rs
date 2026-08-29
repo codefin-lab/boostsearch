@@ -1301,9 +1301,19 @@ pub async fn delete_index(
     }
     // `allow_no_indices=false` makes an expression that reaches nothing an
     // error rather than a request with nothing to do
+    // `allow_no_indices=false` is asked of each pattern in turn: an
+    // expression is only satisfied if every part of it reached something
     let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
-    if targets.is_empty() && !allow_none {
-        return no_such_index(&index);
+    if !allow_none {
+        for part in index.split(',').map(|n| n.trim()).filter(|n| n.contains('*')) {
+            let reached = store.names().iter().any(|n| crate::store::glob_match(part, n));
+            if !reached {
+                return no_such_index(part);
+            }
+        }
+        if targets.is_empty() {
+            return no_such_index(&index);
+        }
     }
     for n in &targets {
         store.delete(n);

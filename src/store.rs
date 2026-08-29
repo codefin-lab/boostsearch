@@ -1404,6 +1404,15 @@ impl Store {
         let mut out = Vec::new();
         for part in expr.split(',') {
             let part = part.trim();
+            // a name in angle brackets is a date expression standing for the
+            // index of some day, month or year
+            let resolved;
+            let part = if part.starts_with('<') {
+                resolved = resolve_date_math_name(part);
+                resolved.as_str()
+            } else {
+                part
+            };
             if part.contains('*') {
                 let re = wildcard_to_regex(part);
                 // a pattern reaches an index by its own name or by any alias
@@ -2148,6 +2157,65 @@ pub fn token_count(text: &str) -> u64 {
 
 /// `2019-12-15||/d`, `now-1d`, `now+1M/M`: an anchor followed by shifts and a
 /// rounding, which is how OpenSearch writes a date relative to another.
+/// Resolve a date-math index name into the name it stands for.
+///
+/// `<logstash-{now/M}>` names the index for the current month; the braces hold
+/// a date expression and, after a pipe, how to write it.
+pub fn resolve_date_math_name(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+        return name.to_string();
+    };
+    let mut out = String::new();
+    let mut rest = inner;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let body = &rest[open + 1..open + close];
+        rest = &rest[open + close + 1..];
+        // the expression may name its own format after a pipe
+        let (expr, fmt) = match body.split_once('|') {
+            Some((e, f)) => (e, f),
+            None => (body, "yyyy.MM.dd"),
+        };
+        match parse_date_math(expr.trim()) {
+            Some((d, _)) => out.push_str(&format_with_pattern(d, fmt.trim())),
+            None => out.push_str(body),
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Write a date the way a Java-style pattern asks for.
+fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mut run = 1;
+        while chars.peek() == Some(&c) {
+            chars.next();
+            run += 1;
+        }
+        match c {
+            'y' => out.push_str(&format!("{:0run$}", d.year(), run = run)),
+            'M' => out.push_str(&format!("{:0run$}", d.month() as u8, run = run)),
+            'd' => out.push_str(&format!("{:0run$}", d.day(), run = run)),
+            'H' => out.push_str(&format!("{:0run$}", d.hour(), run = run)),
+            'm' => out.push_str(&format!("{:0run$}", d.minute(), run = run)),
+            's' => out.push_str(&format!("{:0run$}", d.second(), run = run)),
+            other => {
+                for _ in 0..run {
+                    out.push(other);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn parse_date_math(s: &str) -> Option<(tantivy::time::OffsetDateTime, Option<char>)> {
     use tantivy::time::{Duration, OffsetDateTime};
     let (anchor, ops) = match s.split_once("||") {
