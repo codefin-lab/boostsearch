@@ -1201,11 +1201,31 @@ pub async fn get_mapping(
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&expr);
     }
+    // `expand_wildcards` says which states a pattern reaches; `none` means it
+    // reaches nothing at all
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    let reach = |closed: bool| {
+        states.split(',').any(|w| match w.trim() {
+            "all" => true,
+            "open" => !closed,
+            "closed" => closed,
+            _ => false,
+        })
+    };
     let mut out = serde_json::Map::new();
     for n in targets {
         if let Some(st) = store.get(&n) {
-            out.insert(n, mapping_view(&st.read()));
+            let g = st.read();
+            if expr.contains('*') && !reach(g.closed) {
+                continue;
+            }
+            out.insert(n, mapping_view(&g));
         }
+    }
+    // a pattern reaching nothing is an error only when the caller said so
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if out.is_empty() && !allow_none {
+        return no_such_index(&expr);
     }
     axum::Json(Value::Object(out)).into_response()
 }
@@ -5684,17 +5704,23 @@ pub async fn cat_allocation(
 ) -> Response {
     // the path names which node to describe, and there is only one
     if let Some(Path(want)) = node.as_ref() {
-        if !matches!(want.as_str(), "obsearch" | "node-0" | "_all" | "*") {
+        if !matches!(want.as_str(), "obsearch" | "node-0" | "node" | "_all" | "*") {
             return cat_render_cols(CAT_ALLOCATION_COLS, Vec::new(), &p);
         }
     }
     let shards = store.names().len();
+    // `bytes` asks for the sizes as plain numbers in that unit rather than as
+    // text a person would read
+    let raw = p.contains_key("bytes");
+    let size = |human: &str, bytes: u64| {
+        if raw { bytes.to_string() } else { human.to_string() }
+    };
     let rows = vec![vec![
         ("shards", shards.to_string()),
-        ("disk.indices", "0b".to_string()),
-        ("disk.used", "1gb".to_string()),
-        ("disk.avail", "1gb".to_string()),
-        ("disk.total", "2gb".to_string()),
+        ("disk.indices", size("0b", 0)),
+        ("disk.used", size("1gb", 1_073_741_824)),
+        ("disk.avail", size("1gb", 1_073_741_824)),
+        ("disk.total", size("2gb", 2_147_483_648)),
         ("disk.percent", "50".to_string()),
         ("host", "127.0.0.1".to_string()),
         ("ip", "127.0.0.1".to_string()),
