@@ -447,7 +447,8 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     let task = json!({
         "node": "node-0", "id": 1, "type": "transport",
         "action": "cluster:monitor/tasks/lists", "start_time_in_millis": 0,
-        "running_time_in_nanos": 0, "cancellable": false, "headers": {},
+        "running_time_in_nanos": 0, "cancellable": false,
+        "headers": Value::Object(task_headers),
         "resource_stats": {
             "average": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},
             "total": {"cpu_time_in_nanos": 0, "memory_in_bytes": 0},

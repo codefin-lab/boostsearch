@@ -154,8 +154,10 @@ class Runner:
     def do(self, action):
         action = dict(action)
         catch = action.pop("catch", None)
+        # a test may tag its request with headers, which some APIs echo back
+        extra_headers = action.pop("headers", None) or {}
         for meta in ("warnings", "allowed_warnings", "warnings_regex",
-                     "allowed_warnings_regex", "headers", "node_selector"):
+                     "allowed_warnings_regex", "node_selector"):
             action.pop(meta, None)
         if not action:
             raise Failure("empty do block")
@@ -163,11 +165,11 @@ class Runner:
         # OpenSearch runner executes each of them in order
         apis = list(action.items())
         for api, params in apis[:-1]:
-            self.do_one(api, params, None)
+            self.do_one(api, params, None, extra_headers)
         api, params = apis[-1]
-        return self.do_one(api, params, catch)
+        return self.do_one(api, params, catch, extra_headers)
 
-    def do_one(self, api, params, catch):
+    def do_one(self, api, params, catch, extra_headers=None):
         params = self.unstash(params or {})
         if not isinstance(params, dict):
             params = {}
@@ -194,6 +196,8 @@ class Runner:
                 query[k] = ",".join(str(x) for x in v)
 
         headers = {"Content-Type": "application/json"}
+        for k, v in (extra_headers or {}).items():
+            headers[k] = str(self.unstash(v))
         data = None
         if body is not None:
             if isinstance(body, (list, tuple)):  # bulk / msearch ndjson
