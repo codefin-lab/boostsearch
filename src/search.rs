@@ -2349,7 +2349,14 @@ pub fn run(
     // reading documents skips the closed indices a pattern would otherwise
     // reach; a closed index named outright is a different complaint
     let targets = store.resolve_open(expr);
-    for name in expr.split(',').map(|n| n.trim()).filter(|n| !n.is_empty() && !n.contains('*')) {
+    // `ignore_unavailable` says to pass over what cannot be searched rather
+    // than to complain about it
+    let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
+    for name in expr
+        .split(',')
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty() && !n.contains('*') && !lenient)
+    {
         if store.is_closed(name) {
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -2358,7 +2365,12 @@ pub fn run(
             ));
         }
     }
-    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !expr.is_empty() {
+    if targets.is_empty()
+        && !expr.contains('*')
+        && expr != "_all"
+        && !expr.is_empty()
+        && !lenient
+    {
         return Err(no_such_index(expr));
     }
     // a `terms` lookup names a document to read the term list from

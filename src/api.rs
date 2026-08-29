@@ -795,6 +795,30 @@ pub async fn put_mapping(
     body: String,
 ) -> Response {
     let body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+    // a mapping names fields, not a type; the type that used to wrap them is
+    // gone and a body still carrying one is not a mapping
+    if body.get("_doc").is_some() && body.get("properties").is_none() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "Types cannot be provided in put mapping requests",
+        );
+    }
+    // a field has to be called something
+    fn empty_named(node: &Value) -> bool {
+        let Some(props) = node.get("properties").and_then(|p| p.as_object()) else {
+            return false;
+        };
+        props.keys().any(|k| k.trim().is_empty())
+            || props.values().any(empty_named)
+    }
+    if empty_named(&body) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "field name cannot be an empty string",
+        );
+    }
     let targets = store.resolve(&index);
     if targets.is_empty() {
         return no_such_index(&index);
@@ -5626,7 +5650,15 @@ pub async fn put_index_template(
             }
         }
     }
-    flat["__composable"] = json!(body);
+    // the body is kept as the composable form's own answer, so it is stored
+    // in the shape that answer has: patterns as a list, settings nested under
+    // `index` with text values
+    let mut kept = body.clone();
+    kept["index_patterns"] = flat["index_patterns"].clone();
+    if let Some(set) = kept.pointer("/template/settings").cloned() {
+        kept["template"]["settings"] = template_settings(&set);
+    }
+    flat["__composable"] = kept;
     store.put_template(&name, flat);
     respond(&p, json!({"acknowledged": true}))
 }
