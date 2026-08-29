@@ -793,13 +793,16 @@ pub async fn resolve_index(
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
-        if (g.closed && !want_closed) || (!g.closed && !want_open) {
-            continue;
-        }
         let mut own: Vec<String> = g.aliases.keys().cloned().collect();
         own.sort();
+        // an alias names every index behind it, whatever state each is in --
+        // closing one does not take it out from behind its alias
         for a in &own {
             aliases.entry(a.clone()).or_default().push(g.name.clone());
+        }
+        // the index listing itself only reaches the states asked for
+        if (g.closed && !want_closed) || (!g.closed && !want_open) {
+            continue;
         }
         let hit = name.split(',').any(|pat| {
             let pat = pat.trim();
@@ -4232,9 +4235,10 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                      "index_writer_memory_in_bytes": 0, "version_map_memory_in_bytes": 0,
                      "fixed_bit_set_memory_in_bytes": 0, "max_unsafe_auto_id_timestamp": -1,
                      "file_sizes": {}},
-        "translog": {"operations": st.pending.len(),
+        "translog": {"operations": if st.closed { 0 } else { st.pending.len() },
                      "size_in_bytes": st.pending_bytes.max(55),
-                     "uncommitted_operations": st.pending.len(),
+                     "uncommitted_operations":
+                        if st.closed { 0 } else { st.pending.len() },
                      "uncommitted_size_in_bytes": st.pending_bytes.max(55),
                      "earliest_last_modified_age": 0,
                      "remote_store": {"upload": {"total_uploads": {"started": 0, "failed": 0, "succeeded": 0}}}},
