@@ -3914,6 +3914,10 @@ fn nest_settings(flat: &Value) -> Value {
 
 /// A setting whose value the cluster refuses rather than stores.
 fn check_cluster_setting(key: &str, value: &Value) -> Option<Response> {
+    // a null is a removal, not a value, and nothing about it can be wrong
+    if value.is_null() {
+        return None;
+    }
     if key == "search_backpressure.mode" {
         let v = value.as_str().unwrap_or("");
         if !matches!(v, "monitor_only" | "enforced" | "disabled") {
@@ -4821,11 +4825,12 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
                     want.iter()
                         .filter_map(|w| {
                             // a column answers to its name or to one of the
-                            // short forms `_cat` accepts
+                            // short forms `_cat` accepts, and is headed by the
+                            // name it was asked for
                             r.iter()
                                 .find(|(k, _)| k == w)
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
-                                .cloned()
+                                .map(|(_, v)| (*w, v.clone()))
                         })
                         .collect()
                 })
@@ -4888,9 +4893,6 @@ pub async fn cat_indices(
                 ),
             );
         }
-        if h != "green" {
-            return cat_render_cols(CAT_INDEX_COLS, Vec::new(), &p);
-        }
     }
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
@@ -4921,9 +4923,18 @@ pub async fn cat_indices(
         if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
             continue;
         }
+        // an index asking for replicas has some it will never get on one node
+        let health = if g.numeric_setting("number_of_replicas").unwrap_or(0) > 0 {
+            "yellow"
+        } else {
+            "green"
+        };
+        if p.get("health").map(|h| h != health).unwrap_or(false) {
+            continue;
+        }
         let docs = g.reader.searcher().num_docs();
         rows.push(vec![
-            ("health", "green".to_string()),
+            ("health", health.to_string()),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
             ("index", g.name.clone()),
             ("uuid", g.uuid.clone()),
@@ -4966,7 +4977,17 @@ pub const CAT_ALLOCATION_COLS: &[&str] = &[
 ///
 /// One node holds every shard, and the disk figures describe the machine it
 /// is running on rather than a share of a cluster.
-pub async fn cat_allocation(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+pub async fn cat_allocation(
+    State(store): State<Store>,
+    node: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    // the path names which node to describe, and there is only one
+    if let Some(Path(want)) = node.as_ref() {
+        if !matches!(want.as_str(), "obsearch" | "node-0" | "_all" | "*") {
+            return cat_render_cols(CAT_ALLOCATION_COLS, Vec::new(), &p);
+        }
+    }
     let shards = store.names().len();
     let rows = vec![vec![
         ("shards", shards.to_string()),

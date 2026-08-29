@@ -359,6 +359,20 @@ def reset(base):
             requests.delete(base + path, timeout=10)
         except Exception:
             pass
+    # Cluster settings outlive an index too, and one file's transient setting
+    # changes what the next file sees. There is no wildcard delete for them,
+    # so whatever is set is read back and cleared by name.
+    try:
+        held = requests.get(base + "/_cluster/settings?flat_settings=true", timeout=10).json()
+        clear = {
+            scope: {k: None for k in held.get(scope, {})}
+            for scope in ("persistent", "transient")
+            if held.get(scope)
+        }
+        if clear:
+            requests.put(base + "/_cluster/settings", json=clear, timeout=10)
+    except Exception:
+        pass
 
 
 def main():
