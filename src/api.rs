@@ -4264,6 +4264,9 @@ fn cat_only_default<'a>(
         .collect()
 }
 
+pub const CAT_TEMPLATE_COLS: &[&str] =
+    &["name", "index_patterns", "order", "version", "composed_of"];
+
 pub const CAT_ALLOCATION_COLS: &[&str] = &[
     "shards", "disk.indices", "disk.used", "disk.avail", "disk.total", "disk.percent",
     "host", "ip", "node",
@@ -4492,10 +4495,10 @@ pub async fn cat_health(Query(p): Query<Params>) -> Response {
 /// the rest answer with the right envelope rather than a 501.
 pub async fn cat_dispatch_target(
     State(store): State<Store>,
-    Path((what, _target)): Path<(String, String)>,
+    Path((what, target)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    cat_by_name(store, what, p).await
+    cat_by_name(store, what, Some(target), p).await
 }
 
 pub async fn cat_dispatch(
@@ -4503,10 +4506,10 @@ pub async fn cat_dispatch(
     Path(what): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    cat_by_name(store, what, p).await
+    cat_by_name(store, what, None, p).await
 }
 
-async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
+async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Params) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
         "indices" => cat_indices(State(store), None, Query(p)).await,
@@ -4522,26 +4525,64 @@ async fn cat_by_name(store: Store, what: String, p: Params) -> Response {
                       ("node.role", "dimr".into()), ("cluster_manager", "*".into()),
                       ("name", "obsearch".into())]], &p),
         "templates" => {
-            let rows = store
+            let mut rows: Vec<Vec<(&str, String)>> = store
                 .get_templates()
                 .into_iter()
                 .map(|(name, t)| {
-                    let pats = t
-                        .get("index_patterns")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
-                        })
-                        .unwrap_or_default();
+                    let list = |key: &str| {
+                        t.get(key)
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                            })
+                            .unwrap_or_default()
+                    };
+                    // the composable form keeps the body it was written with,
+                    // which is where its version and components are
+                    let body = t.get("__composable").unwrap_or(&t);
+                    let num = |key: &str| {
+                        body.get(key)
+                            .or_else(|| t.get(key))
+                            .map(|o| o.to_string())
+                            .unwrap_or_default()
+                    };
                     vec![
                         ("name", name),
-                        ("index_patterns", format!("[{pats}]")),
-                        ("order", t.get("order").map(|o| o.to_string()).unwrap_or("0".into())),
-                        ("version", "".to_string()),
+                        ("index_patterns", format!("[{}]", list("index_patterns"))),
+                        ("order", {
+                            let o = num("order");
+                            if o.is_empty() { num("priority") } else { o }
+                        }),
+                        ("version", num("version")),
+                        ("composed_of", {
+                            let c = body
+                                .get("composed_of")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                                })
+                                .unwrap_or_default();
+                            format!("[{c}]")
+                        }),
                     ]
                 })
                 .collect();
-            cat_render(rows, &p)
+            // the path names which templates to show, by name or by pattern
+            if let Some(t) = target.as_deref().filter(|t| !t.is_empty() && *t != "*") {
+                rows.retain(|r| {
+                    t.split(',').any(|pat| {
+                        let pat = pat.trim();
+                        pat == r[0].1 || crate::store::glob_match(pat, &r[0].1)
+                    })
+                });
+            }
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            let rows = cat_only_default(
+                rows,
+                &["name", "index_patterns", "order", "version"],
+                &p,
+            );
+            cat_render_cols(CAT_TEMPLATE_COLS, rows, &p)
         }
         "shards" => {
             let rows: Vec<Vec<(&str, String)>> = store
