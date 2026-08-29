@@ -2542,8 +2542,13 @@ pub fn run(
                 .collect()
         })
     };
+    // `docvalue_fields` may also be named on the URL, as a comma-separated list
+    let param_docvalues: Option<Value> = p.get("docvalue_fields").filter(|v| !v.is_empty()).map(|v| {
+        Value::Array(v.split(',').map(|f| json!(f.trim())).collect())
+    });
+    let body_docvalues = body.get("docvalue_fields").cloned().or(param_docvalues);
     let field_specs: Option<Vec<(String, Option<String>)>> =
-        match (spec_list(body.get("fields")), spec_list(body.get("docvalue_fields"))) {
+        match (spec_list(body.get("fields")), spec_list(body_docvalues.as_ref())) {
             (Some(mut a), Some(b)) => {
                 a.extend(b);
                 Some(a)
@@ -3086,7 +3091,9 @@ pub fn run(
                     "_score": if sort_keys.is_empty() { json!(h.score) } else { Value::Null },
                 })
             };
-            let sel = source_sel.clone().or_else(|| crate::api::source_selector_from_params_pub(p));
+            // a selector on the URL is the narrower instruction and wins over
+            // one in the body
+            let sel = crate::api::source_selector_from_params_pub(p).or_else(|| source_sel.clone());
             let explicit_source = sel.is_some();
             if let Some(names) = &stored {
                 let mut out = serde_json::Map::new();

@@ -146,10 +146,11 @@ pub async fn delete_index(
     Path(index): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    let lenient = ignore_unavailable(&p);
     // an alias names indices without being one; deleting it would have to
     // mean deleting what it points at, which is not what was asked
     for part in index.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
-        if !part.contains('*') && store.is_alias(part) {
+        if !part.contains('*') && store.is_alias(part) && !lenient {
             return err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
@@ -160,18 +161,43 @@ pub async fn delete_index(
             );
         }
     }
-    let targets = store.resolve(&index);
-    if targets.is_empty() && !index.contains('*') && !ignore_unavailable(&p) {
-        return no_such_index(&index);
-    }
-    // a pattern that names an alias and nothing else has nothing to delete
-    if targets.is_empty() && index.contains('*') && !ignore_unavailable(&p) {
-        let names: Vec<&str> = index.split(',').map(|n| n.trim()).collect();
-        if names.iter().any(|n| n.contains('*')) && store.names().is_empty() {
-            return no_such_index(&index);
+    // a pattern reaches for indices, not for the aliases that stand in front
+    // of them, so it is matched against the real names only
+    let mut targets: Vec<String> = Vec::new();
+    let mut missing: Option<String> = None;
+    for part in index.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if part.contains('*') {
+            for n in store.names() {
+                if crate::store::glob_match(part, &n) && !targets.contains(&n) {
+                    targets.push(n);
+                }
+            }
+        } else if store.is_alias(part) {
+            continue;
+        } else {
+            let found = store.resolve(part);
+            if found.is_empty() {
+                missing.get_or_insert_with(|| part.to_string());
+            }
+            for n in found {
+                if !targets.contains(&n) {
+                    targets.push(n);
+                }
+            }
         }
     }
-    store.delete(&index);
+    if let Some(name) = missing.filter(|_| !lenient) {
+        return no_such_index(&name);
+    }
+    // `allow_no_indices=false` makes an expression that reaches nothing an
+    // error rather than a request with nothing to do
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if targets.is_empty() && !allow_none {
+        return no_such_index(&index);
+    }
+    for n in &targets {
+        store.delete(n);
+    }
     axum::Json(json!({"acknowledged": true})).into_response()
 }
 
@@ -3986,14 +4012,33 @@ pub async fn get_index(
     if let Some(r) = reserved_index_name(&index) {
         return r;
     }
+    // `expand_wildcards` says which states a pattern reaches
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
+    let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let targets = store.resolve(&index);
     if targets.is_empty() && !index.contains('*') && index != "_all" && !ignore_unavailable(&p) {
+        return no_such_index(&index);
+    }
+    // a pattern reaching nothing is an error only when the caller said so
+    let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
+    if targets.is_empty() && !allow_none {
         return no_such_index(&index);
     }
     let mut out = serde_json::Map::new();
     for n in targets {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        // a pattern only reaches the states it was told to; a name given
+        // outright reaches its index whatever state it is in
+        if index.contains('*') && ((g.closed && !want_closed) || (!g.closed && !want_open)) {
+            continue;
+        }
+        // a pattern only reaches the states it was told to; a name given
+        // outright reaches its index whatever state it is in
+        if index.contains('*') && ((g.closed && !want_closed) || (!g.closed && !want_open)) {
+            continue;
+        }
         let mut aliases = serde_json::Map::new();
         for (a, def) in &g.aliases {
             aliases.insert(a.clone(), def.clone());
