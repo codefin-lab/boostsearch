@@ -1144,6 +1144,14 @@ pub async fn nodes_stats(
                     "throttle_time_in_millis": 0,
                     "doc_status": {},
                 },
+                // how many writes ended in each status class, which is what a
+                // caller watching for rejections reads
+                "status_counter": {
+                    "doc_status": {"1xx": 0, "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0},
+                    "search_response_status": {
+                        "1xx": 0, "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0
+                    },
+                },
                 "get": {"total": 0, "time_in_millis": 0, "exists_total": 0,
                         "exists_time_in_millis": 0, "missing_total": 0,
                         "missing_time_in_millis": 0, "current": 0},
@@ -1198,7 +1206,11 @@ pub async fn nodes_stats(
     if !index_metrics.is_empty() && !index_metrics.iter().any(|m| m == "_all") {
         if let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
         {
-            idx.retain(|k, _| index_metrics.iter().any(|m| m == k));
+            // the status counter belongs to indexing, and travels with it
+            idx.retain(|k, _| {
+                index_metrics.iter().any(|m| m == k)
+                    || (k == "status_counter" && index_metrics.iter().any(|m| m == "indexing"))
+            });
         }
     }
     respond(&p, out)
@@ -3204,6 +3216,7 @@ pub async fn mget(
     };
 
     let mut requested: Vec<(Option<String>, Option<String>, Option<Value>)> = Vec::new();
+    let mut per_doc_routing: Vec<Option<String>> = Vec::new();
     let empty_docs = body
         .get("docs")
         .and_then(|d| d.as_array())
@@ -3212,7 +3225,9 @@ pub async fn mget(
         || body.get("ids").and_then(|d| d.as_array()).map(|a| a.is_empty()).unwrap_or(false);
     if let Some(docs) = body.get("docs").and_then(|d| d.as_array()) {
         for d in docs {
-            for dep in ["_routing", "_version", "_type", "routing", "version"] {
+            // `routing` is a real field here; the underscored spellings are
+            // the ones that were taken away
+            for dep in ["_routing", "_version", "_type", "version"] {
                 if d.get(dep).is_some() {
                     return err(
                         StatusCode::BAD_REQUEST,
@@ -3232,6 +3247,7 @@ pub async fn mget(
     }
     if let Some(docs) = body.get("docs").and_then(|d| d.as_array()) {
         for d in docs {
+            per_doc_routing.push(d.get("routing").and_then(scalar_str));
             requested.push((
                 d.get("_index").and_then(scalar_str),
                 d.get("_id").and_then(scalar_str),
@@ -3242,12 +3258,15 @@ pub async fn mget(
         }
     } else if let Some(ids) = body.get("ids").and_then(|d| d.as_array()) {
         for i in ids {
+            per_doc_routing.push(None);
             requested.push((None, scalar_str(i), None));
         }
     }
 
     let mut docs = Vec::new();
-    for (idx, id, sel) in requested {
+    for (n, (idx, id, sel)) in requested.into_iter().enumerate() {
+        // a routing given on the document is the one it has to be reached by
+        let want_routing = per_doc_routing.get(n).cloned().flatten();
         let idx = idx.or_else(|| default_index.clone());
         let Some(idx) = idx else {
             return err(
@@ -3283,7 +3302,11 @@ pub async fn mget(
             continue;
         };
         let g = st.read();
-        match read_source_as_asked(&g, &id, &p) {
+        let routing_ok = match g.routing.get(&id) {
+            Some(have) => want_routing.as_deref() == Some(have.as_str()),
+            None => true,
+        };
+        match read_source_as_asked(&g, &id, &p).filter(|_| routing_ok) {
             Some(src) => {
                 // a doc may carry its own stored_fields; otherwise the request-level
                 // one applies. Either way it suppresses _source unless asked for.
@@ -3308,6 +3331,9 @@ pub async fn mget(
                     "_version": g.version_of(&id),
                     "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1, "found": true
                 });
+                if let Some(r) = g.routing.get(&id) {
+                    d["_routing"] = json!(r);
+                }
                 let mut wants_source = true;
                 if let Some(spec) = &stored_spec {
                     let mut sub = Params::new();
@@ -3449,6 +3475,9 @@ pub async fn update_doc(
         json!({
             "_index": g.name, "_id": id, "_version": version, "result": "noop",
             "_shards": {"total": 0, "successful": 0, "failed": 0},
+            // an update that changed nothing still reports where the document
+            // stands, which is where it already stood
+            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
         })
     } else {
         match write_doc(&mut g, &id, next.clone(), "index") {
@@ -3463,6 +3492,18 @@ pub async fn update_doc(
     let sel = patch.get("_source").cloned().or_else(|| source_selector_from_params(&p));
     if let Some(sel) = sel.as_ref().filter(|v| **v != json!(false)) {
         body_out["get"] = json!({"_source": apply_source_selector(&next, sel), "found": true});
+    }
+    // a routing given on the update is the one the document keeps
+    match p.get("routing").filter(|r| !r.is_empty()) {
+        Some(r) => {
+            g.routing.insert(id.clone(), r.clone());
+            body_out["_routing"] = json!(r);
+        }
+        None => {
+            if let Some(r) = g.routing.get(&id) {
+                body_out["_routing"] = json!(r);
+            }
+        }
     }
     maybe_refresh(&mut g, &p);
     note_forced_refresh(&mut body_out, &p);
