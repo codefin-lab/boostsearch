@@ -895,6 +895,41 @@ pub struct Store {
     /// write burst (11.15 MB/index uncapped vs 11.37 MB/index at a cap of 8).
     /// It is kept for the thread bound, not as a memory fix.
     live_writers: Arc<RwLock<Vec<String>>>,
+    /// cluster-level settings, which a few APIs read back and one or two enforce
+    cluster_settings: Arc<RwLock<Value>>,
+}
+
+impl Store {
+    /// Merge one `_cluster/settings` body in, dropping the keys set to null.
+    pub fn merge_cluster_settings(&self, body: &Value) {
+        let mut g = self.cluster_settings.write();
+        for scope in ["persistent", "transient"] {
+            let Some(incoming) = body.get(scope).and_then(|v| v.as_object()) else { continue };
+            let Some(dest) = g.get_mut(scope).and_then(|v| v.as_object_mut()) else { continue };
+            for (k, v) in incoming {
+                if v.is_null() {
+                    dest.remove(k);
+                } else {
+                    dest.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    pub fn cluster_settings(&self) -> Value {
+        self.cluster_settings.read().clone()
+    }
+
+    /// A cluster setting by name; a transient value shadows a persistent one.
+    pub fn cluster_setting(&self, key: &str) -> Option<Value> {
+        let g = self.cluster_settings.read();
+        for scope in ["transient", "persistent"] {
+            if let Some(v) = g.get(scope).and_then(|s| s.get(key)) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Hand memory freed by a finished write burst back to the OS.
@@ -994,6 +1029,7 @@ impl Store {
             data_dir: None,
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1013,6 +1049,7 @@ impl Store {
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

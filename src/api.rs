@@ -2697,12 +2697,22 @@ pub async fn cluster_state(State(store): State<Store>, Query(p): Query<Params>) 
     }))
 }
 
-pub async fn cluster_settings_get(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({"persistent": {}, "transient": {}, "defaults": {}}))
+pub async fn cluster_settings_get(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+) -> Response {
+    let mut out = store.cluster_settings();
+    out["defaults"] = json!({});
+    respond(&p, out)
 }
 
-pub async fn cluster_settings_put(Query(p): Query<Params>, body: String) -> Response {
+pub async fn cluster_settings_put(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    store.merge_cluster_settings(&body);
     respond(&p, json!({
         "acknowledged": true,
         "persistent": body.get("persistent").cloned().unwrap_or(json!({})),

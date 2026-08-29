@@ -732,8 +732,37 @@ fn check_agg_params(name: &str, def: &Value, owner: &str) -> std::result::Result
                     return Err(bad("compression", v, "0"));
                 }
             }
+            // the tdigest sketch takes its own compression, and admits 0
+            if let Some(v) = def.pointer("/tdigest/compression").and_then(|v| v.as_f64()) {
+                if v < 0.0 {
+                    return Err(bad("compression", v, "or equal to 0"));
+                }
+            }
+        }
+        "moving_fn" | "moving_avg" => {
+            // a window of zero or fewer has nothing to average over
+            if let Some(v) = num("window") {
+                if v < 1.0 {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "[window] must be a positive, non-zero integer.",
+                    ));
+                }
+            }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Walk the aggregation tree applying only the checks that need no mapping.
+fn check_agg_bounds(node: &Value, owner: &str) -> std::result::Result<(), Response> {
+    let Some(o) = node.as_object() else { return Ok(()) };
+    for (name, def) in o {
+        check_agg_params(name, def, owner)?;
+        let next_owner = if owner.is_empty() { name.as_str() } else { owner };
+        check_agg_bounds(def, next_owner)?;
     }
     Ok(())
 }
@@ -2260,6 +2289,12 @@ pub fn run(
         }
     }
     let mut agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
+    // Parameter bounds do not depend on any mapping, so they are checked here
+    // rather than per shard: a request that names no existing index has no
+    // shards to walk, and a bad parameter would otherwise pass unread.
+    if let Some(a) = agg_json.as_ref() {
+        check_agg_bounds(a, "")?;
+    }
     // buckets have to be weighted only where a document stands for several
     let weighted = targets
         .iter()
@@ -3191,6 +3226,48 @@ pub fn run(
         }
         Some(base)
     };
+
+    // `search.max_buckets` caps how many buckets one request may build. The
+    // limit is counted over the whole answer, sub-buckets included, which is
+    // what makes a nested terms aggregation the expensive one.
+    if let Some(limit) = store
+        .cluster_setting("search.max_buckets")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        fn count_buckets(node: &Value) -> u64 {
+            match node {
+                Value::Object(o) => o
+                    .iter()
+                    .map(|(k, v)| {
+                        let here = if k == "buckets" {
+                            match v {
+                                Value::Array(a) => a.len() as u64,
+                                Value::Object(b) => b.len() as u64,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        here + count_buckets(v)
+                    })
+                    .sum(),
+                Value::Array(a) => a.iter().map(count_buckets).sum(),
+                _ => 0,
+            }
+        }
+        let built = aggs.as_ref().map(count_buckets).unwrap_or(0);
+        if built > limit {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "Trying to create too many buckets. Must be less than or equal to: \
+                     [{limit}] but was [{built}]. This limit can be set by changing the \
+                     [search.max_buckets] cluster level setting."
+                ),
+            ));
+        }
+    }
 
     // pre-filtering lets a shard that cannot match be skipped entirely, but at
     // least one always runs so there is a real (empty) result to return
