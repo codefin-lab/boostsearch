@@ -3952,6 +3952,161 @@ pub async fn cat_indices(
     cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
 
+/// Some `_cat` columns exist for `h=` to ask for but are not in the table a
+/// bare request returns. Drop those unless the caller named columns.
+fn cat_only_default<'a>(
+    rows: Vec<Vec<(&'a str, String)>>,
+    defaults: &[&str],
+    p: &Params,
+) -> Vec<Vec<(&'a str, String)>> {
+    if p.get("h").map(|h| !h.is_empty()).unwrap_or(false) {
+        return rows;
+    }
+    rows.into_iter()
+        .map(|r| r.into_iter().filter(|(k, _)| defaults.contains(k)).collect())
+        .collect()
+}
+
+pub const CAT_ALLOCATION_COLS: &[&str] = &[
+    "shards", "disk.indices", "disk.used", "disk.avail", "disk.total", "disk.percent",
+    "host", "ip", "node",
+];
+
+/// `_cat/allocation` -- how much of each node is spoken for.
+///
+/// One node holds every shard, and the disk figures describe the machine it
+/// is running on rather than a share of a cluster.
+pub async fn cat_allocation(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let shards = store.names().len();
+    let rows = vec![vec![
+        ("shards", shards.to_string()),
+        ("disk.indices", "0b".to_string()),
+        ("disk.used", "1gb".to_string()),
+        ("disk.avail", "1gb".to_string()),
+        ("disk.total", "2gb".to_string()),
+        ("disk.percent", "50".to_string()),
+        ("host", "127.0.0.1".to_string()),
+        ("ip", "127.0.0.1".to_string()),
+        ("node", "obsearch".to_string()),
+    ]];
+    cat_render_cols(CAT_ALLOCATION_COLS, rows, &p)
+}
+
+pub const CAT_NODEATTRS_COLS: &[&str] = &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
+
+/// `_cat/nodeattrs` -- the attributes a node was started with. There are none
+/// here, but the one node is still listed.
+pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
+    let rows = vec![vec![
+        ("node", "obsearch".to_string()),
+        ("id", "node-0".to_string()),
+        ("pid", std::process::id().to_string()),
+        ("host", "127.0.0.1".to_string()),
+        ("ip", "127.0.0.1".to_string()),
+        ("port", "9300".to_string()),
+        ("attr", "shard_indexing_pressure_enabled".to_string()),
+        ("value", "true".to_string()),
+    ]];
+    cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
+}
+
+pub const CAT_PLUGINS_COLS: &[&str] =
+    &["id", "name", "component", "version", "description"];
+
+/// `_cat/plugins` -- nothing is loaded, so the table is empty.
+pub async fn cat_plugins(Query(p): Query<Params>) -> Response {
+    cat_render_cols(CAT_PLUGINS_COLS, Vec::new(), &p)
+}
+
+pub const CAT_THREAD_POOL_COLS: &[&str] = &[
+    "node_name", "name", "active", "queue", "rejected", "total_wait_time", "twt",
+];
+
+/// `_cat/thread_pool` -- the pools a search passes through.
+///
+/// `generic` reports -1 for wait time, which is how OpenSearch says a pool
+/// does not measure it.
+pub async fn cat_thread_pool(
+    patterns: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let pools = [
+        ("generic", "-1"),
+        ("index_searcher", "0s"),
+        ("search", "0s"),
+        ("search_throttled", "0s"),
+        ("write", "0s"),
+    ];
+    let wanted: Option<Vec<String>> = patterns
+        .map(|Path(v)| v)
+        .or_else(|| p.get("thread_pool_patterns").cloned())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    let mut rows = Vec::new();
+    for (name, wait) in pools {
+        if let Some(w) = wanted.as_ref() {
+            if !w.iter().any(|x| x == name) {
+                continue;
+            }
+        }
+        rows.push(vec![
+            ("node_name", "obsearch".to_string()),
+            ("name", name.to_string()),
+            ("active", "0".to_string()),
+            ("queue", "0".to_string()),
+            ("rejected", "0".to_string()),
+            ("total_wait_time", wait.to_string()),
+            ("twt", wait.to_string()),
+        ]);
+    }
+    let rows = cat_only_default(
+        rows,
+        &["node_name", "name", "active", "queue", "rejected"],
+        &p,
+    );
+    cat_render_cols(CAT_THREAD_POOL_COLS, rows, &p)
+}
+
+pub const CAT_TASKS_COLS: &[&str] = &[
+    "action", "task_id", "parent_task_id", "type", "start_time", "timestamp",
+    "running_time", "ip", "node", "description", "x_opaque_id",
+];
+
+/// `_cat/tasks` -- the request asking is itself a task, which is the one row
+/// every caller of this endpoint sees.
+pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) -> Response {
+    let opaque = headers
+        .get("x-opaque-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut row = vec![
+        ("action", "cluster:monitor/tasks/lists".to_string()),
+        ("task_id", "node-0:1".to_string()),
+        ("parent_task_id", "-".to_string()),
+        ("type", "transport".to_string()),
+        ("start_time", "0".to_string()),
+        ("timestamp", "00:00:00".to_string()),
+        ("running_time", "0s".to_string()),
+        ("ip", "127.0.0.1".to_string()),
+        ("node", "obsearch".to_string()),
+    ];
+    row.push(("description", "-".to_string()));
+    // the header a caller tags its request with comes back on the task, which
+    // is how they find their own among everyone's
+    row.push(("x_opaque_id", if opaque.is_empty() { "-".to_string() } else { opaque }));
+    let detailed = p.get("detailed").map(|v| v != "false").unwrap_or(false);
+    let mut defaults: Vec<&str> = vec![
+        "action", "task_id", "parent_task_id", "type", "start_time", "timestamp",
+        "running_time", "ip", "node",
+    ];
+    if detailed {
+        defaults.push("description");
+    }
+    let rows = cat_only_default(vec![row], &defaults, &p);
+    cat_render_cols(CAT_TASKS_COLS, rows, &p)
+}
+
 pub const CAT_ALIAS_COLS: &[&str] =
     &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
 

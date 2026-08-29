@@ -124,6 +124,13 @@ fn app(store: Store) -> Router {
         // --- cat ---
         .route("/_cat/{what}", get(api::cat_dispatch))
         .route("/_cat/{what}/{target}", get(api::cat_dispatch_target))
+        .route("/_cat/allocation", get(api::cat_allocation))
+        .route("/_cat/allocation/{node}", get(api::cat_allocation))
+        .route("/_cat/nodeattrs", get(api::cat_nodeattrs))
+        .route("/_cat/plugins", get(api::cat_plugins))
+        .route("/_cat/thread_pool", get(api::cat_thread_pool))
+        .route("/_cat/thread_pool/{patterns}", get(api::cat_thread_pool))
+        .route("/_cat/tasks", get(api::cat_tasks))
         .route("/_cat/indices", get(api::cat_indices))
         .route("/_cat/indices/{index}", get(api::cat_indices))
         .route("/_cat/aliases", get(api::cat_aliases))
