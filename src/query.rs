@@ -603,7 +603,25 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let subs: Result<Vec<_>> = qs.iter().map(|s| build(ctx, s)).collect();
             Box::new(tantivy::query::DisjunctionMaxQuery::new(subs?))
         }
-        other => return Err(anyhow!("unknown query [{other}]")),
+                other => {
+            // a near-miss is usually a typo, and saying which name was meant
+            // saves the caller reading the whole list
+            const KNOWN: &[&str] = &[
+                "bool", "term", "terms", "match", "match_all", "match_none", "range",
+                "prefix", "wildcard", "regexp", "fuzzy", "exists", "ids", "nested",
+                "match_phrase", "multi_match", "query_string", "simple_query_string",
+                "constant_score", "dis_max", "boosting", "function_score", "more_like_this",
+            ];
+            let near = KNOWN.iter().find(|k| {
+                k.len().abs_diff(other.len()) <= 2
+                    && k.chars().zip(other.chars()).filter(|(a, b)| a == b).count() + 2
+                        >= k.len()
+            });
+            return Err(match near {
+                Some(k) => anyhow!("unknown query [{other}] did you mean [{k}]?"),
+                None => anyhow!("unknown query [{other}]"),
+            });
+        }
     };
 
     let boost = q

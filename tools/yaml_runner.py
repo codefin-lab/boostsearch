@@ -94,6 +94,15 @@ class Runner:
         self.session = requests.Session()
 
     # ---- stash -----------------------------------------------------------
+    def unstash_path(self, path):
+        """A `$name` inside an assertion path stands for a stashed value."""
+        if not isinstance(path, str) or "$" not in path:
+            return path
+        return ".".join(
+            str(self.stash.get(part[1:], part)) if part.startswith("$") else part
+            for part in path.split(".")
+        )
+
     def unstash(self, value):
         if isinstance(value, str):
             if value.startswith("$"):
@@ -145,8 +154,10 @@ class Runner:
     def do(self, action):
         action = dict(action)
         catch = action.pop("catch", None)
+        # a test may tag its request with headers, which some APIs echo back
+        extra_headers = action.pop("headers", None) or {}
         for meta in ("warnings", "allowed_warnings", "warnings_regex",
-                     "allowed_warnings_regex", "headers", "node_selector"):
+                     "allowed_warnings_regex", "node_selector"):
             action.pop(meta, None)
         if not action:
             raise Failure("empty do block")
@@ -154,11 +165,11 @@ class Runner:
         # OpenSearch runner executes each of them in order
         apis = list(action.items())
         for api, params in apis[:-1]:
-            self.do_one(api, params, None)
+            self.do_one(api, params, None, extra_headers)
         api, params = apis[-1]
-        return self.do_one(api, params, catch)
+        return self.do_one(api, params, catch, extra_headers)
 
-    def do_one(self, api, params, catch):
+    def do_one(self, api, params, catch, extra_headers=None):
         params = self.unstash(params or {})
         if not isinstance(params, dict):
             params = {}
@@ -185,6 +196,8 @@ class Runner:
                 query[k] = ",".join(str(x) for x in v)
 
         headers = {"Content-Type": "application/json"}
+        for k, v in (extra_headers or {}).items():
+            headers[k] = str(self.unstash(v))
         data = None
         if body is not None:
             if isinstance(body, (list, tuple)):  # bulk / msearch ndjson
@@ -200,11 +213,16 @@ class Runner:
         url = self.base + path
         resp = self.session.request(method, url, params=query, data=data,
                                     headers=headers, timeout=30)
-        try:
-            parsed = resp.json() if resp.content else None
-        except Exception:
-            # cat APIs answer in plain text; the suite matches on the body itself
-            parsed = resp.text
+        # cat APIs answer in plain text and the suite matches on the body
+        # itself; a one-line table of digits is still text, not a number, so
+        # the content type decides rather than whether it happens to parse
+        if "json" not in resp.headers.get("content-type", ""):
+            parsed = resp.text if resp.content else None
+        else:
+            try:
+                parsed = resp.json() if resp.content else None
+            except Exception:
+                parsed = resp.text
         # HEAD-style APIs return no body and the suite asserts on the outcome
         # itself; a GET that simply answered with an empty body is still a body.
         self.last_req = (method, url, body)
@@ -239,7 +257,7 @@ class Runner:
     # ---- assertions ------------------------------------------------------
     def assert_match(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             # a regex may carry surrounding whitespace from a yaml block scalar
             stripped = expected.strip() if isinstance(expected, str) else expected
@@ -264,7 +282,7 @@ class Runner:
 
     def assert_length(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             if actual is None:
                 raise Failure(f"length {path}: missing")
             if len(actual) != int(self.unstash(expected)):
@@ -273,7 +291,7 @@ class Runner:
     def assert_bool(self, spec, want):
         paths = spec if isinstance(spec, list) else [spec]
         for path in paths:
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             truthy = not (actual is None or actual is False or actual == 0
                           or actual == "" or actual == "false")
             if truthy != want:
@@ -284,18 +302,26 @@ class Runner:
         fn = {"gt": operator.gt, "lt": operator.lt,
               "gte": operator.ge, "lte": operator.le}[op]
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             if actual is None or not fn(actual, expected):
                 raise Failure(f"{op} {path}: {actual!r} vs {expected!r}")
 
     def do_set(self, spec):
         for path, name in spec.items():
-            self.stash[name] = flatten_path(self.last, path)
+            # `_arbitrary_key_` asks for the name of any one key of the object
+            # at that path, which is how a test refers to a node whose id it
+            # cannot know in advance
+            if path.endswith("_arbitrary_key_"):
+                parent = flatten_path(self.last, path[: -len("._arbitrary_key_")])
+                if isinstance(parent, dict) and parent:
+                    self.stash[name] = next(iter(parent))
+                    continue
+            self.stash[name] = flatten_path(self.last, self.unstash_path(path))
 
     def assert_contains(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             if not isinstance(actual, list) or expected not in actual:
                 raise Failure(f"contains {path}: {expected!r} not in {actual!r}")

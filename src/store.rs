@@ -93,6 +93,24 @@ pub fn index_uuid(name: &str) -> String {
     out
 }
 
+/// Round to the nearest value a sixteen-bit float can hold.
+pub fn half_float(v: f64) -> f64 {
+    let bits = (v as f32).to_bits();
+    let sign = bits >> 31;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127;
+    // outside what the exponent can name, the value is kept as it is
+    if !(-14..=15).contains(&exp) {
+        return v;
+    }
+    let mantissa = bits & 0x007f_ffff;
+    // ten bits of mantissa, rounded to nearest with ties going even
+    let shift = 13;
+    let round = (mantissa + (1 << (shift - 1)) + ((mantissa >> shift) & 1)) >> shift;
+    let (exp, round) = if round > 0x3ff { (exp + 1, round >> 1) } else { (exp, round) };
+    let out = (sign << 31) | (((exp + 127) as u32) << 23) | (round << shift);
+    f32::from_bits(out) as f64
+}
+
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("_id", STRING | STORED | FAST);
@@ -334,7 +352,27 @@ impl Mapping {
                         .or_insert_with(|| serde_json::json!({}));
                     if let Some(existing) = slot.as_object_mut() {
                         for (k, v) in props {
-                            existing.insert(k.clone(), v.clone());
+                            // a dotted name is an object with one field in it,
+                            // written short; the mapping holds the long form
+                            match k.split_once('.') {
+                                Some((head, rest)) => {
+                                    let parent = existing
+                                        .entry(head.to_string())
+                                        .or_insert_with(|| serde_json::json!({}));
+                                    let inner = parent
+                                        .as_object_mut()
+                                        .map(|o| {
+                                            o.entry("properties".to_string())
+                                                .or_insert_with(|| serde_json::json!({}))
+                                        });
+                                    if let Some(inner) = inner.and_then(|i| i.as_object_mut()) {
+                                        inner.insert(rest.to_string(), v.clone());
+                                    }
+                                }
+                                None => {
+                                    existing.insert(k.clone(), v.clone());
+                                }
+                            }
                         }
                     }
                 }
@@ -467,6 +505,8 @@ pub struct IdxState {
     /// a stable identifier for the index itself, distinct from the id of any
     /// one commit; 22 characters, as the API reports them
     pub uuid: String,
+    /// when the index was made, in milliseconds since the epoch
+    pub created_ms: u64,
     /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
     /// false negatives), so the common "is this a new document?" question costs
     /// one hash. A hit is confirmed against the index, which only happens for
@@ -911,6 +951,24 @@ impl IdxState {
         out
     }
 
+    pub fn created_millis(&self) -> u64 {
+        // a setting written by hand wins, since a restored index keeps the
+        // date it was first made
+        self.numeric_setting("creation_date").unwrap_or(self.created_ms)
+    }
+
+    /// The creation date as text, which is the other spelling `_cat` offers.
+    pub fn created_string(&self) -> String {
+        let ms = self.created_millis() as i128;
+        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+            .map(|d| format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                d.year(), d.month() as u8, d.day(), d.hour(), d.minute(), d.second(),
+                d.millisecond(),
+            ))
+            .unwrap_or_default()
+    }
+
     pub fn numeric_setting(&self, key: &str) -> Option<u64> {
         match self.raw_setting(key)? {
             Value::String(s) => s.parse().ok(),
@@ -1340,6 +1398,19 @@ impl Store {
         self.get(name).map(|st| st.read().closed).unwrap_or(false)
     }
 
+    /// Every index carrying this alias, in name order.
+    pub fn indices_for_alias(&self, alias: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .inner
+            .read()
+            .iter()
+            .filter(|(_, st)| st.read().aliases.contains_key(alias))
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     fn resolve_with(&self, expr: &str, include_closed: bool) -> Vec<String> {
         let open_only = |names: Vec<String>| -> Vec<String> {
             if include_closed {
@@ -1353,10 +1424,25 @@ impl Store {
         let mut out = Vec::new();
         for part in expr.split(',') {
             let part = part.trim();
+            // a name in angle brackets is a date expression standing for the
+            // index of some day, month or year
+            let resolved;
+            let part = if part.starts_with('<') {
+                resolved = resolve_date_math_name(part);
+                resolved.as_str()
+            } else {
+                part
+            };
             if part.contains('*') {
                 let re = wildcard_to_regex(part);
+                // a pattern reaches an index by its own name or by any alias
+                // standing in front of it
                 for n in open_only(self.names()) {
-                    if re.is_match(&n) && !out.contains(&n) {
+                    let by_alias = self
+                        .get(&n)
+                        .map(|st| st.read().aliases.keys().any(|a| re.is_match(a)))
+                        .unwrap_or(false);
+                    if (re.is_match(&n) || by_alias) && !out.contains(&n) {
                         out.push(n);
                     }
                 }
@@ -1364,10 +1450,21 @@ impl Store {
                 if !out.contains(&part.to_string()) {
                     out.push(part.to_string());
                 }
-            } else if let Some(st) = self.get(part) {
-                let n = st.read().name.clone();
-                if !out.contains(&n) {
-                    out.push(n);
+            } else {
+                // an alias may stand in front of several indices, and names
+                // all of them; `get` would answer with whichever it found
+                // first, which is how a search over an alias came to miss
+                // every index but one
+                let mut named = self.indices_for_alias(part);
+                if named.is_empty() {
+                    if let Some(st) = self.get(part) {
+                        named.push(st.read().name.clone());
+                    }
+                }
+                for n in open_only(named) {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
                 }
             }
         }
@@ -1560,6 +1657,10 @@ impl Store {
             versions: HashMap::new(),
             routing: HashMap::new(),
             uuid: index_uuid(&name),
+            created_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             live_ids: Default::default(),
             pending: HashMap::new(),
             pending_seq: HashMap::new(),
@@ -1811,6 +1912,16 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
+            }
+            // a half_float holds sixteen bits, so the value it keeps is the
+            // nearest one that fits -- 184.4 becomes 184.375, and a search
+            // paging past that number has to see the same figure the index does
+            if ty == Some("half_float") {
+                if let Some(n) = leaf.as_f64() {
+                    if let Some(q) = serde_json::Number::from_f64(half_float(n)) {
+                        *leaf = Value::Number(q);
+                    }
+                }
             }
         }
     }
@@ -2066,6 +2177,65 @@ pub fn token_count(text: &str) -> u64 {
 
 /// `2019-12-15||/d`, `now-1d`, `now+1M/M`: an anchor followed by shifts and a
 /// rounding, which is how OpenSearch writes a date relative to another.
+/// Resolve a date-math index name into the name it stands for.
+///
+/// `<logstash-{now/M}>` names the index for the current month; the braces hold
+/// a date expression and, after a pipe, how to write it.
+pub fn resolve_date_math_name(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+        return name.to_string();
+    };
+    let mut out = String::new();
+    let mut rest = inner;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let body = &rest[open + 1..open + close];
+        rest = &rest[open + close + 1..];
+        // the expression may name its own format after a pipe
+        let (expr, fmt) = match body.split_once('|') {
+            Some((e, f)) => (e, f),
+            None => (body, "yyyy.MM.dd"),
+        };
+        match parse_date_math(expr.trim()) {
+            Some((d, _)) => out.push_str(&format_with_pattern(d, fmt.trim())),
+            None => out.push_str(body),
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Write a date the way a Java-style pattern asks for.
+fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mut run = 1;
+        while chars.peek() == Some(&c) {
+            chars.next();
+            run += 1;
+        }
+        match c {
+            'y' => out.push_str(&format!("{:0run$}", d.year(), run = run)),
+            'M' => out.push_str(&format!("{:0run$}", d.month() as u8, run = run)),
+            'd' => out.push_str(&format!("{:0run$}", d.day(), run = run)),
+            'H' => out.push_str(&format!("{:0run$}", d.hour(), run = run)),
+            'm' => out.push_str(&format!("{:0run$}", d.minute(), run = run)),
+            's' => out.push_str(&format!("{:0run$}", d.second(), run = run)),
+            other => {
+                for _ in 0..run {
+                    out.push(other);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn parse_date_math(s: &str) -> Option<(tantivy::time::OffsetDateTime, Option<char>)> {
     use tantivy::time::{Duration, OffsetDateTime};
     let (anchor, ops) = match s.split_once("||") {
@@ -2231,6 +2401,12 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
             Ok(n) if format.is_some() => {
                 tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
             }
+            // `2019` is a year before it is a count of milliseconds, so the
+            // date reading is tried first and the epoch only where nothing
+            // else could be read from the digits
+            Ok(n) => parse_date_lenient(s).or_else(|| {
+                tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
+            })?,
             _ => parse_date_lenient(s)?,
         },
         _ => return None,

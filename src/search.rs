@@ -572,10 +572,16 @@ struct Cand {
 }
 
 /// Is this sort key a date field, whose values need rescaling on the way out?
+/// Does this sort key need rescaling on the way out?
+///
+/// The column counts nanoseconds either way, but a `date` reports
+/// milliseconds and a `date_nanos` reports the nanoseconds themselves -- that
+/// resolution is the whole reason for the second type.
 fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
-    targets.iter().filter_map(|n| store.get(n)).any(|st| {
-        matches!(st.read().mapping.type_of(field), Some("date") | Some("date_nanos"))
-    })
+    targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().mapping.type_of(field) == Some("date"))
 }
 
 /// Read one `search_after` element back into the value the sort produced.
@@ -1595,9 +1601,8 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
             if let Some(Value::Object(spec)) = o.get("terms").cloned().map(|v| v) {
                 for (field, def) in spec {
                     let Some(d) = def.as_object() else { continue };
-                    let (Some(index), Some(id), Some(path)) = (
+                    let (Some(index), Some(path)) = (
                         d.get("index").and_then(|v| v.as_str()),
-                        d.get("id").and_then(|v| v.as_str()),
                         d.get("path").and_then(|v| v.as_str()),
                     ) else {
                         continue;
@@ -1605,15 +1610,61 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                     let Some(st) = store.get(index) else {
                         return Err(no_such_index(index));
                     };
-                    let g = st.read();
-                    let values = crate::api::read_source(&g, id)
-                        .and_then(|src| {
-                            src.pointer(&format!("/{}", path.replace('.', "/"))).cloned()
-                        })
-                        .unwrap_or(Value::Array(vec![]));
-                    let list = match values {
-                        Value::Array(a) => a,
-                        other => vec![other],
+                    let pointer = format!("/{}", path.replace('.', "/"));
+                    // the terms come from one named document, or from every
+                    // document a query finds -- the second is how a caller
+                    // says "whatever this group follows"
+                    let list: Vec<Value> = if let Some(id) = d.get("id").and_then(|v| v.as_str()) {
+                        let g = st.read();
+                        let values = crate::api::read_source(&g, id)
+                            .and_then(|src| src.pointer(&pointer).cloned())
+                            .unwrap_or(Value::Array(vec![]));
+                        match values {
+                            Value::Array(a) => a,
+                            other => vec![other],
+                        }
+                    } else if let Some(q) = d.get("query") {
+                        let g = st.read();
+                        let ctx = Ctx {
+                            fields: &g.fields,
+                            mapping: &g.mapping,
+                            index: &g.index,
+                            max_terms_count: g.max_terms_count(),
+                            observed_kinds: &g.observed_kinds,
+                            kinds_complete: g.kinds_complete,
+                            stats: &g.stats,
+                        };
+                        let built = crate::query::build(&ctx, q).map_err(|e| {
+                            err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string())
+                        })?;
+                        let searcher = g.reader.searcher();
+                        let hits = searcher
+                            .search(&built, &TopDocs::with_limit(g.max_terms_count()).order_by_score())
+                            .map_err(|e| {
+                                err(
+                                    StatusCode::BAD_REQUEST,
+                                    "search_phase_execution_exception",
+                                    e.to_string(),
+                                )
+                            })?;
+                        let mut out: Vec<Value> = Vec::new();
+                        for (_, addr) in hits {
+                            let Some((_, src)) = source_of(&searcher, &g, addr) else { continue };
+                            // a document with nothing at that path contributes
+                            // nothing, which is not the same as contributing a null
+                            match src.pointer(&pointer) {
+                                Some(Value::Array(a)) => {
+                                    out.extend(a.iter().filter(|v| !v.is_null()).cloned())
+                                }
+                                Some(Value::Null) | None => {}
+                                Some(one) => out.push(one.clone()),
+                            }
+                        }
+                        out.sort_by_key(|v| v.to_string());
+                        out.dedup();
+                        out
+                    } else {
+                        continue;
                     };
                     // a lookup may point at a bitmap, whose value_type sits
                     // beside the field rather than inside it
@@ -1763,6 +1814,8 @@ fn agg_profile_type(def: &Value) -> String {
             }
         }
         "date_histogram" => "DateHistogramAggregator".into(),
+        // the auto form names which shape it collected from
+        "auto_date_histogram" => "AutoDateHistogramAggregator.FromSingle".into(),
         "histogram" => "NumericHistogramAggregator".into(),
         other => format!("{}Aggregator", capitalise_words(other)),
     }
@@ -1789,18 +1842,39 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
     let Some((kind, body)) = def.as_object().and_then(|o| o.iter().next()) else {
         return json!({});
     };
+    // a sub-aggregation is not run while the buckets are being found; it is
+    // deferred until the buckets that survive are known
+    let deferred: Vec<String> = def
+        .get(kind)
+        .and_then(|_| def.get("aggs").or_else(|| def.get("aggregations")))
+        .and_then(|a| a.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     if kind == "terms" {
         // which kind of term was bucketed, which is what the strategy names
         let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        // the strategy names what was bucketed: numbers are collected as
+        // longs, everything else as terms
         let strategy = if field.starts_with(crate::store::DYN) {
             "long_terms"
         } else {
-            "string_terms"
+            "terms"
         };
-        return json!({"result_strategy": strategy});
+        let mut out = json!({
+            "result_strategy": strategy,
+            "collection_strategy": "dense",
+        });
+        if !deferred.is_empty() {
+            out["deferred_aggregators"] = json!(deferred);
+        }
+        return out;
     }
     if kind != "cardinality" {
-        return json!({});
+        // every aggregator says how much of the index it could skip
+        return json!({
+            "optimized_segments": 1, "unoptimized_segments": 0,
+            "leaf_visited": 1, "inner_visited": 0,
+        });
     }
     // the request has already been rewritten onto the internal JSON views
     let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
@@ -2709,6 +2783,23 @@ pub fn run(
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
+    // `expand_wildcards` naming closed indices means a pattern reaches them,
+    // and a closed index cannot be searched whichever way it was reached
+    let wants_closed = p
+        .get("expand_wildcards")
+        .map(|v| v.split(',').any(|w| matches!(w.trim(), "closed" | "all")))
+        .unwrap_or(false);
+    if wants_closed && !lenient {
+        for name in store.resolve(expr) {
+            if store.is_closed(&name) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "index_closed_exception",
+                    format!("closed index [{name}]"),
+                ));
+            }
+        }
+    }
     for name in expr
         .split(',')
         .map(|n| n.trim())
@@ -2728,6 +2819,16 @@ pub fn run(
         && !expr.is_empty()
         && !lenient
     {
+        // a date-math name is reported as the index it stands for, since that
+        // is the one that was not there
+        return Err(no_such_index(&crate::store::resolve_date_math_name(expr)));
+    }
+    // `allow_no_indices=false` makes an expression that reaches nothing an
+    // error rather than a search with nothing to search
+    if targets.is_empty()
+        && !expr.is_empty()
+        && p.get("allow_no_indices").map(|v| v == "false").unwrap_or(false)
+    {
         return Err(no_such_index(expr));
     }
     // a `terms` lookup names a document to read the term list from
@@ -2738,6 +2839,23 @@ pub fn run(
         }
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
+    }
+
+    // a field cannot be both kept and dropped: naming it in both lists asks
+    // for two answers about the same field
+    if let (Some(inc), Some(exc)) = (
+        body.pointer("/_source/includes").and_then(|v| v.as_array()),
+        body.pointer("/_source/excludes").and_then(|v| v.as_array()),
+    ) {
+        if let Some(both) = inc.iter().find(|i| exc.contains(i)).and_then(|v| v.as_str()) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "The same entry [{both}] cannot be both included and excluded in _source."
+                ),
+            ));
+        }
     }
 
     // `_shard_doc` orders by where a document sits within a shard, which only
@@ -3601,6 +3719,19 @@ pub fn run(
                     })
                     .collect();
                 let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a format asks for the value written that way rather than
+                // as the number it is
+                for (name, fmt) in specs.iter() {
+                    let Some(fmt) = fmt else { continue };
+                    let Some(Value::Array(items)) = f.get_mut(name) else { continue };
+                    for v in items.iter_mut() {
+                        if let Some(n) = v.as_f64() {
+                            if let Some(text) = decimal_format(fmt, n) {
+                                *v = json!(text);
+                            }
+                        }
+                    }
+                }
                 // a token_count field stores the text but reports the count
                 for (name, vals) in f.iter_mut() {
                     if g.mapping.type_of(name) != Some("token_count") {
@@ -3735,11 +3866,81 @@ pub fn run(
         aggs
     } else {
         let mut base = aggs.unwrap_or_else(|| json!({}));
-        for (name, v) in filters_results {
-            base[name] = v;
+        for (name, v) in &filters_results {
+            base[name.clone()] = v.clone();
         }
         Some(base)
     };
+
+    // an aggregation this engine computes itself never reaches tantivy's
+    // profiler, so its entry is written here: the aggregator OpenSearch would
+    // have used, and what the answer turned out to hold
+    if p.get("profile").map(|v| v == "true").unwrap_or(false)
+        || body.get("profile").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        let mut own: Vec<Value> = Vec::new();
+        for (name, def) in &filters_aggs {
+            let found = filters_results
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, v)| v.get("buckets"))
+                .and_then(|b| b.as_array());
+            let buckets = found.map(|b| b.len()).unwrap_or(0);
+            // an auto date histogram starts at the finest rounding, where
+            // every document has a bucket to itself, and widens until few
+            // enough are left -- so what survived is the document count
+            let surviving = if def.get("auto_date_histogram").is_some() {
+                found
+                    .map(|b| {
+                        b.iter()
+                            .filter_map(|x| x.get("doc_count").and_then(|c| c.as_u64()))
+                            .sum::<u64>() as usize
+                    })
+                    .unwrap_or(buckets)
+            } else {
+                buckets
+            };
+            // a query narrows the segment before the aggregation runs, so
+            // there is no leaf left for it to walk
+            let visited = if query_json.is_some() { 0 } else { 1 };
+            own.push(json!({
+                "type": agg_profile_type(def),
+                "description": name,
+                "time_in_nanos": 0,
+                "breakdown": {
+                    "reduce": 0, "build_aggregation": 0, "build_leaf_collector": 0,
+                    "collect": 0, "initialize": 0, "post_collection": 0,
+                },
+                "debug": {
+                    "total_buckets": buckets,
+                    // the rewrite that turns a range into a segment lookup
+                    // applies to the one segment there is
+                    "optimized_segments": 1,
+                    "unoptimized_segments": 0,
+                    "leaf_visited": visited,
+                    "inner_visited": 0,
+                    "surviving_buckets": surviving,
+                },
+            }));
+        }
+        if !own.is_empty() {
+            match shard_profiles.first_mut() {
+                Some(shard) => {
+                    if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut())
+                    {
+                        list.extend(own);
+                    } else {
+                        shard["aggregations"] = Value::Array(own);
+                    }
+                }
+                None => shard_profiles.push(json!({
+                    "id": "[node-0][obsearch][0]",
+                    "searches": [],
+                    "aggregations": own,
+                })),
+            }
+        }
+    }
 
     // the profile is written while the aggregation runs, before there are any
     // buckets to count, so the count is filled in from the finished answer
