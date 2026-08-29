@@ -638,6 +638,21 @@ impl IdxState {
     /// `existed` must be the answer the caller already got from `is_live`, so a
     /// write cannot decide "updated" and "version 1" from two different sources
     /// while the id table is still loading.
+    /// Record a version the caller chose rather than the next one in sequence.
+    ///
+    /// External versioning hands the index a number kept somewhere else, so
+    /// the index follows it rather than counting for itself.
+    pub fn bump_to(&mut self, id: &str, live: bool, version: u64) -> (u64, u64) {
+        let fp = id_fingerprint(id);
+        self.versions.insert(id.to_string(), DocMeta { version, live });
+        if live {
+            self.live_ids.insert(fp);
+        }
+        let seq = self.seq_no;
+        self.seq_no += 1;
+        (version, seq)
+    }
+
     pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
         let fp = id_fingerprint(id);
         let known = existed || self.versions.contains_key(id);

@@ -1101,6 +1101,83 @@ pub fn append_only(st: &IdxState) -> bool {
     st.setting("append_only.enabled").map(|v| v == "true").unwrap_or(false)
 }
 
+/// A version the caller supplied, and what it means for the write.
+///
+/// `external` numbers a document from somewhere outside the index: it must
+/// climb, so a write carrying a version the index already has, or an older
+/// one, has arrived out of order and is refused. `external_gte` allows the
+/// same number again. Without a type the number names the version the caller
+/// believes is current, and must match.
+fn version_check(
+    st: &IdxState,
+    id: &str,
+    p: &Params,
+) -> std::result::Result<Option<u64>, Response> {
+    let Some(want) = p.get("version").and_then(|v| v.parse::<u64>().ok()) else {
+        return Ok(None);
+    };
+    let ty = p.get("version_type").map(|v| v.as_str()).unwrap_or("internal");
+    let existed = exists_doc(st, id);
+    let have = st.version_of(id);
+    let conflict = |have: u64| {
+        Err(err(
+            StatusCode::CONFLICT,
+            "version_conflict_engine_exception",
+            format!(
+                "[{id}]: version conflict, current version [{have}] is higher or equal to \
+                 the one provided [{want}]"
+            ),
+        ))
+    };
+    match ty {
+        "external" | "external_gt" => {
+            if existed && want <= have {
+                return conflict(have);
+            }
+            Ok(Some(want))
+        }
+        "external_gte" => {
+            if existed && want < have {
+                return conflict(have);
+            }
+            Ok(Some(want))
+        }
+        _ => {
+            if !existed || want != have {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "version_conflict_engine_exception",
+                    format!(
+                        "[{id}]: version conflict, required version [{want}] is different \
+                         to the one in the index [{have}]"
+                    ),
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// `if_seq_no` makes a write conditional on the document not having moved.
+fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response> {
+    let want = p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok())?;
+    if !exists_doc(st, id) {
+        return None;
+    }
+    let have = read_seq(st, id).unwrap_or(0);
+    if have == want {
+        return None;
+    }
+    Some(err(
+        StatusCode::CONFLICT,
+        "version_conflict_engine_exception",
+        format!(
+            "[{id}]: version conflict, required seqNo [{want}], primary term [1]. current \
+             document has seqNo [{have}] and primary term [1]"
+        ),
+    ))
+}
+
 pub fn write_doc(
     st: &mut IdxState,
     id: &str,
@@ -1108,6 +1185,22 @@ pub fn write_doc(
     op_type: &str,
 ) -> std::result::Result<(Value, StatusCode), Response> {
     write_doc_raw(st, id, source, op_type, None)
+}
+
+/// A write that carries the caller's own version and conditions.
+pub fn write_doc_checked(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    p: &Params,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    if let Some(r) = seq_check(st, id, p) {
+        return Err(r);
+    }
+    let forced = version_check(st, id, p)?;
+    write_doc_versioned(st, id, source, op_type, raw, forced)
 }
 
 /// `raw` is the document exactly as the client sent it; passing it through
@@ -1118,6 +1211,17 @@ pub fn write_doc_raw(
     source: Value,
     op_type: &str,
     raw: Option<String>,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    write_doc_versioned(st, id, source, op_type, raw, None)
+}
+
+pub fn write_doc_versioned(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
     // an index held still refuses writes until the block is lifted
     if st.setting("blocks.write").as_deref() == Some("true") {
@@ -1150,7 +1254,10 @@ pub fn write_doc_raw(
             format!("[{id}]: version conflict, document already exists"),
         ));
     }
-    let (version, seq) = st.bump(id, true, existed);
+    let (version, seq) = match forced {
+        Some(v) => st.bump_to(id, true, v),
+        None => st.bump(id, true, existed),
+    };
     // deleting is only needed when something is actually there to replace;
     // a bulk load of new documents should not queue a delete per document
     if existed {
@@ -1357,7 +1464,7 @@ async fn do_index(
     };
     let mut g = st.write();
     let id = id.unwrap_or_else(|| g.next_auto_id());
-    match write_doc(&mut g, &id, source, &op_type) {
+    match write_doc_checked(&mut g, &id, source, &op_type, None, &p) {
         Ok((mut body, status)) => {
             // a document written with a routing is only reachable by quoting
             // the same routing back, so it has to be remembered
@@ -1482,6 +1589,36 @@ pub async fn delete_doc_route(
 ) -> Response {
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let mut g = st.write();
+    if let Some(r) = seq_check(&g, &id, &p) {
+        return r;
+    }
+    // an external version numbers the delete too, so a stale one is refused
+    match version_check(&g, &id, &p) {
+        Ok(Some(v)) => {
+            let existed = exists_doc(&g, &id);
+            let (version, seq) = g.bump_to(&id, false, v);
+            if existed {
+                let term = Term::from_field_text(g.fields.id, &id);
+                if let Ok(w) = g.writer() {
+                    w.delete_term(term);
+                }
+                g.note_pending(&id, None);
+            }
+            g.routing.remove(&id);
+            maybe_refresh(&mut g, &p);
+            let mut body = json!({
+                "_index": g.name, "_id": id, "_version": version,
+                "result": if existed { "deleted" } else { "not_found" },
+                "_shards": shards_of(&g), "_seq_no": seq, "_primary_term": 1,
+            });
+            note_forced_refresh(&mut body, &p);
+            let status =
+                if existed { StatusCode::OK } else { StatusCode::NOT_FOUND };
+            return (status, axum::Json(body)).into_response();
+        }
+        Ok(None) => {}
+        Err(r) => return r,
+    }
     if !routing_matches(&g, &id, &p) {
         return (
             StatusCode::NOT_FOUND,
