@@ -1814,6 +1814,8 @@ fn agg_profile_type(def: &Value) -> String {
             }
         }
         "date_histogram" => "DateHistogramAggregator".into(),
+        // the auto form names which shape it collected from
+        "auto_date_histogram" => "AutoDateHistogramAggregator.FromSingle".into(),
         "histogram" => "NumericHistogramAggregator".into(),
         other => format!("{}Aggregator", capitalise_words(other)),
     }
@@ -1840,18 +1842,39 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
     let Some((kind, body)) = def.as_object().and_then(|o| o.iter().next()) else {
         return json!({});
     };
+    // a sub-aggregation is not run while the buckets are being found; it is
+    // deferred until the buckets that survive are known
+    let deferred: Vec<String> = def
+        .get(kind)
+        .and_then(|_| def.get("aggs").or_else(|| def.get("aggregations")))
+        .and_then(|a| a.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     if kind == "terms" {
         // which kind of term was bucketed, which is what the strategy names
         let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        // the strategy names what was bucketed: numbers are collected as
+        // longs, everything else as terms
         let strategy = if field.starts_with(crate::store::DYN) {
             "long_terms"
         } else {
-            "string_terms"
+            "terms"
         };
-        return json!({"result_strategy": strategy});
+        let mut out = json!({
+            "result_strategy": strategy,
+            "collection_strategy": "dense",
+        });
+        if !deferred.is_empty() {
+            out["deferred_aggregators"] = json!(deferred);
+        }
+        return out;
     }
     if kind != "cardinality" {
-        return json!({});
+        // every aggregator says how much of the index it could skip
+        return json!({
+            "optimized_segments": 1, "unoptimized_segments": 0,
+            "leaf_visited": 1, "inner_visited": 0,
+        });
     }
     // the request has already been rewritten onto the internal JSON views
     let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
@@ -3857,13 +3880,29 @@ pub fn run(
     {
         let mut own: Vec<Value> = Vec::new();
         for (name, def) in &filters_aggs {
-            let buckets = filters_results
+            let found = filters_results
                 .iter()
                 .find(|(n, _)| n == name)
                 .and_then(|(_, v)| v.get("buckets"))
-                .and_then(|b| b.as_array())
-                .map(|b| b.len())
-                .unwrap_or(0);
+                .and_then(|b| b.as_array());
+            let buckets = found.map(|b| b.len()).unwrap_or(0);
+            // an auto date histogram starts at the finest rounding, where
+            // every document has a bucket to itself, and widens until few
+            // enough are left -- so what survived is the document count
+            let surviving = if def.get("auto_date_histogram").is_some() {
+                found
+                    .map(|b| {
+                        b.iter()
+                            .filter_map(|x| x.get("doc_count").and_then(|c| c.as_u64()))
+                            .sum::<u64>() as usize
+                    })
+                    .unwrap_or(buckets)
+            } else {
+                buckets
+            };
+            // a query narrows the segment before the aggregation runs, so
+            // there is no leaf left for it to walk
+            let visited = if query_json.is_some() { 0 } else { 1 };
             own.push(json!({
                 "type": agg_profile_type(def),
                 "description": name,
@@ -3878,8 +3917,9 @@ pub fn run(
                     // applies to the one segment there is
                     "optimized_segments": 1,
                     "unoptimized_segments": 0,
-                    "leaf_visited": 1,
+                    "leaf_visited": visited,
                     "inner_visited": 0,
+                    "surviving_buckets": surviving,
                 },
             }));
         }
