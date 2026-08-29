@@ -2381,6 +2381,29 @@ pub fn run(
         }
     }
 
+    // `_shard_doc` orders by where a document sits within a shard, which only
+    // holds still while a point-in-time is open; without one the order it
+    // names does not exist
+    if body.get("pit").is_none() {
+        let names_shard_doc = |v: &Value| match v {
+            Value::String(s) => s == "_shard_doc",
+            Value::Object(o) => o.keys().any(|k| k == "_shard_doc"),
+            _ => false,
+        };
+        let asked = match body.get("sort") {
+            Some(Value::Array(a)) => a.iter().any(names_shard_doc),
+            Some(one) => names_shard_doc(one),
+            None => false,
+        };
+        if asked {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                "Validation Failed: 1: _shard_doc is only supported with point-in-time;",
+            ));
+        }
+    }
+
     // unsigned_long cannot be sorted alongside another numeric type
     let sort_keys = parse_sort(body.get("sort"));
     for k in &sort_keys {

@@ -245,7 +245,13 @@ class Runner:
             stripped = expected.strip() if isinstance(expected, str) else expected
             if isinstance(stripped, str) and len(stripped) > 2 \
                     and stripped.startswith("/") and stripped.endswith("/"):
-                if not re.search(stripped[1:-1], str(actual if actual is not None else ""), re.X):
+                # Verbose mode is what the multi-line patterns need -- they
+                # are laid out in columns with comments. It also throws away
+                # the spaces inside a one-line pattern, where they are part of
+                # the text being matched, so both readings are tried.
+                text = str(actual if actual is not None else "")
+                pat = stripped[1:-1]
+                if not (re.search(pat, text, re.X) or re.search(pat, text)):
                     raise Failure(f"match {path}: {actual!r} !~ {expected}")
                 continue
             if isinstance(expected, (int, float)) and isinstance(actual, (int, float)) \
