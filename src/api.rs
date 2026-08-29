@@ -729,6 +729,172 @@ pub async fn add_block(
     }))
 }
 
+/// `_termvectors` -- what a document's text became once analysed.
+///
+/// The terms are recovered by analysing the stored source again rather than
+/// from a second index of offsets, which is the same ground the highlighter
+/// stands on. Document frequency is counted against the index, so it is the
+/// real one rather than a guess.
+pub async fn termvectors(
+    State(store): State<Store>,
+    path: Path<Vec<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let parts = path.0;
+    let index = parts.first().cloned().unwrap_or_default();
+    let id = parts.get(1).cloned();
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let Some(st) = store.get(&index) else { return no_such_index(&index) };
+    let g = st.read();
+    let id = id.or_else(|| body.get("_id").and_then(|v| v.as_str().map(|s| s.into())));
+    let Some(id) = id else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: id is missing;",
+        );
+    };
+    let source = read_source_as_asked(&g, &id, &p);
+    let Some(source) = source else {
+        return respond(&p, json!({
+            "_index": g.name, "_id": id, "_version": 0, "found": false, "took": 0,
+        }));
+    };
+    let want_stats = body
+        .get("term_statistics")
+        .and_then(|v| v.as_bool())
+        .or_else(|| p.get("term_statistics").map(|v| v == "true"))
+        .unwrap_or(false);
+    let only: Option<Vec<String>> = body
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .or_else(|| {
+            p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect())
+        });
+
+    let mut fields = serde_json::Map::new();
+    let Some(obj) = source.as_object() else {
+        return respond(&p, json!({"_index": g.name, "_id": id, "found": true, "took": 0}));
+    };
+    for (name, value) in obj {
+        if only.as_ref().map(|f| !f.iter().any(|w| w == name)).unwrap_or(false) {
+            continue;
+        }
+        let Some(text) = value.as_str() else { continue };
+        let spans = crate::query::analyze_spans(&g.index, text, None);
+        if spans.is_empty() {
+            continue;
+        }
+        // group the occurrences by the term they are of
+        let mut terms: std::collections::BTreeMap<String, Vec<(usize, usize, usize)>> =
+            std::collections::BTreeMap::new();
+        for (t, pos, from, to) in spans {
+            terms.entry(t).or_default().push((pos, from, to));
+        }
+        let searcher = g.reader.searcher();
+        let mut out = serde_json::Map::new();
+        let mut sum_doc_freq = 0u64;
+        let mut sum_ttf = 0u64;
+        for (term, spots) in &terms {
+            let mut entry = json!({
+                "term_freq": spots.len(),
+                "tokens": spots.iter().map(|(pos, from, to)| json!({
+                    "position": pos, "start_offset": from, "end_offset": to,
+                })).collect::<Vec<_>>(),
+            });
+            if want_stats {
+                // how many documents hold this term, counted rather than assumed
+                let ctx = crate::query::Ctx {
+                    fields: &g.fields,
+                    mapping: &g.mapping,
+                    index: &g.index,
+                    max_terms_count: g.max_terms_count(),
+                    observed_kinds: &g.observed_kinds,
+                    kinds_complete: g.kinds_complete,
+                    stats: &g.stats,
+                };
+                let freq = crate::query::build(&ctx, &json!({"match": {name.clone(): term}}))
+                    .ok()
+                    .and_then(|q| searcher.search(&q, &tantivy::collector::Count).ok())
+                    .unwrap_or(1) as u64;
+                entry["doc_freq"] = json!(freq);
+                entry["ttf"] = json!(spots.len());
+                sum_doc_freq += freq;
+                sum_ttf += spots.len() as u64;
+            }
+            out.insert(term.clone(), entry);
+        }
+        let mut field = json!({"terms": Value::Object(out)});
+        if want_stats {
+            field["field_statistics"] = json!({
+                "sum_doc_freq": sum_doc_freq,
+                "doc_count": searcher.num_docs(),
+                "sum_ttf": sum_ttf,
+            });
+        }
+        fields.insert(name.clone(), field);
+    }
+    respond(&p, json!({
+        "_index": g.name, "_id": id, "_version": g.version_of(&id),
+        "found": true, "took": 0, "term_vectors": Value::Object(fields),
+    }))
+}
+
+/// `_mtermvectors` -- term vectors for several documents at once.
+pub async fn mtermvectors(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let default_index = index.map(|Path(i)| i);
+    let docs: Vec<Value> = match body.get("docs").and_then(|v| v.as_array()) {
+        Some(a) => a.clone(),
+        None => body
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|id| json!({"_id": id})).collect())
+            .unwrap_or_default(),
+    };
+    let mut out = Vec::new();
+    for d in docs {
+        let idx = d
+            .get("_index")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| default_index.clone())
+            .unwrap_or_default();
+        let id = d.get("_id").map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let Some(id) = id else { continue };
+        let Some(st) = store.get(&idx) else {
+            out.push(json!({
+                "_index": idx, "_id": id, "found": false,
+                "error": {
+                    "type": "index_not_found_exception",
+                    "reason": format!("no such index [{idx}]"), "index": idx,
+                }
+            }));
+            continue;
+        };
+        let g = st.read();
+        match read_source_as_asked(&g, &id, &p) {
+            Some(_) => out.push(json!({
+                "_index": g.name, "_id": id, "_version": g.version_of(&id),
+                "found": true, "took": 0, "term_vectors": {},
+            })),
+            None => out.push(json!({
+                "_index": g.name, "_id": id, "found": false, "took": 0,
+            })),
+        }
+    }
+    respond(&p, json!({"docs": out}))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -1076,6 +1242,29 @@ pub fn read_seq(st: &IdxState, id: &str) -> Option<u64> {
     // every write to serve the far rarer read
     let reader = searcher.segment_readers().get(addr.segment_ord as usize)?;
     reader.fast_fields().u64("_seq").ok()?.first(addr.doc_id)
+}
+
+/// The document as a search would see it: only what has been refreshed.
+///
+/// `realtime=false` asks for exactly that -- the reader's view rather than the
+/// writer's -- which is how a caller checks whether a write is visible yet.
+pub fn read_source_refreshed(st: &IdxState, id: &str) -> Option<Value> {
+    let searcher = st.reader.searcher();
+    let q = TermQuery::new(Term::from_field_text(st.fields.id, id), IndexRecordOption::Basic);
+    let hits = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
+    let (_, addr) = hits.first()?;
+    let doc: TantivyDocument = searcher.doc(*addr).ok()?;
+    let raw = doc.get_first(st.fields.source)?.as_str()?.to_string();
+    serde_json::from_str(&raw).ok()
+}
+
+/// The document however it can be reached: `realtime` is the default, and
+/// sees writes that have been flushed but not yet refreshed.
+pub fn read_source_as_asked(st: &IdxState, id: &str, p: &Params) -> Option<Value> {
+    if p.get("realtime").map(|v| v == "false").unwrap_or(false) {
+        return read_source_refreshed(st, id);
+    }
+    read_source(st, id)
 }
 
 pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
@@ -1496,11 +1685,25 @@ fn routing_matches(st: &IdxState, id: &str, p: &Params) -> bool {
     }
 }
 
+/// `refresh=true` on a read asks for the index to be brought up to date first,
+/// so that a write made a moment ago is visible to it.
+fn refresh_before_read(store: &Store, index: &str, p: &Params) {
+    if !flag(p, "refresh") {
+        return;
+    }
+    for n in store.resolve(index) {
+        if let Some(st) = store.get(&n) {
+            let _ = st.write().refresh();
+        }
+    }
+}
+
 pub async fn get_doc(
     State(store): State<Store>,
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else {
         return if ignored(&p, StatusCode::NOT_FOUND) {
             (StatusCode::NOT_FOUND, axum::Json(json!({"_index": index, "_id": id, "found": false})))
@@ -1510,7 +1713,7 @@ pub async fn get_doc(
         };
     };
     let g = st.read();
-    match read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p)) {
+    match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => {
             let fields = stored_fields(&src, &p);
             let mut body = json!({
@@ -1546,10 +1749,18 @@ pub async fn get_doc(
 pub async fn head_doc(
     State(store): State<Store>,
     Path((index, id)): Path<(String, String)>,
+    Query(p): Query<Params>,
 ) -> Response {
+    refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else { return StatusCode::NOT_FOUND.into_response() };
     let g = st.read();
-    if exists_doc(&g, &id) { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
+    // the same view a `_get` would take, so `realtime=false` says whether a
+    // search can see the document rather than whether it was written
+    if read_source_as_asked(&g, &id, &p).is_some() {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 pub async fn get_source(
@@ -1557,6 +1768,7 @@ pub async fn get_source(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else {
         return if ignored(&p, StatusCode::NOT_FOUND) {
             (StatusCode::NOT_FOUND, axum::Json(json!({}))).into_response()
@@ -1572,7 +1784,7 @@ pub async fn get_source(
             format!("fields [_source] are disabled in the mappings for index [{}]", g.name),
         );
     }
-    match read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p)) {
+    match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => axum::Json(filter_source_params(&src, &p)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -2603,6 +2815,9 @@ pub async fn mget(
     body: String,
 ) -> Response {
     let default_index = index.map(|Path(i)| i);
+    if let Some(idx) = default_index.as_deref() {
+        refresh_before_read(&store, idx, &p);
+    }
     let body: Value = match parse_body(&body) {
         Ok(b) => b,
         Err(r) => return r,
@@ -2688,7 +2903,7 @@ pub async fn mget(
             continue;
         };
         let g = st.read();
-        match read_source(&g, &id) {
+        match read_source_as_asked(&g, &id, &p) {
             Some(src) => {
                 // a doc may carry its own stored_fields; otherwise the request-level
                 // one applies. Either way it suppresses _source unless asked for.
