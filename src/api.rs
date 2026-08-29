@@ -5316,21 +5316,48 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             .collect();
         return axum::Json(arr).into_response();
     }
-    // plain text: the format `cat` is named for
-    let mut out = String::new();
-    if p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true) {
-        let head: Vec<&str> = match rows.first() {
-            Some(r) => r.iter().map(|(k, _)| *k).collect(),
-            None => columns.to_vec(),
-        };
-        if !head.is_empty() {
-            out.push_str(&head.join(" "));
-            out.push('\n');
+    // plain text: the format `cat` is named for. Cells are padded to the width
+    // of their column so the values line up down the page.
+    let show_head = p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true);
+    let head: Vec<&str> = match rows.first() {
+        Some(r) => r.iter().map(|(k, _)| *k).collect(),
+        None => columns.to_vec(),
+    };
+    let mut widths: Vec<usize> = if show_head {
+        head.iter().map(|h| h.len()).collect()
+    } else {
+        vec![0; head.len()]
+    };
+    for r in &rows {
+        for (i, (_, v)) in r.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(v.len());
+            }
         }
     }
+    let line = |cells: Vec<&str>| {
+        let mut s = String::new();
+        for (i, c) in cells.iter().enumerate() {
+            if i > 0 {
+                s.push(' ');
+            }
+            s.push_str(c);
+            // the last cell needs no padding: nothing follows it to line up
+            if i + 1 < cells.len() {
+                for _ in c.len()..widths.get(i).copied().unwrap_or(0) {
+                    s.push(' ');
+                }
+            }
+        }
+        s.push('\n');
+        s
+    };
+    let mut out = String::new();
+    if show_head && !head.is_empty() {
+        out.push_str(&line(head.clone()));
+    }
     for r in &rows {
-        out.push_str(&r.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" "));
-        out.push('\n');
+        out.push_str(&line(r.iter().map(|(_, v)| v.as_str()).collect()));
     }
     out.into_response()
 }
