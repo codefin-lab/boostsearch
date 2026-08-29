@@ -3843,11 +3843,64 @@ pub fn run(
         aggs
     } else {
         let mut base = aggs.unwrap_or_else(|| json!({}));
-        for (name, v) in filters_results {
-            base[name] = v;
+        for (name, v) in &filters_results {
+            base[name.clone()] = v.clone();
         }
         Some(base)
     };
+
+    // an aggregation this engine computes itself never reaches tantivy's
+    // profiler, so its entry is written here: the aggregator OpenSearch would
+    // have used, and what the answer turned out to hold
+    if p.get("profile").map(|v| v == "true").unwrap_or(false)
+        || body.get("profile").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        let mut own: Vec<Value> = Vec::new();
+        for (name, def) in &filters_aggs {
+            let buckets = filters_results
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, v)| v.get("buckets"))
+                .and_then(|b| b.as_array())
+                .map(|b| b.len())
+                .unwrap_or(0);
+            own.push(json!({
+                "type": agg_profile_type(def),
+                "description": name,
+                "time_in_nanos": 0,
+                "breakdown": {
+                    "reduce": 0, "build_aggregation": 0, "build_leaf_collector": 0,
+                    "collect": 0, "initialize": 0, "post_collection": 0,
+                },
+                "debug": {
+                    "total_buckets": buckets,
+                    // the rewrite that turns a range into a segment lookup
+                    // applies to the one segment there is
+                    "optimized_segments": 1,
+                    "unoptimized_segments": 0,
+                    "leaf_visited": 1,
+                    "inner_visited": 0,
+                },
+            }));
+        }
+        if !own.is_empty() {
+            match shard_profiles.first_mut() {
+                Some(shard) => {
+                    if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut())
+                    {
+                        list.extend(own);
+                    } else {
+                        shard["aggregations"] = Value::Array(own);
+                    }
+                }
+                None => shard_profiles.push(json!({
+                    "id": "[node-0][obsearch][0]",
+                    "searches": [],
+                    "aggregations": own,
+                })),
+            }
+        }
+    }
 
     // the profile is written while the aggregation runs, before there are any
     // buckets to count, so the count is filled in from the finished answer
