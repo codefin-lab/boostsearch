@@ -2692,6 +2692,19 @@ pub fn run(
     let size = as_usize(body_or_param(body, p, "size")).unwrap_or(10);
     // reading documents skips the closed indices a pattern would otherwise
     // reach; a closed index named outright is a different complaint
+    // `pit` names a point in time rather than an index expression: it carries
+    // both which indices to search and how far into each to look
+    let pit = body
+        .get("pit")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .and_then(|id| store.read_pit(id));
+    let expr: &str = match pit.as_ref() {
+        Some(p) if expr.is_empty() => &p.expr,
+        _ => expr,
+    };
+    let pit_ceiling: std::collections::HashMap<String, u64> =
+        pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
     let targets = store.resolve_open(expr);
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
@@ -3040,6 +3053,22 @@ pub fn run(
                 }
             },
             None => Box::new(tantivy::query::AllQuery),
+        };
+        // a point in time holds the search to what the index had written when
+        // it was opened, which is what makes paging through it stable
+        let q: Box<dyn tantivy::query::Query> = match pit_ceiling.get(name) {
+            Some(ceiling) => {
+                let upper = tantivy::Term::from_field_u64(g.fields.seq, *ceiling);
+                let below = tantivy::query::FastFieldRangeQuery::new(
+                    std::ops::Bound::Unbounded,
+                    std::ops::Bound::Excluded(upper),
+                );
+                Box::new(tantivy::query::BooleanQuery::new(vec![
+                    (tantivy::query::Occur::Must, q),
+                    (tantivy::query::Occur::Must, Box::new(below) as Box<dyn tantivy::query::Query>),
+                ]))
+            }
+            None => q,
         };
 
         let searcher = g.reader.searcher();

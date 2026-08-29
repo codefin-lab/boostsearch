@@ -975,6 +975,10 @@ pub struct Store {
     /// component templates: settings and mappings named once and composed
     /// into whichever index templates ask for them
     components: Arc<RwLock<HashMap<String, Value>>>,
+    /// open points in time, each remembering where every index it covers had
+    /// got to when it was opened
+    pits: Arc<RwLock<HashMap<String, PitState>>>,
+    pit_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
@@ -992,6 +996,36 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Open a point in time over an expression: what each index it reaches
+    /// had written by now, so a later search can be held to that.
+    pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
+        let n = self.pit_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("obsearch-pit-{n:016x}");
+        let mut ceiling = HashMap::new();
+        for name in self.resolve(expr) {
+            if let Some(st) = self.get(&name) {
+                ceiling.insert(name, st.read().seq_no);
+            }
+        }
+        self.pits.write().insert(
+            id.clone(),
+            PitState { expr: expr.to_string(), ceiling, keep_alive_ms },
+        );
+        id
+    }
+
+    pub fn read_pit(&self, id: &str) -> Option<PitState> {
+        self.pits.read().get(id).cloned()
+    }
+
+    pub fn all_pits(&self) -> Vec<(String, PitState)> {
+        self.pits.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub fn close_pit(&self, id: &str) -> bool {
+        self.pits.write().remove(id).is_some()
     }
 
     pub fn put_component(&self, name: &str, body: Value) {
@@ -1139,6 +1173,8 @@ impl Store {
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
+            pits: Arc::new(RwLock::new(HashMap::new())),
+            pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1161,6 +1197,8 @@ impl Store {
             cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
+            pits: Arc::new(RwLock::new(HashMap::new())),
+            pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1343,7 +1381,13 @@ impl Store {
         let id = format!("obsearch-scroll-{n:016x}");
         self.scrolls.write().insert(
             id.clone(),
-            ScrollState { expr: expr.to_string(), body: body.clone(), offset: size, size },
+            ScrollState {
+                expr: expr.to_string(),
+                body: body.clone(),
+                offset: size,
+                size,
+                pit: self.open_pit(expr, 0),
+            },
         );
         id
     }
@@ -1567,12 +1611,25 @@ impl Store {
 
 /// A scroll is a cursor over a search: the request that opened it plus how far
 /// the client has read.
+/// A point in time: which indices it covers, and how far each had got.
+#[derive(Clone)]
+pub struct PitState {
+    pub expr: String,
+    /// per index, the sequence number the next write will take -- everything
+    /// below it was already there when the point in time was opened
+    pub ceiling: HashMap<String, u64>,
+    pub keep_alive_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct ScrollState {
     pub expr: String,
     pub body: Value,
     pub offset: usize,
     pub size: usize,
+    /// the point in time the scroll was opened over, so that documents
+    /// written after it are not walked into
+    pub pit: String,
 }
 
 /// Recursive object merge; `patch` wins on conflict.

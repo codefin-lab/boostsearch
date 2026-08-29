@@ -969,6 +969,67 @@ pub async fn pending_tasks(Query(p): Query<Params>) -> Response {
     respond(&p, json!({"tasks": []}))
 }
 
+/// A keep-alive as written, in milliseconds.
+fn keep_alive_millis(s: &str) -> u64 {
+    parse_keep_alive(s).map(|secs| secs * 1000).unwrap_or(0)
+}
+
+/// `_search/point_in_time` -- freeze what the indices hold now, so that
+/// paging through them is not disturbed by writes that arrive meanwhile.
+pub async fn create_pit(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    if names.is_empty() && !expr.is_empty() {
+        return no_such_index(&expr);
+    }
+    let keep = p.get("keep_alive").map(|v| keep_alive_millis(v)).unwrap_or(0);
+    let id = store.open_pit(&expr, keep);
+    respond(&p, json!({
+        "pit_id": id,
+        "_shards": shards_over(&store, &names),
+        "creation_time": 0,
+    }))
+}
+
+pub async fn get_all_pits(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let pits: Vec<Value> = store
+        .all_pits()
+        .into_iter()
+        .map(|(id, st)| json!({
+            "pit_id": id, "creation_time": 0, "keep_alive": st.keep_alive_ms,
+        }))
+        .collect();
+    respond(&p, json!({"pits": pits}))
+}
+
+pub async fn delete_pit(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let ids: Vec<String> = match body.get("pit_id") {
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        }
+        Some(Value::String(one)) => vec![one.clone()],
+        // no id names them all
+        _ => store.all_pits().into_iter().map(|(id, _)| id).collect(),
+    };
+    let pits: Vec<Value> = ids
+        .into_iter()
+        .map(|id| {
+            let gone = store.close_pit(&id);
+            json!({"pit_id": id, "successful": gone})
+        })
+        .collect();
+    respond(&p, json!({"pits": pits}))
+}
+
 pub async fn delete_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -2647,6 +2708,9 @@ pub async fn scroll(
     let mut req = state.body.clone();
     req["from"] = json!(state.offset);
     req["size"] = json!(state.size);
+    // the scroll walks the index as it stood when it was opened, so a
+    // document written since is not walked into halfway through
+    req["pit"] = json!({"id": state.pit});
     match crate::search::run(&store, &state.expr, &req, &p) {
         Ok(out) => {
             let n = out.hits.len();

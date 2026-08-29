@@ -354,6 +354,11 @@ def reset(base):
     # Templates outlive a `DELETE /*`, and an index template left behind by an
     # earlier file changes how the next file's indices are created -- so the
     # suite has to start from nothing, not just from no indices.
+    # a point in time outlives the indices it was opened over
+    try:
+        requests.delete(base + "/_search/point_in_time/_all", timeout=10)
+    except Exception:
+        pass
     for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
         try:
             requests.delete(base + path, timeout=10)
