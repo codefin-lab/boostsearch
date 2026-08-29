@@ -20,6 +20,9 @@ pub struct Fields {
     pub dynamic: Field,
     /// raw (untokenised) JSON view -- backs `keyword` fields, sorts and term aggs
     pub raw: Field,
+    /// the order the write arrived in, which is what `_seq_no` reports and
+    /// what settles ties between equally-ranked documents
+    pub seq: Field,
 }
 
 /// How much un-refreshed document source may sit in memory before the writer
@@ -71,6 +74,25 @@ pub fn id_fingerprint(id: &str) -> u64 {
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
 
+/// A stable 22-character identifier derived from the index name, in the
+/// alphabet the API uses for these.
+pub fn index_uuid(name: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let mut g: u64 = h ^ 0x9e37_79b9_7f4a_7c15;
+    let mut out = String::with_capacity(22);
+    for i in 0..22 {
+        let src = if i % 2 == 0 { &mut h } else { &mut g };
+        *src = src.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        out.push(ALPHABET[((*src >> 58) & 63) as usize] as char);
+    }
+    out
+}
+
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("_id", STRING | STORED | FAST);
@@ -95,7 +117,12 @@ pub fn build_schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
-    (sb.build(), Fields { id, source, dynamic, raw })
+    // The writer spreads one bulk request across its worker threads, so a
+    // document's segment and doc id do not follow the order it was sent in.
+    // Recording that order is what lets two equally-scored hits come back the
+    // same way twice.
+    let seq = sb.add_u64_field("_seq", FAST);
+    (sb.build(), Fields { id, source, dynamic, raw, seq })
 }
 
 /// Declared field types, flattened to dotted paths (`user.name` -> `keyword`).
@@ -434,6 +461,12 @@ pub struct IdxState {
     /// Exact record for ids that need one: anything updated past version 1, and
     /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
+    /// the routing a document was written with, kept only for the documents
+    /// that were given one -- which is the rare case
+    pub routing: HashMap<String, String>,
+    /// a stable identifier for the index itself, distinct from the id of any
+    /// one commit; 22 characters, as the API reports them
+    pub uuid: String,
     /// 64-bit fingerprints of ids believed live. A miss is authoritative (no
     /// false negatives), so the common "is this a new document?" question costs
     /// one hash. A hit is confirmed against the index, which only happens for
@@ -442,6 +475,8 @@ pub struct IdxState {
     /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
     /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
     pub pending: HashMap<String, Option<String>>,
+    /// arrival order of the writes not yet visible to the refreshed reader
+    pub pending_seq: HashMap<String, u64>,
     pub pending_bytes: usize,
     /// A second reader that IS advanced when the buffer is flushed, so GET stays
     /// realtime while search still only moves on an explicit refresh.
@@ -472,6 +507,8 @@ pub struct IdxState {
     pub has_doc_count: bool,
     /// Updates that changed nothing, which the stats report separately.
     pub noop_updates: std::sync::atomic::AtomicU64,
+    /// how many times this index has been flushed, which `_stats` reports
+    pub flushes: std::sync::atomic::AtomicU64,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -506,12 +543,17 @@ impl IdxState {
         self.reader.reload()?;
         self.realtime.reload()?;
         self.pending.clear();
+        self.pending_seq.clear();
         self.pending_bytes = 0;
         Ok(())
     }
 
     /// Bound how much un-refreshed source we hold in memory. Flushing advances
     /// only the realtime reader, so search visibility is unchanged.
+    pub fn note_pending_seq(&mut self, id: &str, seq: u64) {
+        self.pending_seq.insert(id.to_string(), seq);
+    }
+
     pub fn note_pending(&mut self, id: &str, source: Option<String>) {
         self.pending_bytes += id.len() + source.as_ref().map(|s| s.len()).unwrap_or(0) + 48;
         self.pending.insert(id.to_string(), source);
@@ -587,6 +629,7 @@ impl IdxState {
         // a write must stay invisible to search until an explicit refresh.
         let _ = self.realtime.reload();
         self.pending.clear();
+        self.pending_seq.clear();
         self.pending_bytes = 0;
         release_freed_memory();
         true
@@ -597,6 +640,21 @@ impl IdxState {
     /// `existed` must be the answer the caller already got from `is_live`, so a
     /// write cannot decide "updated" and "version 1" from two different sources
     /// while the id table is still loading.
+    /// Record a version the caller chose rather than the next one in sequence.
+    ///
+    /// External versioning hands the index a number kept somewhere else, so
+    /// the index follows it rather than counting for itself.
+    pub fn bump_to(&mut self, id: &str, live: bool, version: u64) -> (u64, u64) {
+        let fp = id_fingerprint(id);
+        self.versions.insert(id.to_string(), DocMeta { version, live });
+        if live {
+            self.live_ids.insert(fp);
+        }
+        let seq = self.seq_no;
+        self.seq_no += 1;
+        (version, seq)
+    }
+
     pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
         let fp = id_fingerprint(id);
         let known = existed || self.versions.contains_key(id);
@@ -823,7 +881,37 @@ impl IdxState {
             .filter(|v| !v.is_null())
     }
 
-    fn numeric_setting(&self, key: &str) -> Option<u64> {
+    /// Every live document's id, in the order the segments hold them.
+    pub fn all_ids(&self) -> Vec<String> {
+        let searcher = self.realtime.searcher();
+        let mut out = Vec::new();
+        for reader in searcher.segment_readers() {
+            let Ok(col) = reader.fast_fields().str("_id") else { continue };
+            let Some(col) = col else { continue };
+            let alive = reader.alive_bitset();
+            for doc in 0..reader.max_doc() {
+                if alive.map(|a| a.is_deleted(doc)).unwrap_or(false) {
+                    continue;
+                }
+                for ord in col.term_ords(doc) {
+                    let mut buf = String::new();
+                    if col.ord_to_str(ord, &mut buf).is_ok() {
+                        out.push(buf);
+                    }
+                    break;
+                }
+            }
+        }
+        // a write not yet visible to the reader is still part of the index
+        for (id, held) in &self.pending {
+            if held.is_some() && !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        out
+    }
+
+    pub fn numeric_setting(&self, key: &str) -> Option<u64> {
         match self.raw_setting(key)? {
             Value::String(s) => s.parse().ok(),
             Value::Number(n) => n.as_u64(),
@@ -879,6 +967,110 @@ pub struct Store {
     /// write burst (11.15 MB/index uncapped vs 11.37 MB/index at a cap of 8).
     /// It is kept for the thread bound, not as a memory fix.
     live_writers: Arc<RwLock<Vec<String>>>,
+    /// cluster-level settings, which a few APIs read back and one or two enforce
+    cluster_settings: Arc<RwLock<Value>>,
+    /// nodes excluded from the voting configuration, which this engine records
+    /// and reports without having a vote to hold
+    voting_exclusions: Arc<RwLock<Vec<Value>>>,
+    /// component templates: settings and mappings named once and composed
+    /// into whichever index templates ask for them
+    components: Arc<RwLock<HashMap<String, Value>>>,
+    /// open points in time, each remembering where every index it covers had
+    /// got to when it was opened
+    pits: Arc<RwLock<HashMap<String, PitState>>>,
+    pit_seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Store {
+    /// Merge one `_cluster/settings` body in, dropping the keys set to null.
+    pub fn merge_cluster_settings(&self, body: &Value) {
+        let mut g = self.cluster_settings.write();
+        for scope in ["persistent", "transient"] {
+            let Some(incoming) = body.get(scope).and_then(|v| v.as_object()) else { continue };
+            let Some(dest) = g.get_mut(scope).and_then(|v| v.as_object_mut()) else { continue };
+            for (k, v) in incoming {
+                if v.is_null() {
+                    dest.remove(k);
+                } else {
+                    dest.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    /// Open a point in time over an expression: what each index it reaches
+    /// had written by now, so a later search can be held to that.
+    pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
+        let n = self.pit_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("obsearch-pit-{n:016x}");
+        let mut ceiling = HashMap::new();
+        for name in self.resolve(expr) {
+            if let Some(st) = self.get(&name) {
+                ceiling.insert(name, st.read().seq_no);
+            }
+        }
+        self.pits.write().insert(
+            id.clone(),
+            PitState { expr: expr.to_string(), ceiling, keep_alive_ms },
+        );
+        id
+    }
+
+    pub fn read_pit(&self, id: &str) -> Option<PitState> {
+        self.pits.read().get(id).cloned()
+    }
+
+    pub fn all_pits(&self) -> Vec<(String, PitState)> {
+        self.pits.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub fn close_pit(&self, id: &str) -> bool {
+        self.pits.write().remove(id).is_some()
+    }
+
+    pub fn put_component(&self, name: &str, body: Value) {
+        self.components.write().insert(name.to_string(), body);
+    }
+
+    pub fn get_components(&self) -> HashMap<String, Value> {
+        self.components.read().clone()
+    }
+
+    pub fn delete_component(&self, name: &str) -> bool {
+        self.components.write().remove(name).is_some()
+    }
+
+    pub fn add_voting_exclusions(&self, entries: Vec<Value>) {
+        let mut g = self.voting_exclusions.write();
+        for e in entries {
+            if !g.contains(&e) {
+                g.push(e);
+            }
+        }
+    }
+
+    pub fn clear_voting_exclusions(&self) {
+        self.voting_exclusions.write().clear();
+    }
+
+    pub fn voting_exclusions(&self) -> Vec<Value> {
+        self.voting_exclusions.read().clone()
+    }
+
+    pub fn cluster_settings(&self) -> Value {
+        self.cluster_settings.read().clone()
+    }
+
+    /// A cluster setting by name; a transient value shadows a persistent one.
+    pub fn cluster_setting(&self, key: &str) -> Option<Value> {
+        let g = self.cluster_settings.read();
+        for scope in ["transient", "persistent"] {
+            if let Some(v) = g.get(scope).and_then(|s| s.get(key)) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Hand memory freed by a finished write burst back to the OS.
@@ -978,6 +1170,11 @@ impl Store {
             data_dir: None,
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            components: Arc::new(RwLock::new(HashMap::new())),
+            pits: Arc::new(RwLock::new(HashMap::new())),
+            pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -997,6 +1194,11 @@ impl Store {
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
+            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            components: Arc::new(RwLock::new(HashMap::new())),
+            pits: Arc::new(RwLock::new(HashMap::new())),
+            pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1179,7 +1381,13 @@ impl Store {
         let id = format!("obsearch-scroll-{n:016x}");
         self.scrolls.write().insert(
             id.clone(),
-            ScrollState { expr: expr.to_string(), body: body.clone(), offset: size, size },
+            ScrollState {
+                expr: expr.to_string(),
+                body: body.clone(),
+                offset: size,
+                size,
+                pit: self.open_pit(expr, 0),
+            },
         );
         id
     }
@@ -1350,8 +1558,11 @@ impl Store {
             aliases,
             closed: false,
             versions: HashMap::new(),
+            routing: HashMap::new(),
+            uuid: index_uuid(&name),
             live_ids: Default::default(),
             pending: HashMap::new(),
+            pending_seq: HashMap::new(),
             pending_bytes: 0,
             realtime,
             seq_no: 0,
@@ -1365,6 +1576,7 @@ impl Store {
             kinds_complete: true,
             has_doc_count: false,
             noop_updates: std::sync::atomic::AtomicU64::new(0),
+            flushes: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),
@@ -1399,12 +1611,25 @@ impl Store {
 
 /// A scroll is a cursor over a search: the request that opened it plus how far
 /// the client has read.
+/// A point in time: which indices it covers, and how far each had got.
+#[derive(Clone)]
+pub struct PitState {
+    pub expr: String,
+    /// per index, the sequence number the next write will take -- everything
+    /// below it was already there when the point in time was opened
+    pub ceiling: HashMap<String, u64>,
+    pub keep_alive_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct ScrollState {
     pub expr: String,
     pub body: Value,
     pub offset: usize,
     pub size: usize,
+    /// the point in time the scroll was opened over, so that documents
+    /// written after it are not walked into
+    pub pit: String,
 }
 
 /// Recursive object merge; `patch` wins on conflict.
@@ -1514,6 +1739,8 @@ fn walk_malformed(
                 walk_malformed(v, path, mapping, index_default, ignored)?;
             }
         }
+        // a null is a document with no value for the field, not a bad one
+        Value::Null => {}
         leaf => {
             let Some(ty) = mapping.type_of(path) else { return Ok(()) };
             let fmt = mapping.field_option(path, "format");
@@ -2167,10 +2394,11 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     out
 }
 
-pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str) -> TantivyDocument {
+pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -> TantivyDocument {
     let mut d = TantivyDocument::default();
     d.add_text(fields.id, id);
     d.add_text(fields.source, raw);
+    d.add_u64(fields.seq, seq);
     if let Value::Object(obj) = source {
         let converted: BTreeMap<String, OwnedValue> =
             obj.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect();

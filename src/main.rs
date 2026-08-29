@@ -61,8 +61,41 @@ fn app(store: Store) -> Router {
         // --- cluster ---
         .route("/_cluster/health", get(api::cluster_health))
         .route("/_cluster/health/{index}", get(api::cluster_health))
+        .route("/_list/wlm_stats", get(api::wlm_stats_list))
+        .route(
+            "/_cluster/voting_config_exclusions",
+            post(api::post_voting_config_exclusions).delete(api::delete_voting_config_exclusions),
+        )
+        .route("/_recovery", get(api::indices_recovery))
+        .route("/{index}/_recovery", get(api::indices_recovery))
+        .route("/_upgrade", post(api::indices_upgrade).get(api::indices_upgrade))
+        .route("/{index}/_upgrade", post(api::indices_upgrade).get(api::indices_upgrade))
+        .route(
+            "/_cluster/allocation/explain",
+            post(api::allocation_explain).get(api::allocation_explain),
+        )
+        .route("/{index}/_split/{target}", put(api::split_index).post(api::split_index))
+        .route("/{index}/_shrink/{target}", put(api::shrink_index).post(api::shrink_index))
+        .route("/{index}/_clone/{target}", put(api::clone_index).post(api::clone_index))
+        .route("/{alias}/_rollover", post(api::rollover))
+        .route("/{alias}/_rollover/{new_index}", post(api::rollover))
+        .route("/_cluster/pending_tasks", get(api::pending_tasks))
+        .route("/_search/point_in_time", post(api::create_pit).delete(api::delete_pit))
+        .route("/{index}/_search/point_in_time", post(api::create_pit))
+        .route("/_search/point_in_time/_all", get(api::get_all_pits).delete(api::delete_pit))
+        .route("/_cluster/stats", get(api::cluster_stats))
+        .route("/_cluster/stats/{*rest}", get(api::cluster_stats))
+        .route("/_shard_stores", get(api::shard_stores))
+        .route("/{index}/_shard_stores", get(api::shard_stores))
+        .route("/_resolve/index/{name}", get(api::resolve_index))
+        .route("/_remote/info", get(api::remote_info))
+        .route("/{index}/_block/{block}", put(api::add_block).post(api::add_block))
+        .route("/_mtermvectors", get(api::mtermvectors).post(api::mtermvectors))
+        .route("/{index}/_mtermvectors", get(api::mtermvectors).post(api::mtermvectors))
+        .route("/{index}/_termvectors/{id}", get(api::termvectors).post(api::termvectors))
+        .route("/{index}/_termvectors", get(api::termvectors).post(api::termvectors))
         .route("/_cluster/state", get(api::cluster_state))
-        .route("/_cluster/state/{*rest}", get(api::cluster_state))
+        .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
         // --- aliases ---
         .route(
@@ -89,14 +122,21 @@ fn app(store: Store) -> Router {
                    .get(api::get_index_template).delete(api::delete_index_template))
         .route("/_index_template", get(api::get_index_template))
         .route("/_component_template/{name}",
-               put(api::put_index_template).get(api::get_index_template)
-                   .delete(api::delete_index_template))
+               put(api::put_component_template).get(api::get_component_template)
+                   .delete(api::delete_component_template))
+        .route("/_component_template", get(api::get_component_template))
+        .route("/_index_template/_simulate",
+               post(api::simulate_template).put(api::simulate_template))
+        .route("/_index_template/_simulate/{name}",
+               post(api::simulate_template).put(api::simulate_template))
+        .route("/_index_template/_simulate_index/{index}",
+               post(api::simulate_index_template).put(api::simulate_index_template))
         // --- nodes and cluster housekeeping ---
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
-        .route("/_cluster/reroute", post(api::acknowledged))
-        .route("/_cluster/allocation/explain", get(api::acknowledged).post(api::acknowledged))
-        .route("/_cluster/pending_tasks", get(api::acknowledged))
+        .route("/_cluster/reroute", post(api::reroute))
+        .route("/_tasks", get(api::list_tasks))
+        .route("/_tasks/{id}", get(api::get_task))
         // --- index housekeeping ---
         .route("/_cat/segments", get(api::cat_segments))
         .route("/_cat/segments/{index}", get(api::cat_segments))
@@ -106,10 +146,6 @@ fn app(store: Store) -> Router {
         .route("/{index}/_flush", post(api::flush).get(api::flush))
         .route("/_cache/clear", post(api::shards_ok))
         .route("/{index}/_cache/clear", post(api::shards_ok))
-        .route("/_upgrade", post(api::shards_ok).get(api::shards_ok))
-        .route("/{index}/_upgrade", post(api::shards_ok).get(api::shards_ok))
-        .route("/_recovery", get(api::acknowledged))
-        .route("/{index}/_recovery", get(api::acknowledged))
         .route("/_search_shards", get(api::search_shards).post(api::search_shards))
         .route("/{index}/_search_shards", get(api::search_shards).post(api::search_shards))
         .route("/_validate/query", get(api::validate_query).post(api::validate_query))
@@ -123,6 +159,13 @@ fn app(store: Store) -> Router {
         // --- cat ---
         .route("/_cat/{what}", get(api::cat_dispatch))
         .route("/_cat/{what}/{target}", get(api::cat_dispatch_target))
+        .route("/_cat/allocation", get(api::cat_allocation))
+        .route("/_cat/allocation/{node}", get(api::cat_allocation))
+        .route("/_cat/nodeattrs", get(api::cat_nodeattrs))
+        .route("/_cat/plugins", get(api::cat_plugins))
+        .route("/_cat/thread_pool", get(api::cat_thread_pool))
+        .route("/_cat/thread_pool/{patterns}", get(api::cat_thread_pool))
+        .route("/_cat/tasks", get(api::cat_tasks))
         .route("/_cat/indices", get(api::cat_indices))
         .route("/_cat/indices/{index}", get(api::cat_indices))
         .route("/_cat/aliases", get(api::cat_aliases))

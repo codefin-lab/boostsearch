@@ -245,7 +245,13 @@ class Runner:
             stripped = expected.strip() if isinstance(expected, str) else expected
             if isinstance(stripped, str) and len(stripped) > 2 \
                     and stripped.startswith("/") and stripped.endswith("/"):
-                if not re.search(stripped[1:-1], str(actual if actual is not None else ""), re.X):
+                # Verbose mode is what the multi-line patterns need -- they
+                # are laid out in columns with comments. It also throws away
+                # the spaces inside a one-line pattern, where they are part of
+                # the text being matched, so both readings are tried.
+                text = str(actual if actual is not None else "")
+                pat = stripped[1:-1]
+                if not (re.search(pat, text, re.X) or re.search(pat, text)):
                     raise Failure(f"match {path}: {actual!r} !~ {expected}")
                 continue
             if isinstance(expected, (int, float)) and isinstance(actual, (int, float)) \
@@ -348,11 +354,30 @@ def reset(base):
     # Templates outlive a `DELETE /*`, and an index template left behind by an
     # earlier file changes how the next file's indices are created -- so the
     # suite has to start from nothing, not just from no indices.
+    # a point in time outlives the indices it was opened over
+    try:
+        requests.delete(base + "/_search/point_in_time/_all", timeout=10)
+    except Exception:
+        pass
     for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
         try:
             requests.delete(base + path, timeout=10)
         except Exception:
             pass
+    # Cluster settings outlive an index too, and one file's transient setting
+    # changes what the next file sees. There is no wildcard delete for them,
+    # so whatever is set is read back and cleared by name.
+    try:
+        held = requests.get(base + "/_cluster/settings?flat_settings=true", timeout=10).json()
+        clear = {
+            scope: {k: None for k in held.get(scope, {})}
+            for scope in ("persistent", "transient")
+            if held.get(scope)
+        }
+        if clear:
+            requests.put(base + "/_cluster/settings", json=clear, timeout=10)
+    except Exception:
+        pass
 
 
 def main():

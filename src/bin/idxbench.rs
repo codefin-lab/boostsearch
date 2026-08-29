@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         t_serialize += t.elapsed();
 
         let t = Instant::now();
-        let d = obsearch::store::make_doc(&g.fields, &id, doc.clone(), &raw);
+        let d = obsearch::store::make_doc(&g.fields, &id, doc.clone(), &raw, i as u64);
         t_makedoc += t.elapsed();
 
         let t = Instant::now();
