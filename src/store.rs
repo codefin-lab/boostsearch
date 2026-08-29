@@ -1679,6 +1679,8 @@ fn walk_malformed(
                 walk_malformed(v, path, mapping, index_default, ignored)?;
             }
         }
+        // a null is a document with no value for the field, not a bad one
+        Value::Null => {}
         leaf => {
             let Some(ty) = mapping.type_of(path) else { return Ok(()) };
             let fmt = mapping.field_option(path, "format");

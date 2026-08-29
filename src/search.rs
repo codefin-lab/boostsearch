@@ -587,6 +587,12 @@ fn sort_value_from_json(v: &Value, is_date: bool) -> SortValue {
             let scale = if is_date { 1e6 } else { 1.0 };
             SortValue::F64(n.as_f64().unwrap_or(0.0) * scale)
         }
+        // a marker for a date field may be written as a date rather than as
+        // the number the column holds
+        Value::String(s) if is_date => crate::store::canonical_date(v)
+            .and_then(|d| crate::store::parse_date_lenient(&d))
+            .map(|d| SortValue::F64(d.unix_timestamp_nanos() as f64))
+            .unwrap_or_else(|| SortValue::Str(s.clone())),
         Value::String(s) => SortValue::Str(s.clone()),
         Value::Null => SortValue::Missing,
         other => SortValue::Str(other.to_string()),
