@@ -1451,7 +1451,13 @@ pub async fn bulk(
 
     // consume the prepared documents rather than cloning them back out
     for (o, prep) in ops.into_iter().zip(prepared.into_iter()) {
-        let op = o.op;
+        // an index action may carry `op_type: create` in its metadata, which
+        // makes it a create -- in what it refuses, and in what it is called
+        // in the answer
+        let op = match o.meta.get("op_type").and_then(|v| v.as_str()) {
+            Some("create") => "create".to_string(),
+            _ => o.op,
+        };
         let meta = o.meta;
         let idx = o.index;
         let id_opt = o.id;
@@ -1479,8 +1485,12 @@ pub async fn bulk(
         }
         // `require_alias` says the write is meant for an alias, so a name that
         // is not one is treated as absent rather than created on the spot
-        let needs_alias = meta.get("require_alias").and_then(|v| v.as_bool()).unwrap_or(false)
-            || p.get("require_alias").map(|v| v != "false").unwrap_or(false);
+        // the action's own flag answers for it; the request's applies to the
+        // actions that did not say
+        let needs_alias = match meta.get("require_alias").and_then(|v| v.as_bool()) {
+            Some(own) => own,
+            None => p.get("require_alias").map(|v| v != "false").unwrap_or(false),
+        };
         if needs_alias && !store.is_alias(&idx) {
             errors = true;
             items.push(json!({ op.clone(): {
