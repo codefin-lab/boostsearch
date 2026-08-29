@@ -406,10 +406,23 @@ pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Respon
 }
 
 pub async fn list_tasks(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({"nodes": {"node-0": {
-        "name": "obsearch", "transport_address": "127.0.0.1:9300",
-        "host": "127.0.0.1", "ip": "127.0.0.1", "tasks": {},
-    }}}))
+    // the request asking is itself a task, which is the one every caller of
+    // this endpoint sees
+    let task = json!({
+        "node": "node-0", "id": 1, "type": "transport",
+        "action": "cluster:monitor/tasks/lists", "start_time_in_millis": 0,
+        "running_time_in_nanos": 0, "cancellable": false, "headers": {},
+        "resource_stats": {"average": {}, "total": {}, "min": {}, "max": {},
+                           "thread_info": {"thread_executions": 1, "active_threads": 1}},
+    });
+    respond(&p, json!({
+        "nodes": {"node-0": {
+            "name": "obsearch", "transport_address": "127.0.0.1:9300",
+            "host": "127.0.0.1", "ip": "127.0.0.1",
+            "roles": ["cluster_manager", "data", "ingest"],
+            "tasks": {"node-0:1": task},
+        }},
+    }))
 }
 
 /// The name that follows this one in a rolled-over series.
@@ -1028,6 +1041,167 @@ pub async fn delete_pit(
         })
         .collect();
     respond(&p, json!({"pits": pits}))
+}
+
+/// `_script_context` -- the places a script may run and what each hands it.
+pub async fn script_contexts(Query(p): Query<Params>) -> Response {
+    let ctx = |name: &str, ret: &str| json!({
+        "name": name,
+        "methods": [{"name": "execute", "return_type": ret, "params": []}],
+    });
+    respond(&p, json!({"contexts": [
+        ctx("aggs", "double"),
+        ctx("filter", "boolean"),
+        ctx("score", "double"),
+        ctx("update", "void"),
+    ]}))
+}
+
+/// `_script_language` -- which languages scripts may be written in, and how
+/// they may be supplied.
+pub async fn script_languages(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({
+        "types_allowed": ["inline", "stored"],
+        "language_contexts": [{
+            "language": "painless",
+            "contexts": ["aggs", "filter", "score", "update"],
+        }],
+    }))
+}
+
+/// `_nodes/stats` -- what the one node has been doing.
+pub async fn nodes_stats(
+    State(store): State<Store>,
+    rest: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    // the path may name which metrics are wanted, and a name that is not one
+    // of them is a mistake rather than something to pass over
+    const METRICS: &[&str] = &[
+        "_all", "indices", "os", "process", "jvm", "thread_pool", "fs", "transport",
+        "http", "breaker", "script", "discovery", "ingest", "adaptive_selection",
+        "script_cache", "indexing_pressure", "shard_indexing_pressure",
+        "search_backpressure", "cluster_manager_throttling", "weighted_routing",
+        "resource_usage_stats", "segment_replication_backpressure", "repositories",
+        "admission_control", "caches", "remote_store",
+    ];
+    // only the first path part names the metrics; anything after it narrows
+    // within one, and is checked by whatever owns that metric
+    let rest_parts: Vec<String> = rest
+        .map(|Path(r)| r.split('/').map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let asked: Vec<String> = rest_parts
+        .first()
+        .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    for m in asked.iter().filter(|m| !m.is_empty() && *m != "stats") {
+        // a node id is also allowed in this position, and ours is known
+        if METRICS.contains(&m.as_str()) || matches!(m.as_str(), "node-0" | "_local" | "_all") {
+            continue;
+        }
+        // a near miss is a typo, and naming the metric meant saves a reading
+        // of the whole list
+        let near = METRICS.iter().find(|k| {
+            k.len().abs_diff(m.len()) <= 1
+                && k.chars().filter(|c| m.contains(*c)).count() + 1 >= k.len()
+        });
+        let hint = match near {
+            Some(k) => format!(" -> did you mean [{k}]?"),
+            None => String::new(),
+        };
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("request [/_nodes/stats/{m}] contains unrecognized metric: [{m}]{hint}"),
+        );
+    }
+    let mut docs = 0u64;
+    for n in store.names() {
+        if let Some(st) = store.get(&n) {
+            docs += st.read().reader.searcher().num_docs() as u64;
+        }
+    }
+    // a second path part narrows within `indices` to the metrics it names
+    let index_metrics: Vec<String> = rest_parts
+        .get(1)
+        .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
+    let mut out = json!({
+        "_nodes": {"total": 1, "successful": 1, "failed": 0},
+        "cluster_name": "obsearch",
+        "nodes": {"node-0": {
+            "timestamp": 0, "name": "obsearch",
+            "transport_address": "127.0.0.1:9300", "host": "127.0.0.1", "ip": "127.0.0.1",
+            "roles": ["cluster_manager", "data", "ingest"], "attributes": {},
+            "indices": {
+                "docs": {"count": docs, "deleted": 0},
+                "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+                "indexing": {
+                    "index_total": docs, "index_time_in_millis": 0, "index_current": 0,
+                    "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,
+                    "delete_current": 0, "noop_update_total": 0, "is_throttled": false,
+                    "throttle_time_in_millis": 0,
+                    "doc_status": {},
+                },
+                "get": {"total": 0, "time_in_millis": 0, "exists_total": 0,
+                        "exists_time_in_millis": 0, "missing_total": 0,
+                        "missing_time_in_millis": 0, "current": 0},
+                "search": {"open_contexts": 0, "query_total": 0, "query_time_in_millis": 0,
+                           "query_current": 0, "fetch_total": 0, "fetch_time_in_millis": 0,
+                           "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
+                           "scroll_current": 0, "suggest_total": 0,
+                           "suggest_time_in_millis": 0, "suggest_current": 0},
+                "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
+                           "total": 0, "total_time_in_millis": 0, "total_docs": 0,
+                           "total_size_in_bytes": 0},
+                "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
+                            "external_total_time_in_millis": 0, "listeners": 0},
+                "flush": {"total": 0, "periodic": 0, "total_time_in_millis": 0},
+                "warmer": zero_time.clone(),
+                "query_cache": {"memory_size_in_bytes": 0, "total_count": 0,
+                                "hit_count": 0, "miss_count": 0, "cache_size": 0,
+                                "cache_count": 0, "evictions": 0},
+                "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
+                "completion": {"size_in_bytes": 0},
+                "segments": {"count": 0, "memory_in_bytes": 0},
+                "translog": {"operations": 0, "size_in_bytes": 0,
+                             "uncommitted_operations": 0, "uncommitted_size_in_bytes": 0,
+                             "earliest_last_modified_age": 0},
+                "request_cache": {"memory_size_in_bytes": 0, "evictions": 0,
+                                  "hit_count": 0, "miss_count": 0},
+                "recovery": {"current_as_source": 0, "current_as_target": 0,
+                             "throttle_time_in_millis": 0},
+            },
+            "os": {"timestamp": 0, "cpu": {"percent": 0}, "mem": {
+                "total_in_bytes": 1_073_741_824u64, "free_in_bytes": 536_870_912u64,
+                "used_in_bytes": 536_870_912u64, "free_percent": 50, "used_percent": 50}},
+            "process": {"timestamp": 0, "open_file_descriptors": 0,
+                        "max_file_descriptors": 0,
+                        "cpu": {"percent": 0, "total_in_millis": 0},
+                        "mem": {"total_virtual_in_bytes": 0}},
+            "jvm": {"timestamp": 0, "uptime_in_millis": 0,
+                    "mem": {"heap_used_in_bytes": 0, "heap_max_in_bytes": 0},
+                    "threads": {"count": 1, "peak_count": 1}},
+            "thread_pool": {}, "fs": {"total": {
+                "total_in_bytes": 2_147_483_648u64, "free_in_bytes": 1_073_741_824u64,
+                "available_in_bytes": 1_073_741_824u64}},
+            "transport": {"server_open": 0, "rx_count": 0, "rx_size_in_bytes": 0,
+                          "tx_count": 0, "tx_size_in_bytes": 0},
+            "http": {"current_open": 0, "total_opened": 0},
+            "breakers": {}, "script": {"compilations": 0, "cache_evictions": 0},
+            "discovery": {}, "ingest": {"total": zero_time, "pipelines": {}},
+            "adaptive_selection": {}, "script_cache": {"sum": {}},
+            "indexing_pressure": {"memory": {}},
+        }},
+    });
+    if !index_metrics.is_empty() && !index_metrics.iter().any(|m| m == "_all") {
+        if let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
+        {
+            idx.retain(|k, _| index_metrics.iter().any(|m| m == k));
+        }
+    }
+    respond(&p, out)
 }
 
 pub async fn delete_index(

@@ -28,6 +28,7 @@ async fn root() -> impl IntoResponse {
     axum::Json(json!({
         "name": "obsearch",
         "cluster_name": "obsearch",
+        "cluster_uuid": "_na_",
         "version": {
             "distribution": "obsearch",
             "number": "3.9.0",
@@ -132,9 +133,13 @@ fn app(store: Store) -> Router {
         .route("/_index_template/_simulate_index/{index}",
                post(api::simulate_index_template).put(api::simulate_index_template))
         // --- nodes and cluster housekeeping ---
+        .route("/_nodes/stats", get(api::nodes_stats))
+        .route("/_nodes/stats/{*rest}", get(api::nodes_stats))
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::reroute))
+        .route("/_script_context", get(api::script_contexts))
+        .route("/_script_language", get(api::script_languages))
         .route("/_tasks", get(api::list_tasks))
         .route("/_tasks/{id}", get(api::get_task))
         // --- index housekeeping ---

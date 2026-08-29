@@ -94,6 +94,15 @@ class Runner:
         self.session = requests.Session()
 
     # ---- stash -----------------------------------------------------------
+    def unstash_path(self, path):
+        """A `$name` inside an assertion path stands for a stashed value."""
+        if not isinstance(path, str) or "$" not in path:
+            return path
+        return ".".join(
+            str(self.stash.get(part[1:], part)) if part.startswith("$") else part
+            for part in path.split(".")
+        )
+
     def unstash(self, value):
         if isinstance(value, str):
             if value.startswith("$"):
@@ -239,7 +248,7 @@ class Runner:
     # ---- assertions ------------------------------------------------------
     def assert_match(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             # a regex may carry surrounding whitespace from a yaml block scalar
             stripped = expected.strip() if isinstance(expected, str) else expected
@@ -264,7 +273,7 @@ class Runner:
 
     def assert_length(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             if actual is None:
                 raise Failure(f"length {path}: missing")
             if len(actual) != int(self.unstash(expected)):
@@ -273,7 +282,7 @@ class Runner:
     def assert_bool(self, spec, want):
         paths = spec if isinstance(spec, list) else [spec]
         for path in paths:
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             truthy = not (actual is None or actual is False or actual == 0
                           or actual == "" or actual == "false")
             if truthy != want:
@@ -284,18 +293,26 @@ class Runner:
         fn = {"gt": operator.gt, "lt": operator.lt,
               "gte": operator.ge, "lte": operator.le}[op]
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             if actual is None or not fn(actual, expected):
                 raise Failure(f"{op} {path}: {actual!r} vs {expected!r}")
 
     def do_set(self, spec):
         for path, name in spec.items():
-            self.stash[name] = flatten_path(self.last, path)
+            # `_arbitrary_key_` asks for the name of any one key of the object
+            # at that path, which is how a test refers to a node whose id it
+            # cannot know in advance
+            if path.endswith("_arbitrary_key_"):
+                parent = flatten_path(self.last, path[: -len("._arbitrary_key_")])
+                if isinstance(parent, dict) and parent:
+                    self.stash[name] = next(iter(parent))
+                    continue
+            self.stash[name] = flatten_path(self.last, self.unstash_path(path))
 
     def assert_contains(self, spec):
         for path, expected in spec.items():
-            actual = flatten_path(self.last, path)
+            actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
             if not isinstance(actual, list) or expected not in actual:
                 raise Failure(f"contains {path}: {expected!r} not in {actual!r}")
