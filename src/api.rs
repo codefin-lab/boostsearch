@@ -838,12 +838,24 @@ pub async fn termvectors(
             p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect())
         });
 
+    let fields = term_vectors_of(&g, &source, want_stats, only.as_deref());
+    return respond(&p, json!({
+        "_index": g.name, "_id": id, "_version": g.version_of(&id),
+        "found": true, "took": 0, "term_vectors": fields,
+    }));
+}
+
+/// The terms each field of a document became once analysed.
+fn term_vectors_of(
+    g: &IdxState,
+    source: &Value,
+    want_stats: bool,
+    only: Option<&[String]>,
+) -> Value {
     let mut fields = serde_json::Map::new();
-    let Some(obj) = source.as_object() else {
-        return respond(&p, json!({"_index": g.name, "_id": id, "found": true, "took": 0}));
-    };
+    let Some(obj) = source.as_object() else { return Value::Object(fields) };
     for (name, value) in obj {
-        if only.as_ref().map(|f| !f.iter().any(|w| w == name)).unwrap_or(false) {
+        if only.map(|f| !f.iter().any(|w| w == name)).unwrap_or(false) {
             continue;
         }
         let Some(text) = value.as_str() else { continue };
@@ -900,10 +912,7 @@ pub async fn termvectors(
         }
         fields.insert(name.clone(), field);
     }
-    respond(&p, json!({
-        "_index": g.name, "_id": id, "_version": g.version_of(&id),
-        "found": true, "took": 0, "term_vectors": Value::Object(fields),
-    }))
+    Value::Object(fields)
 }
 
 /// `_mtermvectors` -- term vectors for several documents at once.
@@ -917,11 +926,20 @@ pub async fn mtermvectors(
     let default_index = index.map(|Path(i)| i);
     let docs: Vec<Value> = match body.get("docs").and_then(|v| v.as_array()) {
         Some(a) => a.clone(),
-        None => body
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().map(|id| json!({"_id": id})).collect())
-            .unwrap_or_default(),
+        None => {
+            // `ids` may be written in the body or on the URL
+            let listed: Vec<Value> = body
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .or_else(|| {
+                    p.get("ids").filter(|v| !v.is_empty()).map(|v| {
+                        v.split(',').map(|s| json!(s.trim())).collect()
+                    })
+                })
+                .unwrap_or_default();
+            listed.into_iter().map(|id| json!({"_id": id})).collect()
+        }
     };
     let mut out = Vec::new();
     for d in docs {
@@ -947,10 +965,18 @@ pub async fn mtermvectors(
         };
         let g = st.read();
         match read_source_as_asked(&g, &id, &p) {
-            Some(_) => out.push(json!({
-                "_index": g.name, "_id": id, "_version": g.version_of(&id),
-                "found": true, "took": 0, "term_vectors": {},
-            })),
+            Some(src) => {
+                let want_stats = body
+                    .get("term_statistics")
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| p.get("term_statistics").map(|v| v == "true"))
+                    .unwrap_or(false);
+                out.push(json!({
+                    "_index": g.name, "_id": id, "_version": g.version_of(&id),
+                    "found": true, "took": 0,
+                    "term_vectors": term_vectors_of(&g, &src, want_stats, None),
+                }))
+            }
             None => out.push(json!({
                 "_index": g.name, "_id": id, "found": false, "took": 0,
             })),
@@ -3396,6 +3422,24 @@ pub async fn mget(
             }));
             continue;
         };
+        // an alias in front of several indices names no one document, so a
+        // get through it cannot say which was meant
+        let behind = store.resolve(&idx);
+        if store.is_alias(&idx) && behind.len() > 1 {
+            let listed = behind.join(", ");
+            let reason = format!(
+                "alias [{idx}] has more than one index associated with it [{listed}], can't \
+                 execute a single index op"
+            );
+            docs.push(json!({
+                "_index": idx, "_id": id, "found": false,
+                "error": {
+                    "type": "illegal_argument_exception", "reason": reason,
+                    "root_cause": [{"type": "illegal_argument_exception", "reason": reason}],
+                }
+            }));
+            continue;
+        }
         let g = st.read();
         let routing_ok = match g.routing.get(&id) {
             Some(have) => want_routing.as_deref() == Some(have.as_str()),
