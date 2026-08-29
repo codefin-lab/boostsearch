@@ -2362,6 +2362,14 @@ pub fn run(
                         .get("date_histogram")
                         .map(|d| d.get("calendar_interval").is_some())
                         .unwrap_or(false)
+                    // a range field holds no single value to bucket a document
+                    // by, so tantivy's histogram sees nothing there at all
+                    || def
+                        .get("histogram")
+                        .and_then(|h| h.get("field"))
+                        .and_then(|f| f.as_str())
+                        .map(|f| range_field(store, &targets, f))
+                        .unwrap_or(false)
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -3121,6 +3129,8 @@ pub fn run(
             run_auto_date_histogram(store, &targets, &query_json, def)
         } else if def.get("date_range").is_some() {
             run_date_range_agg(store, &targets, &query_json, def)
+        } else if def.get("histogram").is_some() {
+            run_range_field_histogram(store, &targets, &query_json, def)
         } else if def.get("ip_range").is_some() {
             run_ip_range_agg(store, &targets, &query_json, def)
         } else if def.get("adjacency_matrix").is_some() {
@@ -4092,6 +4102,99 @@ fn run_date_range_agg(
 ///
 /// Each range is a filter on the field, so the ordinary query path answers it;
 /// `from` is included and `to` is not, and either may be left open.
+/// Is this field one of the range types, which store two endpoints per
+/// document rather than one value?
+fn range_field(store: &Store, targets: &[String], field: &str) -> bool {
+    targets.iter().filter_map(|n| store.get(n)).any(|st| {
+        st.read().mapping.type_of(field).map(|t| t.ends_with("_range")).unwrap_or(false)
+    })
+}
+
+/// A numeric histogram over a range field.
+///
+/// A range document has no single value to fall into one bucket; it covers a
+/// span, and belongs to every bucket that span touches. So each bucket is
+/// counted on its own, by asking which stored ranges overlap it, rather than
+/// by reading a column of values the field does not have.
+fn run_range_field_histogram(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("histogram").cloned().unwrap_or_else(|| json!({}));
+    let Some(field) = spec.get("field").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+        return Ok(json!({"buckets": []}));
+    };
+    let interval = spec.get("interval").and_then(|v| v.as_f64()).filter(|i| *i > 0.0);
+    let Some(interval) = interval else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[interval] must be >0 for histogram aggregation",
+        ));
+    };
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
+    let bound = |k: &str| bounds.and_then(|b| b.get(k)).and_then(|v| v.as_f64());
+
+    // without bounds the span is the widest the stored endpoints reach
+    let (lo, hi) = match (bound("min"), bound("max")) {
+        (Some(a), Some(b)) => (a, b),
+        (a, b) => {
+            let probe = json!({
+                "__min": {"min": {"field": format!("{field}.gte")}},
+                "__max": {"max": {"field": format!("{field}.lte")}},
+            });
+            let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+            let read = |k: &str| -> Option<f64> {
+                extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+            };
+            match (a.or_else(|| read("__min")), b.or_else(|| read("__max"))) {
+                (Some(x), Some(y)) => (x, y),
+                _ => return Ok(json!({"buckets": []})),
+            }
+        }
+    };
+    if !lo.is_finite() || !hi.is_finite() || hi < lo {
+        return Ok(json!({"buckets": []}));
+    }
+    // buckets start on multiples of the interval, as they do for a plain field
+    let first = (lo / interval).floor() * interval;
+    let steps = (((hi - first) / interval).floor() as i64).clamp(0, 65_536);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let mut buckets = Vec::new();
+    for i in 0..=steps {
+        let key = first + i as f64 * interval;
+        // a stored range overlaps this bucket when it starts before the
+        // bucket ends and ends at or after the bucket starts
+        let overlap = json!({"bool": {"filter": [
+            {"range": {format!("{field}.gte"): {"lt": key + interval}}},
+            {"range": {format!("{field}.lte"): {"gte": key}}},
+            base.clone(),
+        ]}});
+        let (count, sub) = filtered_count(store, targets, &overlap, &sub_aggs)?;
+        if count < min_doc_count {
+            continue;
+        }
+        let mut b = json!({
+            "key": if key.fract() == 0.0 { json!(key as i64) } else { json!(key) },
+            "doc_count": count,
+        });
+        if let (Some(sub), Some(o)) = (sub, b.as_object_mut()) {
+            if let Some(entries) = sub.as_object() {
+                for (k, v) in entries {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        buckets.push(b);
+    }
+    Ok(json!({"buckets": buckets}))
+}
+
 fn run_ip_range_agg(
     store: &Store,
     targets: &[String],
@@ -5149,15 +5252,24 @@ fn run_calendar_histogram(
         return Ok(json!({"buckets": []}));
     };
 
+    // `offset` shifts the whole grid of boundaries. The buckets keep their
+    // calendar width; they just no longer start on the calendar unit.
+    let offset = spec
+        .get("offset")
+        .and_then(|v| v.as_str())
+        .and_then(parse_offset)
+        .unwrap_or(Duration::seconds(0));
+    let shift = |dt: OffsetDateTime| unit.floor(dt - offset) + offset;
+
     let mut buckets = Vec::new();
-    let mut cursor = unit.floor(lo);
-    let last = unit.floor(hi);
+    let mut cursor = shift(lo);
+    let last = shift(hi);
     // a runaway interval would otherwise spin: no calendar histogram the suite
     // or a sane request produces comes near this
     let mut guard = 0;
     while cursor <= last && guard < 100_000 {
         guard += 1;
-        let next = unit.advance(cursor);
+        let next = unit.advance(cursor - offset) + offset;
         let mut spec = json!({
             "gte": iso_millis(cursor),
             "lt": iso_millis(next),
@@ -5188,8 +5300,51 @@ fn run_calendar_histogram(
         }
         cursor = next;
     }
+    // buckets are built in calendar order; `order` may want another. `_time`
+    // is the old spelling of `_key`, and both name the bucket's own date.
+    if let Some((key, desc)) = spec
+        .get("order")
+        .and_then(|o| o.as_object())
+        .and_then(|o| o.iter().next())
+        .map(|(k, v)| (k.clone(), v.as_str() == Some("desc")))
+    {
+        let by = |f: fn(&Value) -> i64| {
+            move |a: &Value, b: &Value| if desc { f(b).cmp(&f(a)) } else { f(a).cmp(&f(b)) }
+        };
+        match key.as_str() {
+            "_key" | "_time" => {
+                buckets.sort_by(by(|x| x.get("key").and_then(|v| v.as_i64()).unwrap_or(0)))
+            }
+            "_count" => buckets
+                .sort_by(by(|x| x.get("doc_count").and_then(|v| v.as_i64()).unwrap_or(0))),
+            _ => {}
+        }
+    }
     let _ = Duration::seconds(0);
     Ok(json!({"buckets": buckets}))
+}
+
+/// `offset` as written on a date histogram: a signed count of fixed time
+/// units. Calendar units are not allowed here -- only lengths that are the
+/// same wherever on the calendar they land.
+fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
+    let s = s.trim();
+    let (sign, rest) = match s.strip_prefix('-') {
+        Some(r) => (-1, r),
+        None => (1, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let split = rest.find(|c: char| !c.is_ascii_digit())?;
+    let (n, unit) = rest.split_at(split);
+    let n: i64 = n.parse().ok()?;
+    let n = n * sign;
+    Some(match unit {
+        "ms" => tantivy::time::Duration::milliseconds(n),
+        "s" => tantivy::time::Duration::seconds(n),
+        "m" => tantivy::time::Duration::minutes(n),
+        "h" | "H" => tantivy::time::Duration::hours(n),
+        "d" => tantivy::time::Duration::days(n),
+        _ => return None,
+    })
 }
 
 fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
