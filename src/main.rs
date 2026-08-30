@@ -108,6 +108,15 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // --- data streams ---
+        .route("/_data_stream", get(api::get_data_stream))
+        .route(
+            "/_data_stream/{name}",
+            put(api::create_data_stream)
+                .post(api::create_data_stream)
+                .get(api::get_data_stream)
+                .delete(api::delete_data_stream),
+        )
         // an index left out of the path leaves an empty segment behind, and
         // the body is expected to name it instead
         .route("//_alias/{name}", put(api::put_alias_named).post(api::put_alias_named))

@@ -1075,6 +1075,8 @@ pub struct Store {
     /// open points in time, each remembering where every index it covers had
     /// got to when it was opened
     pits: Arc<RwLock<HashMap<String, PitState>>>,
+    /// Data streams by name, each remembering the template it was made from.
+    data_streams: Arc<RwLock<HashMap<String, String>>>,
     pit_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1271,6 +1273,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            data_streams: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1295,6 +1298,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            data_streams: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1552,6 +1556,28 @@ impl Store {
     /// Index templates, applied to any index created with a matching name.
     pub fn put_template(&self, name: &str, body: Value) {
         self.templates.write().insert(name.to_string(), body);
+    }
+
+    /// The data streams there are, each with the template it was made from.
+    pub fn data_streams(&self) -> HashMap<String, String> {
+        self.data_streams.read().clone()
+    }
+
+    pub fn add_data_stream(&self, name: &str, template: &str) {
+        self.data_streams.write().insert(name.to_string(), template.to_string());
+    }
+
+    pub fn remove_data_stream(&self, name: &str) -> Vec<String> {
+        let mut streams = self.data_streams.write();
+        let gone: Vec<String> = streams
+            .keys()
+            .filter(|k| k.as_str() == name || wildcard_to_regex(name).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            streams.remove(g);
+        }
+        gone
     }
 
     pub fn get_templates(&self) -> HashMap<String, Value> {
