@@ -8070,7 +8070,6 @@ fn snapshot_record(store: &Store, name: &str, indices: Vec<String>, global: bool
         .filter_map(|n| store.get(n))
         .map(|st| st.read().shard_count())
         .sum();
-    let shards = shards.max(1);
     json!({
         "snapshot": name,
         "uuid": crate::store::index_uuid(name),
@@ -8117,8 +8116,12 @@ pub async fn create_snapshot(
     let indices = match asked.as_deref() {
         Some(expr) => {
             // an index named outright has to be there to be kept
+            // `ignore_unavailable` may be asked for in the body as well as
+            // on the path
+            let lenient = ignore_unavailable(&p)
+                || body.get("ignore_unavailable").and_then(|v| v.as_bool()).unwrap_or(false);
             for part in expr.split(',').map(|s| s.trim()).filter(|s| !s.contains('*')) {
-                if store.resolve(part).is_empty() && !ignore_unavailable(&p) {
+                if store.resolve(part).is_empty() && !lenient {
                     return no_such_index(part);
                 }
             }

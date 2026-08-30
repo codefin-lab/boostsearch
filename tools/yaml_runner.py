@@ -385,7 +385,17 @@ def reset(base):
         requests.delete(base + "/_search/point_in_time/_all", timeout=10)
     except Exception:
         pass
-    for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
+    # repositories, snapshots and pipelines outlive indices in the same way
+    for path in (
+        "/*",
+        "/_index_template/*",
+        "/_template/*",
+        "/_component_template/*",
+        "/_snapshot/*",
+        "/_ingest/pipeline/*",
+        "/_search/pipeline/*",
+        "/_data_stream/*",
+    ):
         try:
             requests.delete(base + path, timeout=10)
         except Exception:
