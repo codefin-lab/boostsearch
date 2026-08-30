@@ -3047,11 +3047,9 @@ pub fn run(
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
                     // calendar units are not fixed lengths, which is all
-                    // tantivy's date histogram knows how to step by
-                    || def
-                        .get("date_histogram")
-                        .map(|d| d.get("calendar_interval").is_some())
-                        .unwrap_or(false)
+                    // tantivy's date histogram knows how to step by, and a
+                    // named zone is a history of offsets it knows nothing of
+                    || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
                     // a range field holds no single value to bucket a document
                     // by, so tantivy's histogram sees nothing there at all
                     || def
@@ -4446,10 +4444,21 @@ fn peelable(def: &Value) -> bool {
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
-        || def
-            .get("date_histogram")
-            .map(|d| d.get("calendar_interval").is_some())
-            .unwrap_or(false)
+        || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
+}
+
+/// A date histogram this engine has to run itself: one stepping by a calendar
+/// unit, or one reported in a zone that is not simply UTC.
+fn zoned_or_calendar(spec: &Value) -> bool {
+    if spec.get("calendar_interval").is_some() {
+        return true;
+    }
+    // any zone but UTC has to be placed here: even one that is on UTC today
+    // may not have been at the instant a bucket falls in
+    match spec.get("time_zone").and_then(|v| v.as_str()).map(|z| z.trim()) {
+        None | Some("") => false,
+        Some(z) => !matches!(z, "Z" | "UTC" | "utc" | "+00:00" | "-00:00" | "+0000" | "-0000"),
+    }
 }
 
 /// Count the documents a query matches, and run its sub-aggregations --
@@ -6341,17 +6350,33 @@ fn run_calendar_histogram(
 
     let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    // a histogram steps by a calendar unit or by a fixed length; the fixed
+    // one only comes through here when a zone means tantivy cannot do it
+    let fixed = spec
+        .get("fixed_interval")
+        .and_then(|v| v.as_str())
+        .and_then(parse_offset)
+        .filter(|d| d.whole_nanoseconds() > 0);
     let interval = spec
         .get("calendar_interval")
         .and_then(|v| v.as_str())
         .unwrap_or("day")
         .to_string();
-    let Some(unit) = CalendarUnit::parse(&interval) else {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            format!("The supplied interval [{interval}] could not be parsed as a calendar interval."),
-        ));
+    let unit = match fixed {
+        Some(_) => CalendarUnit::Second,
+        None => match CalendarUnit::parse(&interval) {
+            Some(u) => u,
+            None => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "The supplied interval [{interval}] could not be parsed as a calendar \
+                         interval."
+                    ),
+                ));
+            }
+        },
     };
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let min_doc_count =
@@ -6429,7 +6454,28 @@ fn run_calendar_histogram(
         .and_then(|v| v.as_str())
         .and_then(parse_offset)
         .unwrap_or(Duration::seconds(0));
-    let shift = |dt: OffsetDateTime| unit.floor(dt - offset) + offset;
+    // a zone is not an offset but a history of them, so the offset in force
+    // is the one at the instant being placed
+    let zone = spec.get("time_zone").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let zone_at = |dt: OffsetDateTime| -> Duration {
+        Duration::seconds(crate::tz::offset_at(&zone, dt.unix_timestamp()).unwrap_or(0) as i64)
+    };
+    let floor_local = |local: OffsetDateTime| -> OffsetDateTime {
+        match fixed {
+            // a fixed step divides the line evenly from the epoch
+            Some(step) => {
+                let step_ns = step.whole_nanoseconds();
+                let ns = local.unix_timestamp_nanos();
+                let floored = ns.div_euclid(step_ns) * step_ns;
+                OffsetDateTime::from_unix_timestamp_nanos(floored).unwrap_or(local)
+            }
+            None => unit.floor(local - offset) + offset,
+        }
+    };
+    let shift = |dt: OffsetDateTime| {
+        let o = zone_at(dt);
+        floor_local(dt + o) - o
+    };
 
     let mut buckets = Vec::new();
     let mut cursor = shift(lo);
@@ -6439,7 +6485,11 @@ fn run_calendar_histogram(
     let mut guard = 0;
     while cursor <= last && guard < 100_000 {
         guard += 1;
-        let next = unit.advance(cursor - offset) + offset;
+        let o = zone_at(cursor);
+        let next = match fixed {
+            Some(step) => cursor + step,
+            None => (unit.advance((cursor + o) - offset) + offset) - o,
+        };
         let mut spec = json!({
             "gte": iso_millis(cursor),
             "lt": iso_millis(next),
@@ -6455,7 +6505,7 @@ fn run_calendar_histogram(
         if count >= min_doc_count {
             let mut b = json!({
                 "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
-                "key_as_string": iso_millis(cursor),
+                "key_as_string": iso_millis_at(cursor, &zone, o),
                 "doc_count": count,
             });
             if let Some(Value::Object(o)) = sub {
@@ -6515,6 +6565,35 @@ fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
         "d" => tantivy::time::Duration::days(n),
         _ => return None,
     })
+}
+
+/// A date written in the zone it is being reported in, which is what puts the
+/// offset on the end of it in place of the `Z`.
+fn iso_millis_at(
+    dt: tantivy::time::OffsetDateTime,
+    zone: &str,
+    offset: tantivy::time::Duration,
+) -> String {
+    if zone.is_empty() || offset.is_zero() {
+        return iso_millis(dt);
+    }
+    let local = dt + offset;
+    let total = offset.whole_minutes();
+    let sign = if total < 0 { '-' } else { '+' };
+    let total = total.abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}{}{:02}:{:02}",
+        local.year(),
+        local.month() as u8,
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+        local.millisecond(),
+        sign,
+        total / 60,
+        total % 60,
+    )
 }
 
 fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
