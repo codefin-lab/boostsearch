@@ -1934,20 +1934,29 @@ fn version_check(
 
 /// `if_seq_no` makes a write conditional on the document not having moved.
 fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response> {
-    let want = p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok())?;
+    let want_seq = p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok());
+    let want_term = p.get("if_primary_term").and_then(|v| v.parse::<u64>().ok());
+    if want_seq.is_none() && want_term.is_none() {
+        return None;
+    }
     if !exists_doc(st, id) {
         return None;
     }
     let have = read_seq(st, id).unwrap_or(0);
-    if have == want {
+    // a shard that has never failed over is on its first term, so any other
+    // term the caller insists on is a term this document was not written in
+    let term_ok = want_term.map(|t| t == 1).unwrap_or(true);
+    let want = want_seq.unwrap_or(have);
+    if have == want && term_ok {
         return None;
     }
+    let want_term = want_term.unwrap_or(1);
     Some(err(
         StatusCode::CONFLICT,
         "version_conflict_engine_exception",
         format!(
-            "[{id}]: version conflict, required seqNo [{want}], primary term [1]. current \
-             document has seqNo [{have}] and primary term [1]"
+            "[{id}]: version conflict, required seqNo [{want}], primary term \
+             [{want_term}]. current document has seqNo [{have}] and primary term [1]"
         ),
     ))
 }
