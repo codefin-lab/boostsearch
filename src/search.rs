@@ -2887,6 +2887,15 @@ fn check_limits(
             "cannot use `collapse` in a scroll context",
         ));
     }
+    // rescoring reorders the top of the result set, which is the very thing
+    // collapsing has already decided
+    if body.get("rescore").is_some() && body.get("collapse").is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search_phase_execution_exception",
+            "cannot use `collapse` in conjunction with `rescore`",
+        ));
+    }
 
     // a page is counted from the front, so there is no such thing as starting
     // before it
@@ -4160,7 +4169,8 @@ pub fn run(
                     hit["fields"] = Value::Object(f);
                 }
             }
-            // a collapsed hit says which value it stands for
+            // a collapsed hit says which value it stands for, and may carry
+            // the group it was chosen from
             if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
                 let path = format!("/{}", field.replace('.', "/"));
                 if let Some(v) = h.source.pointer(&path) {
@@ -4172,8 +4182,35 @@ pub fn run(
                         Some(Value::Object(o)) => o.clone(),
                         _ => serde_json::Map::new(),
                     };
-                    f.insert(field.to_string(), Value::Array(list));
+                    f.insert(field.to_string(), Value::Array(list.clone()));
                     hit["fields"] = Value::Object(f);
+                    // a hit may be asked for its group more than once, each
+                    // time with a different name and ordering
+                    let asked = match body.pointer("/collapse/inner_hits") {
+                        Some(Value::Array(a)) => a.clone(),
+                        Some(other) => vec![other.clone()],
+                        None => Vec::new(),
+                    };
+                    let mut groups = serde_json::Map::new();
+                    for inner in &asked {
+                        let Some(group) = collapsed_group(
+                            store,
+                            &targets,
+                            query_json.as_ref(),
+                            field,
+                            list.first().unwrap_or(&Value::Null),
+                            inner,
+                            p,
+                        ) else {
+                            continue;
+                        };
+                        let name =
+                            inner.get("name").and_then(|n| n.as_str()).unwrap_or("inner_hits");
+                        groups.insert(name.to_string(), group);
+                    }
+                    if !groups.is_empty() {
+                        hit["inner_hits"] = Value::Object(groups);
+                    }
                 }
             }
             if let Some(spec) = body.get("highlight") {
@@ -4487,6 +4524,40 @@ pub fn run(
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
     })
+}
+
+/// The documents a collapsed hit was chosen from: the same query, narrowed to
+/// the one value, asked again with whatever the `inner_hits` clause says.
+fn collapsed_group(
+    store: &Store,
+    targets: &[String],
+    query: Option<&Value>,
+    field: &str,
+    value: &Value,
+    inner: &Value,
+    p: &Params,
+) -> Option<Value> {
+    let mut filters = vec![json!({"term": {field: value.clone()}})];
+    if let Some(q) = query {
+        filters.push(q.clone());
+    }
+    let mut body = json!({"query": {"bool": {"filter": filters}}});
+    for key in [
+        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
+        "stored_fields", "highlight", "explain", "fields",
+    ] {
+        if let Some(v) = inner.get(key) {
+            body[key] = v.clone();
+        }
+    }
+    let out = run(store, &targets.join(","), &body, &Params::new()).ok()?;
+    let total = if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
+        json!(out.total)
+    } else {
+        json!({"value": out.total, "relation": "eq"})
+    };
+    let max_score = out.max_score.map(|s| json!(s)).unwrap_or(Value::Null);
+    Some(json!({"hits": {"total": total, "max_score": max_score, "hits": out.hits}}))
 }
 
 /// Assemble the `hits` envelope, honouring track_total_hits and the
