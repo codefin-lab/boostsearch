@@ -530,6 +530,10 @@ pub struct IdxState {
     pub request_cache_miss: std::sync::atomic::AtomicU64,
     /// per-group query counts, from the `stats` field of a search body
     pub search_groups: RwLock<HashMap<String, u64>>,
+    /// Fields whose ordinals have been read into memory: sorting on a field
+    /// or aggregating over its ordinals loads them, and that is what the
+    /// fielddata statistic reports on.
+    pub loaded_fielddata: RwLock<std::collections::HashSet<String>>,
     pub auto_id: u64,
     /// field paths seen in indexed documents, with the type OpenSearch's
     /// dynamic mapping would have given them. Explicit mappings win over these.
@@ -1705,6 +1709,7 @@ impl Store {
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_groups: RwLock::new(HashMap::new()),
+            loaded_fielddata: RwLock::new(std::collections::HashSet::new()),
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),

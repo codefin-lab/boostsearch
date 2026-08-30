@@ -3091,6 +3091,74 @@ fn parse_keep_alive(s: &str) -> Option<u64> {
 }
 
 /// What a scroll refuses before it starts.
+/// Which fields a search reads ordinals for: sorting on one loads it, and so
+/// does a terms aggregation, unless it was asked to build its buckets in a map
+/// instead.
+fn fielddata_fields_of(body: &Value, out: &mut Vec<String>) {
+    match body {
+        Value::Object(o) => {
+            if let Some(t) = o.get("terms").and_then(|t| t.as_object()) {
+                let mapped = t
+                    .get("execution_hint")
+                    .and_then(|h| h.as_str())
+                    .map(|h| h == "map")
+                    .unwrap_or(false);
+                if !mapped {
+                    if let Some(f) = t.get("field").and_then(|f| f.as_str()) {
+                        out.push(f.to_string());
+                    }
+                }
+            }
+            for (k, v) in o {
+                if k == "sort" {
+                    match v {
+                        Value::String(f) => out.push(f.clone()),
+                        Value::Array(a) => {
+                            for item in a {
+                                match item {
+                                    Value::String(f) => out.push(f.clone()),
+                                    Value::Object(f) => {
+                                        out.extend(f.keys().cloned());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Value::Object(f) => out.extend(f.keys().cloned()),
+                        _ => {}
+                    }
+                    continue;
+                }
+                fielddata_fields_of(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                fielddata_fields_of(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Note what this search loaded, so the fielddata statistic can report it.
+fn note_fielddata(store: &Store, expr: &str, body: &Value) {
+    let mut fields = Vec::new();
+    fielddata_fields_of(body, &mut fields);
+    fields.retain(|f| !f.starts_with('_'));
+    if fields.is_empty() {
+        return;
+    }
+    for n in store.resolve(expr) {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut loaded = g.loaded_fielddata.write();
+        for f in &fields {
+            loaded.insert(f.clone());
+        }
+    }
+}
+
 fn check_scroll(store: &Store, expr: &str, body: &Value, p: &Params) -> Option<Response> {
     let Some(keep) = p.get("scroll") else { return None };
     if body.get("size").and_then(|v| v.as_i64()) == Some(0)
@@ -3183,6 +3251,7 @@ pub async fn search(
             }
         }
     }
+    note_fielddata(&store, &expr, &body);
     if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;
     }
@@ -4244,7 +4313,13 @@ fn readable_bytes(bytes: u64) -> String {
 fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
-    let cols = st.field_column_bytes();
+    // only a field whose ordinals were actually read counts as fielddata
+    let loaded = st.loaded_fielddata.read().clone();
+    let cols: std::collections::HashMap<String, u64> = st
+        .field_column_bytes()
+        .into_iter()
+        .filter(|(k, _)| loaded.contains(k))
+        .collect();
     let fielddata_total: u64 = cols.values().sum();
     // a per-field breakdown is reported only where the request asked for one,
     // and a field appears under the statistic its type can carry: fielddata
@@ -7159,7 +7234,12 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
             for name in store.names() {
                 let Some(st) = store.get(&name) else { continue };
                 let g = st.read();
-                let mut fields: Vec<(String, u64)> = g.field_column_bytes().into_iter().collect();
+                let loaded = g.loaded_fielddata.read().clone();
+                let mut fields: Vec<(String, u64)> = g
+                    .field_column_bytes()
+                    .into_iter()
+                    .filter(|(f, _)| loaded.contains(f))
+                    .collect();
                 fields.sort();
                 // the path names which fields to report on
                 if let Some(want) = target.as_deref() {
