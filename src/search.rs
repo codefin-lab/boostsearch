@@ -7241,6 +7241,12 @@ fn run_composite_agg(
                 .iter()
                 .filter_map(|n| store.get(n))
                 .any(|st| st.read().mapping.type_of(&field) == Some("ip")),
+            missing_bucket: source
+                .get("missing_bucket")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            missing_last: source.get("missing_order").and_then(|v| v.as_str()) != Some("first"),
+            field: field.clone(),
         });
     }
     if sources.is_empty() {
@@ -7358,6 +7364,28 @@ fn run_composite_agg(
             apply_doc_counts(&mut res);
         }
         flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
+        // a source may ask for a bucket of the documents that have no value
+        // for it at all, which no terms aggregation will ever produce
+        for source in sources.iter().filter(|s| s.missing_bucket) {
+            let absent = json!({"bool": {"must_not": [{"exists": {"field": source.field}}]}});
+            let narrowed = combine(main_query, Some(absent));
+            let (count, sub) =
+                count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+            if count == 0 {
+                continue;
+            }
+            let mut key = serde_json::Map::new();
+            for other in &sources {
+                key.insert(other.name.clone(), Value::Null);
+            }
+            let mut b = json!({"key": Value::Object(key), "doc_count": count});
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+            flat.push(b);
+        }
     }
     // whether a date bucket comes back counted in milliseconds or in
     // nanoseconds is not fixed, but the earliest value is known, so which unit
@@ -7439,6 +7467,12 @@ struct CompSource {
     zone_ms: i64,
     /// an address is held in a fixed-width form and read back out of it
     ip: bool,
+    /// documents with no value for this source still make a bucket of their own
+    missing_bucket: bool,
+    /// where that bucket goes: `first` or `last`
+    missing_last: bool,
+    /// the field the source reads, for finding the documents that lack it
+    field: String,
 }
 
 fn flatten_composite(
@@ -7502,6 +7536,19 @@ fn composite_key_order(a: &Value, b: &Value, sources: &[CompSource]) -> Ordering
     for source in sources {
         let name = &source.name;
         let (x, y) = (a.pointer(&format!("/key/{name}")), b.pointer(&format!("/key/{name}")));
+        let missing = |v: Option<&Value>| matches!(v, None | Some(Value::Null));
+        if missing(x) || missing(y) {
+            let last = if source.missing_last { Ordering::Greater } else { Ordering::Less };
+            let ord = match (missing(x), missing(y)) {
+                (true, true) => Ordering::Equal,
+                (true, false) => last,
+                _ => last.reverse(),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            continue;
+        }
         let ord = match (x, y) {
             (Some(Value::Number(m)), Some(Value::Number(n))) => m
                 .as_f64()
