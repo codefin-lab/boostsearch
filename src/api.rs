@@ -374,7 +374,8 @@ pub async fn resize_index(
     }
     // `max_shard_size` asks for as many shards as the data needs rather than
     // for a number; what this much data needs is one
-    if p.contains_key("max_shard_size") && num("number_of_shards").is_none() {
+    let asked_max_size = p.contains_key("max_shard_size") || body.get("max_shard_size").is_some();
+    if asked_max_size && num("number_of_shards").is_none() {
         if let Some(o) = settings.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
             o.insert("number_of_shards".into(), json!("1"));
         }
