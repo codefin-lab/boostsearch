@@ -5672,16 +5672,10 @@ async fn put_alias_inner(
         }
         None
     };
-    // the body may name the index too, and does so when the path names one
-    // that is not there
-    let from_path = index.filter(|s| !s.is_empty());
-    let from_body_index = from_body(&["index", "indices"]);
-    let index = match (&from_path, &from_body_index) {
-        (Some(p), Some(b)) if store.resolve(p).is_empty() => Some(b.clone()),
-        (Some(p), _) => Some(p.clone()),
-        (None, b) => b.clone(),
-    };
-    let name = name.filter(|s| !s.is_empty()).or_else(|| from_body(&["alias", "aliases"]));
+    // what the body names wins over what the path names, for the index and
+    // for the alias alike
+    let index = from_body(&["index", "indices"]).or_else(|| index.filter(|s| !s.is_empty()));
+    let name = from_body(&["alias", "aliases"]).or_else(|| name.filter(|s| !s.is_empty()));
 
     let (Some(index), Some(name)) = (index, name) else {
         return err(
