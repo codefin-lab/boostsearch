@@ -4556,6 +4556,14 @@ pub fn run(
                             .collect(),
                         _ => Vec::new(),
                     };
+                    if let Some(spec) = inner.get("highlight") {
+                        let g = searchers[h.shard_idx].2.read();
+                        if let Some(hl) =
+                            build_highlight(spec, &h.source, &query_json, &g.mapping, &g.index)
+                        {
+                            inner_hit["highlight"] = hl;
+                        }
+                    }
                     if !asked.is_empty() {
                         let mut fields = serde_json::Map::new();
                         for name in asked {
