@@ -3450,7 +3450,13 @@ pub fn run(
     // a slice divides the index between readers, so the page it can offer is
     // cut from every matching document rather than from the first few
     let slice = body.get("slice").filter(|s| s.get("max").is_some()).cloned();
-    let page_want = if slice.is_some() { 65_536 } else { from + size };
+    // collapsing decides the page from groups rather than from documents, so
+    // the best few documents are not enough to cut it from
+    let page_want = if slice.is_some() || body.get("collapse").is_some() {
+        65_536
+    } else {
+        from + size
+    };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();
@@ -3932,11 +3938,14 @@ pub fn run(
     // which after the sort is the first each value is seen at. It has to run
     // before the page is cut, or a page could be all one value's worth
     if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
-        let path = format!("/{}", field.replace('.', "/"));
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
+            // a field declared as an alias is another name for one that is
+            // really in the document
+            let real = g.mapping.target_of(field).unwrap_or(field);
+            let path = format!("/{}", real.replace('.', "/"));
             let value = source_of(searcher, &g, c.addr)
                 .and_then(|(_, src)| src.pointer(&path).cloned())
                 .map(|v| match v {
@@ -4172,7 +4181,14 @@ pub fn run(
             // a collapsed hit says which value it stands for, and may carry
             // the group it was chosen from
             if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
-                let path = format!("/{}", field.replace('.', "/"));
+                let real = searchers[h.shard_idx]
+                    .2
+                    .read()
+                    .mapping
+                    .target_of(field)
+                    .unwrap_or(field)
+                    .to_string();
+                let path = format!("/{}", real.replace('.', "/"));
                 if let Some(v) = h.source.pointer(&path) {
                     let list = match v {
                         Value::Array(a) => a.clone(),

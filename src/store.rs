@@ -330,7 +330,20 @@ impl Mapping {
     }
 
     pub fn type_of(&self, field: &str) -> Option<&str> {
+        let field = self.target_of(field).unwrap_or(field);
         self.types.get(field).map(|s| s.as_str())
+    }
+
+    /// A field declared as an `alias` is another name for a field that is
+    /// really there; this is the name behind it.
+    pub fn target_of(&self, field: &str) -> Option<&str> {
+        let path = self
+            .raw
+            .pointer(&format!("/properties/{}", field.replace('.', "/properties/")))?;
+        if path.get("type").and_then(|t| t.as_str()) != Some("alias") {
+            return None;
+        }
+        path.get("path").and_then(|p| p.as_str())
     }
 
     /// PUT _mapping is additive: new properties layer onto the old ones, and

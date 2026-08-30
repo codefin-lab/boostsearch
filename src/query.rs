@@ -70,6 +70,12 @@ impl<'a> Ctx<'a> {
 
     /// `title.keyword` addresses the raw view of `title`.
     pub fn resolve(&self, field: &str, analyzed: bool) -> (Field, String, View) {
+        // a field declared as an alias is another name for one that is really
+        // there, and a query asking by that name asks about the real one
+        if let Some(real) = self.mapping.target_of(field) {
+            let real = real.to_string();
+            return self.resolve(&real, analyzed);
+        }
         // naming a flat_object itself asks about every value beneath it
         if self.mapping.type_of(field) == Some("flat_object") {
             let path = format!("{field}.{}", crate::store::FLAT_VALUES);
