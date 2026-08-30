@@ -470,13 +470,23 @@ pub async fn clone_index(
 /// Everything this engine is asked to do finishes before the request returns,
 /// so a task named here is one that has already completed.
 pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
+    // the id carries what the task was, after the node that ran it
+    let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
+    let action = if what.starts_with("open") {
+        "indices:admin/open"
+    } else if what.starts_with("shrink") || what.starts_with("split")
+        || what.starts_with("clone")
+    {
+        "indices:admin/resize"
+    } else {
+        "indices:admin/tasks"
+    };
     respond(&p, json!({
         "completed": true,
         "task": {
             "node": "node-0", "id": 1, "type": "transport",
-            "action": "indices:admin/resize",
-            // the id carries what the task was, after the node that ran it
-            "description": id.split_once(':').map(|(_, d)| d).unwrap_or(&id),
+            "action": action,
+            "description": what,
             "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
         },
         "response": {"acknowledged": true, "shards_acknowledged": true},
@@ -2636,6 +2646,30 @@ pub async fn bulk(
                         }
                     }}));
                     continue;
+                }
+                // an index action may be conditional too, on the sequence
+                // number the caller believes the document is at
+                let cond = meta
+                    .get("if_seq_no")
+                    .and_then(|v| v.as_u64())
+                    .filter(|_| exists_doc(&g, &id));
+                if let Some(want) = cond {
+                    let have = read_seq(&g, &id).unwrap_or(0);
+                    if have != want {
+                        errors = true;
+                        items.push(json!({ op.clone(): {
+                            "_index": idx, "_id": id, "status": 409,
+                            "error": {
+                                "type": "version_conflict_engine_exception",
+                                "reason": format!(
+                                    "[{id}]: version conflict, required seqNo [{want}], \
+                                     primary term [1]. current document has seqNo [{have}] \
+                                     and primary term [1]"
+                                )
+                            }
+                        }}));
+                        continue;
+                    }
                 }
                 let src = source.unwrap_or_else(|| json!({}));
                 match write_doc_raw(&mut g, &id, src, &op, doc_raw.take()) {
@@ -6080,10 +6114,15 @@ pub async fn open_index(
     if targets.is_empty() && !index.contains('*') {
         return no_such_index(&index);
     }
-    for n in targets {
-        if let Some(st) = store.get(&n) {
+    for n in &targets {
+        if let Some(st) = store.get(n) {
             st.write().closed = false;
         }
+    }
+    // `wait_for_completion=false` asks for the work to be tracked rather than
+    // waited on; the index is already open, so the task is a finished one
+    if p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false) {
+        return respond(&p, json!({"task": format!("node-0:open [{index}]")}));
     }
     respond(&p, json!({"acknowledged": true, "shards_acknowledged": true}))
 }
