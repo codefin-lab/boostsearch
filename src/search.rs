@@ -4145,6 +4145,15 @@ pub fn run(
         cands.extend(shard_cands);
 
         let mut shard_profile = None;
+        // a profile is asked for by the request, not by the aggregations: a
+        // search with no aggregations still has a shard to report on
+        if profiling && this_agg.is_none() {
+            shard_profile = Some(json!({
+                "id": "[obsearch][0]",
+                "searches": [],
+                "aggregations": [],
+            }));
+        }
         if let (Some(a), true) = (this_agg, profiling) {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let (res, prof) = profiled_agg_search(
@@ -5115,6 +5124,107 @@ pub fn run(
     } else {
         (aggs, suggest)
     };
+
+    // `profile` also asks what the fetch cost: reading each hit back, and the
+    // sub-phases that filled it in
+    if !shard_profiles.is_empty() {
+        let fetched = page.len() as u64;
+        let nanos = started.elapsed().as_nanos().max(1) as u64;
+        let breakdown = |n: u64| {
+            json!({
+                "load_stored_fields": nanos, "load_stored_fields_count": n,
+                "load_source": nanos, "load_source_count": n,
+                "get_next_reader": nanos, "get_next_reader_count": 1,
+                "build_sub_phase_processors": nanos, "build_sub_phase_processors_count": 1,
+                "create_stored_fields_visitor": nanos,
+                "create_stored_fields_visitor_count": 1,
+            })
+        };
+        let child = |kind: &str, n: u64| {
+            json!({
+                "type": kind,
+                "description": kind,
+                "time_in_nanos": nanos,
+                "breakdown": {
+                    "process": nanos, "process_count": n,
+                    "set_next_reader": nanos, "set_next_reader_count": 1,
+                },
+            })
+        };
+        let mut entries: Vec<Value> = Vec::new();
+        if size > 0 && fetched > 0 {
+            let mut children = Vec::new();
+            if body.get("_source").map(|v| v != &json!(false)).unwrap_or(true) {
+                children.push(child("FetchSourcePhase", fetched));
+            }
+            if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("ExplainPhase", fetched));
+            }
+            if body.get("docvalue_fields").is_some() {
+                children.push(child("FetchDocValuesPhase", fetched));
+            }
+            if body.get("fields").is_some() {
+                children.push(child("FetchFieldsPhase", fetched));
+            }
+            if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("FetchVersionPhase", fetched));
+            }
+            if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("SeqNoPrimaryTermPhase", fetched));
+            }
+            if !named.is_empty() {
+                children.push(child("MatchedQueriesPhase", fetched));
+            }
+            if body.get("highlight").is_some() {
+                children.push(child("HighlightPhase", fetched));
+            }
+            if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("FetchScorePhase", fetched));
+            }
+            entries.push(json!({
+                "type": "fetch",
+                "description": "fetch",
+                "time_in_nanos": nanos,
+                "breakdown": breakdown(fetched),
+                "children": children,
+                "debug": {},
+            }));
+            // an inner-hits clause fetches documents of its own
+            if let Some((path, _)) = body.get("query").and_then(find_nested_inner_hits) {
+                entries.push(json!({
+                    "type": format!("fetch_inner_hits[{path}]"),
+                    "description": format!("fetch_inner_hits[{path}]"),
+                    "time_in_nanos": nanos,
+                    "breakdown": breakdown(fetched),
+                    "children": [child("FetchSourcePhase", fetched)],
+                    "debug": {},
+                }));
+            }
+        }
+        // so does every top_hits aggregation
+        if let Some(o) = body
+            .get("aggs")
+            .or_else(|| body.get("aggregations"))
+            .and_then(|a| a.as_object())
+        {
+            for (name, def) in o {
+                if def.get("top_hits").is_none() {
+                    continue;
+                }
+                entries.push(json!({
+                    "type": format!("fetch_top_hits_aggregation[{name}]"),
+                    "description": format!("fetch_top_hits_aggregation[{name}]"),
+                    "time_in_nanos": nanos,
+                    "breakdown": breakdown(1),
+                    "children": [child("FetchSourcePhase", 1)],
+                    "debug": {},
+                }));
+            }
+        }
+        for shard in shard_profiles.iter_mut() {
+            shard["fetch"] = Value::Array(entries.clone());
+        }
+    }
 
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,

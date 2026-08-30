@@ -323,7 +323,14 @@ class Runner:
         for path, expected in spec.items():
             actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
-            if not isinstance(actual, list) or expected not in actual:
+            # an entry "contains" what was asked for when it carries at least
+            # those keys with those values, not only when it is exactly them
+            def holds(item, want):
+                if isinstance(want, dict) and isinstance(item, dict):
+                    return all(k in item and item[k] == v for k, v in want.items())
+                return item == want
+
+            if not isinstance(actual, list) or not any(holds(i, expected) for i in actual):
                 raise Failure(f"contains {path}: {expected!r} not in {actual!r}")
 
     # ---- driving ---------------------------------------------------------
