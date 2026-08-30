@@ -177,6 +177,98 @@ pub async fn create_index(
             format!("index [{index}] already exists"),
         );
     }
+    // a flat_object holds whatever it is given and is not analysed, so the
+    // parameters that describe analysis mean nothing to it
+    if let Some(props) = body.pointer("/mappings/properties").and_then(|p| p.as_object()) {
+        for (name, def) in props {
+            if def.get("type").and_then(|t| t.as_str()) != Some("flat_object") {
+                continue;
+            }
+            let stray: Vec<String> = def
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| k.to_string() != "type")
+                        .map(|(k, v)| {
+                            format!(
+                                "{k} : {}",
+                                v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !stray.is_empty() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "mapper_parsing_exception",
+                    format!(
+                        "Mapping definition for [{name}] has unsupported parameters:  [{}]",
+                        stray.join(", ")
+                    ),
+                );
+            }
+        }
+    }
+    // an index can only sort itself by a field whose values it can compare,
+    // one at a time
+    if let Some(fields) = body
+        .pointer("/settings/index.sort.field")
+        .or_else(|| body.pointer("/settings/index/sort/field"))
+    {
+        let names: Vec<String> = match fields {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            _ => Vec::new(),
+        };
+        for name in names {
+            let kind = body
+                .pointer(&format!(
+                    "/mappings/properties/{}/type",
+                    name.replace('.', "/properties/")
+                ))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            // a field inside a nested object belongs to the object, not to
+            // the document, so the document cannot be sorted by it
+            let mut inside_nested = false;
+            let mut walked = String::new();
+            for part in name.split('.').rev().skip(1).collect::<Vec<_>>().into_iter().rev() {
+                walked = if walked.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{walked}.{part}")
+                };
+                if body
+                    .pointer(&format!(
+                        "/mappings/properties/{}/type",
+                        walked.replace('.', "/properties/")
+                    ))
+                    .and_then(|t| t.as_str())
+                    == Some("nested")
+                {
+                    inside_nested = true;
+                }
+            }
+            if inside_nested {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "index sorting on nested fields is not supported: found nested sort \
+                         field [{name}] in [{index}]"
+                    ),
+                );
+            }
+            if matches!(kind, "half_float" | "nested" | "object" | "text" | "") {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("docvalues not found for index sort field:[{name}]"),
+                );
+            }
+        }
+    }
     // adaptive shard selection only makes sense on an append-only index
     let setting = |k: &str| -> Option<String> {
         body.pointer(&format!("/settings/index/{k}"))

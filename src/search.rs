@@ -3127,6 +3127,16 @@ fn check_limits(
     };
     let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
 
+    // a scroll has to know how much is left to walk
+    if p.contains_key("scroll")
+        && matches!(body.get("track_total_hits"), Some(Value::Bool(false)))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "disabling [track_total_hits] is not allowed in a scroll context",
+        ));
+    }
     // a scroll walks the whole result set in order; collapsing rewrites what
     // that order even is, so the two cannot be asked for together
     if p.contains_key("scroll") && body.get("collapse").is_some() {
@@ -3482,6 +3492,37 @@ pub fn run(
     for k in sort_keys.iter_mut() {
         if k.field == "_shard_doc" {
             k.field = "_seq".to_string();
+        }
+    }
+    // `_doc` is the order the index holds its documents in, and an index that
+    // was told to sort itself holds them in that order
+    if sort_keys.len() == 1 && sort_keys[0].field == "_doc" {
+        let declared = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| {
+                let g = st.read();
+                let fields = g.setting("sort.field")?;
+                let orders = g.setting("sort.order").unwrap_or_default();
+                let orders: Vec<String> =
+                    orders.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
+                let keys: Vec<SortKey> = fields
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|f| f.trim().trim_matches('"').to_string())
+                    .filter(|f| !f.is_empty())
+                    .enumerate()
+                    .map(|(i, field)| SortKey {
+                        field,
+                        desc: orders.get(i).map(|o| o == "desc").unwrap_or(false),
+                        mode: None,
+                        missing_last: true,
+                    })
+                    .collect();
+                (!keys.is_empty()).then_some(keys)
+            });
+        if let Some(keys) = declared {
+            sort_keys = keys;
         }
     }
     for k in &sort_keys {
