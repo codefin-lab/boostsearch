@@ -3557,6 +3557,13 @@ pub fn run(
             }
         }
     }
+    // a pipeline that sits *inside* a bucketing aggregation reads that
+    // aggregation's own buckets, so it is taken out of the request and applied
+    // to the answer once the buckets are there
+    let mut bucket_pipelines: Vec<(Vec<String>, String, Value)> = Vec::new();
+    if let Some(node) = agg_json.as_mut() {
+        strip_bucket_pipelines(node, &mut Vec::new(), &mut bucket_pipelines);
+    }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Object(o)) = agg_json.as_mut() {
         let names: Vec<String> = o
@@ -4737,6 +4744,15 @@ pub fn run(
         }
     }
 
+    let aggs = match aggs {
+        Some(mut base) if !bucket_pipelines.is_empty() => {
+            for (path, name, def) in &bucket_pipelines {
+                apply_bucket_pipeline(&mut base, path, name, def);
+            }
+            Some(base)
+        }
+        other => other,
+    };
     let aggs = if pipeline_aggs.is_empty() {
         aggs
     } else {
@@ -6948,6 +6964,120 @@ fn collect_field_pairs(
 
 /// The sibling pipelines: aggregations whose input is other aggregations'
 /// buckets rather than documents.
+/// Pipelines that live inside a bucketing aggregation and add a value to each
+/// of its buckets, rather than beside it summarising them all.
+const BUCKET_PIPELINES: &[&str] =
+    &["cumulative_sum", "derivative", "moving_avg", "moving_fn", "serial_diff"];
+
+/// Take those out of the request, remembering which aggregation each was under.
+fn strip_bucket_pipelines(
+    node: &mut Value,
+    at: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, String, Value)>,
+) {
+    let Some(o) = node.as_object_mut() else { return };
+    let names: Vec<String> = o.keys().map(|k| k.to_string()).collect();
+    for name in names {
+        let is_bucket_pipeline = o
+            .get(&name)
+            .and_then(|d| d.as_object())
+            .map(|d| d.keys().any(|k| BUCKET_PIPELINES.contains(&k.as_str())))
+            .unwrap_or(false);
+        if is_bucket_pipeline {
+            if let Some(def) = o.remove(&name) {
+                out.push((at.clone(), name, def));
+            }
+            continue;
+        }
+        let Some(def) = o.get_mut(&name) else { continue };
+        let subs = if def.get("aggs").is_some() { "aggs" } else { "aggregations" };
+        if def.get(subs).is_some() {
+            at.push(name.clone());
+            let mut inner = def[subs].clone();
+            strip_bucket_pipelines(&mut inner, at, out);
+            def[subs] = inner;
+            at.pop();
+        }
+    }
+    // an aggregation left with nothing under it should not carry an empty list
+    let empty: Vec<String> = o
+        .iter()
+        .filter(|(_, d)| {
+            ["aggs", "aggregations"].iter().any(|k| {
+                d.get(*k).and_then(|v| v.as_object()).map(|v| v.is_empty()).unwrap_or(false)
+            })
+        })
+        .map(|(k, _)| k.to_string())
+        .collect();
+    for name in empty {
+        if let Some(d) = o.get_mut(&name).and_then(|d| d.as_object_mut()) {
+            d.remove("aggs");
+            d.remove("aggregations");
+        }
+    }
+}
+
+/// Add a running value to each bucket of the aggregation it was written under.
+fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str, def: &Value) {
+    let Some(parent) = at.last() else { return };
+    // walk down to the aggregation the pipeline was written inside
+    let mut node: &mut Value = aggs;
+    for step in &at[..at.len() - 1] {
+        node = match node.get_mut(step) {
+            Some(next) => next,
+            None => return,
+        };
+        if node.get("buckets").is_some() {
+            node = match node.get_mut("buckets") {
+                Some(b) => b,
+                None => return,
+            };
+        }
+    }
+    let target = match node.get_mut(parent) {
+        Some(t) => t,
+        None => return,
+    };
+    let Some(buckets) = target.get_mut("buckets").and_then(|b| b.as_array_mut()) else { return };
+    let kind = def
+        .as_object()
+        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| BUCKET_PIPELINES.contains(&k.as_str())))
+        .unwrap_or_default();
+    let path = def
+        .pointer(&format!("/{kind}/buckets_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("_count")
+        .to_string();
+    let read = |b: &Value| -> Option<f64> {
+        if path == "_count" {
+            return b.get("doc_count").and_then(|v| v.as_f64());
+        }
+        let mut node = b;
+        for step in path.split(['.', '>']) {
+            node = node.get(step)?;
+        }
+        node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
+    };
+    let mut running = 0.0f64;
+    let mut previous: Option<f64> = None;
+    for b in buckets.iter_mut() {
+        let Some(v) = read(b) else { continue };
+        match kind.as_str() {
+            "cumulative_sum" => {
+                running += v;
+                b[name] = json!({"value": running});
+            }
+            "derivative" => {
+                if let Some(prev) = previous {
+                    b[name] = json!({"value": v - prev});
+                }
+                previous = Some(v);
+            }
+            _ => {}
+        }
+    }
+}
+
 const PIPELINES: &[&str] =
     &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
 
