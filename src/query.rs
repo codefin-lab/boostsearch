@@ -533,7 +533,15 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
             // every document has an id and belongs to an index, so asking
             // whether one exists is asking for all of them
-            if field == "_id" || field == "_index" {
+            // `_source` is not a field to ask after: it is the document
+            if field == "_source" {
+                return Err(anyhow!(
+                    "query_shard_exception: Cannot search on field [_source] since it is not \
+                     indexed."
+                ));
+            }
+            // every document has an id, an index and a sequence number
+            if field == "_id" || field == "_index" || field == "_seq_no" {
                 return Ok(Box::new(AllQuery));
             }
             let col = ctx.column_name(field, false);

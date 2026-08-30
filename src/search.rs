@@ -648,6 +648,47 @@ pub fn expensive_allowed(store: &Store) -> bool {
         .unwrap_or(true)
 }
 
+/// Does this query ask whether a document has a routing value?
+fn mentions_routing_exists(node: Option<&Value>) -> bool {
+    let Some(node) = node else { return false };
+    match node {
+        Value::Object(o) => {
+            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
+                == Some("_routing")
+            {
+                return true;
+            }
+            o.values().any(|v| mentions_routing_exists(Some(v)))
+        }
+        Value::Array(a) => a.iter().any(|v| mentions_routing_exists(Some(v))),
+        _ => false,
+    }
+}
+
+/// Turn that question into the list of documents it is really about.
+fn replace_routing_exists(node: &mut Value, ids: &[String]) {
+    match node {
+        Value::Object(o) => {
+            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
+                == Some("_routing")
+            {
+                o.remove("exists");
+                o.insert("ids".into(), json!({"values": ids}));
+                return;
+            }
+            for (_, v) in o.iter_mut() {
+                replace_routing_exists(v, ids);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                replace_routing_exists(v, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The `intervals` clause of a query: the field it reads and the rule it asks.
 fn find_intervals(node: &Value) -> Option<(String, Value)> {
     match node {
@@ -3460,6 +3501,19 @@ pub fn run(
     }
     // a `terms` lookup names a document to read the term list from
     let mut query_json = body.get("query").cloned();
+    // A document's routing is not part of it -- it is how the document was
+    // addressed -- so asking which documents have one is asking after a list
+    // of ids rather than after a column.
+    if let Some(q) = query_json.as_mut() {
+        if mentions_routing_exists(Some(q)) {
+            let ids: Vec<String> = targets
+                .iter()
+                .filter_map(|n| store.get(n))
+                .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
+                .collect();
+            replace_routing_exists(q, &ids);
+        }
+    }
     if let Some(q) = query_json.as_mut() {
         if let Err(r) = resolve_terms_lookups(store, q) {
             return Err(r);

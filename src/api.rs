@@ -564,6 +564,18 @@ pub async fn clone_index(
 /// so a task named here is one that has already completed.
 pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
     // the id carries what the task was, after the node that ran it
+    let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
+    // a task named after a node that is not here is a task nobody has heard of
+    if !node.is_empty() && node != "node-0" && node != "obsearch" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!(
+                "task [{id}] belongs to the node [{node}] which isn't part of the cluster and \
+                 there is no record of the task"
+            ),
+        );
+    }
     let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
     let action = if what.starts_with("open") {
         "indices:admin/open"
