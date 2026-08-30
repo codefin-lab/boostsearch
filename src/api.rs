@@ -818,7 +818,9 @@ pub async fn resolve_index(
         std::collections::BTreeMap::new();
     // a pattern reaches the states `expand_wildcards` names, which is open
     // ones unless the caller says otherwise
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let mut names = store.names();
@@ -1592,7 +1594,9 @@ pub async fn get_mapping(
     }
     // `expand_wildcards` says which states a pattern reaches; `none` means it
     // reaches nothing at all
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let reach = |closed: bool| {
         states.split(',').any(|w| match w.trim() {
             "all" => true,
@@ -4820,7 +4824,9 @@ pub async fn cluster_health(
     let expr = index.map(|Path(i)| i);
     // `expand_wildcards` decides whether a pattern reaches closed indices,
     // which are the ones that make the cluster less than green
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let names: Vec<String> = match expr.as_deref() {
@@ -4874,7 +4880,11 @@ pub async fn cluster_health(
             })
             .unwrap_or(true);
 
-    let n = names.len();
+    // a shard is a shard whether or not the index it belongs to is open
+    let shards_of = |name: &str| {
+        store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1)
+    };
+    let n: usize = names.iter().map(|name| shards_of(name)).sum();
     let mut out = json!({
         "cluster_name": "obsearch", "status": status, "timed_out": !satisfied,
         "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
@@ -4893,19 +4903,26 @@ pub async fn cluster_health(
         for name in &names {
             let Some(st) = store.get(name) else { continue };
             let replicas = st.read().numeric_setting("number_of_replicas").unwrap_or(0);
-            let closed = replicas > 0;
+            let shards = st.read().shard_count() as usize;
+            let short = replicas > 0;
             let mut entry = json!({
-                "status": if closed { "yellow" } else { "green" },
-                "number_of_shards": 1, "number_of_replicas": 0,
-                "active_primary_shards": 1, "active_shards": 1,
-                "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+                "status": if short { "yellow" } else { "green" },
+                "number_of_shards": shards, "number_of_replicas": replicas,
+                "active_primary_shards": shards, "active_shards": shards,
+                "relocating_shards": 0, "initializing_shards": 0,
+                "unassigned_shards": shards * replicas as usize,
             });
             if level == "shards" {
-                entry["shards"] = json!({"0": {
-                    "status": if closed { "yellow" } else { "green" },
-                    "primary_active": true, "active_shards": 1,
-                    "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
-                }});
+                let mut per = serde_json::Map::new();
+                for shard in 0..shards {
+                    per.insert(shard.to_string(), json!({
+                        "status": if short { "yellow" } else { "green" },
+                        "primary_active": true, "active_shards": 1,
+                        "relocating_shards": 0, "initializing_shards": 0,
+                        "unassigned_shards": replicas,
+                    }));
+                }
+                entry["shards"] = Value::Object(per);
             }
             indices.insert(st.read().name.clone(), entry);
         }
@@ -6116,7 +6133,9 @@ pub async fn get_index(
         return r;
     }
     // `expand_wildcards` says which states a pattern reaches
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let targets = store.resolve(&index);
