@@ -1095,6 +1095,8 @@ pub struct Store {
     pits: Arc<RwLock<HashMap<String, PitState>>>,
     /// Data streams by name, each remembering the template it was made from.
     data_streams: Arc<RwLock<HashMap<String, String>>>,
+    /// Pipelines by kind ("ingest" or "search") and then by name.
+    pipelines: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
     pit_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1292,6 +1294,7 @@ impl Store {
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
+            pipelines: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1317,6 +1320,7 @@ impl Store {
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
+            pipelines: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1574,6 +1578,34 @@ impl Store {
     /// Index templates, applied to any index created with a matching name.
     pub fn put_template(&self, name: &str, body: Value) {
         self.templates.write().insert(name.to_string(), body);
+    }
+
+    /// The pipelines of one kind, by name.
+    pub fn pipelines(&self, kind: &str) -> HashMap<String, Value> {
+        self.pipelines.read().get(kind).cloned().unwrap_or_default()
+    }
+
+    pub fn put_pipeline(&self, kind: &str, name: &str, body: Value) {
+        self.pipelines
+            .write()
+            .entry(kind.to_string())
+            .or_default()
+            .insert(name.to_string(), body);
+    }
+
+    /// Remove the pipelines of one kind whose names a pattern reaches.
+    pub fn remove_pipelines(&self, kind: &str, pattern: &str) -> usize {
+        let mut all = self.pipelines.write();
+        let Some(map) = all.get_mut(kind) else { return 0 };
+        let gone: Vec<String> = map
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            map.remove(g);
+        }
+        gone.len()
     }
 
     /// The data streams there are, each with the template it was made from.

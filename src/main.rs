@@ -108,6 +108,21 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // --- pipelines ---
+        .route("/_ingest/pipeline", get(api::get_ingest_pipeline))
+        .route(
+            "/_ingest/pipeline/{name}",
+            put(api::put_ingest_pipeline)
+                .get(api::get_ingest_pipeline)
+                .delete(api::delete_ingest_pipeline),
+        )
+        .route("/_search/pipeline", get(api::get_search_pipeline))
+        .route(
+            "/_search/pipeline/{name}",
+            put(api::put_search_pipeline)
+                .get(api::get_search_pipeline)
+                .delete(api::delete_search_pipeline),
+        )
         // --- data streams ---
         .route("/_data_stream", get(api::get_data_stream))
         .route(
