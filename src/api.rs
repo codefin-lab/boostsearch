@@ -4752,8 +4752,11 @@ pub async fn explain(
 // ---------------------------------------------------------------- field_caps
 
 fn caps_for(kind: &str) -> Value {
-    let aggregatable = kind != "text";
-    let searchable = true;
+    // a container holds no values of its own: nothing to search it for, and
+    // nothing to aggregate over
+    let container = matches!(kind, "object" | "nested");
+    let aggregatable = kind != "text" && !container;
+    let searchable = !container;
     json!({"type": kind, "searchable": searchable, "aggregatable": aggregatable})
 }
 

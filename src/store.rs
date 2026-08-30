@@ -471,6 +471,12 @@ fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<Str
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
+            // the container is a field in its own right: an object, or a
+            // nested one if it says so
+            out.insert(
+                path.clone(),
+                def.get("type").and_then(|t| t.as_str()).unwrap_or("object").to_string(),
+            );
             flatten_props(sub, &path, out);
             continue;
         }
