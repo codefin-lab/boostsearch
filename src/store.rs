@@ -1033,6 +1033,11 @@ impl IdxState {
     }
 
     /// `index.max_terms_count` caps how many terms a `terms` query may carry.
+    /// `index.max_regex_length` caps how long a pattern a query may carry.
+    pub fn max_regex_length(&self) -> usize {
+        self.numeric_setting("max_regex_length").unwrap_or(1_000) as usize
+    }
+
     pub fn max_terms_count(&self) -> usize {
         self.numeric_setting("max_terms_count").unwrap_or(65_536) as usize
     }

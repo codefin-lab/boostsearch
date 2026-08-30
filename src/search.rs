@@ -1612,6 +1612,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
                         mapping: &g.mapping,
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
@@ -1684,6 +1685,7 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                             mapping: &g.mapping,
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
@@ -2853,6 +2855,120 @@ pub fn validate_params(body: &Value, p: &Params) -> std::result::Result<(), Resp
     Ok(())
 }
 
+/// The ceilings a search has to stay under, all of them index settings.
+///
+/// They exist because each one costs memory on the node answering, so the
+/// complaint says which setting to raise rather than only that the request was
+/// refused.
+fn check_limits(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    p: &Params,
+    from: usize,
+    size: usize,
+) -> std::result::Result<(), Response> {
+    let setting = |key: &str, default: u64| -> u64 {
+        targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .filter_map(|st| st.read().numeric_setting(key))
+            .max()
+            .unwrap_or(default)
+    };
+    let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
+
+    // a page is counted from the front, so there is no such thing as starting
+    // before it
+    let negative = body
+        .get("from")
+        .and_then(|v| v.as_i64())
+        .or_else(|| p.get("from").and_then(|v| v.parse::<i64>().ok()))
+        .map(|v| v < 0)
+        .unwrap_or(false);
+    if negative {
+        return Err(bad("[from] parameter cannot be negative".into()));
+    }
+    // a size past what an int holds never reaches the window check: it is not
+    // a number the request could have meant
+    let too_wide = body
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse::<u64>().ok()))
+        .filter(|v| *v > i32::MAX as u64);
+    if let Some(v) = too_wide {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "input_coercion_exception",
+            format!("Numeric value ({v}) out of range of int"),
+        ));
+    }
+
+    let window = setting("max_result_window", 10_000);
+    if p.contains_key("scroll") {
+        // a scroll reads a batch at a time, and a batch costs what a window
+        // costs, so the same ceiling holds
+        if size as u64 > window {
+            return Err(bad(format!(
+                "Batch size is too large, size must be less than or equal to: [{window}] but was \
+                 [{size}]. Scroll batch sizes cost as much memory as result windows so they are \
+                 controlled by the [index.max_result_window] index level setting."
+            )));
+        }
+    } else if (from + size) as u64 > window {
+        let total = from + size;
+        return Err(bad(format!(
+            "Result window is too large, from + size must be less than or equal to: [{window}] \
+             but was [{total}]. See the scroll api for a more efficient way to request large data \
+             sets."
+        )));
+    }
+
+    // rescoring re-reads a window's worth of hits, so it has its own ceiling
+    let windows = match body.get("rescore") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for r in windows {
+        let want = r.get("window_size").and_then(|v| v.as_u64()).unwrap_or(0);
+        if want > window {
+            return Err(bad(format!(
+                "Rescore window [{want}] is too large. It must be less than [{window}]."
+            )));
+        }
+    }
+
+    let counted = |key: &str| -> usize {
+        body.get(key)
+            .map(|v| match v {
+                Value::Array(a) => a.len(),
+                Value::Object(o) => o.len(),
+                _ => 0,
+            })
+            .unwrap_or(0)
+    };
+    let docvalues = setting("max_docvalue_fields_search", 100);
+    let n = counted("docvalue_fields");
+    if n as u64 > docvalues {
+        return Err(bad(format!(
+            "Trying to retrieve too many docvalue_fields. Must be less than or equal to: \
+             [{docvalues}] but was [{n}]. This limit can be set by changing the \
+             [index.max_docvalue_fields_search] index level setting."
+        )));
+    }
+    let scripts = setting("max_script_fields", 32);
+    let n = counted("script_fields");
+    if n as u64 > scripts {
+        return Err(bad(format!(
+            "Trying to retrieve too many script_fields. Must be less than or equal to: \
+             [{scripts}] but was [{n}]. This limit can be set by changing the \
+             [index.max_script_fields] index level setting."
+        )));
+    }
+    Ok(())
+}
+
 fn as_i64(v: Option<Value>) -> Option<i64> {
     match v? {
         Value::Number(n) => n.as_i64(),
@@ -2963,6 +3079,7 @@ pub fn run(
     let pit_ceiling: std::collections::HashMap<String, u64> =
         pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
     let targets = store.resolve_open(expr);
+    check_limits(store, &targets, body, p, from, size)?;
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
@@ -3350,6 +3467,7 @@ pub fn run(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -4645,6 +4763,7 @@ fn filtered_count(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -4812,6 +4931,7 @@ fn collect_field_values(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -6128,6 +6248,7 @@ fn collect_field_pairs(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,

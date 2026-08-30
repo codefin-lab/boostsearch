@@ -18,6 +18,7 @@ pub struct Ctx<'a> {
     pub mapping: &'a Mapping,
     pub index: &'a Index,
     pub max_terms_count: usize,
+    pub max_regex_length: usize,
     /// value kinds seen per field path, used to narrow typed range variants
     pub observed_kinds: &'a std::collections::HashMap<String, u8>,
     pub kinds_complete: bool,
@@ -555,6 +556,17 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "regexp" => {
             let (field, val, opts) = field_and_value(&body)?;
+            // a long pattern costs what it costs to run against every term, so
+            // the index says how long one may be
+            let n = val.as_str().map(|s| s.chars().count()).unwrap_or(0);
+            if n > ctx.max_regex_length {
+                return Err(anyhow!(
+                    "The length of regex [{n}] used in the Regexp Query request has exceeded the \
+                     allowed maximum of [{}]. This maximum can be set by changing the \
+                     [index.max_regex_length] index level setting.",
+                    ctx.max_regex_length
+                ));
+            }
             let (f, path, _) = ctx.resolve(&field, true);
             let text = normalized(ctx, &field, val.as_str().unwrap_or_default());
             let pat = if is_true(opts.get("case_insensitive")) {
@@ -1431,6 +1443,20 @@ fn escape_regex(s: &str) -> String {
 /// AND/OR/NOT, and `default_field` / `default_operator`.
 fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let text = body.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+    // a whole query written between slashes is one regex, whatever whitespace
+    // it happens to contain, and it costs what any other pattern costs
+    let whole = text.trim();
+    if whole.len() > 2 && whole.starts_with('/') && whole.ends_with('/') {
+        let n = whole.chars().count() - 2;
+        if n > ctx.max_regex_length {
+            return Err(anyhow!(
+                "The length of regex [{n}] used in the Regexp Query request has exceeded the \
+                 allowed maximum of [{}]. This maximum can be set by changing the \
+                 [index.max_regex_length] index level setting.",
+                ctx.max_regex_length
+            ));
+        }
+    }
     let default_operator = body
         .get("default_operator")
         .and_then(|v| v.as_str())
@@ -1491,6 +1517,19 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             continue;
         }
         let regex_literal = value.len() > 2 && value.starts_with('/') && value.ends_with('/');
+        // a pattern written between slashes is a regex, and costs the same as
+        // one asked for by name
+        if regex_literal {
+            let n = value.chars().count() - 2;
+            if n > ctx.max_regex_length {
+                return Err(anyhow!(
+                    "The length of regex [{n}] used in the Regexp Query request has exceeded the \
+                     allowed maximum of [{}]. This maximum can be set by changing the \
+                     [index.max_regex_length] index level setting.",
+                    ctx.max_regex_length
+                ));
+            }
+        }
         // `field:[a TO b]` is a range, not a term
         if let Some(spec) = parse_range_token(&value) {
             let mut per_field: Vec<Box<dyn Query>> = Vec::new();
