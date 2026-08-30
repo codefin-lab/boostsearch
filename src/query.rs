@@ -642,9 +642,18 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
     };
 
-    let boost = q
-        .get(&kind)
+    // a boost sits beside the clause, or -- where a clause names one field --
+    // beside that field's own options
+    let clause = q.get(&kind);
+    let boost = clause
         .and_then(|b| b.get("boost"))
+        .or_else(|| {
+            clause
+                .and_then(|b| b.as_object())
+                .filter(|o| o.len() == 1)
+                .and_then(|o| o.values().next())
+                .and_then(|v| v.get("boost"))
+        })
         .and_then(|b| b.as_f64())
         .filter(|_| kind != "match_all" && kind != "constant_score");
     Ok(match boost {
@@ -753,6 +762,12 @@ fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn Query>> {
         let mut exact = term_for(f, &path, &val);
         if exact.is_empty() {
             exact = terms.clone();
+        }
+        // matching a number is matching one value, not a passage of text: it
+        // is either there or it is not, and every document that has it is
+        // equally a match
+        if !matches!(val, Value::String(_)) {
+            return Ok(Box::new(ConstScore::new(any_of(exact), 1.0)));
         }
         return Ok(any_of(exact));
     }

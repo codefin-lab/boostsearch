@@ -4067,6 +4067,13 @@ pub fn run(
         .iter()
         .map(|k| date_sort_key(store, &targets, &k.field))
         .collect();
+    // a clause given a name says so on every hit it matched
+    let page_ids: Vec<String> = all_hits.iter().map(|h| h.id.clone()).collect();
+    let named = matched_names(store, &targets, body, &page_ids);
+    let named_scores = p
+        .get("include_named_queries_score")
+        .map(|v| v != "false")
+        .unwrap_or(false);
     let page: Vec<Value> = all_hits
         .into_iter()
         .map(|h| {
@@ -4201,6 +4208,19 @@ pub fn run(
                 if !f.is_empty() {
                     hit["fields"] = Value::Object(f);
                 }
+            }
+            if let Some(hits) = named.get(&h.id) {
+                hit["matched_queries"] = if named_scores {
+                    let mut m = serde_json::Map::new();
+                    for (n, s) in hits {
+                        m.insert(n.clone(), json!(s));
+                    }
+                    Value::Object(m)
+                } else {
+                    let mut names: Vec<String> = hits.iter().map(|(n, _)| n.clone()).collect();
+                    names.sort();
+                    json!(names)
+                };
             }
             // a collapsed hit says which value it stands for, and may carry
             // the group it was chosen from
@@ -4564,6 +4584,100 @@ pub fn run(
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
     })
+}
+
+/// Every clause of a query that was given a `_name`, paired with the clause
+/// itself so it can be asked about one document at a time.
+fn named_clauses(node: &Value, out: &mut Vec<(String, Value)>) {
+    match node {
+        Value::Object(o) => {
+            for (k, v) in o {
+                if k == "_name" {
+                    continue;
+                }
+                let named = v
+                    .get("_name")
+                    .and_then(|n| n.as_str())
+                    // `match: {field: {query, _name}}` puts the name beside the
+                    // field's options rather than beside the clause
+                    .or_else(|| {
+                        v.as_object()
+                            .filter(|o| o.len() == 1)
+                            .and_then(|o| o.values().next())
+                            .and_then(|inner| inner.get("_name"))
+                            .and_then(|n| n.as_str())
+                    });
+                if let Some(name) = named {
+                    out.push((name.to_string(), json!({k.clone(): v.clone()})));
+                }
+                named_clauses(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                named_clauses(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Take the `_name` markers out of a clause.
+fn strip_names(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            o.remove("_name");
+            for (_, v) in o.iter_mut() {
+                strip_names(v);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                strip_names(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Which named clauses each document on the page matched, and with what score.
+fn matched_names(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    ids: &[String],
+) -> std::collections::HashMap<String, Vec<(String, f32)>> {
+    let mut out: std::collections::HashMap<String, Vec<(String, f32)>> =
+        std::collections::HashMap::new();
+    let mut clauses = Vec::new();
+    if let Some(q) = body.get("query") {
+        named_clauses(q, &mut clauses);
+    }
+    for r in body.get("rescore").into_iter().flat_map(|r| match r {
+        Value::Array(a) => a.clone(),
+        other => vec![other.clone()],
+    }) {
+        named_clauses(&r, &mut clauses);
+    }
+    if clauses.is_empty() || ids.is_empty() {
+        return out;
+    }
+    for (name, mut clause) in clauses {
+        // the clause is asked about on its own, and must not carry the name
+        // that would make it a named clause all over again
+        strip_names(&mut clause);
+        let probe = json!({
+            "query": {"bool": {"must": [clause], "filter": [{"terms": {"_id": ids}}]}},
+            "size": ids.len(),
+        });
+        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
+        for hit in answer.hits {
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+            let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            out.entry(id.to_string()).or_default().push((name.clone(), score));
+        }
+    }
+    out
 }
 
 /// The documents a collapsed hit was chosen from: the same query, narrowed to
