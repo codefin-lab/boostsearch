@@ -492,6 +492,8 @@ pub struct DocMeta {
 
 pub struct IdxState {
     pub name: String,
+    /// whether this index was last brought back from a snapshot
+    pub restored: bool,
     pub index: Index,
     /// Created on first write. An index that is only read -- or has not been
     /// written to since startup -- should not hold indexing threads or an arena.
@@ -1097,6 +1099,10 @@ pub struct Store {
     data_streams: Arc<RwLock<HashMap<String, String>>>,
     /// Pipelines by kind ("ingest" or "search") and then by name.
     pipelines: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
+    /// Snapshot repositories by name.
+    repositories: Arc<RwLock<HashMap<String, Value>>>,
+    /// Snapshots by repository and then by name.
+    snapshots: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
     pit_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1295,6 +1301,8 @@ impl Store {
             pits: Arc::new(RwLock::new(HashMap::new())),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
+            repositories: Arc::new(RwLock::new(HashMap::new())),
+            snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1321,6 +1329,8 @@ impl Store {
             pits: Arc::new(RwLock::new(HashMap::new())),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
+            repositories: Arc::new(RwLock::new(HashMap::new())),
+            snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1580,6 +1590,56 @@ impl Store {
         self.templates.write().insert(name.to_string(), body);
     }
 
+    /// The snapshot repositories there are.
+    pub fn repositories(&self) -> HashMap<String, Value> {
+        self.repositories.read().clone()
+    }
+
+    pub fn put_repository(&self, name: &str, body: Value) {
+        self.repositories.write().insert(name.to_string(), body);
+    }
+
+    pub fn remove_repository(&self, pattern: &str) -> usize {
+        let mut repos = self.repositories.write();
+        let gone: Vec<String> = repos
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            repos.remove(g);
+            self.snapshots.write().remove(g);
+        }
+        gone.len()
+    }
+
+    /// The snapshots held in one repository.
+    pub fn snapshots(&self, repo: &str) -> HashMap<String, Value> {
+        self.snapshots.read().get(repo).cloned().unwrap_or_default()
+    }
+
+    pub fn put_snapshot(&self, repo: &str, name: &str, body: Value) {
+        self.snapshots
+            .write()
+            .entry(repo.to_string())
+            .or_default()
+            .insert(name.to_string(), body);
+    }
+
+    pub fn remove_snapshots(&self, repo: &str, pattern: &str) -> usize {
+        let mut all = self.snapshots.write();
+        let Some(map) = all.get_mut(repo) else { return 0 };
+        let gone: Vec<String> = map
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            map.remove(g);
+        }
+        gone.len()
+    }
+
     /// The pipelines of one kind, by name.
     pub fn pipelines(&self, kind: &str) -> HashMap<String, Value> {
         self.pipelines.read().get(kind).cloned().unwrap_or_default()
@@ -1758,6 +1818,7 @@ impl Store {
             .unwrap_or_default();
         let st = IdxState {
             name: name.to_string(),
+            restored: false,
             index,
             writer: None,
             writer_threads,

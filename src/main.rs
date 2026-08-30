@@ -108,6 +108,31 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // --- snapshots ---
+        .route("/_snapshot", get(api::get_repository))
+        .route(
+            "/_snapshot/{repo}",
+            put(api::put_repository)
+                .post(api::put_repository)
+                .get(api::get_repository)
+                .delete(api::delete_repository),
+        )
+        .route("/_snapshot/{repo}/_verify", post(api::verify_repository))
+        .route("/_snapshot/{repo}/_cleanup", post(api::cleanup_repository))
+        .route("/_snapshot/_status", get(api::snapshot_status))
+        .route(
+            "/_snapshot/{repo}/{snapshot}",
+            put(api::create_snapshot)
+                .post(api::create_snapshot)
+                .get(api::get_snapshot)
+                .delete(api::delete_snapshot),
+        )
+        .route("/_snapshot/{repo}/{snapshot}/_status", get(api::snapshot_status))
+        .route("/_snapshot/{repo}/{snapshot}/_restore", post(api::restore_snapshot))
+        .route(
+            "/_snapshot/{repo}/{snapshot}/_clone/{target}",
+            put(api::clone_snapshot).post(api::clone_snapshot),
+        )
         // --- pipelines ---
         .route("/_ingest/pipeline", get(api::get_ingest_pipeline))
         .route(

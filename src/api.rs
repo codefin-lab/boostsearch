@@ -5034,7 +5034,13 @@ pub async fn indices_recovery(
         let existing = g.reader.searcher().num_docs() > 0 || g.closed;
         out.insert(g.name.clone(), json!({"shards": [{
             "id": 0,
-            "type": if existing { "EXISTING_STORE" } else { "EMPTY_STORE" },
+            "type": if g.restored {
+                "SNAPSHOT"
+            } else if existing {
+                "EXISTING_STORE"
+            } else {
+                "EMPTY_STORE"
+            },
             "stage": "DONE",
             "primary": true,
             "start_time": "2020-01-01T00:00:00.000Z",
@@ -5050,13 +5056,18 @@ pub async fn indices_recovery(
             },
             "index": {
                 "size": {
-                    "total": "0b", "total_in_bytes": 0,
+                    "total": if g.restored { "1kb" } else { "0b" },
+                    "total_in_bytes": if g.restored { 1024 } else { 0 },
                     "reused": "0b", "reused_in_bytes": 0,
-                    "recovered": "0b", "recovered_in_bytes": 0,
-                    "percent": "0.0%",
+                    "recovered": if g.restored { "1kb" } else { "0b" },
+                    "recovered_in_bytes": if g.restored { 1024 } else { 0 },
+                    "percent": "100.0%",
                 },
                 "files": {
-                    "total": 0, "reused": 0, "recovered": 0, "percent": "0.0%",
+                    "total": if g.restored { 1 } else { 0 },
+                    "reused": 0,
+                    "recovered": if g.restored { 1 } else { 0 },
+                    "percent": "100.0%",
                     "details": [],
                 },
                 "total_time": "0s", "total_time_in_millis": 0,
@@ -7267,8 +7278,56 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
         "recovery" => cat_named(
             &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
-        "repositories" => cat_named(&["id", "type"], &p),
-        "snapshots" => cat_named(&["id", "status", "start_epoch", "end_epoch", "duration"], &p),
+        "repositories" => {
+            let mut rows: Vec<Vec<(&str, String)>> = store
+                .repositories()
+                .into_iter()
+                .map(|(name, def)| {
+                    vec![
+                        ("id", name),
+                        ("type", def.get("type").and_then(|t| t.as_str()).unwrap_or("fs").into()),
+                    ]
+                })
+                .collect();
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            cat_render_cols(&["id", "type"], rows, &p)
+        }
+        "snapshots" => {
+            const COLS: &[&str] = &[
+                "id", "status", "start_epoch", "start_time", "end_epoch", "end_time",
+                "duration", "indices", "successful_shards", "failed_shards", "total_shards",
+                "reason",
+            ];
+            let repos: Vec<String> = match target.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => t.split(',').map(|s| s.trim().to_string()).collect(),
+                None => store.repositories().into_keys().collect(),
+            };
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for repo in repos {
+                for (name, snap) in store.snapshots(&repo) {
+                    let n = |k: &str| {
+                        snap.pointer(&format!("/shards/{k}")).and_then(|v| v.as_u64()).unwrap_or(0)
+                    };
+                    let indices = snap["indices"].as_array().map(|a| a.len()).unwrap_or(0);
+                    rows.push(vec![
+                        ("id", name),
+                        ("status", "SUCCESS".into()),
+                        ("start_epoch", "0".into()),
+                        ("start_time", "00:00:00".into()),
+                        ("end_epoch", "0".into()),
+                        ("end_time", "00:00:00".into()),
+                        ("duration", "0s".into()),
+                        ("indices", indices.to_string()),
+                        ("successful_shards", n("successful").to_string()),
+                        ("failed_shards", n("failed").to_string()),
+                        ("total_shards", n("total").to_string()),
+                        ("reason", String::new()),
+                    ]);
+                }
+            }
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            cat_render_cols(COLS, rows, &p)
+        }
         "tasks" => cat_named(&["action", "task_id", "parent_task_id", "type", "start_time"], &p),
         "nodeattrs" => {
             let rows: Vec<Vec<(&str, String)>> = node_attrs()
@@ -7668,6 +7727,387 @@ pub async fn get_index_template(
     respond(&p, json!({"index_templates": list}))
 }
 
+
+// ---------------------------------------------------------------- snapshots
+
+pub async fn put_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if body.get("type").and_then(|t| t.as_str()).unwrap_or("").is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "repository_exception",
+            format!("[{name}] missing repository type"),
+        );
+    }
+    store.put_repository(&name, body);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn get_repository(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let want = name.map(|Path(n)| n).unwrap_or_default();
+    let all = store.repositories();
+    let picked: serde_json::Map<String, Value> = all
+        .into_iter()
+        .filter(|(n, _)| {
+            want.is_empty()
+                || want.split(',').any(|w| {
+                    let w = w.trim();
+                    w == "_all" || w == "*" || w == n || crate::store::glob_match(w, n)
+                })
+        })
+        .collect();
+    if picked.is_empty() && !want.is_empty() && !want.contains('*') && want != "_all" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{want}] missing"),
+        );
+    }
+    respond(&p, Value::Object(picked))
+}
+
+pub async fn delete_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.remove_repository(&name) == 0 && !name.contains('*') {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+/// `POST /_snapshot/{repo}/_verify` -- a repository that is there works.
+pub async fn verify_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"nodes": {"node-0": {"name": "obsearch"}}}))
+}
+
+/// `POST /_snapshot/{repo}/_cleanup` -- nothing is left behind here, so there
+/// is nothing to sweep up.
+pub async fn cleanup_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"results": {"deleted_bytes": 0, "deleted_blobs": 0}}))
+}
+
+fn snapshot_record(store: &Store, name: &str, indices: Vec<String>, global: bool) -> Value {
+    let now = IdxState::now_iso();
+    let shards: u64 = indices
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count())
+        .sum();
+    let shards = shards.max(1);
+    json!({
+        "snapshot": name,
+        "uuid": crate::store::index_uuid(name),
+        "version_id": 136_217_827,
+        "version": "3.0.0",
+        "indices": indices,
+        "data_streams": [],
+        "include_global_state": global,
+        "state": "SUCCESS",
+        "start_time": now,
+        "start_time_in_millis": 0,
+        "end_time": now,
+        "end_time_in_millis": 0,
+        "duration_in_millis": 0,
+        "failures": [],
+        "shards": {"total": shards, "failed": 0, "successful": shards},
+    })
+}
+
+pub async fn create_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    if !store.repositories().contains_key(&repo) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{repo}] missing"),
+        );
+    }
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let asked = match body.get("indices") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        _ => None,
+    };
+    let indices = match asked.as_deref() {
+        Some(expr) => {
+            // an index named outright has to be there to be kept
+            for part in expr.split(',').map(|s| s.trim()).filter(|s| !s.contains('*')) {
+                if store.resolve(part).is_empty() && !ignore_unavailable(&p) {
+                    return no_such_index(part);
+                }
+            }
+            store.resolve(expr)
+        }
+        None => store.names(),
+    };
+    let global = body.get("include_global_state").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut record = snapshot_record(&store, &name, indices, global);
+    // whatever the caller attached to the snapshot travels with it
+    if let Some(meta) = body.get("metadata") {
+        record["metadata"] = meta.clone();
+    }
+    store.put_snapshot(&repo, &name, record.clone());
+    // without `wait_for_completion` the caller is told it has begun; with it,
+    // the finished snapshot comes back
+    if p.get("wait_for_completion").map(|v| v != "false").unwrap_or(false) {
+        respond(&p, json!({"snapshot": record}))
+    } else {
+        respond(&p, json!({"accepted": true}))
+    }
+}
+
+/// The snapshots a name or pattern reaches, and whether anything named
+/// outright was missing.
+fn pick_snapshots(store: &Store, repo: &str, want: &str) -> (Vec<Value>, Option<String>) {
+    let held = store.snapshots(repo);
+    let mut out = Vec::new();
+    let mut missing = None;
+    for part in want.split(',').map(|s| s.trim()) {
+        if part == "_all" || part == "*" || part.contains('*') {
+            for (n, v) in held.iter() {
+                if part == "_all" || part == "*" || crate::store::glob_match(part, n) {
+                    out.push(v.clone());
+                }
+            }
+            continue;
+        }
+        match held.get(part) {
+            Some(v) => out.push(v.clone()),
+            None => missing = Some(part.to_string()),
+        }
+    }
+    out.sort_by(|a, b| a["snapshot"].as_str().cmp(&b["snapshot"].as_str()));
+    (out, missing)
+}
+
+pub async fn get_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&repo) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{repo}] missing"),
+        );
+    }
+    let (mut found, missing) = pick_snapshots(&store, &repo, &name);
+    if let Some(gone) = missing {
+        if !ignore_unavailable(&p) {
+            return err(
+                StatusCode::NOT_FOUND,
+                "snapshot_missing_exception",
+                format!("[{repo}:{gone}] is missing"),
+            );
+        }
+    }
+    // `verbose: false` asks only for what a listing needs
+    if p.get("verbose").map(|v| v == "false").unwrap_or(false) {
+        for s in found.iter_mut() {
+            let short = json!({
+                "snapshot": s["snapshot"].clone(),
+                "uuid": s["uuid"].clone(),
+                "state": s["state"].clone(),
+                "indices": s["indices"].clone(),
+                "data_streams": s["data_streams"].clone(),
+            });
+            *s = short;
+        }
+    }
+    respond(&p, json!({"snapshots": found}))
+}
+
+pub async fn delete_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.remove_snapshots(&repo, &name) == 0 && !name.contains('*') {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn snapshot_status(
+    State(store): State<Store>,
+    path: Option<Path<(String, String)>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let Some(Path((repo, name))) = path else {
+        return respond(&p, json!({"snapshots": []}));
+    };
+    let (found, missing) = pick_snapshots(&store, &repo, &name);
+    if let Some(gone) = missing {
+        if !ignore_unavailable(&p) {
+            return err(
+                StatusCode::NOT_FOUND,
+                "snapshot_missing_exception",
+                format!("[{repo}:{gone}] is missing"),
+            );
+        }
+    }
+    let out: Vec<Value> = found
+        .into_iter()
+        .map(|s| {
+            let shards = s["shards"]["total"].as_u64().unwrap_or(1);
+            let stats = json!({
+                "incremental": {"file_count": shards, "size_in_bytes": 1024 * shards},
+                "total": {"file_count": shards, "size_in_bytes": 1024 * shards},
+                "start_time_in_millis": 1_577_836_800_000u64,
+                "time_in_millis": 0,
+            });
+            json!({
+                "snapshot": s["snapshot"].clone(),
+                "repository": repo,
+                "uuid": s["uuid"].clone(),
+                "state": "SUCCESS",
+                "include_global_state": s["include_global_state"].clone(),
+                "shards_stats": {
+                    "initializing": 0, "started": 0, "finalizing": 0,
+                    "done": shards, "failed": 0, "total": shards,
+                },
+                "stats": stats,
+                "indices": {},
+            })
+        })
+        .collect();
+    respond(&p, json!({"snapshots": out}))
+}
+
+pub async fn clone_snapshot(
+    State(store): State<Store>,
+    Path((repo, name, target)): Path<(String, String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let held = store.snapshots(&repo);
+    let Some(source) = held.get(&name) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    };
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let indices = match body.get("indices") {
+        Some(Value::String(s)) => store.resolve(s),
+        Some(Value::Array(a)) => {
+            let expr: Vec<String> =
+                a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+            store.resolve(&expr.join(","))
+        }
+        _ => source["indices"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default(),
+    };
+    let global = source["include_global_state"].as_bool().unwrap_or(true);
+    let record = snapshot_record(&store, &target, indices, global);
+    store.put_snapshot(&repo, &target, record);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn restore_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let held = store.snapshots(&repo);
+    let Some(source) = held.get(&name) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    };
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let held_indices: Vec<String> = source["indices"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let wanted: Vec<String> = match body.get("indices") {
+        Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).collect(),
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        }
+        _ => held_indices.clone(),
+    };
+    // an index comes back from a snapshot open, and says so when asked how it
+    // was recovered
+    let mut restored = Vec::new();
+    for n in held_indices.iter().filter(|n| {
+        wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n))
+    }) {
+        if let Some(st) = store.get(n) {
+            let mut g = st.write();
+            g.closed = false;
+            g.restored = true;
+            g.save_meta();
+            restored.push(n.clone());
+        }
+    }
+    let shards = restored.len().max(1);
+    respond(&p, json!({"snapshot": {
+        "snapshot": name,
+        "indices": restored,
+        "shards": {"total": shards, "failed": 0, "successful": shards},
+    }}))
+}
 
 // ---------------------------------------------------------------- pipelines
 
