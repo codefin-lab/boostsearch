@@ -640,6 +640,14 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     }
 }
 
+/// Does this cluster still allow the queries that cost the most to run?
+pub fn expensive_allowed(store: &Store) -> bool {
+    store
+        .cluster_setting("search.allow_expensive_queries")
+        .map(|v| v != json!("false") && v != json!(false))
+        .unwrap_or(true)
+}
+
 /// The `intervals` clause of a query: the field it reads and the rule it asks.
 fn find_intervals(node: &Value) -> Option<(String, Value)> {
     match node {
@@ -1749,6 +1757,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
@@ -1822,6 +1831,7 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
@@ -3874,6 +3884,7 @@ pub fn run(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -5569,6 +5580,7 @@ fn filtered_count(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -5817,6 +5829,7 @@ fn collect_field_values(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -7134,6 +7147,7 @@ fn collect_field_pairs(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,

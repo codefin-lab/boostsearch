@@ -19,6 +19,8 @@ pub struct Ctx<'a> {
     pub index: &'a Index,
     pub max_terms_count: usize,
     pub max_regex_length: usize,
+    /// whether the cluster still allows the queries that cost the most to run
+    pub allow_expensive: bool,
     /// value kinds seen per field path, used to narrow typed range variants
     pub observed_kinds: &'a std::collections::HashMap<String, u8>,
     pub kinds_complete: bool,
@@ -676,6 +678,46 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     // a boost sits beside the clause, or -- where a clause names one field --
     // beside that field's own options
     let clause = q.get(&kind);
+    // some queries walk the whole term dictionary, and a cluster may say it
+    // would rather not
+    if !ctx.allow_expensive {
+        let tail = match kind.as_str() {
+            "prefix" => Some(" For optimised prefix queries on text fields please enable \
+                              [index_prefixes]."),
+            "fuzzy" | "regexp" | "wildcard" => Some(""),
+            _ => None,
+        };
+        if let Some(tail) = tail {
+            return Err(anyhow!(
+                "[{kind}] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false.{tail}"
+            ));
+        }
+        // a range over text is a walk of the dictionary too; over a number it
+        // is not
+        if kind == "range" {
+            let field = q
+                .get(&kind)
+                .and_then(|b| b.as_object())
+                .and_then(|o| o.keys().next().cloned())
+                .unwrap_or_default();
+            if matches!(
+                ctx.mapping.type_of(&field),
+                Some("text") | Some("keyword") | Some("match_only_text")
+            ) {
+                return Err(anyhow!(
+                    "[range] queries on [text] or [keyword] fields cannot be executed when \
+                     'search.allow_expensive_queries' is set to false."
+                ));
+            }
+        }
+        if kind == "nested" || kind == "has_child" || kind == "has_parent" {
+            return Err(anyhow!(
+                "[joining] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false."
+            ));
+        }
+    }
     let boost = clause
         .and_then(|b| b.get("boost"))
         .or_else(|| {
