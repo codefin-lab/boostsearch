@@ -2101,6 +2101,15 @@ fn combine_spans(parts: &[Vec<Span>], ordered: bool, no_overlap: bool) -> Vec<Sp
     if parts.len() == 1 {
         return parts[0].clone();
     }
+    // where overlap is forbidden the parts are folded together two at a time,
+    // so a stretch already built is what the next part must keep clear of
+    if no_overlap && parts.len() > 2 {
+        let mut acc = combine_spans(&parts[..2], ordered, no_overlap);
+        for part in &parts[2..] {
+            acc = combine_spans(&[acc, part.clone()], ordered, no_overlap);
+        }
+        return acc;
+    }
     let mut out: Vec<Span> = Vec::new();
     if ordered {
         for first in &parts[0] {
@@ -2121,42 +2130,36 @@ fn combine_spans(parts: &[Vec<Span>], ordered: bool, no_overlap: bool) -> Vec<Sp
         }
     } else {
         // every part has to be somewhere; the stretch runs from the earliest
-        // of the chosen spans to the latest
-        for anchor in parts.iter().flatten() {
-            let mut lo = anchor.0;
-            let mut hi = anchor.1;
-            let mut taken: Vec<Span> = vec![*anchor];
-            let mut ok = true;
-            for part in parts {
-                if part.iter().any(|s| taken.contains(s)) && part.len() == 1 {
+        // of the chosen spans to the latest, and where overlap is forbidden no
+        // two parts may claim the same tokens
+        let mut chosen: Vec<Span> = Vec::with_capacity(parts.len());
+        fn walk(
+            parts: &[Vec<Span>],
+            at: usize,
+            chosen: &mut Vec<Span>,
+            no_overlap: bool,
+            out: &mut Vec<Span>,
+        ) {
+            if at == parts.len() {
+                let lo = chosen.iter().map(|s| s.0).min().unwrap_or(0);
+                let hi = chosen.iter().map(|s| s.1).max().unwrap_or(0);
+                out.push((lo, hi));
+                return;
+            }
+            for span in &parts[at] {
+                if no_overlap && chosen.iter().any(|t| span.0 <= t.1 && t.0 <= span.1) {
                     continue;
                 }
-                let pick = part
-                    .iter()
-                    .filter(|s| !no_overlap || !taken.iter().any(|t| s.0 <= t.1 && t.0 <= s.1))
-                    .filter(|s| !taken.contains(s))
-                    .min_by_key(|s| {
-                        let l = s.0.min(lo);
-                        let h = s.1.max(hi);
-                        h - l
-                    })
-                    .copied();
-                match pick {
-                    Some(s) => {
-                        lo = lo.min(s.0);
-                        hi = hi.max(s.1);
-                        taken.push(s);
-                    }
-                    None if part.iter().any(|s| taken.contains(s)) => {}
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                }
+                chosen.push(*span);
+                walk(parts, at + 1, chosen, no_overlap, out);
+                chosen.pop();
             }
-            if ok {
-                out.push((lo, hi));
-            }
+        }
+        // the search is over every way of choosing one span per part, which is
+        // small for the rules a query is written by hand with
+        let combinations: usize = parts.iter().map(|p| p.len().max(1)).product();
+        if combinations <= 100_000 {
+            walk(parts, 0, &mut chosen, no_overlap, &mut out);
         }
     }
     out.sort();
