@@ -3594,6 +3594,8 @@ pub fn run(
                     || def.get("rare_terms").is_some()
                     || def.get("nested").is_some()
                     || def.get("reverse_nested").is_some()
+                    || def.get("geo_distance").is_some()
+                    || def.get("percentile_ranks").is_some()
                     || def.get("significant_terms").is_some()
                     || def.get("significant_text").is_some()
                     || def.get("ip_range").is_some()
@@ -5228,6 +5230,10 @@ fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geo_distance").is_some() {
+        run_geo_distance_agg(store, targets, query_json, def, weighted)
+    } else if def.get("percentile_ranks").is_some() {
+        run_percentile_ranks(store, targets, query_json, def)
     } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
@@ -5296,6 +5302,7 @@ fn peelable_here(def: &Value) -> bool {
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
         "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
+        "geo_distance", "percentile_ranks",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
@@ -7259,6 +7266,142 @@ fn run_auto_date_histogram(
     let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
     out["interval"] = json!(label);
     Ok(out)
+}
+
+/// `geo_distance`: buckets of how far each document is from a point.
+///
+/// The distance is not a column, so it is worked out from each document's own
+/// position, and the documents in a bucket are then named to whatever
+/// aggregations sit under it.
+fn run_geo_distance_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("geo_distance").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let origin = spec.get("origin").cloned().unwrap_or(Value::Null);
+    let unit = spec.get("unit").and_then(|v| v.as_str()).unwrap_or("m");
+    let scale = parse_distance(&format!("1{unit}")).unwrap_or(1.0);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": [field.clone()],
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let path = format!("/_source/{}", field.replace('.', "/"));
+    let placed: Vec<(String, f64)> = answer
+        .hits
+        .iter()
+        .filter_map(|h| {
+            let id = h.get("_id")?.as_str()?.to_string();
+            let here = h.pointer(&path)?;
+            let d = geo_distance_metres(&origin, here)? / scale;
+            Some((id, d))
+        })
+        .collect();
+
+    let mut buckets: Vec<Value> = Vec::new();
+    let mut named = serde_json::Map::new();
+    for range in spec.get("ranges").and_then(|v| v.as_array()).into_iter().flatten() {
+        let from = range.get("from").and_then(|v| v.as_f64());
+        let to = range.get("to").and_then(|v| v.as_f64());
+        let ids: Vec<String> = placed
+            .iter()
+            .filter(|(_, d)| from.map(|f| *d >= f).unwrap_or(true))
+            .filter(|(_, d)| to.map(|t| *d < t).unwrap_or(true))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let key = range.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()).unwrap_or_else(
+            || match (from, to) {
+                (None, Some(t)) => format!("*-{t:?}"),
+                (Some(f), None) => format!("{f:?}-*"),
+                (Some(f), Some(t)) => format!("{f:?}-{t:?}"),
+                (None, None) => "*-*".to_string(),
+            },
+        );
+        let mut b = json!({"key": key.clone(), "doc_count": ids.len()});
+        if let Some(f) = from {
+            b["from"] = json!(f);
+        }
+        if let Some(t) = to {
+            b["to"] = json!(t);
+        }
+        if let Some(subs) = sub_aggs.as_ref() {
+            // the documents in this bucket are named outright, which is the
+            // only handle a distance leaves behind
+            let narrowed = Some(json!({"bool": {"filter": [{"terms": {"_id": ids}}]}}));
+            let (_, sub) = count_with_sub_aggs(
+                store,
+                targets,
+                &narrowed.clone().unwrap(),
+                &Some(subs.clone()),
+                weighted,
+            )?;
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+        }
+        if keyed {
+            named.insert(key, b);
+        } else {
+            buckets.push(b);
+        }
+    }
+    if keyed {
+        Ok(json!({"buckets": Value::Object(named)}))
+    } else {
+        Ok(json!({"buckets": buckets}))
+    }
+}
+
+/// `percentile_ranks`: for each value given, how much of the data falls at or
+/// below it.
+fn run_percentile_ranks(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("percentile_ranks").cloned().unwrap_or(json!({}));
+    let (field, missing) = agg_field_and_missing(&spec);
+    let wanted: Vec<f64> = spec
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+        .unwrap_or_default();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
+    let query = combine(main_query, None);
+    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let rank = |v: f64| -> Option<f64> {
+        if values.is_empty() {
+            return None;
+        }
+        let below = values.iter().filter(|x| **x <= v).count();
+        Some(below as f64 * 100.0 / values.len() as f64)
+    };
+    if keyed {
+        let mut map = serde_json::Map::new();
+        for v in &wanted {
+            map.insert(
+                format!("{v:.1}"),
+                rank(*v).map(|r| json!(r)).unwrap_or(Value::Null),
+            );
+        }
+        Ok(json!({"values": Value::Object(map)}))
+    } else {
+        let arr: Vec<Value> =
+            wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
+        Ok(json!({"values": arr}))
+    }
 }
 
 /// `top_hits`: the documents themselves, from inside whatever bucket the
