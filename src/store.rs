@@ -2286,6 +2286,56 @@ pub fn resolve_date_math_name(name: &str) -> String {
 }
 
 /// Write a date the way a Java-style pattern asks for.
+/// A moment written the way a named or literal date format asks for.
+pub fn format_millis(ms: i64, format: &str) -> Option<String> {
+    format_millis_at(ms, format, 0)
+}
+
+/// The same, written in a zone rather than in UTC.
+pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
+    if zone_ms != 0 {
+        let local = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+            (ms + zone_ms) as i128 * 1_000_000,
+        )
+        .ok()?;
+        let total = zone_ms / 60_000;
+        let sign = if total < 0 { '-' } else { '+' };
+        let total = total.abs();
+        let body = match format {
+            "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+            | "strict_date_time" => format!(
+                "{}.{:03}",
+                format_with_pattern(local, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
+                local.millisecond()
+            ),
+            other => return format_millis_utc(ms + zone_ms, other),
+        };
+        return Some(format!("{body}{sign}{:02}:{:02}", total / 60, total % 60));
+    }
+    format_millis_utc(ms, format)
+}
+
+fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
+    let dt = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .ok()?;
+    Some(match format {
+        "epoch_millis" => ms.to_string(),
+        "epoch_second" => (ms / 1000).to_string(),
+        "strict_date" | "date" | "yyyy-MM-dd" => format_with_pattern(dt, "yyyy-MM-dd"),
+        "basic_date" => format_with_pattern(dt, "yyyyMMdd"),
+        "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+        | "strict_date_time" => format!(
+            "{}.{:03}Z",
+            format_with_pattern(dt, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
+            dt.millisecond()
+        ),
+        "strict_date_hour_minute_second" | "date_hour_minute_second" => {
+            format_with_pattern(dt, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', "")
+        }
+        other => format_with_pattern(dt, other),
+    })
+}
+
 fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> String {
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
