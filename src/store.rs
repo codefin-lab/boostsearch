@@ -549,6 +549,9 @@ pub struct IdxState {
     pub noop_updates: std::sync::atomic::AtomicU64,
     /// how many times this index has been flushed, which `_stats` reports
     pub flushes: std::sync::atomic::AtomicU64,
+    /// how many documents have been fetched by id, which is what `_stats`
+    /// counts under `get` -- a terms lookup fetches one too
+    pub gets: std::sync::atomic::AtomicU64,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -1678,6 +1681,7 @@ impl Store {
             has_doc_count: false,
             noop_updates: std::sync::atomic::AtomicU64::new(0),
             flushes: std::sync::atomic::AtomicU64::new(0),
+            gets: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),

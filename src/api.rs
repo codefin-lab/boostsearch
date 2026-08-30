@@ -1819,6 +1819,7 @@ pub fn read_source_as_asked(st: &IdxState, id: &str, p: &Params) -> Option<Value
 }
 
 pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
+    st.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(p) = st.pending.get(id) {
         return p.as_ref().and_then(|raw| serde_json::from_str(raw).ok());
     }
@@ -4201,8 +4202,9 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                          st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
                      "is_throttled": false,
                      "throttle_time_in_millis": 0},
-        "get": {"total": 0, "time_in_millis": 0, "time": "0s", "getTime": "0s",
-                "exists_total": 0,
+        "get": {"total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
+                "time_in_millis": 0, "time": "0s", "getTime": "0s",
+                "exists_total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
                 "exists_time_in_millis": 0, "missing_total": 0,
                 "missing_time_in_millis": 0, "current": 0},
         "search": {"open_contexts": 0, "query_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "query_time_in_millis": 1,
@@ -6980,6 +6982,31 @@ fn compose_template(store: &Store, body: &Value) -> Value {
     json!({"settings": settings, "mappings": mappings, "aliases": aliases})
 }
 
+/// Could one name match both of these patterns?
+///
+/// Two templates overlap when some index name would pick up both, which is
+/// not the same as their patterns being written the same way: `t*` and `te*`
+/// both claim `test`.
+fn patterns_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let head = |p: &str| p.split('*').next().unwrap_or(p).to_string();
+    let (ha, hb) = (head(a), head(b));
+    // with the wildcards taken off, one claim contains the other when its
+    // fixed part is a prefix of the other's
+    if a.contains('*') && b.contains('*') {
+        return ha.starts_with(&hb) || hb.starts_with(&ha);
+    }
+    if a.contains('*') {
+        return crate::store::glob_match(a, b);
+    }
+    if b.contains('*') {
+        return crate::store::glob_match(b, a);
+    }
+    false
+}
+
 /// Which other index templates claim any of the same patterns.
 fn overlapping_templates(store: &Store, skip: &str, patterns: &[String]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -6993,7 +7020,7 @@ fn overlapping_templates(store: &Store, skip: &str, patterns: &[String]) -> Vec<
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
-        if pats.iter().any(|p| patterns.contains(p)) {
+        if pats.iter().any(|a| patterns.iter().any(|b| patterns_overlap(a, b))) {
             out.push(json!({"name": name, "index_patterns": pats}));
         }
     }
