@@ -4814,6 +4814,23 @@ pub async fn field_caps(
                 .raw
                 .pointer(&format!("/properties/{}/meta", name.replace('.', "/properties/")))
                 .cloned();
+            // a field with no doc values cannot be aggregated over
+            let has_doc_values = g
+                .mapping
+                .raw
+                .pointer(&format!(
+                    "/properties/{}/doc_values",
+                    name.replace('.', "/properties/")
+                ))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            // a field the mapping says not to index cannot be searched for
+            let indexed = g
+                .mapping
+                .raw
+                .pointer(&format!("/properties/{}/index", name.replace('.', "/properties/")))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             for kind in kinds {
             let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
             let slot = entry
@@ -4821,6 +4838,28 @@ pub async fn field_caps(
                 .unwrap()
                 .entry(kind.clone())
                 .or_insert_with(|| caps_for(&kind));
+            if !has_doc_values {
+                let where_not = slot
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("__unaggregatable".to_string())
+                    .or_insert_with(|| json!([]));
+                if let Some(a) = where_not.as_array_mut() {
+                    a.push(json!(n));
+                }
+            }
+            if !indexed {
+                // remember where it is not searchable; if that is everywhere,
+                // the field simply is not searchable
+                let where_not = slot
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("__unsearchable".to_string())
+                    .or_insert_with(|| json!([]));
+                if let Some(a) = where_not.as_array_mut() {
+                    a.push(json!(n));
+                }
+            }
             if let Some(m) = meta.clone().and_then(|m| m.as_object().cloned()) {
                 let dst = slot
                     .as_object_mut()
@@ -4853,13 +4892,81 @@ pub async fn field_caps(
         }
     }
 
+    // `include_unmapped` names the indices a field is missing from, which
+    // means the ones it is present in have to be named too
+    let unmapped = flag(&p, "include_unmapped");
+    if unmapped {
+        let mut extra: Vec<(String, Value)> = Vec::new();
+        for (name, per_type) in fields.iter() {
+            let mut has: Vec<String> = Vec::new();
+            for (_, v) in per_type.as_object().into_iter().flatten() {
+                for i in v.get("__indices").and_then(|i| i.as_array()).into_iter().flatten() {
+                    if let Some(s) = i.as_str() {
+                        has.push(s.to_string());
+                    }
+                }
+            }
+            let missing: Vec<String> =
+                kept.iter().filter(|n| !has.contains(n)).cloned().collect();
+            if !missing.is_empty() {
+                extra.push((name.clone(), json!(missing)));
+            }
+        }
+        for (name, missing) in extra {
+            if let Some(o) = fields.get_mut(&name).and_then(|v| v.as_object_mut()) {
+                // the mapped types now have to say where they are, since one
+                // of the entries says where the field is not
+                for (_, v) in o.iter_mut() {
+                    if let Some(i) = v.get("__indices").cloned() {
+                        v["indices"] = i;
+                    }
+                }
+                o.insert(
+                    "unmapped".to_string(),
+                    json!({
+                        "type": "unmapped",
+                        "searchable": false,
+                        "aggregatable": false,
+                        "indices": missing,
+                    }),
+                );
+            }
+        }
+    }
+
     // only report `indices` on a field whose type is not uniform
     for (_, per_type) in fields.iter_mut() {
         let type_count = per_type.as_object().map(|o| o.len()).unwrap_or(0);
         if let Some(o) = per_type.as_object_mut() {
             for (_, v) in o.iter_mut() {
                 let idx = v.as_object_mut().unwrap().remove("__indices");
-                if type_count > 1 {
+                let unsearchable = v.as_object_mut().unwrap().remove("__unsearchable");
+                let unaggregatable = v.as_object_mut().unwrap().remove("__unaggregatable");
+                if let (Some(Value::Array(no)), Some(Value::Array(all))) =
+                    (unaggregatable, idx.clone())
+                {
+                    if no.len() == all.len() {
+                        v["aggregatable"] = json!(false);
+                    } else if !no.is_empty() {
+                        v["aggregatable"] = json!(false);
+                        v["non_aggregatable_indices"] = json!(no);
+                    }
+                }
+                // searchable in some indices and not others: say which
+                if let (Some(Value::Array(no)), Some(Value::Array(all))) =
+                    (unsearchable.clone(), idx.clone())
+                {
+                    if no.len() == all.len() {
+                        v["searchable"] = json!(false);
+                    } else if !no.is_empty() {
+                        v["searchable"] = json!(false);
+                        v["non_searchable_indices"] = json!(no);
+                    }
+                }
+                // with `include_unmapped`, a field present everywhere still
+                // needs no listing: there is nothing it is missing from
+                let partly = type_count > 1;
+                if partly {
                     if let Some(i) = idx {
                         v["indices"] = i;
                     }
