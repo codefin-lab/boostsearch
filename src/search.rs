@@ -3646,8 +3646,8 @@ pub fn run(
     // which after the sort is the first each value is seen at. It has to run
     // before the page is cut, or a page could be all one value's worth
     if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let path = format!("/{}", field.replace('.', "/"));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
@@ -5511,7 +5511,7 @@ fn run_rare_terms_agg(
         inject_doc_count_helpers(&mut request);
     }
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
     let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
     if weighted {
         apply_doc_counts(&mut res);
@@ -5698,7 +5698,7 @@ fn run_multi_terms_agg(
         inject_doc_count_helpers(&mut request);
     }
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
     let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
     if weighted {
         apply_doc_counts(&mut res);
@@ -5719,6 +5719,22 @@ fn run_multi_terms_agg(
     flatten_multi_terms(&res, 0, fields.len(), &mut Vec::new(), &mut flat);
 
     let total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    // `min_doc_count: 0` asks for combinations the index holds but the query
+    // did not match, so the key space comes from the whole index
+    if min_doc_count == 0 && main_query.is_some() {
+        let (_, all) = filtered_count(store, targets, &json!({"match_all": {}}), &Some(request))?;
+        if let Some(all) = all {
+            let mut every = Vec::new();
+            flatten_multi_terms(&all, 0, fields.len(), &mut Vec::new(), &mut every);
+            let mut seen: std::collections::HashSet<String> =
+                flat.iter().map(|(k, _, _)| format!("{k:?}")).collect();
+            for (key, _, _) in every {
+                if seen.insert(format!("{key:?}")) {
+                    flat.push((key, 0, serde_json::Map::new()));
+                }
+            }
+        }
+    }
     let mut buckets: Vec<Value> = flat
         .into_iter()
         .filter(|(_, c, _)| *c >= min_doc_count)
@@ -6215,7 +6231,7 @@ fn run_composite_agg(
     }
 
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
     let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
     if weighted {
         apply_doc_counts(&mut res);
