@@ -2063,6 +2063,37 @@ pub fn write_doc_versioned(
             w.delete_term(term);
         }
     }
+    // a completion field filed under contexts has to be given them: without
+    // one the value could never be found again
+    if let Some(props) = st.mapping.raw.pointer("/properties").and_then(|p| p.as_object()) {
+        for (name, def) in props {
+            let needs = def
+                .get("contexts")
+                .and_then(|c| c.as_array())
+                .map(|c| c.iter().all(|d| d.get("path").is_none()) && !c.is_empty())
+                .unwrap_or(false);
+            if !needs {
+                continue;
+            }
+            let Some(value) = source.get(name) else { continue };
+            let given = match value {
+                Value::Object(o) => o.contains_key("contexts"),
+                Value::Array(a) => a
+                    .iter()
+                    .all(|v| v.as_object().map(|o| o.contains_key("contexts")).unwrap_or(false)),
+                _ => false,
+            };
+            if !given {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "mapper_parsing_exception",
+                    format!(
+                        "Contexts are mandatory in context enabled completion field [{name}]"
+                    ),
+                ));
+            }
+        }
+    }
     let default_lenient = st
         .setting("mapping.ignore_malformed")
         .map(|v| v == "true")

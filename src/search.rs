@@ -2612,6 +2612,93 @@ fn build_suggest(
 }
 
 /// Values that begin with what has been typed.
+/// Does this document sit in the contexts the suggestion asked for?
+///
+/// A completion field may be filed under contexts -- a category it belongs to,
+/// or a place it is near. The values come from the completion object itself,
+/// or from another field the mapping points at.
+fn context_matches(
+    g: &IdxState,
+    field: &str,
+    spec: &Value,
+    raw: Option<&Value>,
+    source: &Value,
+) -> bool {
+    let Some(asked) = spec.get("contexts").and_then(|c| c.as_object()) else { return true };
+    let path_of = match field.rsplit_once('.') {
+        Some((parent, leaf)) => format!(
+            "/properties/{}/fields/{leaf}/contexts",
+            parent.replace('.', "/properties/")
+        ),
+        None => format!("/properties/{field}/contexts"),
+    };
+    let declared = g
+        .mapping
+        .raw
+        .pointer(&path_of)
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (name, want) in asked {
+        let kind = declared
+            .iter()
+            .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            .and_then(|d| d.get("type").and_then(|t| t.as_str()))
+            .unwrap_or("category");
+        let path = declared
+            .iter()
+            .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            .and_then(|d| d.get("path").and_then(|t| t.as_str()));
+        // the document's own value for this context: written beside the
+        // completion, or read from the field the mapping names
+        let held = raw
+            .and_then(|r| r.pointer(&format!("/contexts/{name}")))
+            .or_else(|| {
+                path.and_then(|p| source.pointer(&format!("/{}", p.replace('.', "/"))))
+            });
+        let Some(held) = held else { return false };
+        let ok = if kind == "geo" {
+            let precision = declared
+                .iter()
+                .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+                .and_then(|d| d.get("precision"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_distance)
+                .unwrap_or(5_000.0);
+            let wanted = want.get("context").unwrap_or(want);
+            geo_distance_metres(wanted, held).map(|d| d <= precision).unwrap_or(false)
+        } else {
+            let listed = |v: &Value| -> Vec<String> {
+                match v {
+                    Value::String(s) => vec![s.clone()],
+                    Value::Array(a) => a
+                        .iter()
+                        .map(|x| match x.get("context").unwrap_or(x) {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    Value::Object(o) => o
+                        .get("context")
+                        .map(|c| match c {
+                            Value::String(s) => vec![s.clone()],
+                            other => vec![other.to_string()],
+                        })
+                        .unwrap_or_default(),
+                    other => vec![other.to_string()],
+                }
+            };
+            let wants = listed(want);
+            let has = listed(held);
+            wants.iter().any(|w| has.contains(w))
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 fn completion_suggest(
     store: &Store,
     targets: &[String],
@@ -2625,6 +2712,36 @@ fn completion_suggest(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let prefix = text.to_lowercase();
+
+    // a field filed under contexts can only be asked about through them
+    let contexts_path = |field: &str| -> String {
+        match field.rsplit_once('.') {
+            // a sub-field lives under its parent's `fields`
+            Some((parent, leaf)) => format!(
+                "/properties/{}/fields/{leaf}/contexts",
+                parent.replace('.', "/properties/")
+            ),
+            None => format!("/properties/{field}/contexts"),
+        }
+    };
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let declared = g
+            .mapping
+            .raw
+            .pointer(&contexts_path(&field))
+            .and_then(|c| c.as_array())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if declared && spec.get("contexts").is_none() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("Missing mandatory contexts in context query for field [{field}]"),
+            ));
+        }
+    }
 
     let mut options: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
@@ -2643,7 +2760,15 @@ fn completion_suggest(
             // a completion field may hold one value or several
             // a completion value may be plain text, a list of them, or an
             // object carrying the inputs and the weight to rank them by
-            let raw = source.pointer(&format!("/{}", field.replace('.', "/")));
+            // a completion may be declared as a sub-field of another, and
+            // then the value it completes is the parent's
+            let raw = source.pointer(&format!("/{}", field.replace('.', "/"))).or_else(|| {
+                field
+                    .rsplit_once('.')
+                    .and_then(|(parent, _)| {
+                        source.pointer(&format!("/{}", parent.replace('.', "/")))
+                    })
+            });
             let texts = |v: &Value| -> Vec<String> {
                 match v {
                     Value::String(s) => vec![s.clone()],
@@ -2681,6 +2806,9 @@ fn completion_suggest(
                 }
                 Some(other) => weighted.extend(texts(other).into_iter().map(|t| (t, 1.0))),
                 None => {}
+            }
+            if !context_matches(&g, &field, spec, raw, &source) {
+                continue;
             }
             for (v, weight) in weighted {
                 if !v.to_lowercase().starts_with(&prefix) {
