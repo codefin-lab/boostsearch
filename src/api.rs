@@ -6377,8 +6377,16 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
     // plain text: the format `cat` is named for. Cells are padded to the width
     // of their column so the values line up down the page.
     let show_head = p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true);
+    // with no rows to read the columns off, `h=` still says which were asked
+    // for, and in what order
+    let asked: Vec<&str> = p
+        .get("h")
+        .filter(|s| !s.is_empty())
+        .map(|spec| spec.split(',').map(|s| s.trim()).collect())
+        .unwrap_or_default();
     let head: Vec<&str> = match rows.first() {
         Some(r) => r.iter().map(|(k, _)| *k).collect(),
+        None if !asked.is_empty() => asked,
         None => columns.to_vec(),
     };
     let mut widths: Vec<usize> = if show_head {
@@ -7052,6 +7060,10 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 let g = st.read();
                 let mut fields: Vec<(String, u64)> = g.field_column_bytes().into_iter().collect();
                 fields.sort();
+                // the path names which fields to report on
+                if let Some(want) = target.as_deref() {
+                    fields.retain(|(f, _)| want.split(',').any(|w| w.trim() == f));
+                }
                 for (field, bytes) in fields {
                     rows.push(vec![
                         ("id", "node-0".to_string()),
