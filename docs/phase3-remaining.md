@@ -201,3 +201,29 @@ means carrying integers as integers through the sort path rather than widening
 them to f64, which is a change to `SortValue` and everything that reads it.
 
 Left failing by this: `search/90_search_after` (1).
+
+## Shards are logical here, and some tests can tell
+
+An index in obsearch is one tantivy index; `number_of_shards` decides routing
+and is reported back, but there is no separate store per shard. Four remaining
+cases turn on that difference, and each would need real per-shard stores rather
+than a fix:
+
+- `delete/50_refresh` -- a refresh reaches one shard, so a delete on another
+  shard stays invisible. Here a refresh reaches everything.
+- `search.aggregation/190_percentiles_hdr_metric` "Negative values test" -- a
+  negative value fails the one shard holding it, and the search reports four
+  hits out of five plus a shard failure. Here there is no shard to fail.
+- `search.aggregation/370_multi_terms` "sum_other_doc_count" -- `shard_size`
+  truncates each shard's answer before the merge, so a term is undercounted on
+  purpose. Here the aggregation sees the whole index at once.
+- `scroll/12_slices` "Sliced scroll" -- which slice a document falls in comes
+  from the shard it is on.
+
+## A date beyond what a date can hold
+
+`search.aggregation/40_range` "Date Range Missing" writes epoch *seconds* in the
+hundreds of billions, which is the year 11970. tantivy holds a date as i64
+nanoseconds since the epoch, which runs out in 2262, so the value cannot be
+stored at all -- not as an approximation, not clamped without losing the
+ordering the aggregation is asking about.
