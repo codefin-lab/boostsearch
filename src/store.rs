@@ -963,6 +963,28 @@ impl IdxState {
         out
     }
 
+    /// The moment now, written the way a timestamp is reported.
+    pub fn now_iso() -> String {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i128)
+            .unwrap_or(0);
+        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+            .map(|d| {
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    d.year(),
+                    d.month() as u8,
+                    d.day(),
+                    d.hour(),
+                    d.minute(),
+                    d.second(),
+                    d.millisecond(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     pub fn created_millis(&self) -> u64 {
         // a setting written by hand wins, since a restored index keeps the
         // date it was first made

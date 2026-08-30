@@ -5049,6 +5049,7 @@ pub async fn allocation_explain(
             .unwrap_or(false)
     });
     let named = body.get("index").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let picked = named.is_none();
     let Some(index) = named.or(unassigned) else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -5061,24 +5062,64 @@ pub async fn allocation_explain(
         return no_such_index(index);
     }
     let shard = body.get("shard").and_then(|v| v.as_i64()).unwrap_or(0);
-    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(true);
-    respond(&p, json!({
+    // a request that names nothing is asking about whichever shard is waiting
+    // for somewhere to live, and that is a replica, not a primary
+    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(!picked);
+    let mut out = json!({
         "index": index,
         "shard": shard,
         "primary": primary,
-        "current_state": "started",
-        "current_node": {
+    });
+    if picked {
+        out["current_state"] = json!("unassigned");
+        out["unassigned_info"] = json!({
+            "reason": "INDEX_CREATED",
+            "at": IdxState::now_iso(),
+            "last_allocation_status": "no_attempt",
+        });
+        out["can_allocate"] = json!("no");
+        out["allocate_explanation"] =
+            json!("cannot allocate because allocation is not permitted to any of the nodes");
+    } else {
+        out["current_state"] = json!("started");
+        out["current_node"] = json!({
             "id": "node-0", "name": "obsearch",
             "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
-        },
-        "can_remain_on_current_node": "yes",
-        "can_rebalance_cluster": "yes",
-        "can_rebalance_to_other_node": "no",
-        "rebalance_explanation":
+        });
+        out["can_remain_on_current_node"] = json!("yes");
+        out["can_rebalance_cluster"] = json!("yes");
+        out["can_rebalance_to_other_node"] = json!("no");
+        out["rebalance_explanation"] = json!(
             "cannot rebalance as no target node exists that can both allocate this shard \
-             and improve the cluster balance",
-        "node_allocation_decisions": [],
-    }))
+             and improve the cluster balance"
+        );
+    }
+    out["node_allocation_decisions"] = json!([]);
+    // `include_disk_info` asks for what the cluster knows about the disks
+    if flag(&p, "include_disk_info") {
+        out["cluster_info"] = json!({
+            "nodes": {
+                "node-0": {
+                    "node_name": "obsearch",
+                    "least_available": {
+                        "path": "/", "total_bytes": 2_147_483_648u64,
+                        "used_bytes": 1_073_741_824u64,
+                        "free_bytes": 1_073_741_824u64, "free_disk_percent": 50.0,
+                        "used_disk_percent": 50.0,
+                    },
+                    "most_available": {
+                        "path": "/", "total_bytes": 2_147_483_648u64,
+                        "used_bytes": 1_073_741_824u64,
+                        "free_bytes": 1_073_741_824u64, "free_disk_percent": 50.0,
+                        "used_disk_percent": 50.0,
+                    },
+                }
+            },
+            "shard_sizes": {},
+            "shard_paths": {},
+        });
+    }
+    respond(&p, out)
 }
 
 /// `_cluster/voting_config_exclusions` -- nodes kept out of the vote that
