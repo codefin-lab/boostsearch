@@ -3023,12 +3023,10 @@ pub fn run(
                 def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
-                    // HDR percentiles answer a different question from
-                    // tantivy's t-digest, so they are computed here
-                    || def
-                        .get("percentiles")
-                        .map(|v| v.get("hdr").is_some())
-                        .unwrap_or(false)
+                    // percentiles answer a different question from tantivy's
+                    // sketch, which is approximate where OpenSearch's is exact
+                    // over the handful of values these aggregations see
+                    || def.get("percentiles").is_some()
                     // `_index` is metadata, not a column: bucket it ourselves
                     || def.get("global").is_some()
                     || def
@@ -4728,22 +4726,36 @@ fn run_hdr_percentiles(
 
     let query = combine(main_query, None);
     let values = collect_field_values(store, targets, &query, &field, missing)?;
+    // without `hdr`, OpenSearch keeps a t-digest, which for the counts these
+    // aggregations see holds every value and reports the one at the rank the
+    // percentile names
+    let hdr = spec.get("hdr").is_some();
+    let mut sorted = values.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |p: f64| -> Option<f64> {
+        if sorted.is_empty() {
+            return None;
+        }
+        let rank = ((p / 100.0) * sorted.len() as f64).ceil().max(1.0) as usize;
+        sorted.get(rank.min(sorted.len()) - 1).copied()
+    };
     let mut hist = crate::hdr::HdrHistogram::default();
     for v in &values {
         hist.record(*v);
     }
+    let value_at = |p: f64| if hdr { hist.value_at(p) } else { at(p) };
 
     if keyed {
         let mut map = serde_json::Map::new();
         for p in &percents {
             let key = format!("{:.1}", p);
-            map.insert(key, hist.value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
+            map.insert(key, value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
         }
         Ok(json!({ "values": Value::Object(map) }))
     } else {
         let arr: Vec<Value> = percents
             .iter()
-            .map(|p| json!({"key": p, "value": hist.value_at(*p)}))
+            .map(|p| json!({"key": p, "value": value_at(*p)}))
             .collect();
         Ok(json!({ "values": arr }))
     }
