@@ -2909,7 +2909,16 @@ pub fn run(
     }
 
     // unsigned_long cannot be sorted alongside another numeric type
-    let sort_keys = parse_sort(body.get("sort"));
+    let mut sort_keys = parse_sort(body.get("sort"));
+    // `_shard_doc` orders by where a document sits within a shard. That is the
+    // order it was written in, which is what `_seq` records -- and it only
+    // holds still while a point in time is open, which is why it is refused
+    // without one.
+    for k in sort_keys.iter_mut() {
+        if k.field == "_shard_doc" {
+            k.field = "_seq".to_string();
+        }
+    }
     for k in &sort_keys {
         let mut kinds: Vec<String> = Vec::new();
         for n in &targets {
@@ -3159,6 +3168,8 @@ pub fn run(
         .get("search_after")
         .and_then(|v| v.as_array())
         .filter(|a| a.len() == sort_keys.len() && !a.is_empty())
+        // a marker of nulls names no page at all: it is where a caller starts
+        .filter(|a| !a.iter().all(|v| v.is_null()))
         .map(|a| {
             a.iter()
                 .zip(sort_keys.iter())
@@ -3341,6 +3352,13 @@ pub fn run(
                 .map(|k| match k.field.as_str() {
                     "_score" => SortSource::Score,
                     "_doc" => SortSource::Doc,
+                    // `_seq` is a column of the index itself, not a field
+                    // inside either JSON view, so it is named as it is
+                    "_seq" => SortSource::Column {
+                        name: "_seq".to_string(),
+                        desc: k.desc,
+                        mode: k.mode.clone(),
+                    },
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
