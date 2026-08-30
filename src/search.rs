@@ -95,6 +95,9 @@ struct SortKey {
     field: String,
     desc: bool,
     mode: Option<String>,
+    /// where a document with no value for this field goes. `_last` means last
+    /// in the order the caller sees, whichever direction that is.
+    missing_last: bool,
 }
 
 fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
@@ -106,7 +109,12 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
     let mut out = Vec::new();
     for item in items {
         match item {
-            Value::String(f) => out.push(SortKey { field: f, desc: false, mode: None }),
+            Value::String(f) => out.push(SortKey {
+                field: f,
+                desc: false,
+                mode: None,
+                missing_last: true,
+            }),
             Value::Object(o) => {
                 for (field, opts) in o {
                     let desc = match &opts {
@@ -122,7 +130,12 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .get("mode")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_ascii_lowercase());
-                    out.push(SortKey { field, desc, mode });
+                    let missing_last = opts
+                        .get("missing")
+                        .and_then(|v| v.as_str())
+                        .map(|m| m == "_last")
+                        .unwrap_or(true);
+                    out.push(SortKey { field, desc, mode, missing_last });
                 }
             }
             _ => {}
@@ -326,6 +339,8 @@ enum SortSource {
 struct SortCollector {
     sources: Vec<SortSource>,
     desc: Vec<bool>,
+    /// per key, whether a document with no value goes last
+    missing_last: Vec<bool>,
     limit: usize,
     /// Where a previous page ended. Documents up to and including it are not
     /// collected at all, so the page limit applies to what comes after.
@@ -337,6 +352,7 @@ struct SortSegmentCollector {
     sources: Vec<SortSource>,
     columns: Vec<Option<SortColumns>>,
     desc: Vec<bool>,
+    missing_last: Vec<bool>,
     limit: usize,
     after: Option<Vec<SortValue>>,
     buf: Vec<Cand>,
@@ -406,6 +422,7 @@ impl tantivy::collector::Collector for SortCollector {
             sources: self.sources.clone(),
             columns,
             desc: self.desc.clone(),
+            missing_last: self.missing_last.clone(),
             limit: self.limit,
             after: self.after.clone(),
             buf: Vec::with_capacity(self.limit.saturating_mul(4).max(512).min(4096)),
@@ -523,8 +540,13 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
             let mut behind = true;
             for (i, want_desc) in self.desc.iter().enumerate() {
                 let Some(marker) = after.get(i) else { break };
-                let ord = sort[i].cmp_asc(marker);
-                let ord = if *want_desc { ord.reverse() } else { ord };
+                let key = SortKey {
+                    field: String::new(),
+                    desc: *want_desc,
+                    mode: None,
+                    missing_last: self.missing_last.get(i).copied().unwrap_or(true),
+                };
+                let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {
                     Ordering::Greater => {
                         behind = false;
@@ -578,26 +600,39 @@ struct Cand {
 /// milliseconds and a `date_nanos` reports the nanoseconds themselves -- that
 /// resolution is the whole reason for the second type.
 fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
+    date_sort_kind(store, targets, field) == Some(false)
+}
+
+/// Which kind of date a sort key names, if it names one at all: `Some(false)`
+/// for a `date`, `Some(true)` for a `date_nanos`.
+fn date_sort_kind(store: &Store, targets: &[String], field: &str) -> Option<bool> {
     targets
         .iter()
         .filter_map(|n| store.get(n))
-        .any(|st| st.read().mapping.type_of(field) == Some("date"))
+        .find_map(|st| match st.read().mapping.type_of(field) {
+            Some("date") => Some(false),
+            Some("date_nanos") => Some(true),
+            _ => None,
+        })
 }
 
 /// Read one `search_after` element back into the value the sort produced.
-fn sort_value_from_json(v: &Value, is_date: bool) -> SortValue {
+fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     match v {
-        // the columns are read as f64, so the marker is put in the same shape
-        // before it is compared with them
-        Value::Number(n) => {
-            let scale = if is_date { 1e6 } else { 1.0 };
-            SortValue::F64(n.as_f64().unwrap_or(0.0) * scale)
-        }
+        // a marker for a date is written in the unit that field reports in,
+        // and the column counts nanoseconds either way
+        Value::Number(n) => match date {
+            // nanoseconds do not survive a trip through an f64, and a marker
+            // that has lost its last digits cannot tell two pages apart
+            Some(true) => SortValue::I64(n.as_i64().unwrap_or(0)),
+            Some(false) => SortValue::I64(n.as_i64().unwrap_or(0).saturating_mul(1_000_000)),
+            None => SortValue::F64(n.as_f64().unwrap_or(0.0)),
+        },
         // a marker for a date field may be written as a date rather than as
         // the number the column holds
-        Value::String(s) if is_date => crate::store::canonical_date(v)
+        Value::String(s) if date.is_some() => crate::store::canonical_date(v)
             .and_then(|d| crate::store::parse_date_lenient(&d))
-            .map(|d| SortValue::F64(d.unix_timestamp_nanos() as f64))
+            .map(|d| SortValue::I64(d.unix_timestamp_nanos() as i64))
             .unwrap_or_else(|| SortValue::Str(s.clone())),
         Value::String(s) => SortValue::Str(s.clone()),
         Value::Null => SortValue::Missing,
@@ -650,13 +685,32 @@ fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
             .then_with(by_doc);
     }
     for (i, k) in sort_keys.iter().enumerate() {
-        let ord = a.sort[i].cmp_asc(&b.sort[i]);
-        let ord = if k.desc && ord != Ordering::Equal { ord.reverse() } else { ord };
+        let ord = cmp_with_missing(&a.sort[i], &b.sort[i], k);
         if ord != Ordering::Equal {
             return ord;
         }
     }
     by_doc()
+}
+
+/// Compare two values of one sort key, in the direction it asks for.
+///
+/// A document with no value goes where `missing` says, which is last in the
+/// order the caller sees -- so it stays last when the sort is reversed rather
+/// than moving to the front with everything else.
+fn cmp_with_missing(a: &SortValue, b: &SortValue, k: &SortKey) -> Ordering {
+    let missing = |v: &SortValue| matches!(v, SortValue::Missing);
+    if missing(a) || missing(b) {
+        let last = if k.missing_last { Ordering::Greater } else { Ordering::Less };
+        return match (missing(a), missing(b)) {
+            (true, true) => Ordering::Equal,
+            (true, false) => last,
+            (false, true) => last.reverse(),
+            _ => unreachable!(),
+        };
+    }
+    let ord = a.cmp_asc(b);
+    if k.desc && ord != Ordering::Equal { ord.reverse() } else { ord }
 }
 
 /// Keep only the best `want` candidates, pruning in amortised linear time
@@ -1113,6 +1167,17 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     match node {
         Value::Object(o) => {
             if let Some(Value::String(f)) = o.get("field") {
+                // a field already named as the column it lives in is left as
+                // it is; naming one that way is how a caller asks for the
+                // analysed view rather than the stored one
+                if f.starts_with(&format!("{}.", crate::store::DYN))
+                    || f.starts_with(&format!("{}.", crate::store::RAW))
+                {
+                    for (_, v) in o.iter_mut() {
+                        rewrite_agg_fields(v, ctx);
+                    }
+                    return;
+                }
                 // `_raw` carries both the untokenised strings and the numerics,
                 // so it is the right column for every agg except one over an
                 // explicitly analysed text field.
@@ -1558,6 +1623,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
                         mapping: &g.mapping,
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
@@ -1630,6 +1696,7 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                             mapping: &g.mapping,
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
@@ -1776,13 +1843,35 @@ fn profiled_agg_search(
                 .and_then(|r| r.get(name.as_str()))
                 .cloned()
                 .unwrap_or_else(|| serde_json::to_value(agg).unwrap_or(Value::Null));
-            json!({
+            // a sub-aggregation is profiled as a child of the one that
+            // built the buckets it ran over
+            let children: Vec<Value> = def
+                .get("aggs")
+                .or_else(|| def.get("aggregations"))
+                .and_then(|a| a.as_object())
+                .map(|o| {
+                    o.iter()
+                        .map(|(cname, cdef)| json!({
+                            "type": agg_profile_type(cdef),
+                            "description": cname,
+                            "time_in_nanos": 0,
+                            "breakdown": breakdown,
+                            "debug": {},
+                        }))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut entry = json!({
                 "type": agg_profile_type(&def),
                 "description": name,
                 "time_in_nanos": total,
                 "breakdown": breakdown,
                 "debug": agg_profile_debug(&def, ctx),
-            })
+            });
+            if !children.is_empty() {
+                entry["children"] = Value::Array(children);
+            }
+            entry
         })
         .collect();
     let profile = json!({
@@ -1863,6 +1952,11 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
         let mut out = json!({
             "result_strategy": strategy,
             "collection_strategy": "dense",
+            // how many segments held one ordinal per document, which is what
+            // lets the collector skip the multi-value path
+            "segments_with_single_valued_ords": 1,
+            "segments_with_multi_valued_ords": 0,
+            "has_filter": false,
         });
         if !deferred.is_empty() {
             out["deferred_aggregators"] = json!(deferred);
@@ -2627,6 +2721,108 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+
+/// The name OpenSearch gives an aggregation's *result* type, which is what
+/// `typed_keys` puts in front of each name. It is not always the name the
+/// aggregation was asked for by: a terms aggregation is named after the kind
+/// of term it produced, and a percentile after the sketch behind it.
+fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -> Option<String> {
+    let Some(o) = def.as_object() else { return None };
+    let kind: String = o
+        .keys()
+        .map(|k| k.to_string())
+        .find(|k| !matches!(k.as_str(), "aggs" | "aggregations" | "meta"))?;
+    let spec = &def[&kind];
+    let field_kind = || -> &'static str {
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        let ty = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+        match ty.as_deref() {
+            Some("unsigned_long") => "u",
+            Some("long" | "integer" | "short" | "byte" | "date" | "date_nanos" | "boolean") => "l",
+            Some("double" | "float" | "half_float" | "scaled_float") => "d",
+            _ => "s",
+        }
+    };
+    Some(match kind.as_str() {
+        "terms" => format!("{}terms", field_kind()),
+        "significant_terms" => format!("sig{}terms", field_kind()),
+        "multi_terms" => "multiterms".into(),
+        "percentiles" => {
+            if spec.get("hdr").is_some() { "hdr_percentiles".into() } else { "tdigest_percentiles".into() }
+        }
+        "percentile_ranks" => {
+            if spec.get("hdr").is_some() {
+                "hdr_percentile_ranks".into()
+            } else {
+                "tdigest_percentile_ranks".into()
+            }
+        }
+        // a pipeline that points at one bucket reports that bucket's value
+        "max_bucket" | "min_bucket" => "bucket_metric_value".into(),
+        "avg_bucket" | "sum_bucket" | "cumulative_sum" | "bucket_script" | "moving_avg"
+        | "moving_fn" | "serial_diff" => "simple_value".into(),
+        "stats_bucket" => "stats_bucket".into(),
+        "extended_stats_bucket" => "extended_stats_bucket".into(),
+        "percentiles_bucket" => "percentiles_bucket".into(),
+        other => other.to_string(),
+    })
+}
+
+/// Rename every aggregation in an answer to `type#name`, all the way down.
+fn apply_typed_keys(store: &Store, targets: &[String], out: &mut Value, request: &Value) {
+    let Some(reqs) = request.as_object().cloned() else { return };
+    let Some(map) = out.as_object_mut() else { return };
+    for (name, def) in reqs {
+        let Some(mut value) = map.remove(&name) else { continue };
+        let subs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+        if let Some(subs) = subs.as_ref() {
+            match value.get_mut("buckets") {
+                // a bucketing aggregation carries its sub-aggregations inside
+                // each bucket rather than beside itself
+                Some(Value::Array(list)) => {
+                    for b in list.iter_mut() {
+                        apply_typed_keys(store, targets, b, subs);
+                    }
+                }
+                Some(Value::Object(named)) => {
+                    for (_, b) in named.iter_mut() {
+                        apply_typed_keys(store, targets, b, subs);
+                    }
+                }
+                _ => apply_typed_keys(store, targets, &mut value, subs),
+            }
+        }
+        match typed_key_prefix(store, targets, &def) {
+            Some(prefix) => {
+                map.insert(format!("{prefix}#{name}"), value);
+            }
+            None => {
+                map.insert(name, value);
+            }
+        }
+    }
+}
+
+/// The same for suggesters, which are named after the kind of suggestion.
+fn apply_typed_keys_suggest(out: &mut Value, request: &Value) {
+    let Some(reqs) = request.as_object().cloned() else { return };
+    let Some(map) = out.as_object_mut() else { return };
+    for (name, def) in reqs {
+        if name == "text" {
+            continue;
+        }
+        let Some(value) = map.remove(&name) else { continue };
+        let kind: String = def
+            .as_object()
+            .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k != "text"))
+            .unwrap_or_else(|| "term".into());
+        map.insert(format!("{kind}#{name}"), value);
+    }
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -2666,6 +2862,163 @@ pub fn validate_params(body: &Value, p: &Params) -> std::result::Result<(), Resp
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+/// The ceilings a search has to stay under, all of them index settings.
+///
+/// They exist because each one costs memory on the node answering, so the
+/// complaint says which setting to raise rather than only that the request was
+/// refused.
+fn check_limits(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    p: &Params,
+    from: usize,
+    size: usize,
+) -> std::result::Result<(), Response> {
+    let setting = |key: &str, default: u64| -> u64 {
+        targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .filter_map(|st| st.read().numeric_setting(key))
+            .max()
+            .unwrap_or(default)
+    };
+    let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
+
+    // a scroll walks the whole result set in order; collapsing rewrites what
+    // that order even is, so the two cannot be asked for together
+    if p.contains_key("scroll") && body.get("collapse").is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search_phase_execution_exception",
+            "cannot use `collapse` in a scroll context",
+        ));
+    }
+    // a page picked up after a marker has to be picked up in the same order
+    // the groups are in, which means sorting by the very field they collapse on
+    if let (Some(field), true) = (
+        body.pointer("/collapse/field").and_then(|v| v.as_str()),
+        body.get("search_after").is_some(),
+    ) {
+        let keys: Vec<Value> = match body.get("sort") {
+            Some(Value::Array(a)) => a.clone(),
+            Some(other) => vec![other.clone()],
+            None => Vec::new(),
+        };
+        let named = match keys.first() {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Object(o)) => o.keys().next().cloned().unwrap_or_default(),
+            _ => String::new(),
+        };
+        if keys.len() != 1 || named != field {
+            return Err(bad(
+                "collapse field and sort field must be the same when use `collapse` in \
+                 conjunction with `search_after`"
+                    .into(),
+            ));
+        }
+    }
+    // rescoring reorders the top of the result set, which is the very thing
+    // collapsing has already decided
+    if body.get("rescore").is_some() && body.get("collapse").is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search_phase_execution_exception",
+            "cannot use `collapse` in conjunction with `rescore`",
+        ));
+    }
+
+    // a page is counted from the front, so there is no such thing as starting
+    // before it
+    let negative = body
+        .get("from")
+        .and_then(|v| v.as_i64())
+        .or_else(|| p.get("from").and_then(|v| v.parse::<i64>().ok()))
+        .map(|v| v < 0)
+        .unwrap_or(false);
+    if negative {
+        return Err(bad("[from] parameter cannot be negative".into()));
+    }
+    // a size past what an int holds never reaches the window check: it is not
+    // a number the request could have meant
+    let too_wide = body
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse::<u64>().ok()))
+        .filter(|v| *v > i32::MAX as u64);
+    if let Some(v) = too_wide {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "input_coercion_exception",
+            format!("Numeric value ({v}) out of range of int"),
+        ));
+    }
+
+    let window = setting("max_result_window", 10_000);
+    if p.contains_key("scroll") {
+        // a scroll reads a batch at a time, and a batch costs what a window
+        // costs, so the same ceiling holds
+        if size as u64 > window {
+            return Err(bad(format!(
+                "Batch size is too large, size must be less than or equal to: [{window}] but was \
+                 [{size}]. Scroll batch sizes cost as much memory as result windows so they are \
+                 controlled by the [index.max_result_window] index level setting."
+            )));
+        }
+    } else if (from + size) as u64 > window {
+        let total = from + size;
+        return Err(bad(format!(
+            "Result window is too large, from + size must be less than or equal to: [{window}] \
+             but was [{total}]. See the scroll api for a more efficient way to request large data \
+             sets."
+        )));
+    }
+
+    // rescoring re-reads a window's worth of hits, so it has its own ceiling
+    let windows = match body.get("rescore") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for r in windows {
+        let want = r.get("window_size").and_then(|v| v.as_u64()).unwrap_or(0);
+        if want > window {
+            return Err(bad(format!(
+                "Rescore window [{want}] is too large. It must be less than [{window}]."
+            )));
+        }
+    }
+
+    let counted = |key: &str| -> usize {
+        body.get(key)
+            .map(|v| match v {
+                Value::Array(a) => a.len(),
+                Value::Object(o) => o.len(),
+                _ => 0,
+            })
+            .unwrap_or(0)
+    };
+    let docvalues = setting("max_docvalue_fields_search", 100);
+    let n = counted("docvalue_fields");
+    if n as u64 > docvalues {
+        return Err(bad(format!(
+            "Trying to retrieve too many docvalue_fields. Must be less than or equal to: \
+             [{docvalues}] but was [{n}]. This limit can be set by changing the \
+             [index.max_docvalue_fields_search] index level setting."
+        )));
+    }
+    let scripts = setting("max_script_fields", 32);
+    let n = counted("script_fields");
+    if n as u64 > scripts {
+        return Err(bad(format!(
+            "Trying to retrieve too many script_fields. Must be less than or equal to: \
+             [{scripts}] but was [{n}]. This limit can be set by changing the \
+             [index.max_script_fields] index level setting."
+        )));
     }
     Ok(())
 }
@@ -2780,6 +3133,7 @@ pub fn run(
     let pit_ceiling: std::collections::HashMap<String, u64> =
         pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
     let targets = store.resolve_open(expr);
+    check_limits(store, &targets, body, p, from, size)?;
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
@@ -2882,7 +3236,16 @@ pub fn run(
     }
 
     // unsigned_long cannot be sorted alongside another numeric type
-    let sort_keys = parse_sort(body.get("sort"));
+    let mut sort_keys = parse_sort(body.get("sort"));
+    // `_shard_doc` orders by where a document sits within a shard. That is the
+    // order it was written in, which is what `_seq` records -- and it only
+    // holds still while a point in time is open, which is why it is refused
+    // without one.
+    for k in sort_keys.iter_mut() {
+        if k.field == "_shard_doc" {
+            k.field = "_seq".to_string();
+        }
+    }
     for k in &sort_keys {
         let mut kinds: Vec<String> = Vec::new();
         for n in &targets {
@@ -2904,6 +3267,42 @@ pub fn run(
         }
     }
     let mut agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
+    // a composite walks the whole index in one pass, which it cannot do once
+    // per bucket of something else
+    fn composite_under_a_parent(node: &Value) -> bool {
+        // an aggregation that produces one bucket does not multiply the work,
+        // so a composite may sit inside one of those
+        const SINGLE: &[&str] = &[
+            "filter", "global", "nested", "reverse_nested", "sampler", "diversified_sampler",
+            "missing", "children", "parent",
+        ];
+        let Some(o) = node.as_object() else { return false };
+        o.values().any(|def| {
+            let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) else {
+                return false;
+            };
+            let single = def
+                .as_object()
+                .map(|d| d.keys().any(|k| SINGLE.contains(&k.as_str())))
+                .unwrap_or(false);
+            if !single
+                && subs
+                    .as_object()
+                    .map(|m| m.values().any(|d| d.get("composite").is_some()))
+                    .unwrap_or(false)
+            {
+                return true;
+            }
+            composite_under_a_parent(subs)
+        })
+    }
+    if agg_json.as_ref().map(composite_under_a_parent).unwrap_or(false) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[composite] aggregation cannot be used with a parent aggregation of type: [terms]",
+        ));
+    }
     // Parameter bounds do not depend on any mapping, so they are checked here
     // rather than per shard: a request that names no existing index has no
     // shards to walk, and a bad parameter would otherwise pass unread.
@@ -2943,15 +3342,16 @@ pub fn run(
         let names: Vec<String> = o
             .iter()
             .filter(|(_, def)| {
-                def.get("filters").is_some()
+                // anything under it that has to be run here drags the whole
+                // aggregation out of tantivy's hands with it
+                peelable(def)
+                    || def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
-                    // HDR percentiles answer a different question from
-                    // tantivy's t-digest, so they are computed here
-                    || def
-                        .get("percentiles")
-                        .map(|v| v.get("hdr").is_some())
-                        .unwrap_or(false)
+                    // percentiles answer a different question from tantivy's
+                    // sketch, which is approximate where OpenSearch's is exact
+                    // over the handful of values these aggregations see
+                    || def.get("percentiles").is_some()
                     // `_index` is metadata, not a column: bucket it ourselves
                     || def.get("global").is_some()
                     || def
@@ -2965,6 +3365,8 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
                     || def.get("rare_terms").is_some()
+                    || def.get("significant_terms").is_some()
+                    || def.get("significant_text").is_some()
                     || def.get("ip_range").is_some()
                     || def.get("date_range").is_some()
                     || def.get("adjacency_matrix").is_some()
@@ -2972,11 +3374,9 @@ pub fn run(
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
                     // calendar units are not fixed lengths, which is all
-                    // tantivy's date histogram knows how to step by
-                    || def
-                        .get("date_histogram")
-                        .map(|d| d.get("calendar_interval").is_some())
-                        .unwrap_or(false)
+                    // tantivy's date histogram knows how to step by, and a
+                    // named zone is a history of offsets it knows nothing of
+                    || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
                     // a range field holds no single value to bucket a document
                     // by, so tantivy's histogram sees nothing there at all
                     || def
@@ -3087,7 +3487,16 @@ pub fn run(
     };
 
     let started = std::time::Instant::now();
-    let page_want = from + size;
+    // a slice divides the index between readers, so the page it can offer is
+    // cut from every matching document rather than from the first few
+    let slice = body.get("slice").filter(|s| s.get("max").is_some()).cloned();
+    // collapsing decides the page from groups rather than from documents, so
+    // the best few documents are not enough to cut it from
+    let page_want = if slice.is_some() || body.get("collapse").is_some() {
+        65_536
+    } else {
+        from + size
+    };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();
@@ -3129,10 +3538,14 @@ pub fn run(
         .get("search_after")
         .and_then(|v| v.as_array())
         .filter(|a| a.len() == sort_keys.len() && !a.is_empty())
+        // a marker of nulls names no page at all: it is where a caller starts
+        .filter(|a| !a.iter().all(|v| v.is_null()))
         .map(|a| {
             a.iter()
                 .zip(sort_keys.iter())
-                .map(|(v, k)| sort_value_from_json(v, date_sort_key(store, &targets, &k.field)))
+                .map(|(v, k)| {
+                    sort_value_from_json(v, date_sort_kind(store, &targets, &k.field))
+                })
                 .collect()
         });
     let fanned_out = targets.len() > 1;
@@ -3155,6 +3568,7 @@ pub fn run(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -3311,6 +3725,13 @@ pub fn run(
                 .map(|k| match k.field.as_str() {
                     "_score" => SortSource::Score,
                     "_doc" => SortSource::Doc,
+                    // `_seq` is a column of the index itself, not a field
+                    // inside either JSON view, so it is named as it is
+                    "_seq" => SortSource::Column {
+                        name: "_seq".to_string(),
+                        desc: k.desc,
+                        mode: k.mode.clone(),
+                    },
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
@@ -3323,6 +3744,7 @@ pub fn run(
                 Count,
                 SortCollector {
                     sources,
+                    missing_last: sort_keys.iter().map(|k| k.missing_last).collect(),
                     desc,
                     limit: want.max(1),
                     after: search_after.clone(),
@@ -3531,15 +3953,39 @@ pub fn run(
         None
     };
 
+    // A slice takes the shards whose number falls to it. Which shard a
+    // document belongs to follows from its id, so the split holds however the
+    // documents were spread -- and every slice together covers all of them.
+    if let Some(slice) = slice.as_ref() {
+        let id = slice.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let max = slice.get("max").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+            match source_of(searcher, &g, c.addr) {
+                Some((doc_id, _)) => {
+                    let routed = murmur3_x86_32(doc_id.as_bytes(), 0) as u32 as u64 % shards;
+                    routed % max == id
+                }
+                None => false,
+            }
+        });
+        total = cands.len() as u64;
+    }
+
     // `collapse` keeps one hit per distinct value of a field: the best one,
     // which after the sort is the first each value is seen at. It has to run
     // before the page is cut, or a page could be all one value's worth
     if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let path = format!("/{}", field.replace('.', "/"));
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
+            // a field declared as an alias is another name for one that is
+            // really in the document
+            let real = g.mapping.target_of(field).unwrap_or(field);
+            let path = format!("/{}", real.replace('.', "/"));
             let value = source_of(searcher, &g, c.addr)
                 .and_then(|(_, src)| src.pointer(&path).cloned())
                 .map(|v| match v {
@@ -3637,6 +4083,13 @@ pub fn run(
         .iter()
         .map(|k| date_sort_key(store, &targets, &k.field))
         .collect();
+    // a clause given a name says so on every hit it matched
+    let page_ids: Vec<String> = all_hits.iter().map(|h| h.id.clone()).collect();
+    let named = matched_names(store, &targets, body, &page_ids);
+    let named_scores = p
+        .get("include_named_queries_score")
+        .map(|v| v != "false")
+        .unwrap_or(false);
     let page: Vec<Value> = all_hits
         .into_iter()
         .map(|h| {
@@ -3770,6 +4223,70 @@ pub fn run(
                 }
                 if !f.is_empty() {
                     hit["fields"] = Value::Object(f);
+                }
+            }
+            if let Some(hits) = named.get(&h.id) {
+                hit["matched_queries"] = if named_scores {
+                    let mut m = serde_json::Map::new();
+                    for (n, s) in hits {
+                        m.insert(n.clone(), json!(s));
+                    }
+                    Value::Object(m)
+                } else {
+                    let mut names: Vec<String> = hits.iter().map(|(n, _)| n.clone()).collect();
+                    names.sort();
+                    json!(names)
+                };
+            }
+            // a collapsed hit says which value it stands for, and may carry
+            // the group it was chosen from
+            if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
+                let real = searchers[h.shard_idx]
+                    .2
+                    .read()
+                    .mapping
+                    .target_of(field)
+                    .unwrap_or(field)
+                    .to_string();
+                let path = format!("/{}", real.replace('.', "/"));
+                if let Some(v) = h.source.pointer(&path) {
+                    let list = match v {
+                        Value::Array(a) => a.clone(),
+                        other => vec![other.clone()],
+                    };
+                    let mut f = match hit.get("fields") {
+                        Some(Value::Object(o)) => o.clone(),
+                        _ => serde_json::Map::new(),
+                    };
+                    f.insert(field.to_string(), Value::Array(list.clone()));
+                    hit["fields"] = Value::Object(f);
+                    // a hit may be asked for its group more than once, each
+                    // time with a different name and ordering
+                    let asked = match body.pointer("/collapse/inner_hits") {
+                        Some(Value::Array(a)) => a.clone(),
+                        Some(other) => vec![other.clone()],
+                        None => Vec::new(),
+                    };
+                    let mut groups = serde_json::Map::new();
+                    for inner in &asked {
+                        let Some(group) = collapsed_group(
+                            store,
+                            &targets,
+                            query_json.as_ref(),
+                            field,
+                            list.first().unwrap_or(&Value::Null),
+                            inner,
+                            p,
+                        ) else {
+                            continue;
+                        };
+                        let name =
+                            inner.get("name").and_then(|n| n.as_str()).unwrap_or("inner_hits");
+                        groups.insert(name.to_string(), group);
+                    }
+                    if !groups.is_empty() {
+                        hit["inner_hits"] = Value::Object(groups);
+                    }
                 }
             }
             if let Some(spec) = body.get("highlight") {
@@ -3951,11 +4468,20 @@ pub fn run(
             };
             for entry in entries.iter_mut() {
                 let Some(name) = entry.get("description").and_then(|d| d.as_str()) else { continue };
+                // a bucket that had to be filled in to close a gap was never
+                // built while collecting, so it is not one of the buckets the
+                // aggregation counts
                 let n = a
                     .get(name)
                     .and_then(|v| v.get("buckets"))
                     .and_then(|b| b.as_array())
-                    .map(|b| b.len())
+                    .map(|b| {
+                        b.iter()
+                            .filter(|x| {
+                                x.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(1) > 0
+                            })
+                            .count()
+                    })
                     .unwrap_or(0);
                 if let Some(debug) = entry.get_mut("debug").and_then(|d| d.as_object_mut()) {
                     debug.insert("total_buckets".into(), json!(n));
@@ -4045,6 +4571,24 @@ pub fn run(
         0
     };
 
+    // `typed_keys` asks for every aggregation and suggestion to be named after
+    // what it produced as well as what it was called
+    let (aggs, suggest) = if p.get("typed_keys").map(|v| v != "false").unwrap_or(false) {
+        let mut aggs = aggs;
+        if let (Some(a), Some(req)) =
+            (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+        {
+            apply_typed_keys(store, &targets, a, req);
+        }
+        let mut suggest = suggest;
+        if let (Some(sg), Some(req)) = (suggest.as_mut(), body.get("suggest")) {
+            apply_typed_keys_suggest(sg, req);
+        }
+        (aggs, suggest)
+    } else {
+        (aggs, suggest)
+    };
+
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,
@@ -4056,6 +4600,134 @@ pub fn run(
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
     })
+}
+
+/// Every clause of a query that was given a `_name`, paired with the clause
+/// itself so it can be asked about one document at a time.
+fn named_clauses(node: &Value, out: &mut Vec<(String, Value)>) {
+    match node {
+        Value::Object(o) => {
+            for (k, v) in o {
+                if k == "_name" {
+                    continue;
+                }
+                let named = v
+                    .get("_name")
+                    .and_then(|n| n.as_str())
+                    // `match: {field: {query, _name}}` puts the name beside the
+                    // field's options rather than beside the clause
+                    .or_else(|| {
+                        v.as_object()
+                            .filter(|o| o.len() == 1)
+                            .and_then(|o| o.values().next())
+                            .and_then(|inner| inner.get("_name"))
+                            .and_then(|n| n.as_str())
+                    });
+                if let Some(name) = named {
+                    out.push((name.to_string(), json!({k.clone(): v.clone()})));
+                }
+                named_clauses(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                named_clauses(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Take the `_name` markers out of a clause.
+fn strip_names(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            o.remove("_name");
+            for (_, v) in o.iter_mut() {
+                strip_names(v);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                strip_names(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Which named clauses each document on the page matched, and with what score.
+fn matched_names(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    ids: &[String],
+) -> std::collections::HashMap<String, Vec<(String, f32)>> {
+    let mut out: std::collections::HashMap<String, Vec<(String, f32)>> =
+        std::collections::HashMap::new();
+    let mut clauses = Vec::new();
+    if let Some(q) = body.get("query") {
+        named_clauses(q, &mut clauses);
+    }
+    for r in body.get("rescore").into_iter().flat_map(|r| match r {
+        Value::Array(a) => a.clone(),
+        other => vec![other.clone()],
+    }) {
+        named_clauses(&r, &mut clauses);
+    }
+    if clauses.is_empty() || ids.is_empty() {
+        return out;
+    }
+    for (name, mut clause) in clauses {
+        // the clause is asked about on its own, and must not carry the name
+        // that would make it a named clause all over again
+        strip_names(&mut clause);
+        let probe = json!({
+            "query": {"bool": {"must": [clause], "filter": [{"terms": {"_id": ids}}]}},
+            "size": ids.len(),
+        });
+        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
+        for hit in answer.hits {
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+            let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            out.entry(id.to_string()).or_default().push((name.clone(), score));
+        }
+    }
+    out
+}
+
+/// The documents a collapsed hit was chosen from: the same query, narrowed to
+/// the one value, asked again with whatever the `inner_hits` clause says.
+fn collapsed_group(
+    store: &Store,
+    targets: &[String],
+    query: Option<&Value>,
+    field: &str,
+    value: &Value,
+    inner: &Value,
+    p: &Params,
+) -> Option<Value> {
+    let mut filters = vec![json!({"term": {field: value.clone()}})];
+    if let Some(q) = query {
+        filters.push(q.clone());
+    }
+    let mut body = json!({"query": {"bool": {"filter": filters}}});
+    for key in [
+        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
+        "stored_fields", "highlight", "explain", "fields",
+    ] {
+        if let Some(v) = inner.get(key) {
+            body[key] = v.clone();
+        }
+    }
+    let out = run(store, &targets.join(","), &body, &Params::new()).ok()?;
+    let total = if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
+        json!(out.total)
+    } else {
+        json!({"value": out.total, "relation": "eq"})
+    };
+    let max_score = out.max_score.map(|s| json!(s)).unwrap_or(Value::Null);
+    Some(json!({"hits": {"total": total, "max_score": max_score, "hits": out.hits}}))
 }
 
 /// Assemble the `hits` envelope, honouring track_total_hits and the
@@ -4287,6 +4959,16 @@ fn run_peeled_agg(
         run_ip_range_agg(store, targets, query_json, def)
     } else if def.get("adjacency_matrix").is_some() {
         run_adjacency_matrix_agg(store, targets, query_json, def)
+    } else if def
+        .get("terms")
+        .map(|t| t.get("field").and_then(|f| f.as_str()) != Some("_index"))
+        .unwrap_or(false)
+    {
+        run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("top_hits").is_some() {
+        run_top_hits(store, targets, query_json, def)
+    } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
+        run_significant_terms(store, targets, query_json, def)
     } else if def.get("rare_terms").is_some() {
         run_rare_terms_agg(store, targets, query_json, def, weighted, name)
     } else if def.get("multi_terms").is_some() {
@@ -4319,19 +5001,43 @@ fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option<Value>) {
     (pack(mine), pack(theirs))
 }
 
+/// Is this aggregation, or anything under it, one that has to be computed a
+/// bucket at a time here?
+fn peelable(def: &Value) -> bool {
+    peelable_here(def)
+        || def
+            .get("aggs")
+            .or_else(|| def.get("aggregations"))
+            .and_then(|s| s.as_object())
+            .map(|o| o.values().any(peelable))
+            .unwrap_or(false)
+}
+
 /// Is this an aggregation tantivy has no parser for, which has to be computed
 /// a bucket at a time here instead?
-fn peelable(def: &Value) -> bool {
+fn peelable_here(def: &Value) -> bool {
     const OWN: &[&str] = &[
         "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
+        "significant_terms", "significant_text", "top_hits",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
-        || def
-            .get("date_histogram")
-            .map(|d| d.get("calendar_interval").is_some())
-            .unwrap_or(false)
+        || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
+}
+
+/// A date histogram this engine has to run itself: one stepping by a calendar
+/// unit, or one reported in a zone that is not simply UTC.
+fn zoned_or_calendar(spec: &Value) -> bool {
+    if spec.get("calendar_interval").is_some() {
+        return true;
+    }
+    // any zone but UTC has to be placed here: even one that is on UTC today
+    // may not have been at the instant a bucket falls in
+    match spec.get("time_zone").and_then(|v| v.as_str()).map(|z| z.trim()) {
+        None | Some("") => false,
+        Some(z) => !matches!(z, "Z" | "UTC" | "utc" | "+00:00" | "-00:00" | "+0000" | "-0000"),
+    }
 }
 
 /// Count the documents a query matches, and run its sub-aggregations --
@@ -4383,6 +5089,7 @@ fn filtered_count(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -4483,6 +5190,86 @@ fn run_filter_agg(
 
 
 /// `terms` over the `_index` metadata field: one bucket per index that has hits.
+/// `terms` over an ordinary field, run here because something under it has to
+/// be: tantivy still finds the buckets, and each one then narrows the query
+/// for the aggregations it could not parse.
+fn run_field_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("terms").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    // an order naming a sub-aggregation that is run here cannot be asked of
+    // tantivy, which will not have that aggregation; the buckets are put in
+    // order once it has answered
+    let order = spec.get("order").cloned();
+    let ordered_here = order
+        .as_ref()
+        .and_then(|o| o.as_object())
+        .and_then(|o| o.keys().next().cloned())
+        .map(|k| {
+            let head = k.split('.').next().unwrap_or("").to_string();
+            peeled_subs
+                .as_ref()
+                .and_then(|p| p.as_object())
+                .map(|p| p.contains_key(&head))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let mut spec = spec;
+    if ordered_here {
+        if let Some(o) = spec.as_object_mut() {
+            o.remove("order");
+        }
+    }
+    let mut node = json!({"terms": spec});
+    if let Some(plain) = plain_subs.as_ref() {
+        node["aggs"] = plain.clone();
+    }
+    let request = json!({"__f": node});
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(res) = res else { return Ok(json!({"buckets": []})) };
+    let mut answer = res.get("__f").cloned().unwrap_or_else(|| json!({"buckets": []}));
+    if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
+        let empty = Vec::new();
+        let buckets = answer["buckets"].as_array().cloned().unwrap_or(empty);
+        let mut filled = Vec::new();
+        for mut b in buckets {
+            let key = b.get("key").cloned().unwrap_or(Value::Null);
+            let mut filters = vec![json!({"term": {field.clone(): key}})];
+            if let Some(q) = main_query.as_ref() {
+                filters.push(q.clone());
+            }
+            let narrowed = Some(json!({"bool": {"filter": filters}}));
+            for (n, d) in peeled {
+                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            }
+            filled.push(b);
+        }
+        if ordered_here {
+            if let Some((key, dir)) = order
+                .as_ref()
+                .and_then(|o| o.as_object())
+                .and_then(|o| o.iter().next())
+                .map(|(k, v)| (k.clone(), v.as_str() == Some("desc")))
+            {
+                filled.sort_by(|a, b| {
+                    let ord = compare_bucket_by(a, b, &key);
+                    if dir { ord.reverse() } else { ord }
+                });
+            }
+        }
+        answer["buckets"] = Value::Array(filled);
+    }
+    Ok(answer)
+}
+
 fn run_index_terms_agg(
     store: &Store,
     targets: &[String],
@@ -4550,6 +5337,7 @@ fn collect_field_values(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -4617,22 +5405,36 @@ fn run_hdr_percentiles(
 
     let query = combine(main_query, None);
     let values = collect_field_values(store, targets, &query, &field, missing)?;
+    // without `hdr`, OpenSearch keeps a t-digest, which for the counts these
+    // aggregations see holds every value and reports the one at the rank the
+    // percentile names
+    let hdr = spec.get("hdr").is_some();
+    let mut sorted = values.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |p: f64| -> Option<f64> {
+        if sorted.is_empty() {
+            return None;
+        }
+        let rank = ((p / 100.0) * sorted.len() as f64).ceil().max(1.0) as usize;
+        sorted.get(rank.min(sorted.len()) - 1).copied()
+    };
     let mut hist = crate::hdr::HdrHistogram::default();
     for v in &values {
         hist.record(*v);
     }
+    let value_at = |p: f64| if hdr { hist.value_at(p) } else { at(p) };
 
     if keyed {
         let mut map = serde_json::Map::new();
         for p in &percents {
             let key = format!("{:.1}", p);
-            map.insert(key, hist.value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
+            map.insert(key, value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
         }
         Ok(json!({ "values": Value::Object(map) }))
     } else {
         let arr: Vec<Value> = percents
             .iter()
-            .map(|p| json!({"key": p, "value": hist.value_at(*p)}))
+            .map(|p| json!({"key": p, "value": value_at(*p)}))
             .collect();
         Ok(json!({ "values": arr }))
     }
@@ -4757,27 +5559,35 @@ fn widen_number_keys(
         }
         let Some(terms) = defo.get("terms") else { continue };
         let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("");
-        if !floating.contains(field) {
-            continue;
-        }
         let Some(Value::Array(buckets)) = node.get_mut("buckets") else { continue };
-        for b in buckets.iter_mut() {
-            let Some(o) = b.as_object_mut() else { continue };
-            let widened = o.get("key").and_then(|k| k.as_i64()).map(|i| i as f64);
-            if let Some(f) = widened {
-                o.insert("key".into(), json!(f));
+        if floating.contains(field) {
+            for b in buckets.iter_mut() {
+                let Some(o) = b.as_object_mut() else { continue };
+                let widened = o.get("key").and_then(|k| k.as_i64()).map(|i| i as f64);
+                if let Some(f) = widened {
+                    o.insert("key".into(), json!(f));
+                }
             }
         }
         // an explicit order is the caller's, and is left alone
         if terms.get("order").is_some() {
             continue;
         }
+        // buckets go by count, and a tie between them by key -- ascending,
+        // which for a string is its own order and for a number is its value
         buckets.sort_by(|a, b| {
             let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
-            let key = |v: &Value| v.get("key").and_then(|k| k.as_f64()).unwrap_or(f64::MAX);
-            count(b).cmp(&count(a)).then(
-                key(a).partial_cmp(&key(b)).unwrap_or(Ordering::Equal),
-            )
+            let key = |v: &Value| match v.get("key") {
+                Some(Value::Number(n)) => (None, n.as_f64().unwrap_or(f64::MAX)),
+                Some(Value::String(s)) => (Some(s.clone()), 0.0),
+                _ => (None, f64::MAX),
+            };
+            let (ka, na) = key(a);
+            let (kb, nb) = key(b);
+            count(b).cmp(&count(a)).then_with(|| match (&ka, &kb) {
+                (Some(x), Some(y)) => x.cmp(y),
+                _ => na.partial_cmp(&nb).unwrap_or(Ordering::Equal),
+            })
         });
     }
 }
@@ -5392,7 +6202,7 @@ fn run_rare_terms_agg(
         inject_doc_count_helpers(&mut request);
     }
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
     let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
     if weighted {
         apply_doc_counts(&mut res);
@@ -5579,7 +6389,7 @@ fn run_multi_terms_agg(
         inject_doc_count_helpers(&mut request);
     }
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
     let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
     if weighted {
         apply_doc_counts(&mut res);
@@ -5600,6 +6410,22 @@ fn run_multi_terms_agg(
     flatten_multi_terms(&res, 0, fields.len(), &mut Vec::new(), &mut flat);
 
     let total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    // `min_doc_count: 0` asks for combinations the index holds but the query
+    // did not match, so the key space comes from the whole index
+    if min_doc_count == 0 && main_query.is_some() {
+        let (_, all) = filtered_count(store, targets, &json!({"match_all": {}}), &Some(request))?;
+        if let Some(all) = all {
+            let mut every = Vec::new();
+            flatten_multi_terms(&all, 0, fields.len(), &mut Vec::new(), &mut every);
+            let mut seen: std::collections::HashSet<String> =
+                flat.iter().map(|(k, _, _)| format!("{k:?}")).collect();
+            for (key, _, _) in every {
+                if seen.insert(format!("{key:?}")) {
+                    flat.push((key, 0, serde_json::Map::new()));
+                }
+            }
+        }
+    }
     let mut buckets: Vec<Value> = flat
         .into_iter()
         .filter(|(_, c, _)| *c >= min_doc_count)
@@ -5828,6 +6654,7 @@ fn collect_field_pairs(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -6045,6 +6872,246 @@ fn run_auto_date_histogram(
     Ok(out)
 }
 
+/// `top_hits`: the documents themselves, from inside whatever bucket the
+/// aggregation sits in. It is the ordinary search, narrowed and asked again.
+fn run_top_hits(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("top_hits").cloned().unwrap_or(json!({}));
+    let mut body = json!({"query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}}))});
+    for key in [
+        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
+        "stored_fields", "highlight", "explain", "fields", "script_fields", "track_scores",
+    ] {
+        if let Some(v) = spec.get(key) {
+            body[key] = v.clone();
+        }
+    }
+    if body.get("size").is_none() {
+        body["size"] = json!(3);
+    }
+    let out = run(store, &targets.join(","), &body, &Params::new())?;
+    Ok(json!({"hits": {
+        "total": {"value": out.total, "relation": "eq"},
+        "max_score": out.max_score.map(|s| json!(s)).unwrap_or(Value::Null),
+        "hits": out.hits,
+    }}))
+}
+
+/// `significant_terms`: the terms that stand out in what the query matched,
+/// compared with how common they are in the index as a whole.
+///
+/// The measure is the one OpenSearch calls JLH: how much more of the
+/// foreground a term takes up than of the background, multiplied by the ratio
+/// between the two, so that a term has to be both commoner *and* markedly
+/// commoner to score well.
+fn run_significant_terms(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let kind = if def.get("significant_text").is_some() {
+        "significant_text"
+    } else {
+        "significant_terms"
+    };
+    let name = def
+        .as_object()
+        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k == kind))
+        .unwrap_or_else(|| kind.to_string());
+    let spec = def.get(&name).cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // a term seen once or twice is noise, so the floor is higher here than it
+    // is for a plain terms aggregation
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(3);
+
+    let string_field = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()))
+        .map(|t| matches!(t.as_str(), "text" | "keyword" | "match_only_text"))
+        .unwrap_or(true);
+    for key in ["include", "exclude"] {
+        if spec.get(key).map(|v| v.is_string()).unwrap_or(false) && !string_field {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Aggregation [{name}] cannot support regular expression style \
+                     include/exclude settings as they can only be applied to string fields. Use \
+                     an array of values for include/exclude clauses"
+                ),
+            ));
+        }
+    }
+    let listed = |key: &str| -> Option<Vec<String>> {
+        let a = spec.get(key)?.as_array()?;
+        Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+    };
+    let include = listed("include");
+    let exclude = listed("exclude");
+
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // A significant *text* aggregation asks about the words in a field rather
+    // than about its value. Words are not kept in a column -- only in the term
+    // index -- so the text is read back and analysed again, which is what
+    // OpenSearch does for this aggregation too.
+    let analysed = kind == "significant_text"
+        || targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()))
+            .map(|t| matches!(t.as_str(), "text" | "match_only_text"))
+            .unwrap_or(false);
+    let counted = |q: &Value| -> std::result::Result<(u64, Vec<(Value, u64)>), Response> {
+        if !analysed {
+            let request =
+                json!({"__s": {"terms": {"field": field, "size": 65_536, "min_doc_count": 1}}});
+            let (total, res) = filtered_count(store, targets, q, &Some(request))?;
+            let buckets = res
+                .as_ref()
+                .and_then(|r| r.pointer("/__s/buckets"))
+                .and_then(|b| b.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|b| {
+                            (
+                                b.get("key").cloned().unwrap_or(Value::Null),
+                                b.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok((total, buckets));
+        }
+        let probe = json!({"query": q.clone(), "size": 10_000, "_source": [field.clone()]});
+        let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+        let mut counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        // `filter_duplicate_text` is for text that repeats itself across
+        // documents -- boilerplate, signatures, quoted replies. A run of words
+        // already seen in an earlier document says nothing new about this one,
+        // so the words in it are passed over.
+        let dedup = spec.get("filter_duplicate_text").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut seen_runs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        const RUN: usize = 3;
+        let total = answer.hits.len() as u64;
+        for hit in &answer.hits {
+            let Some(text) = hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
+            else {
+                continue;
+            };
+            let text = match text {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            // a word counts once for the document it is in, however often it
+            // is repeated there
+            let mut tokens: Vec<String> = Vec::new();
+            for st in targets.iter().filter_map(|n| store.get(n)).take(1) {
+                let g = st.read();
+                tokens = crate::query::analyze_text(&g.index, &text, None);
+            }
+            let mut skip = vec![false; tokens.len()];
+            if dedup && tokens.len() >= RUN {
+                let mut fresh = Vec::new();
+                for i in 0..=tokens.len() - RUN {
+                    let run = tokens[i..i + RUN].join(" ");
+                    if seen_runs.contains(&run) {
+                        for slot in skip.iter_mut().skip(i).take(RUN) {
+                            *slot = true;
+                        }
+                    } else {
+                        fresh.push(run);
+                    }
+                }
+                for run in fresh {
+                    seen_runs.insert(run);
+                }
+            }
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (i, token) in tokens.into_iter().enumerate() {
+                if skip.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                seen.insert(token);
+            }
+            for token in seen {
+                *counts.entry(token).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(Value, u64)> =
+            counts.into_iter().map(|(k, c)| (json!(k), c)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok((total, out))
+    };
+    let (fg_total, fg) = counted(&query)?;
+    let (bg_total, bg) = counted(&json!({"match_all": {}}))?;
+    let read = |res: &Vec<(Value, u64)>| -> Vec<(Value, u64)> { res.clone() };
+    let background: std::collections::HashMap<String, u64> = read(&bg)
+        .into_iter()
+        .map(|(k, c)| (k.to_string(), c))
+        .collect();
+
+    let ip_field = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().mapping.type_of(&field) == Some("ip"));
+    let mut buckets: Vec<Value> = Vec::new();
+    for (key, count) in read(&fg) {
+        if count < min_doc_count {
+            continue;
+        }
+        let bg_count = background.get(&key.to_string()).copied().unwrap_or(count);
+        let key = if ip_field {
+            key.as_str()
+                .and_then(crate::store::ip_from_canonical)
+                .map(Value::String)
+                .unwrap_or(key)
+        } else {
+            key
+        };
+        let text = match &key {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if let Some(only) = include.as_ref() {
+            if !only.contains(&text) {
+                continue;
+            }
+        }
+        if let Some(never) = exclude.as_ref() {
+            if never.contains(&text) {
+                continue;
+            }
+        }
+        let fg_pct = count as f64 / fg_total.max(1) as f64;
+        let bg_pct = bg_count as f64 / bg_total.max(1) as f64;
+        let score = if bg_pct > 0.0 { (fg_pct - bg_pct) * (fg_pct / bg_pct) } else { 0.0 };
+        buckets.push(json!({
+            "key": key,
+            "doc_count": count,
+            "score": score,
+            "bg_count": bg_count,
+        }));
+    }
+    buckets.sort_by(|a, b| {
+        let s = |v: &Value| v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        s(b).partial_cmp(&s(a)).unwrap_or(Ordering::Equal).then_with(|| {
+            let k = |v: &Value| v.get("key").map(|x| x.to_string()).unwrap_or_default();
+            k(a).cmp(&k(b))
+        })
+    });
+    buckets.truncate(size);
+    Ok(json!({"doc_count": fg_total, "bg_count": bg_total, "buckets": buckets}))
+}
+
 fn run_composite_agg(
     store: &Store,
     targets: &[String],
@@ -6058,73 +7125,360 @@ fn run_composite_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
 
     // `sources` is a list of single-key objects, each naming one source
-    let mut sources: Vec<(String, String)> = Vec::new();
-    for entry in spec.get("sources").and_then(|v| v.as_array()).into_iter().flatten() {
+    let Some(list) = spec.get("sources") else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "Required [sources]",
+        ));
+    };
+    if list.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "Composite [sources] cannot be null or empty",
+        ));
+    }
+    // a page of composite buckets is held in memory while it is built, so
+    // there is a ceiling on how big a page may be asked for
+    if size > 65_536 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "too_many_buckets_exception",
+            format!(
+                "Trying to create too many buckets. Must be less than or equal to: [65536] but \
+                 was [{size}]."
+            ),
+        ));
+    }
+    let mut sources: Vec<CompSource> = Vec::new();
+    for entry in list.as_array().into_iter().flatten() {
         let Some((name, body)) = entry.as_object().and_then(|o| o.iter().next()) else {
             continue;
         };
-        let Some(field) = body.pointer("/terms/field").and_then(|f| f.as_str()) else {
+        let Some((kind, source)) = body.as_object().and_then(|o| o.iter().next()) else {
+            continue;
+        };
+        let field = source.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+        let desc = source.get("order").and_then(|o| o.as_str()) == Some("desc");
+        let order = if desc { "desc" } else { "asc" };
+        let format = source.get("format").and_then(|f| f.as_str()).map(|s| s.to_string());
+        let mut zone_ms = 0i64;
+        let (node, date) = match kind.as_str() {
+            "terms" => (
+                json!({"terms": {"field": field, "size": 65_536, "order": {"_key": order}}}),
+                false,
+            ),
+            "histogram" => {
+                let interval = source.get("interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                (json!({"histogram": {"field": field, "interval": interval}}), false)
+            }
+            "date_histogram" => {
+                // a date is bucketed on the same even grid a number is, once
+                // the step and the shift are counted in the same milliseconds
+                let step = source
+                    .get("fixed_interval")
+                    .or_else(|| source.get("calendar_interval"))
+                    .or_else(|| source.get("interval"))
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_offset)
+                    .map(|d| d.whole_milliseconds() as f64)
+                    .filter(|d| *d > 0.0);
+                let Some(step) = step else {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "[composite] only supports fixed-length date intervals",
+                    ));
+                };
+                let offset = source
+                    .get("offset")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_offset)
+                    .map(|d| d.whole_milliseconds() as f64)
+                    .unwrap_or(0.0);
+                // a zone shifts where each day begins, which on this grid is
+                // the same thing as an offset
+                let zone = source
+                    .get("time_zone")
+                    .and_then(|v| v.as_str())
+                    .and_then(|z| crate::tz::offset_at(z, 0))
+                    .map(|secs| secs as f64 * 1000.0)
+                    .unwrap_or(0.0);
+                zone_ms = zone as i64;
+                // a day in a zone begins where that zone's midnight falls in
+                // UTC, which is as far the other way as the zone sits from it
+                let shift = (offset - zone).rem_euclid(step);
+                (
+                    json!({"histogram": {"field": field, "interval": step, "offset": shift}}),
+                    true,
+                )
+            }
+            other => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("[composite] does not support [{other}] sources"),
+                ));
+            }
+        };
+        if sources.iter().any(|s| s.name == *name) {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                "[composite] only supports `terms` sources",
+                format!("Composite source names must be unique, found duplicates: [{name}]"),
             ));
-        };
-        sources.push((name.clone(), field.to_string()));
+        }
+        sources.push(CompSource {
+            name: name.clone(),
+            node,
+            date,
+            format,
+            desc,
+            least_ns: None,
+            zone_ms,
+            ip: targets
+                .iter()
+                .filter_map(|n| store.get(n))
+                .any(|st| st.read().mapping.type_of(&field) == Some("ip")),
+            missing_bucket: source
+                .get("missing_bucket")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            missing_last: source.get("missing_order").and_then(|v| v.as_str()) != Some("first"),
+            field: field.clone(),
+        });
     }
     if sources.is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
-            "[composite] requires at least one source",
+            "Composite [sources] cannot be null or empty",
         ));
     }
 
-    // nest the sources outermost-first; the innermost carries the sub-aggs
-    let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
-    for (i, (_, field)) in sources.iter().enumerate().rev() {
-        let mut node = json!({
-            "terms": {"field": field, "size": 65_536, "order": {"_key": "asc"}}
-        });
-        if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
-            node["aggs"] = request;
-        }
-        request = json!({format!("__c{i}"): node});
-    }
-    if weighted {
-        inject_doc_count_helpers(&mut request);
-    }
-
-    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
-    let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
-    if weighted {
-        apply_doc_counts(&mut res);
-    }
-
+    // A date source is bucketed here rather than by tantivy: the column is
+    // absent from any segment whose documents all lack the field, and a
+    // histogram over a column that is only sometimes there answers for only
+    // some of the segments. The span is known from the extremes, so the grid
+    // can be walked and each step counted through the ordinary query path.
     let mut flat: Vec<Value> = Vec::new();
-    flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
+    if let Some(at) = sources.iter().position(|s| s.date) {
+        let source = &sources[at];
+        let field =
+            source.node.pointer("/histogram/field").and_then(|f| f.as_str()).unwrap_or("");
+        let step = source.node.pointer("/histogram/interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let shift = source.node.pointer("/histogram/offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        let probe = json!({
+            "__min": {"min": {"field": field}},
+            "__max": {"max": {"field": field}},
+        });
+        let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
+        let read = |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
+        let (Some(lo), Some(hi)) = (read("__min"), read("__max")) else {
+            return Ok(json!({"buckets": []}));
+        };
+        // the extremes are read in nanoseconds; a bucket is named in
+        // milliseconds
+        let (lo, hi) = (lo / 1e6, hi / 1e6);
+        let first = ((lo - shift) / step).floor() * step + shift;
+        // the rest of the sources are a composite of their own, run once
+        // inside each step
+        let rest: Vec<Value> = spec
+            .get("sources")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != at)
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut cursor = first;
+        let mut guard = 0;
+        while cursor <= hi && guard < 100_000 {
+            guard += 1;
+            let next = cursor + step;
+            let window = json!({"range": {field: {
+                "gte": crate::store::format_millis(cursor as i64, "iso8601"),
+                "lt": crate::store::format_millis(next as i64, "iso8601"),
+                "format": "strict_date_optional_time",
+            }}});
+            let narrowed = combine(main_query, Some(window));
+            if rest.is_empty() {
+                let (count, sub) =
+                    count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+                if count > 0 {
+                    let mut b = json!({
+                        "key": {source.name.clone(): cursor as i64},
+                        "doc_count": count,
+                    });
+                    if let Some(Value::Object(o)) = sub {
+                        for (k, v) in o {
+                            b[k] = v;
+                        }
+                    }
+                    flat.push(b);
+                }
+            } else {
+                let mut inner = json!({"composite": {"sources": rest, "size": 65_536}});
+                if let Some(sub) = sub_aggs.as_ref() {
+                    inner["aggs"] = sub.clone();
+                }
+                let answer =
+                    run_composite_agg(store, targets, &Some(narrowed.clone()), &inner, weighted)?;
+                for mut b in answer["buckets"].as_array().cloned().unwrap_or_default() {
+                    if let Some(key) = b.get_mut("key").and_then(|k| k.as_object_mut()) {
+                        let mut with_date = serde_json::Map::new();
+                        with_date.insert(source.name.clone(), json!(cursor as i64));
+                        for (k, v) in key.iter() {
+                            with_date.insert(k.clone(), v.clone());
+                        }
+                        *key = with_date;
+                    }
+                    flat.push(b);
+                }
+            }
+            cursor = next;
+        }
+    } else {
+        // nest the sources outermost-first; the innermost carries the sub-aggs
+        let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+        for (i, source) in sources.iter().enumerate().rev() {
+            let mut node = source.node.clone();
+            if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+                node["aggs"] = request;
+            }
+            request = json!({format!("__c{i}"): node});
+        }
+        if weighted {
+            inject_doc_count_helpers(&mut request);
+        }
+
+        let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        let (_, res) = filtered_count(store, targets, &query, &Some(request.clone()))?;
+        let Some(mut res) = res else { return Ok(json!({"buckets": []})) };
+        if weighted {
+            apply_doc_counts(&mut res);
+        }
+        flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
+        // a source may ask for a bucket of the documents that have no value
+        // for it at all, which no terms aggregation will ever produce
+        for source in sources.iter().filter(|s| s.missing_bucket) {
+            let absent = json!({"bool": {"must_not": [{"exists": {"field": source.field}}]}});
+            let narrowed = combine(main_query, Some(absent));
+            let (count, sub) =
+                count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+            if count == 0 {
+                continue;
+            }
+            let mut key = serde_json::Map::new();
+            for other in &sources {
+                key.insert(other.name.clone(), Value::Null);
+            }
+            let mut b = json!({"key": Value::Object(key), "doc_count": count});
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+            flat.push(b);
+        }
+    }
+    // whether a date bucket comes back counted in milliseconds or in
+    // nanoseconds is not fixed, but the earliest value is known, so which unit
+    // an answer is in can be read off rather than assumed
+    for source in &sources {
+        let Some(least) = source.least_ns.filter(|v| *v != 0.0) else { continue };
+        let path = format!("/key/{}", source.name);
+        for b in flat.iter_mut() {
+            let Some(key) = b.pointer(&path).and_then(|v| v.as_f64()) else { continue };
+            if key.abs() >= least.abs() / 1_000.0 {
+                b["key"][source.name.clone()] = json!((key / 1e6) as i64);
+            }
+        }
+    }
     flat.sort_by(|a, b| composite_key_order(a, b, &sources));
 
     if let Some(after) = after.as_ref().and_then(|a| a.as_object()) {
+        // a marker for a date source is written the way its key is written,
+        // which is a date rather than the number behind it
+        let mut after = after.clone();
+        for source in &sources {
+            if !source.date {
+                continue;
+            }
+            let Some(Value::String(text)) = after.get(&source.name) else { continue };
+            let Some(ms) = crate::store::canonical_date(&json!(text))
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+                .map(|d| (d.unix_timestamp_nanos() / 1_000_000) as i64 - source.zone_ms)
+            else {
+                continue;
+            };
+            after.insert(source.name.clone(), json!(ms));
+        }
         let marker = json!({"key": Value::Object(after.clone())});
         flat.retain(|b| composite_key_order(b, &marker, &sources) == Ordering::Greater);
     }
-    let more = flat.len() > size;
+    let _more = flat.len() > size;
     flat.truncate(size);
-    let mut out = json!({"buckets": flat});
-    if more || after.is_some() {
-        if let Some(last) = out["buckets"].as_array().and_then(|a| a.last()) {
-            out["after_key"] = last["key"].clone();
+    // a source that says how it wants its key written gets it written that way,
+    // which happens once the page is settled so ordering stays numeric
+    for source in &sources {
+        let Some(pattern) = source.format.as_deref() else { continue };
+        if !source.date {
+            continue;
+        }
+        for b in flat.iter_mut() {
+            let Some(ms) = b.pointer(&format!("/key/{}", source.name)).and_then(|v| v.as_i64())
+            else {
+                continue;
+            };
+            if let Some(text) =
+                crate::store::format_millis_at(ms, pattern, source.zone_ms)
+            {
+                b["key"][source.name.clone()] = json!(text);
+            }
         }
     }
+    let mut out = json!({"buckets": flat});
+    // the marker for the next page is where this one ended, whether or not
+    // there turns out to be one
+    if let Some(last) = out["buckets"].as_array().and_then(|a| a.last()) {
+        out["after_key"] = last["key"].clone();
+    }
     Ok(out)
+}
+
+/// One source of a composite aggregation: what to bucket by, and how the key
+/// it produces should be read back.
+struct CompSource {
+    name: String,
+    node: Value,
+    date: bool,
+    format: Option<String>,
+    desc: bool,
+    /// the earliest value the field holds, in nanoseconds, which is what says
+    /// which unit the histogram answered in
+    least_ns: Option<f64>,
+    /// how far the zone this source is reported in sits from UTC
+    zone_ms: i64,
+    /// an address is held in a fixed-width form and read back out of it
+    ip: bool,
+    /// documents with no value for this source still make a bucket of their own
+    missing_bucket: bool,
+    /// where that bucket goes: `first` or `last`
+    missing_last: bool,
+    /// the field the source reads, for finding the documents that lack it
+    field: String,
 }
 
 fn flatten_composite(
     node: &Value,
     depth: usize,
-    sources: &[(String, String)],
+    sources: &[CompSource],
     key: &mut serde_json::Map<String, Value>,
     out: &mut Vec<Value>,
 ) {
@@ -6133,7 +7487,26 @@ fn flatten_composite(
         return;
     };
     for b in buckets {
-        key.insert(sources[depth].0.clone(), b.get("key").cloned().unwrap_or(Value::Null));
+        // a histogram fills the gaps between its buckets; a composite has no
+        // gaps to fill, so an empty one is not a bucket at all
+        if b.get("doc_count").and_then(|c| c.as_u64()) == Some(0) {
+            continue;
+        }
+        let mut raw = b.get("key").cloned().unwrap_or(Value::Null);
+        if sources[depth].ip {
+            if let Some(text) =
+                raw.as_str().and_then(crate::store::ip_from_canonical)
+            {
+                raw = json!(text);
+            }
+        }
+        if sources[depth].date {
+            // a date key is a whole number of milliseconds, not a float
+            if let Some(n) = raw.as_f64() {
+                raw = json!(n as i64);
+            }
+        }
+        key.insert(sources[depth].name.clone(), raw);
         if depth + 1 < sources.len() {
             flatten_composite(b, depth + 1, sources, key, out);
         } else {
@@ -6144,7 +7517,11 @@ fn flatten_composite(
             // anything else under the bucket is a sub-aggregation of the composite
             if let Some(o) = b.as_object() {
                 for (k, v) in o {
-                    if k != "key" && k != "doc_count" && !k.starts_with("__c") {
+                    // the key belongs to the composite, written its own way,
+                    // and the bucketing agg's spelling of it is not wanted
+                    if k != "key" && k != "key_as_string" && k != "doc_count"
+                        && !k.starts_with("__c")
+                    {
                         bucket[k] = v.clone();
                     }
                 }
@@ -6152,12 +7529,26 @@ fn flatten_composite(
             out.push(bucket);
         }
     }
-    key.remove(&sources[depth].0);
+    key.remove(&sources[depth].name);
 }
 
-fn composite_key_order(a: &Value, b: &Value, sources: &[(String, String)]) -> Ordering {
-    for (name, _) in sources {
+fn composite_key_order(a: &Value, b: &Value, sources: &[CompSource]) -> Ordering {
+    for source in sources {
+        let name = &source.name;
         let (x, y) = (a.pointer(&format!("/key/{name}")), b.pointer(&format!("/key/{name}")));
+        let missing = |v: Option<&Value>| matches!(v, None | Some(Value::Null));
+        if missing(x) || missing(y) {
+            let last = if source.missing_last { Ordering::Greater } else { Ordering::Less };
+            let ord = match (missing(x), missing(y)) {
+                (true, true) => Ordering::Equal,
+                (true, false) => last,
+                _ => last.reverse(),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            continue;
+        }
         let ord = match (x, y) {
             (Some(Value::Number(m)), Some(Value::Number(n))) => m
                 .as_f64()
@@ -6168,6 +7559,7 @@ fn composite_key_order(a: &Value, b: &Value, sources: &[(String, String)]) -> Or
             (Some(m), Some(n)) => m.to_string().cmp(&n.to_string()),
             _ => Ordering::Equal,
         };
+        let ord = if source.desc { ord.reverse() } else { ord };
         if ord != Ordering::Equal {
             return ord;
         }
@@ -6185,17 +7577,33 @@ fn run_calendar_histogram(
 
     let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    // a histogram steps by a calendar unit or by a fixed length; the fixed
+    // one only comes through here when a zone means tantivy cannot do it
+    let fixed = spec
+        .get("fixed_interval")
+        .and_then(|v| v.as_str())
+        .and_then(parse_offset)
+        .filter(|d| d.whole_nanoseconds() > 0);
     let interval = spec
         .get("calendar_interval")
         .and_then(|v| v.as_str())
         .unwrap_or("day")
         .to_string();
-    let Some(unit) = CalendarUnit::parse(&interval) else {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            format!("The supplied interval [{interval}] could not be parsed as a calendar interval."),
-        ));
+    let unit = match fixed {
+        Some(_) => CalendarUnit::Second,
+        None => match CalendarUnit::parse(&interval) {
+            Some(u) => u,
+            None => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "The supplied interval [{interval}] could not be parsed as a calendar \
+                         interval."
+                    ),
+                ));
+            }
+        },
     };
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let min_doc_count =
@@ -6273,7 +7681,28 @@ fn run_calendar_histogram(
         .and_then(|v| v.as_str())
         .and_then(parse_offset)
         .unwrap_or(Duration::seconds(0));
-    let shift = |dt: OffsetDateTime| unit.floor(dt - offset) + offset;
+    // a zone is not an offset but a history of them, so the offset in force
+    // is the one at the instant being placed
+    let zone = spec.get("time_zone").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let zone_at = |dt: OffsetDateTime| -> Duration {
+        Duration::seconds(crate::tz::offset_at(&zone, dt.unix_timestamp()).unwrap_or(0) as i64)
+    };
+    let floor_local = |local: OffsetDateTime| -> OffsetDateTime {
+        match fixed {
+            // a fixed step divides the line evenly from the epoch
+            Some(step) => {
+                let step_ns = step.whole_nanoseconds();
+                let ns = local.unix_timestamp_nanos();
+                let floored = ns.div_euclid(step_ns) * step_ns;
+                OffsetDateTime::from_unix_timestamp_nanos(floored).unwrap_or(local)
+            }
+            None => unit.floor(local - offset) + offset,
+        }
+    };
+    let shift = |dt: OffsetDateTime| {
+        let o = zone_at(dt);
+        floor_local(dt + o) - o
+    };
 
     let mut buckets = Vec::new();
     let mut cursor = shift(lo);
@@ -6283,7 +7712,11 @@ fn run_calendar_histogram(
     let mut guard = 0;
     while cursor <= last && guard < 100_000 {
         guard += 1;
-        let next = unit.advance(cursor - offset) + offset;
+        let o = zone_at(cursor);
+        let next = match fixed {
+            Some(step) => cursor + step,
+            None => (unit.advance((cursor + o) - offset) + offset) - o,
+        };
         let mut spec = json!({
             "gte": iso_millis(cursor),
             "lt": iso_millis(next),
@@ -6299,7 +7732,7 @@ fn run_calendar_histogram(
         if count >= min_doc_count {
             let mut b = json!({
                 "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
-                "key_as_string": iso_millis(cursor),
+                "key_as_string": iso_millis_at(cursor, &zone, o),
                 "doc_count": count,
             });
             if let Some(Value::Object(o)) = sub {
@@ -6359,6 +7792,35 @@ fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
         "d" => tantivy::time::Duration::days(n),
         _ => return None,
     })
+}
+
+/// A date written in the zone it is being reported in, which is what puts the
+/// offset on the end of it in place of the `Z`.
+fn iso_millis_at(
+    dt: tantivy::time::OffsetDateTime,
+    zone: &str,
+    offset: tantivy::time::Duration,
+) -> String {
+    if zone.is_empty() || offset.is_zero() {
+        return iso_millis(dt);
+    }
+    let local = dt + offset;
+    let total = offset.whole_minutes();
+    let sign = if total < 0 { '-' } else { '+' };
+    let total = total.abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}{}{:02}:{:02}",
+        local.year(),
+        local.month() as u8,
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+        local.millisecond(),
+        sign,
+        total / 60,
+        total % 60,
+    )
 }
 
 fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {

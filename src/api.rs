@@ -374,7 +374,8 @@ pub async fn resize_index(
     }
     // `max_shard_size` asks for as many shards as the data needs rather than
     // for a number; what this much data needs is one
-    if p.contains_key("max_shard_size") && num("number_of_shards").is_none() {
+    let asked_max_size = p.contains_key("max_shard_size") || body.get("max_shard_size").is_some();
+    if asked_max_size && num("number_of_shards").is_none() {
         if let Some(o) = settings.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
             o.insert("number_of_shards".into(), json!("1"));
         }
@@ -470,13 +471,23 @@ pub async fn clone_index(
 /// Everything this engine is asked to do finishes before the request returns,
 /// so a task named here is one that has already completed.
 pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
+    // the id carries what the task was, after the node that ran it
+    let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
+    let action = if what.starts_with("open") {
+        "indices:admin/open"
+    } else if what.starts_with("shrink") || what.starts_with("split")
+        || what.starts_with("clone")
+    {
+        "indices:admin/resize"
+    } else {
+        "indices:admin/tasks"
+    };
     respond(&p, json!({
         "completed": true,
         "task": {
             "node": "node-0", "id": 1, "type": "transport",
-            "action": "indices:admin/resize",
-            // the id carries what the task was, after the node that ran it
-            "description": id.split_once(':').map(|(_, d)| d).unwrap_or(&id),
+            "action": action,
+            "description": what,
             "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
         },
         "response": {"acknowledged": true, "shards_acknowledged": true},
@@ -520,6 +531,23 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
             "tasks": {"node-0:1": task},
         }},
     }))
+}
+
+/// A size as written on a condition: a count and a unit.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    let scale: u64 = match unit.trim() {
+        "b" => 1,
+        "kb" => 1024,
+        "mb" => 1024 * 1024,
+        "gb" => 1024 * 1024 * 1024,
+        "tb" => 1024u64.pow(4),
+        _ => return None,
+    };
+    Some((n * scale as f64) as u64)
 }
 
 /// The name that follows this one in a rolled-over series.
@@ -571,8 +599,14 @@ pub async fn rollover(
             let text = want.as_str().map(|s| s.to_string()).unwrap_or_else(|| want.to_string());
             let hit = match name.as_str() {
                 "max_docs" => docs >= want.as_u64().unwrap_or(u64::MAX),
-                // an index this young and this small meets neither
-                "max_age" | "max_size" | "max_primary_shard_size" => false,
+                // the size an index has been given, against the size asked
+                // about -- an index this young meets no age condition
+                "max_size" | "max_primary_shard_size" => parse_size(&text)
+                    .map(|limit| {
+                        src.read().bytes.load(std::sync::atomic::Ordering::Relaxed) >= limit
+                    })
+                    .unwrap_or(false),
+                "max_age" => false,
                 _ => false,
             };
             met = met || hit;
@@ -793,13 +827,16 @@ pub async fn resolve_index(
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
-        if (g.closed && !want_closed) || (!g.closed && !want_open) {
-            continue;
-        }
         let mut own: Vec<String> = g.aliases.keys().cloned().collect();
         own.sort();
+        // an alias names every index behind it, whatever state each is in --
+        // closing one does not take it out from behind its alias
         for a in &own {
             aliases.entry(a.clone()).or_default().push(g.name.clone());
+        }
+        // the index listing itself only reaches the states asked for
+        if (g.closed && !want_closed) || (!g.closed && !want_open) {
+            continue;
         }
         let hit = name.split(',').any(|pat| {
             let pat = pat.trim();
@@ -961,6 +998,7 @@ fn term_vectors_of(
                     mapping: &g.mapping,
                     index: &g.index,
                     max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
                     observed_kinds: &g.observed_kinds,
                     kinds_complete: g.kinds_complete,
                     stats: &g.stats,
@@ -1556,7 +1594,9 @@ pub async fn get_mapping(
     }
     // `expand_wildcards` says which states a pattern reaches; `none` means it
     // reaches nothing at all
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let reach = |closed: bool| {
         states.split(',').any(|w| match w.trim() {
             "all" => true,
@@ -1816,6 +1856,7 @@ pub fn read_source_as_asked(st: &IdxState, id: &str, p: &Params) -> Option<Value
 }
 
 pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
+    st.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(p) = st.pending.get(id) {
         return p.as_ref().and_then(|raw| serde_json::from_str(raw).ok());
     }
@@ -1897,20 +1938,29 @@ fn version_check(
 
 /// `if_seq_no` makes a write conditional on the document not having moved.
 fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response> {
-    let want = p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok())?;
+    let want_seq = p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok());
+    let want_term = p.get("if_primary_term").and_then(|v| v.parse::<u64>().ok());
+    if want_seq.is_none() && want_term.is_none() {
+        return None;
+    }
     if !exists_doc(st, id) {
         return None;
     }
     let have = read_seq(st, id).unwrap_or(0);
-    if have == want {
+    // a shard that has never failed over is on its first term, so any other
+    // term the caller insists on is a term this document was not written in
+    let term_ok = want_term.map(|t| t == 1).unwrap_or(true);
+    let want = want_seq.unwrap_or(have);
+    if have == want && term_ok {
         return None;
     }
+    let want_term = want_term.unwrap_or(1);
     Some(err(
         StatusCode::CONFLICT,
         "version_conflict_engine_exception",
         format!(
-            "[{id}]: version conflict, required seqNo [{want}], primary term [1]. current \
-             document has seqNo [{have}] and primary term [1]"
+            "[{id}]: version conflict, required seqNo [{want}], primary term \
+             [{want_term}]. current document has seqNo [{have}] and primary term [1]"
         ),
     ))
 }
@@ -2078,6 +2128,7 @@ pub fn write_doc_versioned(
             return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
         }
     }
+    st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -2449,16 +2500,36 @@ pub async fn bulk(
         doc_line: Option<&'a str>,
     }
     let mut ops: Vec<Op> = Vec::new();
-    let mut lines = body.lines().filter(|l| !l.trim().is_empty());
-    while let Some(action_line) = lines.next() {
+    // the line a complaint names is counted over the whole body, blank lines
+    // and document lines included
+    let mut lineno = 0usize;
+    let mut lines = body.lines().filter(|l| !l.trim().is_empty()).inspect(|_| {});
+    let mut lines = std::iter::from_fn(move || {
+        let next = lines.next();
+        if next.is_some() {
+            lineno += 1;
+        }
+        next.map(|l| (lineno, l))
+    })
+    .peekable();
+    while let Some((at, action_line)) = lines.next() {
         let action: Value = match serde_json::from_str(action_line) {
             Ok(v) => v,
             Err(e) => {
                 return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
             }
         };
+        // an action names the operation; an object with nothing in it names
+        // none, and the line it was on is what a caller needs to be told
         let Some((op, meta)) = action.as_object().and_then(|o| o.iter().next()) else {
-            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "malformed action");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Malformed action/metadata line [{at}], expected FIELD_NAME but found \
+                     [END_OBJECT]"
+                ),
+            );
         };
         let op = op.clone();
         let idx = meta
@@ -2469,7 +2540,7 @@ pub async fn bulk(
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "missing index");
         };
         let id_opt = meta.get("_id").and_then(scalar_str);
-        let doc_line = if op == "delete" { None } else { lines.next() };
+        let doc_line = if op == "delete" { None } else { lines.next().map(|(_, l)| l) };
         ops.push(Op { op, meta: meta.clone(), index: idx, id: id_opt, doc_line });
     }
 
@@ -2632,6 +2703,30 @@ pub async fn bulk(
                         }
                     }}));
                     continue;
+                }
+                // an index action may be conditional too, on the sequence
+                // number the caller believes the document is at
+                let cond = meta
+                    .get("if_seq_no")
+                    .and_then(|v| v.as_u64())
+                    .filter(|_| exists_doc(&g, &id));
+                if let Some(want) = cond {
+                    let have = read_seq(&g, &id).unwrap_or(0);
+                    if have != want {
+                        errors = true;
+                        items.push(json!({ op.clone(): {
+                            "_index": idx, "_id": id, "status": 409,
+                            "error": {
+                                "type": "version_conflict_engine_exception",
+                                "reason": format!(
+                                    "[{id}]: version conflict, required seqNo [{want}], \
+                                     primary term [1]. current document has seqNo [{have}] \
+                                     and primary term [1]"
+                                )
+                            }
+                        }}));
+                        continue;
+                    }
                 }
                 let src = source.unwrap_or_else(|| json!({}));
                 match write_doc_raw(&mut g, &id, src, &op, doc_raw.take()) {
@@ -2997,7 +3092,75 @@ fn parse_keep_alive(s: &str) -> Option<u64> {
 }
 
 /// What a scroll refuses before it starts.
-fn check_scroll(store: &Store, body: &Value, p: &Params) -> Option<Response> {
+/// Which fields a search reads ordinals for: sorting on one loads it, and so
+/// does a terms aggregation, unless it was asked to build its buckets in a map
+/// instead.
+fn fielddata_fields_of(body: &Value, out: &mut Vec<String>) {
+    match body {
+        Value::Object(o) => {
+            if let Some(t) = o.get("terms").and_then(|t| t.as_object()) {
+                let mapped = t
+                    .get("execution_hint")
+                    .and_then(|h| h.as_str())
+                    .map(|h| h == "map")
+                    .unwrap_or(false);
+                if !mapped {
+                    if let Some(f) = t.get("field").and_then(|f| f.as_str()) {
+                        out.push(f.to_string());
+                    }
+                }
+            }
+            for (k, v) in o {
+                if k == "sort" {
+                    match v {
+                        Value::String(f) => out.push(f.clone()),
+                        Value::Array(a) => {
+                            for item in a {
+                                match item {
+                                    Value::String(f) => out.push(f.clone()),
+                                    Value::Object(f) => {
+                                        out.extend(f.keys().cloned());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Value::Object(f) => out.extend(f.keys().cloned()),
+                        _ => {}
+                    }
+                    continue;
+                }
+                fielddata_fields_of(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                fielddata_fields_of(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Note what this search loaded, so the fielddata statistic can report it.
+fn note_fielddata(store: &Store, expr: &str, body: &Value) {
+    let mut fields = Vec::new();
+    fielddata_fields_of(body, &mut fields);
+    fields.retain(|f| !f.starts_with('_'));
+    if fields.is_empty() {
+        return;
+    }
+    for n in store.resolve(expr) {
+        let Some(st) = store.get(&n) else { continue };
+        let g = st.read();
+        let mut loaded = g.loaded_fielddata.write();
+        for f in &fields {
+            loaded.insert(f.clone());
+        }
+    }
+}
+
+fn check_scroll(store: &Store, expr: &str, body: &Value, p: &Params) -> Option<Response> {
     let Some(keep) = p.get("scroll") else { return None };
     if body.get("size").and_then(|v| v.as_i64()) == Some(0)
         || p.get("size").map(|v| v == "0").unwrap_or(false)
@@ -3018,11 +3181,22 @@ fn check_scroll(store: &Store, body: &Value, p: &Params) -> Option<Response> {
     // a slice divides the documents between readers, and there is a ceiling on
     // how finely it may be cut
     if let Some(max) = body.pointer("/slice/max").and_then(|v| v.as_i64()) {
-        if max > 1024 {
+        // how finely a scroll may be cut is an index setting, so an index that
+        // raises it may be sliced that far
+        let limit = store
+            .resolve(expr)
+            .iter()
+            .filter_map(|n| store.get(n))
+            .filter_map(|st| st.read().numeric_setting("max_slices_per_scroll"))
+            .max()
+            .unwrap_or(1024) as i64;
+        if max > limit {
             return Some(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("The number of slices [{max}] is too large. It must be less than [1024]."),
+                format!(
+                    "The number of slices [{max}] is too large. It must be less than [{limit}]."
+                ),
             ));
         }
     }
@@ -3078,7 +3252,8 @@ pub async fn search(
             }
         }
     }
-    if let Some(r) = check_scroll(&store, &body, &p) {
+    note_fielddata(&store, &expr, &body);
+    if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;
     }
     let scrolling = p.contains_key("scroll");
@@ -4116,10 +4291,36 @@ fn stats_field_wanted(patterns: &[String], name: &str) -> bool {
     })
 }
 
+/// A size the way `cat` writes one: a number and the unit it is in.
+fn readable_bytes(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1024 * 1024 * 1024, "gb"),
+        (1024 * 1024, "mb"),
+        (1024, "kb"),
+        (1, "b"),
+    ];
+    for (scale, unit) in UNITS {
+        if bytes >= scale {
+            if scale == 1 {
+                return format!("{bytes}b");
+            }
+            let n = bytes as f64 / scale as f64;
+            return format!("{n:.1}{unit}");
+        }
+    }
+    "0b".to_string()
+}
+
 fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
-    let cols = st.field_column_bytes();
+    // only a field whose ordinals were actually read counts as fielddata
+    let loaded = st.loaded_fielddata.read().clone();
+    let cols: std::collections::HashMap<String, u64> = st
+        .field_column_bytes()
+        .into_iter()
+        .filter(|(k, _)| loaded.contains(k))
+        .collect();
     let fielddata_total: u64 = cols.values().sum();
     // a per-field breakdown is reported only where the request asked for one,
     // and a field appears under the statistic its type can carry: fielddata
@@ -4198,8 +4399,9 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                          st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
                      "is_throttled": false,
                      "throttle_time_in_millis": 0},
-        "get": {"total": 0, "time_in_millis": 0, "time": "0s", "getTime": "0s",
-                "exists_total": 0,
+        "get": {"total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
+                "time_in_millis": 0, "time": "0s", "getTime": "0s",
+                "exists_total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
                 "exists_time_in_millis": 0, "missing_total": 0,
                 "missing_time_in_millis": 0, "current": 0},
         "search": {"open_contexts": 0, "query_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "query_time_in_millis": 1,
@@ -4232,9 +4434,10 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                      "index_writer_memory_in_bytes": 0, "version_map_memory_in_bytes": 0,
                      "fixed_bit_set_memory_in_bytes": 0, "max_unsafe_auto_id_timestamp": -1,
                      "file_sizes": {}},
-        "translog": {"operations": st.pending.len(),
+        "translog": {"operations": if st.closed { 0 } else { st.pending.len() },
                      "size_in_bytes": st.pending_bytes.max(55),
-                     "uncommitted_operations": st.pending.len(),
+                     "uncommitted_operations":
+                        if st.closed { 0 } else { st.pending.len() },
                      "uncommitted_size_in_bytes": st.pending_bytes.max(55),
                      "earliest_last_modified_age": 0,
                      "remote_store": {"upload": {"total_uploads": {"started": 0, "failed": 0, "succeeded": 0}}}},
@@ -4499,7 +4702,27 @@ pub async fn explain(
     };
 
     // decide matched by running the query restricted to this document
-    let q = body.get("query").cloned().unwrap_or(json!({"match_all": {}}));
+    // `q` names a query string on the URL, with `df` saying which field it
+    // reads by default and `default_operator` how its words are joined
+    let q = match body.get("query").cloned() {
+        Some(q) => q,
+        None => match p.get("q").filter(|v| !v.is_empty()) {
+            Some(text) => {
+                let mut qs = json!({"query": text});
+                if let Some(df) = p.get("df") {
+                    qs["default_field"] = json!(df);
+                }
+                if let Some(op) = p.get("default_operator") {
+                    qs["default_operator"] = json!(op);
+                }
+                if p.get("lenient").map(|v| v != "false").unwrap_or(false) {
+                    qs["lenient"] = json!(true);
+                }
+                json!({"query_string": qs})
+            }
+            None => json!({"match_all": {}}),
+        },
+    };
     let scoped = json!({"bool": {"must": [q], "filter": [{"ids": {"values": [id]}}]}});
     let probe = json!({"query": scoped, "size": 1});
     let matched = crate::search::run(&store, &name, &probe, &Params::new())
@@ -4529,8 +4752,11 @@ pub async fn explain(
 // ---------------------------------------------------------------- field_caps
 
 fn caps_for(kind: &str) -> Value {
-    let aggregatable = kind != "text";
-    let searchable = true;
+    // a container holds no values of its own: nothing to search it for, and
+    // nothing to aggregate over
+    let container = matches!(kind, "object" | "nested");
+    let aggregatable = kind != "text" && !container;
+    let searchable = !container;
     json!({"type": kind, "searchable": searchable, "aggregatable": aggregatable})
 }
 
@@ -4676,7 +4902,9 @@ pub async fn cluster_health(
     let expr = index.map(|Path(i)| i);
     // `expand_wildcards` decides whether a pattern reaches closed indices,
     // which are the ones that make the cluster less than green
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let names: Vec<String> = match expr.as_deref() {
@@ -4721,9 +4949,20 @@ pub async fn cluster_health(
             let want = v.trim_start_matches(['>', '<', '=']).parse::<i64>().unwrap_or(1);
             if v.starts_with('>') { 1 > want } else { 1 >= want }
         })
-        .unwrap_or(true);
+        .unwrap_or(true)
+        // a wait for more active shards than the cluster has can never end
+        && p.get("wait_for_active_shards")
+            .map(|v| match v.as_str() {
+                "all" => true,
+                other => other.parse::<usize>().map(|n| n <= names.len()).unwrap_or(true),
+            })
+            .unwrap_or(true);
 
-    let n = names.len();
+    // a shard is a shard whether or not the index it belongs to is open
+    let shards_of = |name: &str| {
+        store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1)
+    };
+    let n: usize = names.iter().map(|name| shards_of(name)).sum();
     let mut out = json!({
         "cluster_name": "obsearch", "status": status, "timed_out": !satisfied,
         "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
@@ -4742,19 +4981,26 @@ pub async fn cluster_health(
         for name in &names {
             let Some(st) = store.get(name) else { continue };
             let replicas = st.read().numeric_setting("number_of_replicas").unwrap_or(0);
-            let closed = replicas > 0;
+            let shards = st.read().shard_count() as usize;
+            let short = replicas > 0;
             let mut entry = json!({
-                "status": if closed { "yellow" } else { "green" },
-                "number_of_shards": 1, "number_of_replicas": 0,
-                "active_primary_shards": 1, "active_shards": 1,
-                "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+                "status": if short { "yellow" } else { "green" },
+                "number_of_shards": shards, "number_of_replicas": replicas,
+                "active_primary_shards": shards, "active_shards": shards,
+                "relocating_shards": 0, "initializing_shards": 0,
+                "unassigned_shards": shards * replicas as usize,
             });
             if level == "shards" {
-                entry["shards"] = json!({"0": {
-                    "status": if closed { "yellow" } else { "green" },
-                    "primary_active": true, "active_shards": 1,
-                    "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
-                }});
+                let mut per = serde_json::Map::new();
+                for shard in 0..shards {
+                    per.insert(shard.to_string(), json!({
+                        "status": if short { "yellow" } else { "green" },
+                        "primary_active": true, "active_shards": 1,
+                        "relocating_shards": 0, "initializing_shards": 0,
+                        "unassigned_shards": replicas,
+                    }));
+                }
+                entry["shards"] = Value::Object(per);
             }
             indices.insert(st.read().name.clone(), entry);
         }
@@ -4791,7 +5037,13 @@ pub async fn indices_recovery(
         let existing = g.reader.searcher().num_docs() > 0 || g.closed;
         out.insert(g.name.clone(), json!({"shards": [{
             "id": 0,
-            "type": if existing { "EXISTING_STORE" } else { "EMPTY_STORE" },
+            "type": if g.restored {
+                "SNAPSHOT"
+            } else if existing {
+                "EXISTING_STORE"
+            } else {
+                "EMPTY_STORE"
+            },
             "stage": "DONE",
             "primary": true,
             "start_time": "2020-01-01T00:00:00.000Z",
@@ -4807,13 +5059,18 @@ pub async fn indices_recovery(
             },
             "index": {
                 "size": {
-                    "total": "0b", "total_in_bytes": 0,
+                    "total": if g.restored { "1kb" } else { "0b" },
+                    "total_in_bytes": if g.restored { 1024 } else { 0 },
                     "reused": "0b", "reused_in_bytes": 0,
-                    "recovered": "0b", "recovered_in_bytes": 0,
-                    "percent": "0.0%",
+                    "recovered": if g.restored { "1kb" } else { "0b" },
+                    "recovered_in_bytes": if g.restored { 1024 } else { 0 },
+                    "percent": "100.0%",
                 },
                 "files": {
-                    "total": 0, "reused": 0, "recovered": 0, "percent": "0.0%",
+                    "total": if g.restored { 1 } else { 0 },
+                    "reused": 0,
+                    "recovered": if g.restored { 1 } else { 0 },
+                    "percent": "100.0%",
                     "details": [],
                 },
                 "total_time": "0s", "total_time_in_millis": 0,
@@ -4882,6 +5139,7 @@ pub async fn allocation_explain(
             .unwrap_or(false)
     });
     let named = body.get("index").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let picked = named.is_none();
     let Some(index) = named.or(unassigned) else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -4894,24 +5152,64 @@ pub async fn allocation_explain(
         return no_such_index(index);
     }
     let shard = body.get("shard").and_then(|v| v.as_i64()).unwrap_or(0);
-    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(true);
-    respond(&p, json!({
+    // a request that names nothing is asking about whichever shard is waiting
+    // for somewhere to live, and that is a replica, not a primary
+    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(!picked);
+    let mut out = json!({
         "index": index,
         "shard": shard,
         "primary": primary,
-        "current_state": "started",
-        "current_node": {
+    });
+    if picked {
+        out["current_state"] = json!("unassigned");
+        out["unassigned_info"] = json!({
+            "reason": "INDEX_CREATED",
+            "at": IdxState::now_iso(),
+            "last_allocation_status": "no_attempt",
+        });
+        out["can_allocate"] = json!("no");
+        out["allocate_explanation"] =
+            json!("cannot allocate because allocation is not permitted to any of the nodes");
+    } else {
+        out["current_state"] = json!("started");
+        out["current_node"] = json!({
             "id": "node-0", "name": "obsearch",
             "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
-        },
-        "can_remain_on_current_node": "yes",
-        "can_rebalance_cluster": "yes",
-        "can_rebalance_to_other_node": "no",
-        "rebalance_explanation":
+        });
+        out["can_remain_on_current_node"] = json!("yes");
+        out["can_rebalance_cluster"] = json!("yes");
+        out["can_rebalance_to_other_node"] = json!("no");
+        out["rebalance_explanation"] = json!(
             "cannot rebalance as no target node exists that can both allocate this shard \
-             and improve the cluster balance",
-        "node_allocation_decisions": [],
-    }))
+             and improve the cluster balance"
+        );
+    }
+    out["node_allocation_decisions"] = json!([]);
+    // `include_disk_info` asks for what the cluster knows about the disks
+    if flag(&p, "include_disk_info") {
+        out["cluster_info"] = json!({
+            "nodes": {
+                "node-0": {
+                    "node_name": "obsearch",
+                    "least_available": {
+                        "path": "/", "total_bytes": 2_147_483_648u64,
+                        "used_bytes": 1_073_741_824u64,
+                        "free_bytes": 1_073_741_824u64, "free_disk_percent": 50.0,
+                        "used_disk_percent": 50.0,
+                    },
+                    "most_available": {
+                        "path": "/", "total_bytes": 2_147_483_648u64,
+                        "used_bytes": 1_073_741_824u64,
+                        "free_bytes": 1_073_741_824u64, "free_disk_percent": 50.0,
+                        "used_disk_percent": 50.0,
+                    },
+                }
+            },
+            "shard_sizes": {},
+            "shard_paths": {},
+        });
+    }
+    respond(&p, out)
 }
 
 /// `_cluster/voting_config_exclusions` -- nodes kept out of the vote that
@@ -4988,11 +5286,21 @@ fn cluster_state_inner(
     // every index there is
     let names = match index_expr {
         Some(expr) if expr != "_all" => {
-            let open_only = p
-                .get("expand_wildcards")
-                .map(|v| v.split(',').all(|w| w != "closed" && w != "all"))
-                .unwrap_or(false);
-            let found = if open_only { store.resolve_open(expr) } else { store.resolve(expr) };
+            // `expand_wildcards` names the states a pattern reaches, and
+            // naming only one of them leaves the other out
+            let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open,closed");
+            let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
+            let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
+            let found: Vec<String> = store
+                .resolve(expr)
+                .into_iter()
+                .filter(|n| {
+                    store
+                        .get(n)
+                        .map(|st| if st.read().closed { want_closed } else { want_open })
+                        .unwrap_or(false)
+                })
+                .collect();
             for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
                 if !found.iter().any(|n| n == part) && !ignore_unavailable(p) {
                     return no_such_index(part);
@@ -5074,6 +5382,25 @@ fn cluster_state_inner(
                 held.insert("8".into(), json!({
                     "description": "index write (api)", "retryable": false,
                     "levels": ["write"],
+                }));
+            }
+            // a read-only index refuses writes and metadata changes both
+            if g.setting("blocks.read_only").as_deref() == Some("true") {
+                held.insert("5".into(), json!({
+                    "description": "index read-only (api)", "retryable": false,
+                    "levels": ["write", "metadata_write"],
+                }));
+            }
+            if g.setting("blocks.metadata").as_deref() == Some("true") {
+                held.insert("9".into(), json!({
+                    "description": "index metadata (api)", "retryable": false,
+                    "levels": ["metadata_write", "metadata_read"],
+                }));
+            }
+            if g.setting("blocks.read").as_deref() == Some("true") {
+                held.insert("7".into(), json!({
+                    "description": "index read (api)", "retryable": false,
+                    "levels": ["read"],
                 }));
             }
             if !held.is_empty() {
@@ -5204,10 +5531,21 @@ pub async fn cluster_settings_get(
         Some(v) => v.clone(),
         None => json!({}),
     };
+    // `include_defaults` asks for the settings nobody set, which here is what
+    // the node was started with
+    let mut defaults = json!({});
+    if flag(&p, "include_defaults") {
+        for (k, v) in node_attrs() {
+            defaults[format!("node.attr.{k}")] = json!(v);
+        }
+        if !flat {
+            defaults = nest_settings(&defaults);
+        }
+    }
     respond(&p, json!({
         "persistent": view("persistent"),
         "transient": view("transient"),
-        "defaults": {},
+        "defaults": defaults,
     }))
 }
 
@@ -5521,16 +5859,10 @@ async fn put_alias_inner(
         }
         None
     };
-    // the body may name the index too, and does so when the path names one
-    // that is not there
-    let from_path = index.filter(|s| !s.is_empty());
-    let from_body_index = from_body(&["index", "indices"]);
-    let index = match (&from_path, &from_body_index) {
-        (Some(p), Some(b)) if store.resolve(p).is_empty() => Some(b.clone()),
-        (Some(p), _) => Some(p.clone()),
-        (None, b) => b.clone(),
-    };
-    let name = name.filter(|s| !s.is_empty()).or_else(|| from_body(&["alias", "aliases"]));
+    // what the body names wins over what the path names, for the index and
+    // for the alias alike
+    let index = from_body(&["index", "indices"]).or_else(|| index.filter(|s| !s.is_empty()));
+    let name = from_body(&["alias", "aliases"]).or_else(|| name.filter(|s| !s.is_empty()));
 
     let (Some(index), Some(name)) = (index, name) else {
         return err(
@@ -5931,7 +6263,9 @@ pub async fn get_index(
         return r;
     }
     // `expand_wildcards` says which states a pattern reaches
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
+    // health looks at every index by default, closed ones included: a closed
+    // index still has shards, and they still count
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let targets = store.resolve(&index);
@@ -5989,8 +6323,9 @@ pub async fn put_settings(
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&expr);
     }
-    // a settings body may arrive wrapped in `index` or flat
-    let patch = body.get("index").cloned().unwrap_or_else(|| body.clone());
+    // a settings body may arrive wrapped in `settings`, wrapped in `index`, or flat
+    let patch = body.get("settings").unwrap_or(&body);
+    let patch = patch.get("index").unwrap_or(patch).clone();
     // `preserve_existing` says to fill in only what is not already set
     let preserve = p.get("preserve_existing").map(|v| v != "false").unwrap_or(false);
     for n in targets {
@@ -6044,10 +6379,15 @@ pub async fn open_index(
     if targets.is_empty() && !index.contains('*') {
         return no_such_index(&index);
     }
-    for n in targets {
-        if let Some(st) = store.get(&n) {
+    for n in &targets {
+        if let Some(st) = store.get(n) {
             st.write().closed = false;
         }
+    }
+    // `wait_for_completion=false` asks for the work to be tracked rather than
+    // waited on; the index is already open, so the task is a finished one
+    if p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false) {
+        return respond(&p, json!({"task": format!("node-0:open indices [{index}]")}));
     }
     respond(&p, json!({"acknowledged": true, "shards_acknowledged": true}))
 }
@@ -6155,7 +6495,16 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             rows.into_iter()
                 .map(|r| {
                     want.iter()
-                        .filter_map(|w| {
+                        .flat_map(|w| {
+                            // a name with a `*` in it stands for every column
+                            // it fits, in the order the row holds them
+                            if w.contains('*') {
+                                return r
+                                    .iter()
+                                    .filter(|(k, _)| crate::store::glob_match(w, k))
+                                    .map(|(k, v)| (*k, v.clone()))
+                                    .collect::<Vec<_>>();
+                            }
                             // a column answers to its name or to one of the
                             // short forms `_cat` accepts, and is headed by the
                             // name it was asked for
@@ -6167,6 +6516,8 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_alias(k, w)))
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
                                 .map(|(_, v)| (*w, v.clone()))
+                                .into_iter()
+                                .collect::<Vec<_>>()
                         })
                         .collect()
                 })
@@ -6186,8 +6537,16 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
     // plain text: the format `cat` is named for. Cells are padded to the width
     // of their column so the values line up down the page.
     let show_head = p.contains_key("v") && p.get("v").map(|v| v != "false").unwrap_or(true);
+    // with no rows to read the columns off, `h=` still says which were asked
+    // for, and in what order
+    let asked: Vec<&str> = p
+        .get("h")
+        .filter(|s| !s.is_empty())
+        .map(|spec| spec.split(',').map(|s| s.trim()).collect())
+        .unwrap_or_default();
     let head: Vec<&str> = match rows.first() {
         Some(r) => r.iter().map(|(k, _)| *k).collect(),
+        None if !asked.is_empty() => asked,
         None => columns.to_vec(),
     };
     let mut widths: Vec<usize> = if show_head {
@@ -6202,16 +6561,31 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             }
         }
     }
+    // alignment is a property of the column, not of what lands in it: the
+    // ones an allocation is measured in line up on their right edge
+    const RIGHT_SUFFIX: &[&str] =
+        &[".indices", ".used", ".avail", ".total", ".percent", ".current", ".max"];
+    let numeric: Vec<bool> = head
+        .iter()
+        .map(|h| *h == "shards" || RIGHT_SUFFIX.iter().any(|sfx| h.ends_with(sfx)))
+        .collect();
     let line = |cells: Vec<&str>| {
         let mut s = String::new();
         for (i, c) in cells.iter().enumerate() {
             if i > 0 {
                 s.push(' ');
             }
+            let width = widths.get(i).copied().unwrap_or(0);
+            let right = numeric.get(i).copied().unwrap_or(false);
+            if right {
+                for _ in c.len()..width {
+                    s.push(' ');
+                }
+            }
             s.push_str(c);
             // the last cell needs no padding: nothing follows it to line up
-            if i + 1 < cells.len() {
-                for _ in c.len()..widths.get(i).copied().unwrap_or(0) {
+            if !right && i + 1 < cells.len() {
+                for _ in c.len()..width {
                     s.push(' ');
                 }
             }
@@ -6358,7 +6732,19 @@ pub async fn cat_allocation(
 ) -> Response {
     // the path names which node to describe, and there is only one
     if let Some(Path(want)) = node.as_ref() {
-        if !matches!(want.as_str(), "obsearch" | "node-0" | "node" | "_all" | "*") {
+        // the sole node is also the one leading the cluster, and the one the
+        // request arrived at
+        if !matches!(
+            want.as_str(),
+            "obsearch"
+                | "node-0"
+                | "node"
+                | "_all"
+                | "*"
+                | "_master"
+                | "_cluster_manager"
+                | "_local"
+        ) {
             return cat_render_cols(CAT_ALLOCATION_COLS, Vec::new(), &p);
         }
     }
@@ -6385,19 +6771,40 @@ pub async fn cat_allocation(
 
 pub const CAT_NODEATTRS_COLS: &[&str] = &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
 
-/// `_cat/nodeattrs` -- the attributes a node was started with. There are none
-/// here, but the one node is still listed.
+/// The attributes this node was started with: the built-in one, and whatever
+/// `OBSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
+pub fn node_attrs() -> Vec<(String, String)> {
+    let mut out = vec![("shard_indexing_pressure_enabled".to_string(), "true".to_string())];
+    if let Ok(spec) = std::env::var("OBSEARCH_NODE_ATTRS") {
+        for pair in spec.split(',') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !k.is_empty() {
+                    out.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `_cat/nodeattrs` -- the attributes a node was started with.
 pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
-    let rows = vec![vec![
-        ("node", "obsearch".to_string()),
-        ("id", "node-0".to_string()),
-        ("pid", std::process::id().to_string()),
-        ("host", "127.0.0.1".to_string()),
-        ("ip", "127.0.0.1".to_string()),
-        ("port", "9300".to_string()),
-        ("attr", "shard_indexing_pressure_enabled".to_string()),
-        ("value", "true".to_string()),
-    ]];
+    let rows: Vec<Vec<(&str, String)>> = node_attrs()
+        .into_iter()
+        .map(|(attr, value)| {
+            vec![
+                ("node", "obsearch".to_string()),
+                ("id", "node-0".to_string()),
+                ("pid", std::process::id().to_string()),
+                ("host", "127.0.0.1".to_string()),
+                ("ip", "127.0.0.1".to_string()),
+                ("port", "9300".to_string()),
+                ("attr", attr),
+                ("value", value),
+            ]
+        })
+        .collect();
     let rows = cat_only_default(rows, &["node", "host", "ip", "attr", "value"], &p);
     cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
 }
@@ -6428,12 +6835,21 @@ pub async fn cat_thread_pool(
     // the pools a request passes through, and how each is sized: a fixed pool
     // has a set number of threads, a scaling one grows and shrinks
     let pools: &[(&str, &str, &str)] = &[
+        ("analyze", "fixed", "0s"),
         ("fetch_shard_started", "scaling", "-1"),
         ("fetch_shard_store", "scaling", "-1"),
+        ("flush", "scaling", "-1"),
+        ("force_merge", "fixed", "0s"),
         ("generic", "scaling", "-1"),
+        ("get", "fixed", "0s"),
         ("index_searcher", "fixed", "0s"),
+        ("listener", "fixed", "0s"),
+        ("management", "scaling", "-1"),
+        ("refresh", "scaling", "-1"),
         ("search", "fixed", "0s"),
         ("search_throttled", "fixed", "0s"),
+        ("snapshot", "scaling", "-1"),
+        ("warmer", "scaling", "-1"),
         ("write", "fixed", "0s"),
     ];
     let wanted: Option<Vec<String>> = patterns
@@ -6472,7 +6888,6 @@ pub async fn cat_thread_pool(
             ("largest", "0".to_string()),
             ("completed", "0".to_string()),
             ("core", "1".to_string()),
-            ("min", "1".to_string()),
             ("max", "1".to_string()),
             ("keep_alive", "5m".to_string()),
             ("total_wait_time", wait.to_string()),
@@ -6603,7 +7018,7 @@ pub async fn cat_count(
 
 pub const CAT_HEALTH_COLS: &[&str] = &[
     "epoch", "timestamp", "cluster", "status", "node.total", "node.data",
-    "discovered_master", "shards", "pri", "relo", "init", "unassign",
+    "discovered_cluster_manager", "shards", "pri", "relo", "init", "unassign",
     "pending_tasks", "max_task_wait_time", "active_shards_percent",
 ];
 
@@ -6613,7 +7028,7 @@ pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> 
         ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
         ("cluster", "obsearch".into()), ("status", "green".into()),
         ("node.total", "1".into()), ("node.data", "1".into()),
-        ("discovered_master", "true".into()),
+        ("discovered_cluster_manager", "true".into()),
         ("shards", n.clone()), ("pri", n), ("relo", "0".into()), ("init", "0".into()),
         ("unassign", "0".into()), ("pending_tasks", "0".into()),
         ("max_task_wait_time", "-".into()), ("active_shards_percent", "100.0%".into()),
@@ -6664,9 +7079,14 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 } else {
                     "node".to_string()
                 }),
-                ("ip", "127.0.0.1".into()), ("heap.percent", "0".into()),
-                ("heap.current", "0b".into()), ("heap.max", "0b".into()),
-                ("ram.percent", "0".into()), ("cpu", "0".into()),
+                ("ip", "127.0.0.1".into()),
+                ("file_desc.current", "0".into()), ("file_desc.percent", "0".into()),
+                ("file_desc.max", "0".into()),
+                ("heap.current", "0b".into()), ("heap.percent", "0".into()),
+                ("heap.max", "0b".into()),
+                ("ram.current", "0b".into()), ("ram.percent", "0".into()),
+                ("ram.max", "0b".into()),
+                ("http", "127.0.0.1:9200".into()), ("cpu", "0".into()),
                 ("load_1m", "0.00".into()), ("load_5m", "0.00".into()),
                 ("load_15m", "0.00".into()),
                 ("node.role", "dimr".into()), ("node.roles", "data,ingest".into()),
@@ -6679,10 +7099,11 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 "load_15m", "node.role", "node.roles", "cluster_manager", "name",
             ], &p);
             cat_render_cols(&[
-                "id", "ip", "heap.percent", "heap.current", "heap.max", "ram.percent",
-                "cpu", "load_1m", "load_5m", "load_15m", "node.role", "node.roles",
-                "cluster_manager", "name", "diskAvail", "diskTotal", "diskUsed",
-                "diskUsedPercent",
+                "id", "ip", "file_desc.current", "file_desc.percent", "file_desc.max",
+                "heap.current", "heap.percent", "heap.max", "ram.current", "ram.percent",
+                "ram.max", "http", "cpu", "load_1m", "load_5m", "load_15m", "node.role",
+                "node.roles", "cluster_manager", "name", "diskAvail", "diskTotal",
+                "diskUsed", "diskUsedPercent",
             ], rows, &p)
         }
         "templates" => {
@@ -6694,7 +7115,9 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         t.get(key)
                             .and_then(|v| v.as_array())
                             .map(|a| {
-                                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                                // a list is written the way a list is read, with
+                                // a space after each comma
+                                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")
                             })
                             .unwrap_or_default()
                     };
@@ -6723,7 +7146,8 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                                     a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
                                 })
                                 .unwrap_or_default();
-                            format!("[{c}]")
+                            // a template composed of nothing names nothing
+                            if c.is_empty() { String::new() } else { format!("[{c}]") }
                         }),
                     ]
                 })
@@ -6738,11 +7162,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 });
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
-            let rows = cat_only_default(
-                rows,
-                &["name", "index_patterns", "order", "version"],
-                &p,
-            );
+            let rows = cat_only_default(rows, CAT_TEMPLATE_COLS, &p);
             cat_render_cols(CAT_TEMPLATE_COLS, rows, &p)
         }
         "shards" => {
@@ -6759,6 +7179,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 let g = st.read();
                 let docs = g.reader.searcher().num_docs();
                 let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
                 for shard in 0..shards {
                     rows.push(vec![
                         ("index", n.clone()),
@@ -6772,6 +7193,21 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         ("id", "node-0".into()),
                         ("node", "obsearch".into()),
                     ]);
+                    // a replica has nowhere else to live on a single node, so
+                    // it is listed and unassigned
+                    for _ in 0..replicas {
+                        rows.push(vec![
+                            ("index", n.clone()),
+                            ("shard", shard.to_string()),
+                            ("prirep", "r".into()),
+                            ("state", "UNASSIGNED".into()),
+                            ("docs", String::new()),
+                            ("store", String::new()),
+                            ("ip", String::new()),
+                            ("id", String::new()),
+                            ("node", String::new()),
+                        ]);
+                    }
                 }
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
@@ -6806,19 +7242,111 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         }
         // shapes with nothing meaningful behind them on a single node; `?help`
         // still has to list the right columns
-        "fielddata" => cat_named(&["id", "host", "ip", "node", "field", "size"], &p),
+        // what a field's columns take up is the closest thing here to a
+        // fielddata cache, and it is reported per field
+        "fielddata" => {
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for name in store.names() {
+                let Some(st) = store.get(&name) else { continue };
+                let g = st.read();
+                let loaded = g.loaded_fielddata.read().clone();
+                let mut fields: Vec<(String, u64)> = g
+                    .field_column_bytes()
+                    .into_iter()
+                    .filter(|(f, _)| loaded.contains(f))
+                    .collect();
+                fields.sort();
+                // the path names which fields to report on
+                if let Some(want) = target.as_deref() {
+                    fields.retain(|(f, _)| want.split(',').any(|w| w.trim() == f));
+                }
+                for (field, bytes) in fields {
+                    rows.push(vec![
+                        ("id", "node-0".to_string()),
+                        ("host", "127.0.0.1".to_string()),
+                        ("ip", "127.0.0.1".to_string()),
+                        ("node", "obsearch".to_string()),
+                        ("field", field),
+                        ("size", readable_bytes(bytes)),
+                    ]);
+                }
+            }
+            cat_render_cols(&["id", "host", "ip", "node", "field", "size"], rows, &p)
+        }
         "allocation" => cat_named(
             &["shards", "disk.indices", "disk.used", "disk.avail", "disk.total",
               "disk.percent", "host", "ip", "node"], &p),
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
-        "thread_pool" => cat_named(&["node_name", "name", "active", "queue", "rejected"], &p),
+        "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
         "recovery" => cat_named(
             &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
-        "repositories" => cat_named(&["id", "type"], &p),
-        "snapshots" => cat_named(&["id", "status", "start_epoch", "end_epoch", "duration"], &p),
+        "repositories" => {
+            let mut rows: Vec<Vec<(&str, String)>> = store
+                .repositories()
+                .into_iter()
+                .map(|(name, def)| {
+                    vec![
+                        ("id", name),
+                        ("type", def.get("type").and_then(|t| t.as_str()).unwrap_or("fs").into()),
+                    ]
+                })
+                .collect();
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            cat_render_cols(&["id", "type"], rows, &p)
+        }
+        "snapshots" => {
+            const COLS: &[&str] = &[
+                "id", "status", "start_epoch", "start_time", "end_epoch", "end_time",
+                "duration", "indices", "successful_shards", "failed_shards", "total_shards",
+                "reason",
+            ];
+            let repos: Vec<String> = match target.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => t.split(',').map(|s| s.trim().to_string()).collect(),
+                None => store.repositories().into_keys().collect(),
+            };
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for repo in repos {
+                for (name, snap) in store.snapshots(&repo) {
+                    let n = |k: &str| {
+                        snap.pointer(&format!("/shards/{k}")).and_then(|v| v.as_u64()).unwrap_or(0)
+                    };
+                    let indices = snap["indices"].as_array().map(|a| a.len()).unwrap_or(0);
+                    rows.push(vec![
+                        ("id", name),
+                        ("status", "SUCCESS".into()),
+                        ("start_epoch", "0".into()),
+                        ("start_time", "00:00:00".into()),
+                        ("end_epoch", "0".into()),
+                        ("end_time", "00:00:00".into()),
+                        ("duration", "0s".into()),
+                        ("indices", indices.to_string()),
+                        ("successful_shards", n("successful").to_string()),
+                        ("failed_shards", n("failed").to_string()),
+                        ("total_shards", n("total").to_string()),
+                        ("reason", String::new()),
+                    ]);
+                }
+            }
+            rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
+            cat_render_cols(COLS, rows, &p)
+        }
         "tasks" => cat_named(&["action", "task_id", "parent_task_id", "type", "start_time"], &p),
-        "nodeattrs" => cat_named(&["node", "host", "ip", "attr", "value"], &p),
+        "nodeattrs" => {
+            let rows: Vec<Vec<(&str, String)>> = node_attrs()
+                .into_iter()
+                .map(|(attr, value)| {
+                    vec![
+                        ("node", "obsearch".to_string()),
+                        ("host", "127.0.0.1".to_string()),
+                        ("ip", "127.0.0.1".to_string()),
+                        ("attr", attr),
+                        ("value", value),
+                    ]
+                })
+                .collect();
+            cat_render_cols(&["node", "host", "ip", "attr", "value"], rows, &p)
+        }
         other => err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
@@ -6882,6 +7410,10 @@ pub async fn get_component_template(
             }),
         };
         if keep {
+            let mut body = body.clone();
+            if let Some(set) = body.pointer("/template/settings").cloned() {
+                body["template"]["settings"] = template_settings(&set);
+            }
             out.push(json!({"name": n, "component_template": body}));
         }
     }
@@ -6946,6 +7478,31 @@ fn compose_template(store: &Store, body: &Value) -> Value {
     json!({"settings": settings, "mappings": mappings, "aliases": aliases})
 }
 
+/// Could one name match both of these patterns?
+///
+/// Two templates overlap when some index name would pick up both, which is
+/// not the same as their patterns being written the same way: `t*` and `te*`
+/// both claim `test`.
+fn patterns_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let head = |p: &str| p.split('*').next().unwrap_or(p).to_string();
+    let (ha, hb) = (head(a), head(b));
+    // with the wildcards taken off, one claim contains the other when its
+    // fixed part is a prefix of the other's
+    if a.contains('*') && b.contains('*') {
+        return ha.starts_with(&hb) || hb.starts_with(&ha);
+    }
+    if a.contains('*') {
+        return crate::store::glob_match(a, b);
+    }
+    if b.contains('*') {
+        return crate::store::glob_match(b, a);
+    }
+    false
+}
+
 /// Which other index templates claim any of the same patterns.
 fn overlapping_templates(store: &Store, skip: &str, patterns: &[String]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -6959,7 +7516,7 @@ fn overlapping_templates(store: &Store, skip: &str, patterns: &[String]) -> Vec<
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
-        if pats.iter().any(|p| patterns.contains(p)) {
+        if pats.iter().any(|a| patterns.iter().any(|b| patterns_overlap(a, b))) {
             out.push(json!({"name": name, "index_patterns": pats}));
         }
     }
@@ -7173,11 +7730,666 @@ pub async fn get_index_template(
     respond(&p, json!({"index_templates": list}))
 }
 
+
+// ---------------------------------------------------------------- snapshots
+
+pub async fn put_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if body.get("type").and_then(|t| t.as_str()).unwrap_or("").is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "repository_exception",
+            format!("[{name}] missing repository type"),
+        );
+    }
+    store.put_repository(&name, body);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn get_repository(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let want = name.map(|Path(n)| n).unwrap_or_default();
+    let all = store.repositories();
+    let picked: serde_json::Map<String, Value> = all
+        .into_iter()
+        .filter(|(n, _)| {
+            want.is_empty()
+                || want.split(',').any(|w| {
+                    let w = w.trim();
+                    w == "_all" || w == "*" || w == n || crate::store::glob_match(w, n)
+                })
+        })
+        .collect();
+    if picked.is_empty() && !want.is_empty() && !want.contains('*') && want != "_all" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{want}] missing"),
+        );
+    }
+    respond(&p, Value::Object(picked))
+}
+
+pub async fn delete_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.remove_repository(&name) == 0 && !name.contains('*') {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+/// `POST /_snapshot/{repo}/_verify` -- a repository that is there works.
+pub async fn verify_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"nodes": {"node-0": {"name": "obsearch"}}}))
+}
+
+/// `POST /_snapshot/{repo}/_cleanup` -- nothing is left behind here, so there
+/// is nothing to sweep up.
+pub async fn cleanup_repository(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&name) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{name}] missing"),
+        );
+    }
+    respond(&p, json!({"results": {"deleted_bytes": 0, "deleted_blobs": 0}}))
+}
+
+fn snapshot_record(store: &Store, name: &str, indices: Vec<String>, global: bool) -> Value {
+    let now = IdxState::now_iso();
+    let shards: u64 = indices
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count())
+        .sum();
+    let shards = shards.max(1);
+    json!({
+        "snapshot": name,
+        "uuid": crate::store::index_uuid(name),
+        "version_id": 136_217_827,
+        "version": "3.0.0",
+        "indices": indices,
+        "data_streams": [],
+        "include_global_state": global,
+        "state": "SUCCESS",
+        "start_time": now,
+        "start_time_in_millis": 0,
+        "end_time": now,
+        "end_time_in_millis": 0,
+        "duration_in_millis": 0,
+        "failures": [],
+        "shards": {"total": shards, "failed": 0, "successful": shards},
+    })
+}
+
+pub async fn create_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    if !store.repositories().contains_key(&repo) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{repo}] missing"),
+        );
+    }
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let asked = match body.get("indices") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        _ => None,
+    };
+    let indices = match asked.as_deref() {
+        Some(expr) => {
+            // an index named outright has to be there to be kept
+            for part in expr.split(',').map(|s| s.trim()).filter(|s| !s.contains('*')) {
+                if store.resolve(part).is_empty() && !ignore_unavailable(&p) {
+                    return no_such_index(part);
+                }
+            }
+            store.resolve(expr)
+        }
+        None => store.names(),
+    };
+    let global = body.get("include_global_state").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut record = snapshot_record(&store, &name, indices, global);
+    // whatever the caller attached to the snapshot travels with it
+    if let Some(meta) = body.get("metadata") {
+        record["metadata"] = meta.clone();
+    }
+    store.put_snapshot(&repo, &name, record.clone());
+    // without `wait_for_completion` the caller is told it has begun; with it,
+    // the finished snapshot comes back
+    if p.get("wait_for_completion").map(|v| v != "false").unwrap_or(false) {
+        respond(&p, json!({"snapshot": record}))
+    } else {
+        respond(&p, json!({"accepted": true}))
+    }
+}
+
+/// The snapshots a name or pattern reaches, and whether anything named
+/// outright was missing.
+fn pick_snapshots(store: &Store, repo: &str, want: &str) -> (Vec<Value>, Option<String>) {
+    let held = store.snapshots(repo);
+    let mut out = Vec::new();
+    let mut missing = None;
+    for part in want.split(',').map(|s| s.trim()) {
+        if part == "_all" || part == "*" || part.contains('*') {
+            for (n, v) in held.iter() {
+                if part == "_all" || part == "*" || crate::store::glob_match(part, n) {
+                    out.push(v.clone());
+                }
+            }
+            continue;
+        }
+        match held.get(part) {
+            Some(v) => out.push(v.clone()),
+            None => missing = Some(part.to_string()),
+        }
+    }
+    out.sort_by(|a, b| a["snapshot"].as_str().cmp(&b["snapshot"].as_str()));
+    (out, missing)
+}
+
+pub async fn get_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    if !store.repositories().contains_key(&repo) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{repo}] missing"),
+        );
+    }
+    let (mut found, missing) = pick_snapshots(&store, &repo, &name);
+    if let Some(gone) = missing {
+        if !ignore_unavailable(&p) {
+            return err(
+                StatusCode::NOT_FOUND,
+                "snapshot_missing_exception",
+                format!("[{repo}:{gone}] is missing"),
+            );
+        }
+    }
+    // `verbose: false` asks only for what a listing needs
+    if p.get("verbose").map(|v| v == "false").unwrap_or(false) {
+        for s in found.iter_mut() {
+            let short = json!({
+                "snapshot": s["snapshot"].clone(),
+                "uuid": s["uuid"].clone(),
+                "state": s["state"].clone(),
+                "indices": s["indices"].clone(),
+                "data_streams": s["data_streams"].clone(),
+            });
+            *s = short;
+        }
+    }
+    respond(&p, json!({"snapshots": found}))
+}
+
+pub async fn delete_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.remove_snapshots(&repo, &name) == 0 && !name.contains('*') {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn snapshot_status(
+    State(store): State<Store>,
+    path: Option<Path<(String, String)>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let Some(Path((repo, name))) = path else {
+        return respond(&p, json!({"snapshots": []}));
+    };
+    let (found, missing) = pick_snapshots(&store, &repo, &name);
+    if let Some(gone) = missing {
+        if !ignore_unavailable(&p) {
+            return err(
+                StatusCode::NOT_FOUND,
+                "snapshot_missing_exception",
+                format!("[{repo}:{gone}] is missing"),
+            );
+        }
+    }
+    let out: Vec<Value> = found
+        .into_iter()
+        .map(|s| {
+            let shards = s["shards"]["total"].as_u64().unwrap_or(1);
+            let stats = json!({
+                "incremental": {"file_count": shards, "size_in_bytes": 1024 * shards},
+                "total": {"file_count": shards, "size_in_bytes": 1024 * shards},
+                "start_time_in_millis": 1_577_836_800_000u64,
+                "time_in_millis": 0,
+            });
+            json!({
+                "snapshot": s["snapshot"].clone(),
+                "repository": repo,
+                "uuid": s["uuid"].clone(),
+                "state": "SUCCESS",
+                "include_global_state": s["include_global_state"].clone(),
+                "shards_stats": {
+                    "initializing": 0, "started": 0, "finalizing": 0,
+                    "done": shards, "failed": 0, "total": shards,
+                },
+                "stats": stats,
+                "indices": {},
+            })
+        })
+        .collect();
+    respond(&p, json!({"snapshots": out}))
+}
+
+pub async fn clone_snapshot(
+    State(store): State<Store>,
+    Path((repo, name, target)): Path<(String, String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let held = store.snapshots(&repo);
+    let Some(source) = held.get(&name) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    };
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let indices = match body.get("indices") {
+        Some(Value::String(s)) => store.resolve(s),
+        Some(Value::Array(a)) => {
+            let expr: Vec<String> =
+                a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+            store.resolve(&expr.join(","))
+        }
+        _ => source["indices"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default(),
+    };
+    let global = source["include_global_state"].as_bool().unwrap_or(true);
+    let record = snapshot_record(&store, &target, indices, global);
+    store.put_snapshot(&repo, &target, record);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn restore_snapshot(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let held = store.snapshots(&repo);
+    let Some(source) = held.get(&name) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{name}] is missing"),
+        );
+    };
+    let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
+    let held_indices: Vec<String> = source["indices"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let wanted: Vec<String> = match body.get("indices") {
+        Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).collect(),
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        }
+        _ => held_indices.clone(),
+    };
+    // an index comes back from a snapshot open, and says so when asked how it
+    // was recovered
+    let mut restored = Vec::new();
+    for n in held_indices.iter().filter(|n| {
+        wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n))
+    }) {
+        if let Some(st) = store.get(n) {
+            let mut g = st.write();
+            g.closed = false;
+            g.restored = true;
+            g.save_meta();
+            restored.push(n.clone());
+        }
+    }
+    let shards = restored.len().max(1);
+    respond(&p, json!({"snapshot": {
+        "snapshot": name,
+        "indices": restored,
+        "shards": {"total": shards, "failed": 0, "successful": shards},
+    }}))
+}
+
+// ---------------------------------------------------------------- pipelines
+
+/// The keys a pipeline of each kind is allowed to carry. Anything else is a
+/// mistake worth naming rather than storing.
+fn pipeline_keys(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "search" => &[
+            "description", "version", "request_processors", "response_processors",
+            "phase_results_processors", "_meta",
+        ],
+        _ => &["description", "version", "processors", "on_failure", "_meta"],
+    }
+}
+
+async fn put_pipeline(store: Store, kind: &str, name: String, p: Params, body: String) -> Response {
+    let body: Value = match parse_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let Some(o) = body.as_object() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "parse_exception",
+            "[pipeline] pipeline definition is not an object",
+        );
+    };
+    let allowed = pipeline_keys(kind);
+    let stray = o.keys().map(|k| k.to_string()).find(|k| !allowed.contains(&k.as_str()));
+    if let Some(stray) = stray {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "parse_exception",
+            format!("[{stray}] pipeline doesn't support one or more provided configuration \
+                     parameters"),
+        );
+    }
+    store.put_pipeline(kind, &name, body);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+async fn get_pipeline(store: Store, kind: &str, name: Option<String>, p: Params) -> Response {
+    let all = store.pipelines(kind);
+    let want = name.filter(|n| !n.is_empty());
+    let picked: serde_json::Map<String, Value> = all
+        .into_iter()
+        .filter(|(n, _)| match want.as_deref() {
+            None => true,
+            Some(pat) => pat.split(',').any(|w| {
+                let w = w.trim();
+                w == "*" || w == n || crate::store::glob_match(w, n)
+            }),
+        })
+        .collect();
+    // asking after one pipeline that is not there is a miss; asking after all
+    // of them when there are none is simply an empty answer
+    if picked.is_empty() && want.as_deref().map(|w| !w.contains('*')).unwrap_or(false) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("pipeline [{}] is missing", want.unwrap_or_default()),
+        );
+    }
+    respond(&p, Value::Object(picked))
+}
+
+async fn delete_pipeline(store: Store, kind: &str, name: String, p: Params) -> Response {
+    if store.remove_pipelines(kind, &name) == 0 && !name.contains('*') {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("pipeline [{name}] is missing"),
+        );
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+pub async fn put_ingest_pipeline(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_pipeline(store, "ingest", name, p, body).await
+}
+
+pub async fn get_ingest_pipeline(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    get_pipeline(store, "ingest", name.map(|Path(n)| n), p).await
+}
+
+pub async fn delete_ingest_pipeline(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    delete_pipeline(store, "ingest", name, p).await
+}
+
+pub async fn put_search_pipeline(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    put_pipeline(store, "search", name, p, body).await
+}
+
+pub async fn get_search_pipeline(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    get_pipeline(store, "search", name.map(|Path(n)| n), p).await
+}
+
+pub async fn delete_search_pipeline(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    delete_pipeline(store, "search", name, p).await
+}
+
+// ------------------------------------------------------------- data streams
+
+/// The composable template a data stream would be made from: the one whose
+/// patterns the name fits, that says it backs a data stream, and that outranks
+/// the others claiming the same name.
+fn data_stream_template(store: &Store, name: &str) -> Option<(String, Value)> {
+    let mut best: Option<(i64, String, Value)> = None;
+    for (tname, t) in store.get_templates() {
+        let Some(body) = t.get("__composable").cloned() else { continue };
+        if body.get("data_stream").is_none() {
+            continue;
+        }
+        let matches = body
+            .get("index_patterns")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|pat| pat == name || crate::store::glob_match(pat, name))
+            })
+            .unwrap_or(false);
+        if !matches {
+            continue;
+        }
+        let priority = body.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+        if best.as_ref().map(|(p, _, _)| priority > *p).unwrap_or(true) {
+            best = Some((priority, tname, body));
+        }
+    }
+    best.map(|(_, n, b)| (n, b))
+}
+
+/// The index a data stream's documents are actually written to.
+fn backing_index(name: &str, generation: u64) -> String {
+    format!(".ds-{name}-{generation:06}")
+}
+
+/// `PUT /_data_stream/{name}` -- a stream is an index that rolls over on its
+/// own, so making one means making the index behind it.
+pub async fn create_data_stream(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if store.data_streams().contains_key(&name) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "resource_already_exists_exception",
+            format!("data_stream [{name}] already exists"),
+        );
+    }
+    let Some((template, _)) = data_stream_template(&store, &name) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("no matching index template found for data stream [{name}]"),
+        );
+    };
+    if let Err(e) = store.create(&backing_index(&name, 1), &json!({})) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
+    }
+    store.add_data_stream(&name, &template);
+    respond(&p, json!({"acknowledged": true}))
+}
+
+fn data_stream_entry(store: &Store, name: &str, template: &str) -> Value {
+    json!({
+        "name": name,
+        "timestamp_field": {"name": "@timestamp"},
+        "indices": [{
+            "index_name": backing_index(name, 1),
+            "index_uuid": crate::store::index_uuid(&backing_index(name, 1)),
+        }],
+        "generation": 1,
+        "status": "GREEN",
+        "template": template,
+    })
+}
+
+/// `GET /_data_stream` and `GET /_data_stream/{name}`.
+pub async fn get_data_stream(
+    State(store): State<Store>,
+    name: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let want = name.map(|Path(n)| n).unwrap_or_else(|| "*".into());
+    let mut out: Vec<Value> = store
+        .data_streams()
+        .into_iter()
+        .filter(|(n, _)| {
+            want.split(',').any(|pat| {
+                let pat = pat.trim();
+                pat == "*" || pat == "_all" || pat == n || crate::store::glob_match(pat, n)
+            })
+        })
+        .map(|(n, t)| data_stream_entry(&store, &n, &t))
+        .collect();
+    if out.is_empty() && !want.contains('*') && want != "_all" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "index_not_found_exception",
+            format!("no such index [{want}]"),
+        );
+    }
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    respond(&p, json!({"data_streams": out}))
+}
+
+/// `DELETE /_data_stream/{name}`.
+pub async fn delete_data_stream(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let gone = store.remove_data_stream(&name);
+    if gone.is_empty() {
+        return err(
+            StatusCode::NOT_FOUND,
+            "index_not_found_exception",
+            format!("no such index [{name}]"),
+        );
+    }
+    for g in &gone {
+        store.delete(&backing_index(g, 1));
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
 pub async fn delete_index_template(
     State(store): State<Store>,
     Path(name): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    // a template a data stream was actually made from cannot be taken away;
+    // one that merely claims the same patterns can
+    let in_use: Vec<String> = store
+        .data_streams()
+        .into_iter()
+        .filter(|(_, t)| *t == name)
+        .map(|(n, _)| n)
+        .collect();
+    if !in_use.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "unable to remove composable templates [{name}] as they are in use by a data \
+                 streams [{}]",
+                in_use.join(",")
+            ),
+        );
+    }
     if !store.delete_template(&name) {
         return err(
             StatusCode::NOT_FOUND,
@@ -7431,6 +8643,7 @@ pub async fn validate_query(
             mapping: &g.mapping,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,

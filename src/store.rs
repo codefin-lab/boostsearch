@@ -330,7 +330,20 @@ impl Mapping {
     }
 
     pub fn type_of(&self, field: &str) -> Option<&str> {
+        let field = self.target_of(field).unwrap_or(field);
         self.types.get(field).map(|s| s.as_str())
+    }
+
+    /// A field declared as an `alias` is another name for a field that is
+    /// really there; this is the name behind it.
+    pub fn target_of(&self, field: &str) -> Option<&str> {
+        let path = self
+            .raw
+            .pointer(&format!("/properties/{}", field.replace('.', "/properties/")))?;
+        if path.get("type").and_then(|t| t.as_str()) != Some("alias") {
+            return None;
+        }
+        path.get("path").and_then(|p| p.as_str())
     }
 
     /// PUT _mapping is additive: new properties layer onto the old ones, and
@@ -458,6 +471,12 @@ fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<Str
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
+            // the container is a field in its own right: an object, or a
+            // nested one if it says so
+            out.insert(
+                path.clone(),
+                def.get("type").and_then(|t| t.as_str()).unwrap_or("object").to_string(),
+            );
             flatten_props(sub, &path, out);
             continue;
         }
@@ -479,6 +498,8 @@ pub struct DocMeta {
 
 pub struct IdxState {
     pub name: String,
+    /// whether this index was last brought back from a snapshot
+    pub restored: bool,
     pub index: Index,
     /// Created on first write. An index that is only read -- or has not been
     /// written to since startup -- should not hold indexing threads or an arena.
@@ -530,6 +551,10 @@ pub struct IdxState {
     pub request_cache_miss: std::sync::atomic::AtomicU64,
     /// per-group query counts, from the `stats` field of a search body
     pub search_groups: RwLock<HashMap<String, u64>>,
+    /// Fields whose ordinals have been read into memory: sorting on a field
+    /// or aggregating over its ordinals loads them, and that is what the
+    /// fielddata statistic reports on.
+    pub loaded_fielddata: RwLock<std::collections::HashSet<String>>,
     pub auto_id: u64,
     /// field paths seen in indexed documents, with the type OpenSearch's
     /// dynamic mapping would have given them. Explicit mappings win over these.
@@ -549,6 +574,12 @@ pub struct IdxState {
     pub noop_updates: std::sync::atomic::AtomicU64,
     /// how many times this index has been flushed, which `_stats` reports
     pub flushes: std::sync::atomic::AtomicU64,
+    /// how many documents have been fetched by id, which is what `_stats`
+    /// counts under `get` -- a terms lookup fetches one too
+    pub gets: std::sync::atomic::AtomicU64,
+    /// how many bytes of document the index has been given, which is the size
+    /// a rollover condition asks about
+    pub bytes: std::sync::atomic::AtomicU64,
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
@@ -911,7 +942,13 @@ impl IdxState {
     fn raw_setting(&self, key: &str) -> Option<&Value> {
         let settings = self.settings.as_object()?;
         if let Some(nested) = settings.get("index").and_then(|v| v.as_object()) {
-            if let Some(v) = nested.get(key).filter(|v| !v.is_null()) {
+            // a setting written flat keeps the `index.` prefix it arrived with,
+            // even once it is filed under `index`
+            if let Some(v) = nested
+                .get(key)
+                .or_else(|| nested.get(&format!("index.{key}")))
+                .filter(|v| !v.is_null())
+            {
                 return Some(v);
             }
         }
@@ -951,6 +988,28 @@ impl IdxState {
         out
     }
 
+    /// The moment now, written the way a timestamp is reported.
+    pub fn now_iso() -> String {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i128)
+            .unwrap_or(0);
+        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+            .map(|d| {
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    d.year(),
+                    d.month() as u8,
+                    d.day(),
+                    d.hour(),
+                    d.minute(),
+                    d.second(),
+                    d.millisecond(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     pub fn created_millis(&self) -> u64 {
         // a setting written by hand wins, since a restored index keeps the
         // date it was first made
@@ -987,13 +1046,19 @@ impl IdxState {
         let settings = self.effective_settings();
         let flat = settings.pointer(&format!("/index/{key}"));
         let nested = settings.pointer(&format!("/index/{}", key.replace('.', "/")));
-        flat.or(nested).map(|v| match v {
+        let prefixed = settings.pointer(&format!("/index/index.{key}"));
+        flat.or(nested).or(prefixed).map(|v| match v {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         })
     }
 
     /// `index.max_terms_count` caps how many terms a `terms` query may carry.
+    /// `index.max_regex_length` caps how long a pattern a query may carry.
+    pub fn max_regex_length(&self) -> usize {
+        self.numeric_setting("max_regex_length").unwrap_or(1_000) as usize
+    }
+
     pub fn max_terms_count(&self) -> usize {
         self.numeric_setting("max_terms_count").unwrap_or(65_536) as usize
     }
@@ -1036,6 +1101,14 @@ pub struct Store {
     /// open points in time, each remembering where every index it covers had
     /// got to when it was opened
     pits: Arc<RwLock<HashMap<String, PitState>>>,
+    /// Data streams by name, each remembering the template it was made from.
+    data_streams: Arc<RwLock<HashMap<String, String>>>,
+    /// Pipelines by kind ("ingest" or "search") and then by name.
+    pipelines: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
+    /// Snapshot repositories by name.
+    repositories: Arc<RwLock<HashMap<String, Value>>>,
+    /// Snapshots by repository and then by name.
+    snapshots: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
     pit_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1232,6 +1305,10 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            data_streams: Arc::new(RwLock::new(HashMap::new())),
+            pipelines: Arc::new(RwLock::new(HashMap::new())),
+            repositories: Arc::new(RwLock::new(HashMap::new())),
+            snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1256,6 +1333,10 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            data_streams: Arc::new(RwLock::new(HashMap::new())),
+            pipelines: Arc::new(RwLock::new(HashMap::new())),
+            repositories: Arc::new(RwLock::new(HashMap::new())),
+            snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
@@ -1515,6 +1596,106 @@ impl Store {
         self.templates.write().insert(name.to_string(), body);
     }
 
+    /// The snapshot repositories there are.
+    pub fn repositories(&self) -> HashMap<String, Value> {
+        self.repositories.read().clone()
+    }
+
+    pub fn put_repository(&self, name: &str, body: Value) {
+        self.repositories.write().insert(name.to_string(), body);
+    }
+
+    pub fn remove_repository(&self, pattern: &str) -> usize {
+        let mut repos = self.repositories.write();
+        let gone: Vec<String> = repos
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            repos.remove(g);
+            self.snapshots.write().remove(g);
+        }
+        gone.len()
+    }
+
+    /// The snapshots held in one repository.
+    pub fn snapshots(&self, repo: &str) -> HashMap<String, Value> {
+        self.snapshots.read().get(repo).cloned().unwrap_or_default()
+    }
+
+    pub fn put_snapshot(&self, repo: &str, name: &str, body: Value) {
+        self.snapshots
+            .write()
+            .entry(repo.to_string())
+            .or_default()
+            .insert(name.to_string(), body);
+    }
+
+    pub fn remove_snapshots(&self, repo: &str, pattern: &str) -> usize {
+        let mut all = self.snapshots.write();
+        let Some(map) = all.get_mut(repo) else { return 0 };
+        let gone: Vec<String> = map
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            map.remove(g);
+        }
+        gone.len()
+    }
+
+    /// The pipelines of one kind, by name.
+    pub fn pipelines(&self, kind: &str) -> HashMap<String, Value> {
+        self.pipelines.read().get(kind).cloned().unwrap_or_default()
+    }
+
+    pub fn put_pipeline(&self, kind: &str, name: &str, body: Value) {
+        self.pipelines
+            .write()
+            .entry(kind.to_string())
+            .or_default()
+            .insert(name.to_string(), body);
+    }
+
+    /// Remove the pipelines of one kind whose names a pattern reaches.
+    pub fn remove_pipelines(&self, kind: &str, pattern: &str) -> usize {
+        let mut all = self.pipelines.write();
+        let Some(map) = all.get_mut(kind) else { return 0 };
+        let gone: Vec<String> = map
+            .keys()
+            .filter(|k| k.as_str() == pattern || wildcard_to_regex(pattern).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            map.remove(g);
+        }
+        gone.len()
+    }
+
+    /// The data streams there are, each with the template it was made from.
+    pub fn data_streams(&self) -> HashMap<String, String> {
+        self.data_streams.read().clone()
+    }
+
+    pub fn add_data_stream(&self, name: &str, template: &str) {
+        self.data_streams.write().insert(name.to_string(), template.to_string());
+    }
+
+    pub fn remove_data_stream(&self, name: &str) -> Vec<String> {
+        let mut streams = self.data_streams.write();
+        let gone: Vec<String> = streams
+            .keys()
+            .filter(|k| k.as_str() == name || wildcard_to_regex(name).is_match(k))
+            .cloned()
+            .collect();
+        for g in &gone {
+            streams.remove(g);
+        }
+        gone
+    }
+
     pub fn get_templates(&self) -> HashMap<String, Value> {
         self.templates.read().clone()
     }
@@ -1643,6 +1824,7 @@ impl Store {
             .unwrap_or_default();
         let st = IdxState {
             name: name.to_string(),
+            restored: false,
             index,
             writer: None,
             writer_threads,
@@ -1670,6 +1852,7 @@ impl Store {
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_groups: RwLock::new(HashMap::new()),
+            loaded_fielddata: RwLock::new(std::collections::HashSet::new()),
             auto_id: 0,
             dynamic_types: HashMap::new(),
             seen_shapes: std::collections::HashSet::new(),
@@ -1678,6 +1861,8 @@ impl Store {
             has_doc_count: false,
             noop_updates: std::sync::atomic::AtomicU64::new(0),
             flushes: std::sync::atomic::AtomicU64::new(0),
+            gets: std::sync::atomic::AtomicU64::new(0),
+            bytes: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),
@@ -1907,7 +2092,7 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             if matches!(ty, Some("date") | Some("date_nanos")) {
                 let fmt = mapping.field_option(path, "format");
                 let fmt = fmt.as_ref().and_then(|v| v.as_str());
-                if let Some(c) = canonical_date_with(leaf, fmt) {
+                if let Some(c) = canonical_date_prec(leaf, fmt, ty == Some("date_nanos")) {
                     *leaf = Value::String(c);
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
@@ -1977,17 +2162,20 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
             for (i, p) in f.iter().enumerate() {
                 c[i] = p.parse().ok()?;
             }
-            let millis: u32 = if frac.is_empty() {
+            // the fraction is kept whole: a date reports milliseconds and
+            // a date_nanos the nanoseconds, and which one this is has not
+            // been decided yet here
+            let nanos: u32 = if frac.is_empty() {
                 0
             } else {
                 let mut d = frac.trim_end_matches(|c: char| !c.is_ascii_digit()).to_string();
-                d.truncate(3);
-                while d.len() < 3 {
+                d.truncate(9);
+                while d.len() < 9 {
                     d.push('0');
                 }
                 d.parse().ok()?
             };
-            Time::from_hms_milli(c[0] as u8, c[1] as u8, c[2] as u8, millis as u16).ok()?
+            Time::from_hms_nano(c[0] as u8, c[1] as u8, c[2] as u8, nanos).ok()?
         }
     };
     Some(OffsetDateTime::new_utc(date, time))
@@ -2210,6 +2398,56 @@ pub fn resolve_date_math_name(name: &str) -> String {
 }
 
 /// Write a date the way a Java-style pattern asks for.
+/// A moment written the way a named or literal date format asks for.
+pub fn format_millis(ms: i64, format: &str) -> Option<String> {
+    format_millis_at(ms, format, 0)
+}
+
+/// The same, written in a zone rather than in UTC.
+pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
+    if zone_ms != 0 {
+        let local = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+            (ms + zone_ms) as i128 * 1_000_000,
+        )
+        .ok()?;
+        let total = zone_ms / 60_000;
+        let sign = if total < 0 { '-' } else { '+' };
+        let total = total.abs();
+        let body = match format {
+            "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+            | "strict_date_time" => format!(
+                "{}.{:03}",
+                format_with_pattern(local, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
+                local.millisecond()
+            ),
+            other => return format_millis_utc(ms + zone_ms, other),
+        };
+        return Some(format!("{body}{sign}{:02}:{:02}", total / 60, total % 60));
+    }
+    format_millis_utc(ms, format)
+}
+
+fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
+    let dt = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .ok()?;
+    Some(match format {
+        "epoch_millis" => ms.to_string(),
+        "epoch_second" => (ms / 1000).to_string(),
+        "strict_date" | "date" | "yyyy-MM-dd" => format_with_pattern(dt, "yyyy-MM-dd"),
+        "basic_date" => format_with_pattern(dt, "yyyyMMdd"),
+        "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+        | "strict_date_time" => format!(
+            "{}.{:03}Z",
+            format_with_pattern(dt, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
+            dt.millisecond()
+        ),
+        "strict_date_hour_minute_second" | "date_hour_minute_second" => {
+            format_with_pattern(dt, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', "")
+        }
+        other => format_with_pattern(dt, other),
+    })
+}
+
 fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> String {
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
@@ -2387,6 +2625,15 @@ pub fn canonical_date(v: &Value) -> Option<String> {
 /// A bare number is epoch milliseconds unless the field says otherwise, which
 /// is the assumption OpenSearch makes too.
 pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
+    canonical_date_prec(v, format, false)
+}
+
+/// As `canonical_date_with`, but able to keep the whole fraction.
+///
+/// A `date` reports milliseconds and a `date_nanos` reports nanoseconds; the
+/// finer resolution is the only reason the second type exists, so truncating
+/// on the way in would throw away what it was chosen for.
+pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Option<String> {
     let scale: i128 = match format {
         Some(f) if f.contains("epoch_second") => 1_000_000_000,
         _ => 1_000_000,
@@ -2411,6 +2658,18 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
         },
         _ => return None,
     };
+    if nanos {
+        return Some(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+            dt.year(),
+            dt.month() as u8,
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            dt.nanosecond(),
+        ));
+    }
     Some(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         dt.year(),

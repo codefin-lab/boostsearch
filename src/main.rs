@@ -10,6 +10,7 @@ mod search;
 mod query;
 mod source;
 mod store;
+mod tz;
 
 use axum::Router;
 
@@ -107,11 +108,66 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // --- snapshots ---
+        .route("/_snapshot", get(api::get_repository))
+        .route(
+            "/_snapshot/{repo}",
+            put(api::put_repository)
+                .post(api::put_repository)
+                .get(api::get_repository)
+                .delete(api::delete_repository),
+        )
+        .route("/_snapshot/{repo}/_verify", post(api::verify_repository))
+        .route("/_snapshot/{repo}/_cleanup", post(api::cleanup_repository))
+        .route("/_snapshot/_status", get(api::snapshot_status))
+        .route(
+            "/_snapshot/{repo}/{snapshot}",
+            put(api::create_snapshot)
+                .post(api::create_snapshot)
+                .get(api::get_snapshot)
+                .delete(api::delete_snapshot),
+        )
+        .route("/_snapshot/{repo}/{snapshot}/_status", get(api::snapshot_status))
+        .route("/_snapshot/{repo}/{snapshot}/_restore", post(api::restore_snapshot))
+        .route(
+            "/_snapshot/{repo}/{snapshot}/_clone/{target}",
+            put(api::clone_snapshot).post(api::clone_snapshot),
+        )
+        // --- pipelines ---
+        .route("/_ingest/pipeline", get(api::get_ingest_pipeline))
+        .route(
+            "/_ingest/pipeline/{name}",
+            put(api::put_ingest_pipeline)
+                .get(api::get_ingest_pipeline)
+                .delete(api::delete_ingest_pipeline),
+        )
+        .route("/_search/pipeline", get(api::get_search_pipeline))
+        .route(
+            "/_search/pipeline/{name}",
+            put(api::put_search_pipeline)
+                .get(api::get_search_pipeline)
+                .delete(api::delete_search_pipeline),
+        )
+        // --- data streams ---
+        .route("/_data_stream", get(api::get_data_stream))
+        .route(
+            "/_data_stream/{name}",
+            put(api::create_data_stream)
+                .post(api::create_data_stream)
+                .get(api::get_data_stream)
+                .delete(api::delete_data_stream),
+        )
+        // an index left out of the path leaves an empty segment behind, and
+        // the body is expected to name it instead
+        .route("//_alias/{name}", put(api::put_alias_named).post(api::put_alias_named))
+        .route("//_alias/", put(api::put_alias_body).post(api::put_alias_body))
         .route("/{index}/_alias/{name}", put(api::put_alias).post(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_alias", put(api::put_alias_on_index))
         .route("/{index}/_aliases", put(api::put_alias_on_index))
         .route("/_alias", put(api::put_alias_body))
+        // an alias left out of the path leaves the trailing slash behind
+        .route("/_alias/", put(api::put_alias_body).post(api::put_alias_body))
         // --- templates ---
         .route("/_template/{name}",
                put(api::put_template).post(api::put_template)
