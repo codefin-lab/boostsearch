@@ -6686,12 +6686,21 @@ pub async fn cat_thread_pool(
     // the pools a request passes through, and how each is sized: a fixed pool
     // has a set number of threads, a scaling one grows and shrinks
     let pools: &[(&str, &str, &str)] = &[
+        ("analyze", "fixed", "0s"),
         ("fetch_shard_started", "scaling", "-1"),
         ("fetch_shard_store", "scaling", "-1"),
+        ("flush", "scaling", "-1"),
+        ("force_merge", "fixed", "0s"),
         ("generic", "scaling", "-1"),
+        ("get", "fixed", "0s"),
         ("index_searcher", "fixed", "0s"),
+        ("listener", "fixed", "0s"),
+        ("management", "scaling", "-1"),
+        ("refresh", "scaling", "-1"),
         ("search", "fixed", "0s"),
         ("search_throttled", "fixed", "0s"),
+        ("snapshot", "scaling", "-1"),
+        ("warmer", "scaling", "-1"),
         ("write", "fixed", "0s"),
     ];
     let wanted: Option<Vec<String>> = patterns
@@ -6730,7 +6739,6 @@ pub async fn cat_thread_pool(
             ("largest", "0".to_string()),
             ("completed", "0".to_string()),
             ("core", "1".to_string()),
-            ("min", "1".to_string()),
             ("max", "1".to_string()),
             ("keep_alive", "5m".to_string()),
             ("total_wait_time", wait.to_string()),
@@ -6958,7 +6966,9 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         t.get(key)
                             .and_then(|v| v.as_array())
                             .map(|a| {
-                                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                                // a list is written the way a list is read, with
+                                // a space after each comma
+                                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")
                             })
                             .unwrap_or_default()
                     };
@@ -7098,7 +7108,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
               "disk.percent", "host", "ip", "node"], &p),
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
-        "thread_pool" => cat_named(&["node_name", "name", "active", "queue", "rejected"], &p),
+        "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
         "recovery" => cat_named(
             &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
         "repositories" => cat_named(&["id", "type"], &p),
