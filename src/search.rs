@@ -640,6 +640,21 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     }
 }
 
+/// The `intervals` clause of a query: the field it reads and the rule it asks.
+fn find_intervals(node: &Value) -> Option<(String, Value)> {
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("intervals").and_then(|v| v.as_object()) {
+                let (field, rule) = spec.iter().next()?;
+                return Some((field.clone(), rule.clone()));
+            }
+            o.values().find_map(find_intervals)
+        }
+        Value::Array(a) => a.iter().find_map(find_intervals),
+        _ => None,
+    }
+}
+
 /// A `nested` clause that asked for the objects it matched to be listed.
 fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
     match node {
@@ -4230,6 +4245,26 @@ pub fn run(
         }
     }
 
+    // An `intervals` query asks where in a field the words are. The query
+    // built for it matches wherever they merely occur, so the candidates are
+    // read back and their text analysed again to see whether they really do.
+    if let Some((field, rule)) = body.get("query").and_then(find_intervals) {
+        let path = format!("/{}", field.replace('.', "/"));
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let Some(text) = src.pointer(&path) else { return false };
+            let text = match text {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let analyse = |t: &str| crate::query::analyze_text(&g.index, t, None);
+            let tokens = analyse(&text);
+            !crate::query::interval_spans(&tokens, &rule, &analyse).is_empty()
+        });
+        total = cands.len() as u64;
+    }
     // `distance_feature` scores by how near a value is to an origin. The
     // candidates are known by now, and each one's value can simply be read.
     if let Some(spec) = body.get("query").and_then(find_distance_feature) {

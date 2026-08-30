@@ -710,8 +710,22 @@ fn build_interval_rule(ctx: &Ctx, field: &str, rule: &Value) -> Result<Box<dyn Q
             let text = spec.get("query").cloned().unwrap_or(Value::Null);
             let ordered = is_true(spec.get("ordered"));
             let gaps = spec.get("max_gaps").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let words = text.as_str().unwrap_or_default().split_whitespace().count();
             let inner = if ordered && gaps == 0 {
                 serde_json::json!({"match_phrase": {field.clone(): {"query": text}}})
+            } else if ordered && words > 1 {
+                // the words have to turn up in the order they were written,
+                // with as much between them as the rule allows
+                let clauses: Vec<Value> = text
+                    .as_str()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(|w| serde_json::json!({"span_term": {field.clone(): w}}))
+                    .collect();
+                let slop = if gaps < 0 { 1_000 } else { gaps as u64 };
+                serde_json::json!({
+                    "span_near": {"clauses": clauses, "slop": slop, "in_order": true}
+                })
             } else {
                 serde_json::json!({"match": {field.clone(): {"query": text, "operator": "and"}}})
             };
@@ -1935,4 +1949,253 @@ impl Weight for ConstWeight {
         }
         Ok(())
     }
+}
+
+// ------------------------------------------------------- intervals, exactly
+//
+// The `intervals` query asks where in a field the words are, not only whether
+// they are there. Positions are not kept in a column, so the text is read back
+// and analysed again -- the same trade `significant_text` makes -- and the
+// rules are then evaluated over the tokens.
+
+/// One stretch of a field, given by the first and last token it covers.
+type Span = (usize, usize);
+
+/// Every stretch of the token list that satisfies a rule, one per starting
+/// point, shortest first.
+pub fn interval_spans(
+    tokens: &[String],
+    rule: &Value,
+    analyse: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<Span> {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
+        return Vec::new();
+    };
+    let ordered = match spec.get("mode").and_then(|m| m.as_str()) {
+        Some(m) => m.starts_with("ordered"),
+        None => is_true(spec.get("ordered")),
+    };
+    let no_overlap = spec.get("mode").and_then(|m| m.as_str()) == Some("unordered_no_overlap");
+    let max_gaps = spec.get("max_gaps").and_then(|v| v.as_i64());
+    let mut spans = match kind.as_str() {
+        "match" => {
+            let text = spec.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+            let words = analyse(text);
+            let places: Vec<Vec<usize>> = words
+                .iter()
+                .map(|w| {
+                    tokens
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| *t == w)
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .collect();
+            combine_spans(&places.iter().map(|p| p.iter().map(|i| (*i, *i)).collect()).collect::<Vec<Vec<Span>>>(), ordered, no_overlap)
+        }
+        "prefix" => {
+            let want = spec.get("prefix").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            single_spans(tokens, &|t| t.starts_with(&want))
+        }
+        "wildcard" => {
+            let pat = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or_default();
+            let re = regex::Regex::new(&format!("(?i)^{}$", wildcard_to_regex_source(pat)));
+            match re {
+                Ok(re) => single_spans(tokens, &|t| re.is_match(t)),
+                Err(_) => Vec::new(),
+            }
+        }
+        "regexp" => {
+            let pat = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or_default();
+            let insensitive = is_true(spec.get("case_insensitive"));
+            let head = if insensitive { "(?i)" } else { "" };
+            match regex::Regex::new(&format!("{head}^{pat}$")) {
+                Ok(re) => single_spans(tokens, &|t| re.is_match(t)),
+                Err(_) => Vec::new(),
+            }
+        }
+        "fuzzy" => {
+            let want =
+                spec.get("term").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            let edits = spec.get("fuzziness").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+            single_spans(tokens, &|t| levenshtein_within(t, &want, edits))
+        }
+        "all_of" | "any_of" => {
+            let children: Vec<Vec<Span>> = spec
+                .get("intervals")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(|r| interval_spans(tokens, r, analyse)).collect())
+                .unwrap_or_default();
+            if kind == "any_of" {
+                let mut all: Vec<Span> = children.into_iter().flatten().collect();
+                all.sort();
+                all.dedup();
+                all
+            } else {
+                combine_spans(&children, ordered, no_overlap)
+            }
+        }
+        _ => Vec::new(),
+    };
+    // `max_gaps` limits how much of the stretch is not the rule itself
+    if let Some(gaps) = max_gaps.filter(|g| *g >= 0) {
+        let width = |s: &Span| (s.1 - s.0 + 1) as i64;
+        let terms = rule_width(rule, analyse);
+        spans.retain(|s| width(s) - terms <= gaps);
+    }
+    if let Some(filter) = spec.get("filter").and_then(|f| f.as_object()) {
+        for (name, inner) in filter {
+            let other = interval_spans(tokens, inner, analyse);
+            spans.retain(|s| match name.as_str() {
+                "containing" => other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
+                "not_containing" => !other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
+                "contained_by" => other.iter().any(|o| o.0 <= s.0 && s.1 <= o.1),
+                "not_contained_by" => !other.iter().any(|o| o.0 <= s.0 && s.1 <= o.1),
+                "overlapping" => other.iter().any(|o| s.0 <= o.1 && o.0 <= s.1),
+                "not_overlapping" => !other.iter().any(|o| s.0 <= o.1 && o.0 <= s.1),
+                "before" => other.iter().any(|o| s.1 < o.0),
+                "after" => other.iter().any(|o| o.1 < s.0),
+                _ => true,
+            });
+        }
+    }
+    spans
+}
+
+/// How many tokens a rule is made of, which is what `max_gaps` counts against.
+fn rule_width(rule: &Value, analyse: &dyn Fn(&str) -> Vec<String>) -> i64 {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else { return 1 };
+    match kind.as_str() {
+        "match" => {
+            analyse(spec.get("query").and_then(|v| v.as_str()).unwrap_or_default()).len() as i64
+        }
+        "all_of" => spec
+            .get("intervals")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|r| rule_width(r, analyse)).sum())
+            .unwrap_or(1),
+        "any_of" => spec
+            .get("intervals")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.iter().map(|r| rule_width(r, analyse)).min())
+            .unwrap_or(1),
+        _ => 1,
+    }
+}
+
+fn single_spans(tokens: &[String], hit: &dyn Fn(&str) -> bool) -> Vec<Span> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| hit(t))
+        .map(|(i, _)| (i, i))
+        .collect()
+}
+
+/// The shortest stretch covering one span from each part, in order or not.
+fn combine_spans(parts: &[Vec<Span>], ordered: bool, no_overlap: bool) -> Vec<Span> {
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Vec::new();
+    }
+    if parts.len() == 1 {
+        return parts[0].clone();
+    }
+    let mut out: Vec<Span> = Vec::new();
+    if ordered {
+        for first in &parts[0] {
+            let mut at = *first;
+            let mut ok = true;
+            for part in &parts[1..] {
+                match part.iter().filter(|s| s.0 > at.1).min_by_key(|s| s.1) {
+                    Some(next) => at = *next,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                out.push((first.0, at.1));
+            }
+        }
+    } else {
+        // every part has to be somewhere; the stretch runs from the earliest
+        // of the chosen spans to the latest
+        for anchor in parts.iter().flatten() {
+            let mut lo = anchor.0;
+            let mut hi = anchor.1;
+            let mut taken: Vec<Span> = vec![*anchor];
+            let mut ok = true;
+            for part in parts {
+                if part.iter().any(|s| taken.contains(s)) && part.len() == 1 {
+                    continue;
+                }
+                let pick = part
+                    .iter()
+                    .filter(|s| !no_overlap || !taken.iter().any(|t| s.0 <= t.1 && t.0 <= s.1))
+                    .filter(|s| !taken.contains(s))
+                    .min_by_key(|s| {
+                        let l = s.0.min(lo);
+                        let h = s.1.max(hi);
+                        h - l
+                    })
+                    .copied();
+                match pick {
+                    Some(s) => {
+                        lo = lo.min(s.0);
+                        hi = hi.max(s.1);
+                        taken.push(s);
+                    }
+                    None if part.iter().any(|s| taken.contains(s)) => {}
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                out.push((lo, hi));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Is one word within so many edits of another?
+fn levenshtein_within(a: &str, b: &str, edits: usize) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > edits {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()] <= edits
+}
+
+/// The regex source a wildcard pattern stands for.
+fn wildcard_to_regex_source(pat: &str) -> String {
+    let mut out = String::new();
+    for c in pat.chars() {
+        match c {
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            c if "\\.+()|[]{}^$#&-~".contains(c) => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
