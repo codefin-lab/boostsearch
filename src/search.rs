@@ -3114,7 +3114,10 @@ pub fn run(
     };
 
     let started = std::time::Instant::now();
-    let page_want = from + size;
+    // a slice divides the index between readers, so the page it can offer is
+    // cut from every matching document rather than from the first few
+    let slice = body.get("slice").filter(|s| s.get("max").is_some()).cloned();
+    let page_want = if slice.is_some() { 65_536 } else { from + size };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();
@@ -3557,6 +3560,27 @@ pub fn run(
     } else {
         None
     };
+
+    // A slice takes the shards whose number falls to it. Which shard a
+    // document belongs to follows from its id, so the split holds however the
+    // documents were spread -- and every slice together covers all of them.
+    if let Some(slice) = slice.as_ref() {
+        let id = slice.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let max = slice.get("max").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+            match source_of(searcher, &g, c.addr) {
+                Some((doc_id, _)) => {
+                    let routed = murmur3_x86_32(doc_id.as_bytes(), 0) as u32 as u64 % shards;
+                    routed % max == id
+                }
+                None => false,
+            }
+        });
+        total = cands.len() as u64;
+    }
 
     // `collapse` keeps one hit per distinct value of a field: the best one,
     // which after the sort is the first each value is seen at. It has to run
