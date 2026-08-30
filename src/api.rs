@@ -6987,7 +6987,8 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                                     a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
                                 })
                                 .unwrap_or_default();
-                            format!("[{c}]")
+                            // a template composed of nothing names nothing
+                            if c.is_empty() { String::new() } else { format!("[{c}]") }
                         }),
                     ]
                 })
@@ -7002,11 +7003,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 });
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
-            let rows = cat_only_default(
-                rows,
-                &["name", "index_patterns", "order", "version"],
-                &p,
-            );
+            let rows = cat_only_default(rows, CAT_TEMPLATE_COLS, &p);
             cat_render_cols(CAT_TEMPLATE_COLS, rows, &p)
         }
         "shards" => {
