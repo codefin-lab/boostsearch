@@ -1167,6 +1167,17 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     match node {
         Value::Object(o) => {
             if let Some(Value::String(f)) = o.get("field") {
+                // a field already named as the column it lives in is left as
+                // it is; naming one that way is how a caller asks for the
+                // analysed view rather than the stored one
+                if f.starts_with(&format!("{}.", crate::store::DYN))
+                    || f.starts_with(&format!("{}.", crate::store::RAW))
+                {
+                    for (_, v) in o.iter_mut() {
+                        rewrite_agg_fields(v, ctx);
+                    }
+                    return;
+                }
                 // `_raw` carries both the untokenised strings and the numerics,
                 // so it is the right column for every agg except one over an
                 // explicitly analysed text field.
@@ -3331,7 +3342,10 @@ pub fn run(
         let names: Vec<String> = o
             .iter()
             .filter(|(_, def)| {
-                def.get("filters").is_some()
+                // anything under it that has to be run here drags the whole
+                // aggregation out of tantivy's hands with it
+                peelable(def)
+                    || def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
                     // percentiles answer a different question from tantivy's
@@ -3351,6 +3365,8 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
                     || def.get("rare_terms").is_some()
+                    || def.get("significant_terms").is_some()
+                    || def.get("significant_text").is_some()
                     || def.get("ip_range").is_some()
                     || def.get("date_range").is_some()
                     || def.get("adjacency_matrix").is_some()
@@ -4943,6 +4959,14 @@ fn run_peeled_agg(
         run_ip_range_agg(store, targets, query_json, def)
     } else if def.get("adjacency_matrix").is_some() {
         run_adjacency_matrix_agg(store, targets, query_json, def)
+    } else if def
+        .get("terms")
+        .map(|t| t.get("field").and_then(|f| f.as_str()) != Some("_index"))
+        .unwrap_or(false)
+    {
+        run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
+        run_significant_terms(store, targets, query_json, def)
     } else if def.get("rare_terms").is_some() {
         run_rare_terms_agg(store, targets, query_json, def, weighted, name)
     } else if def.get("multi_terms").is_some() {
@@ -4975,13 +4999,26 @@ fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option<Value>) {
     (pack(mine), pack(theirs))
 }
 
+/// Is this aggregation, or anything under it, one that has to be computed a
+/// bucket at a time here?
+fn peelable(def: &Value) -> bool {
+    peelable_here(def)
+        || def
+            .get("aggs")
+            .or_else(|| def.get("aggregations"))
+            .and_then(|s| s.as_object())
+            .map(|o| o.values().any(peelable))
+            .unwrap_or(false)
+}
+
 /// Is this an aggregation tantivy has no parser for, which has to be computed
 /// a bucket at a time here instead?
-fn peelable(def: &Value) -> bool {
+fn peelable_here(def: &Value) -> bool {
     const OWN: &[&str] = &[
         "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
+        "significant_terms", "significant_text",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
@@ -5151,6 +5188,50 @@ fn run_filter_agg(
 
 
 /// `terms` over the `_index` metadata field: one bucket per index that has hits.
+/// `terms` over an ordinary field, run here because something under it has to
+/// be: tantivy still finds the buckets, and each one then narrows the query
+/// for the aggregations it could not parse.
+fn run_field_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("terms").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    let mut node = json!({"terms": spec});
+    if let Some(plain) = plain_subs.as_ref() {
+        node["aggs"] = plain.clone();
+    }
+    let request = json!({"__f": node});
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let Some(res) = res else { return Ok(json!({"buckets": []})) };
+    let mut answer = res.get("__f").cloned().unwrap_or_else(|| json!({"buckets": []}));
+    if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
+        let empty = Vec::new();
+        let buckets = answer["buckets"].as_array().cloned().unwrap_or(empty);
+        let mut filled = Vec::new();
+        for mut b in buckets {
+            let key = b.get("key").cloned().unwrap_or(Value::Null);
+            let mut filters = vec![json!({"term": {field.clone(): key}})];
+            if let Some(q) = main_query.as_ref() {
+                filters.push(q.clone());
+            }
+            let narrowed = Some(json!({"bool": {"filter": filters}}));
+            for (n, d) in peeled {
+                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            }
+            filled.push(b);
+        }
+        answer["buckets"] = Value::Array(filled);
+    }
+    Ok(answer)
+}
+
 fn run_index_terms_agg(
     store: &Store,
     targets: &[String],
@@ -6751,6 +6832,217 @@ fn run_auto_date_histogram(
     let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
     out["interval"] = json!(label);
     Ok(out)
+}
+
+/// `significant_terms`: the terms that stand out in what the query matched,
+/// compared with how common they are in the index as a whole.
+///
+/// The measure is the one OpenSearch calls JLH: how much more of the
+/// foreground a term takes up than of the background, multiplied by the ratio
+/// between the two, so that a term has to be both commoner *and* markedly
+/// commoner to score well.
+fn run_significant_terms(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let kind = if def.get("significant_text").is_some() {
+        "significant_text"
+    } else {
+        "significant_terms"
+    };
+    let name = def
+        .as_object()
+        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k == kind))
+        .unwrap_or_else(|| kind.to_string());
+    let spec = def.get(&name).cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // a term seen once or twice is noise, so the floor is higher here than it
+    // is for a plain terms aggregation
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(3);
+
+    let string_field = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()))
+        .map(|t| matches!(t.as_str(), "text" | "keyword" | "match_only_text"))
+        .unwrap_or(true);
+    for key in ["include", "exclude"] {
+        if spec.get(key).map(|v| v.is_string()).unwrap_or(false) && !string_field {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Aggregation [{name}] cannot support regular expression style \
+                     include/exclude settings as they can only be applied to string fields. Use \
+                     an array of values for include/exclude clauses"
+                ),
+            ));
+        }
+    }
+    let listed = |key: &str| -> Option<Vec<String>> {
+        let a = spec.get(key)?.as_array()?;
+        Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+    };
+    let include = listed("include");
+    let exclude = listed("exclude");
+
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // A significant *text* aggregation asks about the words in a field rather
+    // than about its value. Words are not kept in a column -- only in the term
+    // index -- so the text is read back and analysed again, which is what
+    // OpenSearch does for this aggregation too.
+    let analysed = kind == "significant_text"
+        || targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()))
+            .map(|t| matches!(t.as_str(), "text" | "match_only_text"))
+            .unwrap_or(false);
+    let counted = |q: &Value| -> std::result::Result<(u64, Vec<(Value, u64)>), Response> {
+        if !analysed {
+            let request =
+                json!({"__s": {"terms": {"field": field, "size": 65_536, "min_doc_count": 1}}});
+            let (total, res) = filtered_count(store, targets, q, &Some(request))?;
+            let buckets = res
+                .as_ref()
+                .and_then(|r| r.pointer("/__s/buckets"))
+                .and_then(|b| b.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|b| {
+                            (
+                                b.get("key").cloned().unwrap_or(Value::Null),
+                                b.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok((total, buckets));
+        }
+        let probe = json!({"query": q.clone(), "size": 10_000, "_source": [field.clone()]});
+        let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+        let mut counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        // `filter_duplicate_text` is for text that repeats itself across
+        // documents -- boilerplate, signatures, quoted replies. A run of words
+        // already seen in an earlier document says nothing new about this one,
+        // so the words in it are passed over.
+        let dedup = spec.get("filter_duplicate_text").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut seen_runs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        const RUN: usize = 3;
+        let total = answer.hits.len() as u64;
+        for hit in &answer.hits {
+            let Some(text) = hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
+            else {
+                continue;
+            };
+            let text = match text {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            // a word counts once for the document it is in, however often it
+            // is repeated there
+            let mut tokens: Vec<String> = Vec::new();
+            for st in targets.iter().filter_map(|n| store.get(n)).take(1) {
+                let g = st.read();
+                tokens = crate::query::analyze_text(&g.index, &text, None);
+            }
+            let mut skip = vec![false; tokens.len()];
+            if dedup && tokens.len() >= RUN {
+                let mut fresh = Vec::new();
+                for i in 0..=tokens.len() - RUN {
+                    let run = tokens[i..i + RUN].join(" ");
+                    if seen_runs.contains(&run) {
+                        for slot in skip.iter_mut().skip(i).take(RUN) {
+                            *slot = true;
+                        }
+                    } else {
+                        fresh.push(run);
+                    }
+                }
+                for run in fresh {
+                    seen_runs.insert(run);
+                }
+            }
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (i, token) in tokens.into_iter().enumerate() {
+                if skip.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                seen.insert(token);
+            }
+            for token in seen {
+                *counts.entry(token).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(Value, u64)> =
+            counts.into_iter().map(|(k, c)| (json!(k), c)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok((total, out))
+    };
+    let (fg_total, fg) = counted(&query)?;
+    let (bg_total, bg) = counted(&json!({"match_all": {}}))?;
+    let read = |res: &Vec<(Value, u64)>| -> Vec<(Value, u64)> { res.clone() };
+    let background: std::collections::HashMap<String, u64> = read(&bg)
+        .into_iter()
+        .map(|(k, c)| (k.to_string(), c))
+        .collect();
+
+    let ip_field = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().mapping.type_of(&field) == Some("ip"));
+    let mut buckets: Vec<Value> = Vec::new();
+    for (key, count) in read(&fg) {
+        if count < min_doc_count {
+            continue;
+        }
+        let bg_count = background.get(&key.to_string()).copied().unwrap_or(count);
+        let key = if ip_field {
+            key.as_str()
+                .and_then(crate::store::ip_from_canonical)
+                .map(Value::String)
+                .unwrap_or(key)
+        } else {
+            key
+        };
+        let text = match &key {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if let Some(only) = include.as_ref() {
+            if !only.contains(&text) {
+                continue;
+            }
+        }
+        if let Some(never) = exclude.as_ref() {
+            if never.contains(&text) {
+                continue;
+            }
+        }
+        let fg_pct = count as f64 / fg_total.max(1) as f64;
+        let bg_pct = bg_count as f64 / bg_total.max(1) as f64;
+        let score = if bg_pct > 0.0 { (fg_pct - bg_pct) * (fg_pct / bg_pct) } else { 0.0 };
+        buckets.push(json!({
+            "key": key,
+            "doc_count": count,
+            "score": score,
+            "bg_count": bg_count,
+        }));
+    }
+    buckets.sort_by(|a, b| {
+        let s = |v: &Value| v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        s(b).partial_cmp(&s(a)).unwrap_or(Ordering::Equal).then_with(|| {
+            let k = |v: &Value| v.get("key").map(|x| x.to_string()).unwrap_or_default();
+            k(a).cmp(&k(b))
+        })
+    });
+    buckets.truncate(size);
+    Ok(json!({"doc_count": fg_total, "bg_count": bg_total, "buckets": buckets}))
 }
 
 fn run_composite_agg(
