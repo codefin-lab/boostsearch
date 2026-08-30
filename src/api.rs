@@ -7030,6 +7030,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 let g = st.read();
                 let docs = g.reader.searcher().num_docs();
                 let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
                 for shard in 0..shards {
                     rows.push(vec![
                         ("index", n.clone()),
@@ -7043,6 +7044,21 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         ("id", "node-0".into()),
                         ("node", "obsearch".into()),
                     ]);
+                    // a replica has nowhere else to live on a single node, so
+                    // it is listed and unassigned
+                    for _ in 0..replicas {
+                        rows.push(vec![
+                            ("index", n.clone()),
+                            ("shard", shard.to_string()),
+                            ("prirep", "r".into()),
+                            ("state", "UNASSIGNED".into()),
+                            ("docs", String::new()),
+                            ("store", String::new()),
+                            ("ip", String::new()),
+                            ("id", String::new()),
+                            ("node", String::new()),
+                        ]);
+                    }
                 }
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
