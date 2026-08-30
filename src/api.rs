@@ -2487,16 +2487,36 @@ pub async fn bulk(
         doc_line: Option<&'a str>,
     }
     let mut ops: Vec<Op> = Vec::new();
-    let mut lines = body.lines().filter(|l| !l.trim().is_empty());
-    while let Some(action_line) = lines.next() {
+    // the line a complaint names is counted over the whole body, blank lines
+    // and document lines included
+    let mut lineno = 0usize;
+    let mut lines = body.lines().filter(|l| !l.trim().is_empty()).inspect(|_| {});
+    let mut lines = std::iter::from_fn(move || {
+        let next = lines.next();
+        if next.is_some() {
+            lineno += 1;
+        }
+        next.map(|l| (lineno, l))
+    })
+    .peekable();
+    while let Some((at, action_line)) = lines.next() {
         let action: Value = match serde_json::from_str(action_line) {
             Ok(v) => v,
             Err(e) => {
                 return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
             }
         };
+        // an action names the operation; an object with nothing in it names
+        // none, and the line it was on is what a caller needs to be told
         let Some((op, meta)) = action.as_object().and_then(|o| o.iter().next()) else {
-            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "malformed action");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Malformed action/metadata line [{at}], expected FIELD_NAME but found \
+                     [END_OBJECT]"
+                ),
+            );
         };
         let op = op.clone();
         let idx = meta
@@ -2507,7 +2527,7 @@ pub async fn bulk(
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "missing index");
         };
         let id_opt = meta.get("_id").and_then(scalar_str);
-        let doc_line = if op == "delete" { None } else { lines.next() };
+        let doc_line = if op == "delete" { None } else { lines.next().map(|(_, l)| l) };
         ops.push(Op { op, meta: meta.clone(), index: idx, id: id_opt, doc_line });
     }
 
@@ -3059,7 +3079,7 @@ fn parse_keep_alive(s: &str) -> Option<u64> {
 }
 
 /// What a scroll refuses before it starts.
-fn check_scroll(store: &Store, body: &Value, p: &Params) -> Option<Response> {
+fn check_scroll(store: &Store, expr: &str, body: &Value, p: &Params) -> Option<Response> {
     let Some(keep) = p.get("scroll") else { return None };
     if body.get("size").and_then(|v| v.as_i64()) == Some(0)
         || p.get("size").map(|v| v == "0").unwrap_or(false)
@@ -3080,11 +3100,22 @@ fn check_scroll(store: &Store, body: &Value, p: &Params) -> Option<Response> {
     // a slice divides the documents between readers, and there is a ceiling on
     // how finely it may be cut
     if let Some(max) = body.pointer("/slice/max").and_then(|v| v.as_i64()) {
-        if max > 1024 {
+        // how finely a scroll may be cut is an index setting, so an index that
+        // raises it may be sliced that far
+        let limit = store
+            .resolve(expr)
+            .iter()
+            .filter_map(|n| store.get(n))
+            .filter_map(|st| st.read().numeric_setting("max_slices_per_scroll"))
+            .max()
+            .unwrap_or(1024) as i64;
+        if max > limit {
             return Some(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("The number of slices [{max}] is too large. It must be less than [1024]."),
+                format!(
+                    "The number of slices [{max}] is too large. It must be less than [{limit}]."
+                ),
             ));
         }
     }
@@ -3140,7 +3171,7 @@ pub async fn search(
             }
         }
     }
-    if let Some(r) = check_scroll(&store, &body, &p) {
+    if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;
     }
     let scrolling = p.contains_key("scroll");
@@ -6109,8 +6140,9 @@ pub async fn put_settings(
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&expr);
     }
-    // a settings body may arrive wrapped in `index` or flat
-    let patch = body.get("index").cloned().unwrap_or_else(|| body.clone());
+    // a settings body may arrive wrapped in `settings`, wrapped in `index`, or flat
+    let patch = body.get("settings").unwrap_or(&body);
+    let patch = patch.get("index").unwrap_or(patch).clone();
     // `preserve_existing` says to fill in only what is not already set
     let preserve = p.get("preserve_existing").map(|v| v != "false").unwrap_or(false);
     for n in targets {

@@ -917,7 +917,13 @@ impl IdxState {
     fn raw_setting(&self, key: &str) -> Option<&Value> {
         let settings = self.settings.as_object()?;
         if let Some(nested) = settings.get("index").and_then(|v| v.as_object()) {
-            if let Some(v) = nested.get(key).filter(|v| !v.is_null()) {
+            // a setting written flat keeps the `index.` prefix it arrived with,
+            // even once it is filed under `index`
+            if let Some(v) = nested
+                .get(key)
+                .or_else(|| nested.get(&format!("index.{key}")))
+                .filter(|v| !v.is_null())
+            {
                 return Some(v);
             }
         }
@@ -993,7 +999,8 @@ impl IdxState {
         let settings = self.effective_settings();
         let flat = settings.pointer(&format!("/index/{key}"));
         let nested = settings.pointer(&format!("/index/{}", key.replace('.', "/")));
-        flat.or(nested).map(|v| match v {
+        let prefixed = settings.pointer(&format!("/index/index.{key}"));
+        flat.or(nested).or(prefixed).map(|v| match v {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         })
