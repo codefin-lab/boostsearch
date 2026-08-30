@@ -4781,7 +4781,14 @@ pub async fn cluster_health(
             let want = v.trim_start_matches(['>', '<', '=']).parse::<i64>().unwrap_or(1);
             if v.starts_with('>') { 1 > want } else { 1 >= want }
         })
-        .unwrap_or(true);
+        .unwrap_or(true)
+        // a wait for more active shards than the cluster has can never end
+        && p.get("wait_for_active_shards")
+            .map(|v| match v.as_str() {
+                "all" => true,
+                other => other.parse::<usize>().map(|n| n <= names.len()).unwrap_or(true),
+            })
+            .unwrap_or(true);
 
     let n = names.len();
     let mut out = json!({
@@ -5144,6 +5151,25 @@ fn cluster_state_inner(
                 held.insert("8".into(), json!({
                     "description": "index write (api)", "retryable": false,
                     "levels": ["write"],
+                }));
+            }
+            // a read-only index refuses writes and metadata changes both
+            if g.setting("blocks.read_only").as_deref() == Some("true") {
+                held.insert("5".into(), json!({
+                    "description": "index read-only (api)", "retryable": false,
+                    "levels": ["write", "metadata_write"],
+                }));
+            }
+            if g.setting("blocks.metadata").as_deref() == Some("true") {
+                held.insert("9".into(), json!({
+                    "description": "index metadata (api)", "retryable": false,
+                    "levels": ["metadata_write", "metadata_read"],
+                }));
+            }
+            if g.setting("blocks.read").as_deref() == Some("true") {
+                held.insert("7".into(), json!({
+                    "description": "index read (api)", "retryable": false,
+                    "levels": ["read"],
                 }));
             }
             if !held.is_empty() {
