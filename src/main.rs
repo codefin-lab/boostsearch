@@ -116,6 +116,8 @@ fn app(store: Store) -> Router {
         .route("/{index}/_alias", put(api::put_alias_on_index))
         .route("/{index}/_aliases", put(api::put_alias_on_index))
         .route("/_alias", put(api::put_alias_body))
+        // an alias left out of the path leaves the trailing slash behind
+        .route("/_alias/", put(api::put_alias_body).post(api::put_alias_body))
         // --- templates ---
         .route("/_template/{name}",
                put(api::put_template).post(api::put_template)
