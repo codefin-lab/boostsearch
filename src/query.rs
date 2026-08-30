@@ -529,9 +529,9 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
-            // every document has an id, so asking whether one exists is asking
-            // for all of them
-            if field == "_id" {
+            // every document has an id and belongs to an index, so asking
+            // whether one exists is asking for all of them
+            if field == "_id" || field == "_index" {
                 return Ok(Box::new(AllQuery));
             }
             let col = ctx.column_name(field, false);

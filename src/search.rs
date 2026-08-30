@@ -640,6 +640,24 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     }
 }
 
+/// A `nested` clause that asked for the objects it matched to be listed.
+fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
+    match node {
+        Value::Object(o) => {
+            if let Some(nested) = o.get("nested") {
+                if let Some(inner) = nested.get("inner_hits") {
+                    let path =
+                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    return Some((path, inner.clone()));
+                }
+            }
+            o.values().find_map(find_nested_inner_hits)
+        }
+        Value::Array(a) => a.iter().find_map(find_nested_inner_hits),
+        _ => None,
+    }
+}
+
 /// The `distance_feature` clause of a query, wherever it sits.
 fn find_distance_feature(node: &Value) -> Option<&Value> {
     match node {
@@ -4428,6 +4446,22 @@ pub fn run(
                     })
                     .collect();
                 let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // the metadata a document carries is asked for the same way as
+                // its own fields, and is not in the source to be read from
+                for (name, _) in specs.iter() {
+                    match name.as_str() {
+                        "_seq_no" => {
+                            f.insert(name.clone(), json!([h.seq]));
+                        }
+                        "_index" => {
+                            f.insert(name.clone(), json!([h.index.clone()]));
+                        }
+                        "_id" => {
+                            f.insert(name.clone(), json!([h.id.clone()]));
+                        }
+                        _ => {}
+                    }
+                }
                 // a format asks for the value written that way rather than
                 // as the number it is
                 for (name, fmt) in specs.iter() {
@@ -4480,6 +4514,85 @@ pub fn run(
                 if !f.is_empty() {
                     hit["fields"] = Value::Object(f);
                 }
+            }
+            // a nested query may ask for the objects it matched to be listed
+            if let Some((path, inner)) = body.get("query").and_then(find_nested_inner_hits) {
+                let name = inner
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(&path)
+                    .to_string();
+                let at = h.source.pointer(&format!("/{}", path.replace('.', "/")));
+                let objects: Vec<Value> = match at {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(other) => vec![other.clone()],
+                    None => Vec::new(),
+                };
+                let size = inner.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                let mut list = Vec::new();
+                for (offset, object) in objects.iter().enumerate().take(size) {
+                    let mut inner_hit = json!({
+                        "_index": h.index.clone(),
+                        "_id": h.id.clone(),
+                        "_nested": {"field": path.clone(), "offset": offset},
+                        "_score": h.score,
+                        "_source": object.clone(),
+                    });
+                    if inner.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        inner_hit["_version"] = json!(h.version);
+                    }
+                    let asked: Vec<String> = match inner.get("docvalue_fields") {
+                        Some(Value::Array(a)) => a
+                            .iter()
+                            .filter_map(|v| {
+                                v.as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        v.get("field")
+                                            .and_then(|f| f.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    if !asked.is_empty() {
+                        let mut fields = serde_json::Map::new();
+                        for name in asked {
+                            match name.as_str() {
+                                "_seq_no" => {
+                                    fields.insert(name.clone(), json!([h.seq]));
+                                }
+                                _ => {
+                                    if let Some(v) = object
+                                        .pointer(&format!("/{}", name.replace('.', "/")))
+                                    {
+                                        fields.insert(
+                                            name.clone(),
+                                            match v {
+                                                Value::Array(a) => Value::Array(a.clone()),
+                                                other => json!([other.clone()]),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        inner_hit["fields"] = Value::Object(fields);
+                    }
+                    list.push(inner_hit);
+                }
+                let group = json!({"hits": {
+                    "total": {"value": objects.len(), "relation": "eq"},
+                    "max_score": h.score,
+                    "hits": list,
+                }});
+                let mut groups = match hit.get("inner_hits") {
+                    Some(Value::Object(o)) => o.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                groups.insert(name, group);
+                hit["inner_hits"] = Value::Object(groups);
             }
             if let Some(hits) = named.get(&h.id) {
                 hit["matched_queries"] = if named_scores {
