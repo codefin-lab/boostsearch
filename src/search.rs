@@ -4060,11 +4060,20 @@ pub fn run(
             };
             for entry in entries.iter_mut() {
                 let Some(name) = entry.get("description").and_then(|d| d.as_str()) else { continue };
+                // a bucket that had to be filled in to close a gap was never
+                // built while collecting, so it is not one of the buckets the
+                // aggregation counts
                 let n = a
                     .get(name)
                     .and_then(|v| v.get("buckets"))
                     .and_then(|b| b.as_array())
-                    .map(|b| b.len())
+                    .map(|b| {
+                        b.iter()
+                            .filter(|x| {
+                                x.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(1) > 0
+                            })
+                            .count()
+                    })
                     .unwrap_or(0);
                 if let Some(debug) = entry.get_mut("debug").and_then(|d| d.as_object_mut()) {
                     debug.insert("total_buckets".into(), json!(n));
