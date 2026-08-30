@@ -95,6 +95,9 @@ struct SortKey {
     field: String,
     desc: bool,
     mode: Option<String>,
+    /// where a document with no value for this field goes. `_last` means last
+    /// in the order the caller sees, whichever direction that is.
+    missing_last: bool,
 }
 
 fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
@@ -106,7 +109,12 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
     let mut out = Vec::new();
     for item in items {
         match item {
-            Value::String(f) => out.push(SortKey { field: f, desc: false, mode: None }),
+            Value::String(f) => out.push(SortKey {
+                field: f,
+                desc: false,
+                mode: None,
+                missing_last: true,
+            }),
             Value::Object(o) => {
                 for (field, opts) in o {
                     let desc = match &opts {
@@ -122,7 +130,12 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .get("mode")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_ascii_lowercase());
-                    out.push(SortKey { field, desc, mode });
+                    let missing_last = opts
+                        .get("missing")
+                        .and_then(|v| v.as_str())
+                        .map(|m| m == "_last")
+                        .unwrap_or(true);
+                    out.push(SortKey { field, desc, mode, missing_last });
                 }
             }
             _ => {}
@@ -326,6 +339,8 @@ enum SortSource {
 struct SortCollector {
     sources: Vec<SortSource>,
     desc: Vec<bool>,
+    /// per key, whether a document with no value goes last
+    missing_last: Vec<bool>,
     limit: usize,
     /// Where a previous page ended. Documents up to and including it are not
     /// collected at all, so the page limit applies to what comes after.
@@ -337,6 +352,7 @@ struct SortSegmentCollector {
     sources: Vec<SortSource>,
     columns: Vec<Option<SortColumns>>,
     desc: Vec<bool>,
+    missing_last: Vec<bool>,
     limit: usize,
     after: Option<Vec<SortValue>>,
     buf: Vec<Cand>,
@@ -406,6 +422,7 @@ impl tantivy::collector::Collector for SortCollector {
             sources: self.sources.clone(),
             columns,
             desc: self.desc.clone(),
+            missing_last: self.missing_last.clone(),
             limit: self.limit,
             after: self.after.clone(),
             buf: Vec::with_capacity(self.limit.saturating_mul(4).max(512).min(4096)),
@@ -523,8 +540,13 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
             let mut behind = true;
             for (i, want_desc) in self.desc.iter().enumerate() {
                 let Some(marker) = after.get(i) else { break };
-                let ord = sort[i].cmp_asc(marker);
-                let ord = if *want_desc { ord.reverse() } else { ord };
+                let key = SortKey {
+                    field: String::new(),
+                    desc: *want_desc,
+                    mode: None,
+                    missing_last: self.missing_last.get(i).copied().unwrap_or(true),
+                };
+                let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {
                     Ordering::Greater => {
                         behind = false;
@@ -650,13 +672,32 @@ fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
             .then_with(by_doc);
     }
     for (i, k) in sort_keys.iter().enumerate() {
-        let ord = a.sort[i].cmp_asc(&b.sort[i]);
-        let ord = if k.desc && ord != Ordering::Equal { ord.reverse() } else { ord };
+        let ord = cmp_with_missing(&a.sort[i], &b.sort[i], k);
         if ord != Ordering::Equal {
             return ord;
         }
     }
     by_doc()
+}
+
+/// Compare two values of one sort key, in the direction it asks for.
+///
+/// A document with no value goes where `missing` says, which is last in the
+/// order the caller sees -- so it stays last when the sort is reversed rather
+/// than moving to the front with everything else.
+fn cmp_with_missing(a: &SortValue, b: &SortValue, k: &SortKey) -> Ordering {
+    let missing = |v: &SortValue| matches!(v, SortValue::Missing);
+    if missing(a) || missing(b) {
+        let last = if k.missing_last { Ordering::Greater } else { Ordering::Less };
+        return match (missing(a), missing(b)) {
+            (true, true) => Ordering::Equal,
+            (true, false) => last,
+            (false, true) => last.reverse(),
+            _ => unreachable!(),
+        };
+    }
+    let ord = a.cmp_asc(b);
+    if k.desc && ord != Ordering::Equal { ord.reverse() } else { ord }
 }
 
 /// Keep only the best `want` candidates, pruning in amortised linear time
@@ -3371,6 +3412,7 @@ pub fn run(
                 Count,
                 SortCollector {
                     sources,
+                    missing_last: sort_keys.iter().map(|k| k.missing_last).collect(),
                     desc,
                     limit: want.max(1),
                     after: search_after.clone(),
