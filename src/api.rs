@@ -4218,6 +4218,26 @@ fn stats_field_wanted(patterns: &[String], name: &str) -> bool {
     })
 }
 
+/// A size the way `cat` writes one: a number and the unit it is in.
+fn readable_bytes(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1024 * 1024 * 1024, "gb"),
+        (1024 * 1024, "mb"),
+        (1024, "kb"),
+        (1, "b"),
+    ];
+    for (scale, unit) in UNITS {
+        if bytes >= scale {
+            if scale == 1 {
+                return format!("{bytes}b");
+            }
+            let n = bytes as f64 / scale as f64;
+            return format!("{n:.1}{unit}");
+        }
+    }
+    "0b".to_string()
+}
+
 fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
@@ -5364,10 +5384,21 @@ pub async fn cluster_settings_get(
         Some(v) => v.clone(),
         None => json!({}),
     };
+    // `include_defaults` asks for the settings nobody set, which here is what
+    // the node was started with
+    let mut defaults = json!({});
+    if flag(&p, "include_defaults") {
+        for (k, v) in node_attrs() {
+            defaults[format!("node.attr.{k}")] = json!(v);
+        }
+        if !flat {
+            defaults = nest_settings(&defaults);
+        }
+    }
     respond(&p, json!({
         "persistent": view("persistent"),
         "transient": view("transient"),
-        "defaults": {},
+        "defaults": defaults,
     }))
 }
 
@@ -6570,19 +6601,40 @@ pub async fn cat_allocation(
 
 pub const CAT_NODEATTRS_COLS: &[&str] = &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
 
-/// `_cat/nodeattrs` -- the attributes a node was started with. There are none
-/// here, but the one node is still listed.
+/// The attributes this node was started with: the built-in one, and whatever
+/// `OBSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
+pub fn node_attrs() -> Vec<(String, String)> {
+    let mut out = vec![("shard_indexing_pressure_enabled".to_string(), "true".to_string())];
+    if let Ok(spec) = std::env::var("OBSEARCH_NODE_ATTRS") {
+        for pair in spec.split(',') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !k.is_empty() {
+                    out.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `_cat/nodeattrs` -- the attributes a node was started with.
 pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
-    let rows = vec![vec![
-        ("node", "obsearch".to_string()),
-        ("id", "node-0".to_string()),
-        ("pid", std::process::id().to_string()),
-        ("host", "127.0.0.1".to_string()),
-        ("ip", "127.0.0.1".to_string()),
-        ("port", "9300".to_string()),
-        ("attr", "shard_indexing_pressure_enabled".to_string()),
-        ("value", "true".to_string()),
-    ]];
+    let rows: Vec<Vec<(&str, String)>> = node_attrs()
+        .into_iter()
+        .map(|(attr, value)| {
+            vec![
+                ("node", "obsearch".to_string()),
+                ("id", "node-0".to_string()),
+                ("pid", std::process::id().to_string()),
+                ("host", "127.0.0.1".to_string()),
+                ("ip", "127.0.0.1".to_string()),
+                ("port", "9300".to_string()),
+                ("attr", attr),
+                ("value", value),
+            ]
+        })
+        .collect();
     let rows = cat_only_default(rows, &["node", "host", "ip", "attr", "value"], &p);
     cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
 }
@@ -6788,7 +6840,7 @@ pub async fn cat_count(
 
 pub const CAT_HEALTH_COLS: &[&str] = &[
     "epoch", "timestamp", "cluster", "status", "node.total", "node.data",
-    "discovered_master", "shards", "pri", "relo", "init", "unassign",
+    "discovered_cluster_manager", "shards", "pri", "relo", "init", "unassign",
     "pending_tasks", "max_task_wait_time", "active_shards_percent",
 ];
 
@@ -6798,7 +6850,7 @@ pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> 
         ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
         ("cluster", "obsearch".into()), ("status", "green".into()),
         ("node.total", "1".into()), ("node.data", "1".into()),
-        ("discovered_master", "true".into()),
+        ("discovered_cluster_manager", "true".into()),
         ("shards", n.clone()), ("pri", n), ("relo", "0".into()), ("init", "0".into()),
         ("unassign", "0".into()), ("pending_tasks", "0".into()),
         ("max_task_wait_time", "-".into()), ("active_shards_percent", "100.0%".into()),
@@ -6991,7 +7043,28 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         }
         // shapes with nothing meaningful behind them on a single node; `?help`
         // still has to list the right columns
-        "fielddata" => cat_named(&["id", "host", "ip", "node", "field", "size"], &p),
+        // what a field's columns take up is the closest thing here to a
+        // fielddata cache, and it is reported per field
+        "fielddata" => {
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for name in store.names() {
+                let Some(st) = store.get(&name) else { continue };
+                let g = st.read();
+                let mut fields: Vec<(String, u64)> = g.field_column_bytes().into_iter().collect();
+                fields.sort();
+                for (field, bytes) in fields {
+                    rows.push(vec![
+                        ("id", "node-0".to_string()),
+                        ("host", "127.0.0.1".to_string()),
+                        ("ip", "127.0.0.1".to_string()),
+                        ("node", "obsearch".to_string()),
+                        ("field", field),
+                        ("size", readable_bytes(bytes)),
+                    ]);
+                }
+            }
+            cat_render_cols(&["id", "host", "ip", "node", "field", "size"], rows, &p)
+        }
         "allocation" => cat_named(
             &["shards", "disk.indices", "disk.used", "disk.avail", "disk.total",
               "disk.percent", "host", "ip", "node"], &p),
@@ -7003,7 +7076,21 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "repositories" => cat_named(&["id", "type"], &p),
         "snapshots" => cat_named(&["id", "status", "start_epoch", "end_epoch", "duration"], &p),
         "tasks" => cat_named(&["action", "task_id", "parent_task_id", "type", "start_time"], &p),
-        "nodeattrs" => cat_named(&["node", "host", "ip", "attr", "value"], &p),
+        "nodeattrs" => {
+            let rows: Vec<Vec<(&str, String)>> = node_attrs()
+                .into_iter()
+                .map(|(attr, value)| {
+                    vec![
+                        ("node", "obsearch".to_string()),
+                        ("host", "127.0.0.1".to_string()),
+                        ("ip", "127.0.0.1".to_string()),
+                        ("attr", attr),
+                        ("value", value),
+                    ]
+                })
+                .collect();
+            cat_render_cols(&["node", "host", "ip", "attr", "value"], rows, &p)
+        }
         other => err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",

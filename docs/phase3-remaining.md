@@ -227,3 +227,11 @@ hundreds of billions, which is the year 11970. tantivy holds a date as i64
 nanoseconds since the epoch, which runs out in 2262, so the value cannot be
 stored at all -- not as an approximation, not clamped without losing the
 ordering the aggregation is asking about.
+
+## The node the suite expects
+
+OpenSearch's own test cluster starts with `node.attr.testattr: test`, and a few
+tests read it back through `_cat/nodeattrs` and `_cluster/settings`. Start the
+server the same way to run them:
+
+    OBSEARCH_NODE_ATTRS=testattr=test ./target/release/obsearch
