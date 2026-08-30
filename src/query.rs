@@ -445,6 +445,49 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
                 }
             }
+            // the values gathered under a flat_object keep the spelling and
+            // the type they were stored with, whether the query names the
+            // object itself or a path inside it
+            let under_flat = {
+                let mut walked = String::new();
+                let mut found = false;
+                for part in field.split('.') {
+                    walked = if walked.is_empty() {
+                        part.to_string()
+                    } else {
+                        format!("{walked}.{part}")
+                    };
+                    if ctx.mapping.type_of(&walked) == Some("flat_object") {
+                        found = true;
+                    }
+                }
+                found
+            };
+            if under_flat {
+                if let Some(text) = val.as_str() {
+                    let mut terms = term_for(f, &path, &val);
+                    let normal = normalized(ctx, &field, text);
+                    if normal != text {
+                        terms.extend(term_for(f, &path, &Value::String(normal)));
+                    }
+                    if let Some(iso) =
+                        crate::store::canonical_date(&Value::String(text.to_string()))
+                    {
+                        if iso != text {
+                            terms.extend(term_for(f, &path, &Value::String(iso)));
+                        }
+                    }
+                    // a number gathered under a flat_object is still a number
+                    if let Ok(n) = text.parse::<f64>() {
+                        if let Some(num) = serde_json::Number::from_f64(n) {
+                            terms.extend(term_for(f, &path, &Value::Number(num)));
+                        }
+                    }
+                    // the values are text like any other, and score like it
+                    return Ok(any_of(terms));
+                }
+            }
+
             let val = ip_value(ctx, &field, &val);
             if let Some(s) = val.as_str() {
                 let n = normalized(ctx, &field, s);
