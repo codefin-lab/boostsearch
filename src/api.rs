@@ -6362,16 +6362,29 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             }
         }
     }
+    // alignment is a property of the column, not of what lands in it: the
+    // ones an allocation is measured in line up on their right edge
+    const RIGHT: &[&str] = &[
+        "shards", "disk.indices", "disk.used", "disk.avail", "disk.total", "disk.percent",
+    ];
+    let numeric: Vec<bool> = head.iter().map(|h| RIGHT.contains(h)).collect();
     let line = |cells: Vec<&str>| {
         let mut s = String::new();
         for (i, c) in cells.iter().enumerate() {
             if i > 0 {
                 s.push(' ');
             }
+            let width = widths.get(i).copied().unwrap_or(0);
+            let right = numeric.get(i).copied().unwrap_or(false);
+            if right {
+                for _ in c.len()..width {
+                    s.push(' ');
+                }
+            }
             s.push_str(c);
             // the last cell needs no padding: nothing follows it to line up
-            if i + 1 < cells.len() {
-                for _ in c.len()..widths.get(i).copied().unwrap_or(0) {
+            if !right && i + 1 < cells.len() {
+                for _ in c.len()..width {
                     s.push(' ');
                 }
             }
@@ -6518,7 +6531,19 @@ pub async fn cat_allocation(
 ) -> Response {
     // the path names which node to describe, and there is only one
     if let Some(Path(want)) = node.as_ref() {
-        if !matches!(want.as_str(), "obsearch" | "node-0" | "node" | "_all" | "*") {
+        // the sole node is also the one leading the cluster, and the one the
+        // request arrived at
+        if !matches!(
+            want.as_str(),
+            "obsearch"
+                | "node-0"
+                | "node"
+                | "_all"
+                | "*"
+                | "_master"
+                | "_cluster_manager"
+                | "_local"
+        ) {
             return cat_render_cols(CAT_ALLOCATION_COLS, Vec::new(), &p);
         }
     }
