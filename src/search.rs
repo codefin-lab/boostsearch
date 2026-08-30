@@ -7108,6 +7108,9 @@ fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Res
     }
     let spec = o.get(&kind).cloned().unwrap_or(Value::Null);
     let path = spec.get("buckets_path").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(complaint) = buckets_path_problem(aggs, path) {
+        return Err(err(StatusCode::BAD_REQUEST, "illegal_argument_exception", complaint));
+    }
     let values = resolve_buckets_path(aggs, path);
     if values.is_empty() {
         return Ok(json!({"value": Value::Null}));
@@ -7134,6 +7137,62 @@ fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Res
 }
 
 /// `histo.v` means: the metric `v` of every bucket of `histo`.
+/// What a `buckets_path` ends at, if it is not a single number.
+///
+/// A pipeline sums, averages or picks from a list of numbers. A path that
+/// stops at a bucketing aggregation, or at a metric with several values,
+/// names no such number, and saying which is more useful than a zero.
+fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('>').flat_map(|s| s.split('.')).collect();
+    let mut node = aggs;
+    let mut last = "";
+    for (i, seg) in segs.iter().enumerate() {
+        last = seg;
+        node = node.get(seg)?;
+        let leaf = i + 1 == segs.len();
+        if let Some(buckets) = node.get("buckets") {
+            if leaf {
+                // the last step is a bucketing aggregation, not a value
+                let kind = match buckets.as_array().and_then(|a| a.first()) {
+                    Some(b) if b.get("key").map(|k| k.is_string()).unwrap_or(false) => "StringTerms",
+                    Some(_) => "LongTerms",
+                    None => "LongTerms",
+                };
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, got: [{kind}] at aggregation [{seg}]"
+                ));
+            }
+            // stepping through a bucketing aggregation means the rest of the
+            // path is read inside each bucket
+            node = buckets.as_array().and_then(|a| a.first())?;
+        }
+    }
+    // a metric holding several values names none of them
+    if node.get("value").is_none() {
+        if let Some(values) = node.get("values") {
+            let many = match values {
+                Value::Object(o) => o.len() > 1,
+                Value::Array(a) => a.len() > 1,
+                _ => false,
+            };
+            if many {
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, but [{last}] contains multiple values. Please \
+                     specify which to use."
+                ));
+            }
+        } else if node.is_object() && node.get("doc_count").is_none() {
+            return Some(format!(
+                "buckets_path must reference either a number value or a single value numeric \
+                 metric aggregation, got: [Object[]] at aggregation [{last}]"
+            ));
+        }
+    }
+    None
+}
+
 fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
     let mut segs = path.split('>').flat_map(|s| s.split('.'));
     let Some(first) = segs.next() else { return Vec::new() };
