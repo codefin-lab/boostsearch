@@ -6346,7 +6346,16 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
             rows.into_iter()
                 .map(|r| {
                     want.iter()
-                        .filter_map(|w| {
+                        .flat_map(|w| {
+                            // a name with a `*` in it stands for every column
+                            // it fits, in the order the row holds them
+                            if w.contains('*') {
+                                return r
+                                    .iter()
+                                    .filter(|(k, _)| crate::store::glob_match(w, k))
+                                    .map(|(k, v)| (*k, v.clone()))
+                                    .collect::<Vec<_>>();
+                            }
                             // a column answers to its name or to one of the
                             // short forms `_cat` accepts, and is headed by the
                             // name it was asked for
@@ -6358,6 +6367,8 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_alias(k, w)))
                                 .or_else(|| r.iter().find(|(k, _)| cat_column_matches(k, w)))
                                 .map(|(_, v)| (*w, v.clone()))
+                                .into_iter()
+                                .collect::<Vec<_>>()
                         })
                         .collect()
                 })
@@ -6403,10 +6414,12 @@ fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params)
     }
     // alignment is a property of the column, not of what lands in it: the
     // ones an allocation is measured in line up on their right edge
-    const RIGHT: &[&str] = &[
-        "shards", "disk.indices", "disk.used", "disk.avail", "disk.total", "disk.percent",
-    ];
-    let numeric: Vec<bool> = head.iter().map(|h| RIGHT.contains(h)).collect();
+    const RIGHT_SUFFIX: &[&str] =
+        &[".indices", ".used", ".avail", ".total", ".percent", ".current", ".max"];
+    let numeric: Vec<bool> = head
+        .iter()
+        .map(|h| *h == "shards" || RIGHT_SUFFIX.iter().any(|sfx| h.ends_with(sfx)))
+        .collect();
     let line = |cells: Vec<&str>| {
         let mut s = String::new();
         for (i, c) in cells.iter().enumerate() {
@@ -6909,9 +6922,14 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 } else {
                     "node".to_string()
                 }),
-                ("ip", "127.0.0.1".into()), ("heap.percent", "0".into()),
-                ("heap.current", "0b".into()), ("heap.max", "0b".into()),
-                ("ram.percent", "0".into()), ("cpu", "0".into()),
+                ("ip", "127.0.0.1".into()),
+                ("file_desc.current", "0".into()), ("file_desc.percent", "0".into()),
+                ("file_desc.max", "0".into()),
+                ("heap.current", "0b".into()), ("heap.percent", "0".into()),
+                ("heap.max", "0b".into()),
+                ("ram.current", "0b".into()), ("ram.percent", "0".into()),
+                ("ram.max", "0b".into()),
+                ("http", "127.0.0.1:9200".into()), ("cpu", "0".into()),
                 ("load_1m", "0.00".into()), ("load_5m", "0.00".into()),
                 ("load_15m", "0.00".into()),
                 ("node.role", "dimr".into()), ("node.roles", "data,ingest".into()),
@@ -6924,10 +6942,11 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 "load_15m", "node.role", "node.roles", "cluster_manager", "name",
             ], &p);
             cat_render_cols(&[
-                "id", "ip", "heap.percent", "heap.current", "heap.max", "ram.percent",
-                "cpu", "load_1m", "load_5m", "load_15m", "node.role", "node.roles",
-                "cluster_manager", "name", "diskAvail", "diskTotal", "diskUsed",
-                "diskUsedPercent",
+                "id", "ip", "file_desc.current", "file_desc.percent", "file_desc.max",
+                "heap.current", "heap.percent", "heap.max", "ram.current", "ram.percent",
+                "ram.max", "http", "cpu", "load_1m", "load_5m", "load_15m", "node.role",
+                "node.roles", "cluster_manager", "name", "diskAvail", "diskTotal",
+                "diskUsed", "diskUsedPercent",
             ], rows, &p)
         }
         "templates" => {
