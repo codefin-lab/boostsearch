@@ -625,6 +625,15 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
             build(ctx, inner)?
         }
+        // an `intervals` query is a little language of rules over one field.
+        // Positions are not compared here; each rule is built as the query it
+        // most nearly is, and the shape of the rule tree is kept.
+        "intervals" => {
+            let Some((field, rule)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return Err(anyhow!("[intervals] requires a field"));
+            };
+            build_interval_rule(ctx, field, rule)?
+        }
         "bool" => build_bool(ctx, &body)?,
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
@@ -682,6 +691,88 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         Some(b) => Box::new(BoostQuery::new(inner, b as f32)),
         None => inner,
     })
+}
+
+/// One rule of an `intervals` query, as the query it most nearly is.
+fn build_interval_rule(ctx: &Ctx, field: &str, rule: &Value) -> Result<Box<dyn Query>> {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
+        return Err(anyhow!("[intervals] requires a rule"));
+    };
+    // a rule may name a different field to read
+    let field = spec
+        .get("use_field")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| field.to_string());
+    let insensitive = is_true(spec.get("case_insensitive"));
+    let clause = match kind.as_str() {
+        "match" => {
+            let text = spec.get("query").cloned().unwrap_or(Value::Null);
+            let ordered = is_true(spec.get("ordered"));
+            let gaps = spec.get("max_gaps").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let inner = if ordered && gaps == 0 {
+                serde_json::json!({"match_phrase": {field.clone(): {"query": text}}})
+            } else {
+                serde_json::json!({"match": {field.clone(): {"query": text, "operator": "and"}}})
+            };
+            build(ctx, &inner)?
+        }
+        "prefix" => {
+            let text = spec.get("prefix").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"prefix": {field.clone(): text}}))?
+        }
+        "wildcard" => {
+            let text = spec.get("pattern").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"wildcard": {field.clone(): text}}))?
+        }
+        "fuzzy" => {
+            let text = spec.get("term").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"fuzzy": {field.clone(): {"value": text}}}))?
+        }
+        "regexp" => {
+            let text = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let mut inner = serde_json::json!({"regexp": {field.clone(): {"value": text}}});
+            if insensitive {
+                inner["regexp"][field.clone()]["case_insensitive"] = serde_json::json!(true);
+            }
+            build(ctx, &inner)?
+        }
+        "all_of" | "any_of" => {
+            let occur = if kind == "all_of" { Occur::Must } else { Occur::Should };
+            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for sub in spec.get("intervals").and_then(|v| v.as_array()).into_iter().flatten() {
+                clauses.push((occur, build_interval_rule(ctx, &field, sub)?));
+            }
+            if clauses.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            Box::new(BooleanQuery::new(clauses))
+        }
+        other => return Err(anyhow!("Unknown interval rule [{other}]")),
+    };
+    // `filter` narrows what the rule matched; the parts of it this engine can
+    // answer are the ones that name a query
+    let filtered = spec.get("filter").and_then(|f| f.as_object()).map(|f| {
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for (name, inner) in f {
+            let occur = match name.as_str() {
+                "not_contained_by" | "not_containing" | "not_overlapping" => Occur::MustNot,
+                "filter" => Occur::Must,
+                _ => Occur::Must,
+            };
+            if let Ok(q) = build_interval_rule(ctx, &field, inner) {
+                clauses.push((occur, q));
+            }
+        }
+        clauses
+    });
+    match filtered {
+        Some(mut clauses) if !clauses.is_empty() => {
+            clauses.insert(0, (Occur::Must, clause));
+            Ok(Box::new(BooleanQuery::new(clauses)))
+        }
+        _ => Ok(clause),
+    }
 }
 
 fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
