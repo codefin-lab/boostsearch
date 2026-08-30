@@ -2887,6 +2887,30 @@ fn check_limits(
             "cannot use `collapse` in a scroll context",
         ));
     }
+    // a page picked up after a marker has to be picked up in the same order
+    // the groups are in, which means sorting by the very field they collapse on
+    if let (Some(field), true) = (
+        body.pointer("/collapse/field").and_then(|v| v.as_str()),
+        body.get("search_after").is_some(),
+    ) {
+        let keys: Vec<Value> = match body.get("sort") {
+            Some(Value::Array(a)) => a.clone(),
+            Some(other) => vec![other.clone()],
+            None => Vec::new(),
+        };
+        let named = match keys.first() {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Object(o)) => o.keys().next().cloned().unwrap_or_default(),
+            _ => String::new(),
+        };
+        if keys.len() != 1 || named != field {
+            return Err(bad(
+                "collapse field and sort field must be the same when use `collapse` in \
+                 conjunction with `search_after`"
+                    .into(),
+            ));
+        }
+    }
     // rescoring reorders the top of the result set, which is the very thing
     // collapsing has already decided
     if body.get("rescore").is_some() && body.get("collapse").is_some() {
