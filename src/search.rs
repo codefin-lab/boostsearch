@@ -600,26 +600,39 @@ struct Cand {
 /// milliseconds and a `date_nanos` reports the nanoseconds themselves -- that
 /// resolution is the whole reason for the second type.
 fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
+    date_sort_kind(store, targets, field) == Some(false)
+}
+
+/// Which kind of date a sort key names, if it names one at all: `Some(false)`
+/// for a `date`, `Some(true)` for a `date_nanos`.
+fn date_sort_kind(store: &Store, targets: &[String], field: &str) -> Option<bool> {
     targets
         .iter()
         .filter_map(|n| store.get(n))
-        .any(|st| st.read().mapping.type_of(field) == Some("date"))
+        .find_map(|st| match st.read().mapping.type_of(field) {
+            Some("date") => Some(false),
+            Some("date_nanos") => Some(true),
+            _ => None,
+        })
 }
 
 /// Read one `search_after` element back into the value the sort produced.
-fn sort_value_from_json(v: &Value, is_date: bool) -> SortValue {
+fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     match v {
-        // the columns are read as f64, so the marker is put in the same shape
-        // before it is compared with them
-        Value::Number(n) => {
-            let scale = if is_date { 1e6 } else { 1.0 };
-            SortValue::F64(n.as_f64().unwrap_or(0.0) * scale)
-        }
+        // a marker for a date is written in the unit that field reports in,
+        // and the column counts nanoseconds either way
+        Value::Number(n) => match date {
+            // nanoseconds do not survive a trip through an f64, and a marker
+            // that has lost its last digits cannot tell two pages apart
+            Some(true) => SortValue::I64(n.as_i64().unwrap_or(0)),
+            Some(false) => SortValue::I64(n.as_i64().unwrap_or(0).saturating_mul(1_000_000)),
+            None => SortValue::F64(n.as_f64().unwrap_or(0.0)),
+        },
         // a marker for a date field may be written as a date rather than as
         // the number the column holds
-        Value::String(s) if is_date => crate::store::canonical_date(v)
+        Value::String(s) if date.is_some() => crate::store::canonical_date(v)
             .and_then(|d| crate::store::parse_date_lenient(&d))
-            .map(|d| SortValue::F64(d.unix_timestamp_nanos() as f64))
+            .map(|d| SortValue::I64(d.unix_timestamp_nanos() as i64))
             .unwrap_or_else(|| SortValue::Str(s.clone())),
         Value::String(s) => SortValue::Str(s.clone()),
         Value::Null => SortValue::Missing,
@@ -3210,7 +3223,9 @@ pub fn run(
         .map(|a| {
             a.iter()
                 .zip(sort_keys.iter())
-                .map(|(v, k)| sort_value_from_json(v, date_sort_key(store, &targets, &k.field)))
+                .map(|(v, k)| {
+                    sort_value_from_json(v, date_sort_kind(store, &targets, &k.field))
+                })
                 .collect()
         });
     let fanned_out = targets.len() > 1;
