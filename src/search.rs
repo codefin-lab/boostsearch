@@ -3213,6 +3213,42 @@ pub fn run(
         }
     }
     let mut agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
+    // a composite walks the whole index in one pass, which it cannot do once
+    // per bucket of something else
+    fn composite_under_a_parent(node: &Value) -> bool {
+        // an aggregation that produces one bucket does not multiply the work,
+        // so a composite may sit inside one of those
+        const SINGLE: &[&str] = &[
+            "filter", "global", "nested", "reverse_nested", "sampler", "diversified_sampler",
+            "missing", "children", "parent",
+        ];
+        let Some(o) = node.as_object() else { return false };
+        o.values().any(|def| {
+            let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) else {
+                return false;
+            };
+            let single = def
+                .as_object()
+                .map(|d| d.keys().any(|k| SINGLE.contains(&k.as_str())))
+                .unwrap_or(false);
+            if !single
+                && subs
+                    .as_object()
+                    .map(|m| m.values().any(|d| d.get("composite").is_some()))
+                    .unwrap_or(false)
+            {
+                return true;
+            }
+            composite_under_a_parent(subs)
+        })
+    }
+    if agg_json.as_ref().map(composite_under_a_parent).unwrap_or(false) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[composite] aggregation cannot be used with a parent aggregation of type: [terms]",
+        ));
+    }
     // Parameter bounds do not depend on any mapping, so they are checked here
     // rather than per shard: a request that names no existing index has no
     // shards to walk, and a bad parameter would otherwise pass unread.
@@ -6591,6 +6627,10 @@ fn run_composite_agg(
             desc,
             least_ns: None,
             zone_ms,
+            ip: targets
+                .iter()
+                .filter_map(|n| store.get(n))
+                .any(|st| st.read().mapping.type_of(&field) == Some("ip")),
         });
     }
     if sources.is_empty() {
@@ -6787,6 +6827,8 @@ struct CompSource {
     least_ns: Option<f64>,
     /// how far the zone this source is reported in sits from UTC
     zone_ms: i64,
+    /// an address is held in a fixed-width form and read back out of it
+    ip: bool,
 }
 
 fn flatten_composite(
@@ -6807,6 +6849,13 @@ fn flatten_composite(
             continue;
         }
         let mut raw = b.get("key").cloned().unwrap_or(Value::Null);
+        if sources[depth].ip {
+            if let Some(text) =
+                raw.as_str().and_then(crate::store::ip_from_canonical)
+            {
+                raw = json!(text);
+            }
+        }
         if sources[depth].date {
             // a date key is a whole number of milliseconds, not a float
             if let Some(n) = raw.as_f64() {
