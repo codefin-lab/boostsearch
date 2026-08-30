@@ -2878,6 +2878,16 @@ fn check_limits(
     };
     let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
 
+    // a scroll walks the whole result set in order; collapsing rewrites what
+    // that order even is, so the two cannot be asked for together
+    if p.contains_key("scroll") && body.get("collapse").is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "search_phase_execution_exception",
+            "cannot use `collapse` in a scroll context",
+        ));
+    }
+
     // a page is counted from the front, so there is no such thing as starting
     // before it
     let negative = body
@@ -4147,6 +4157,22 @@ pub fn run(
                     }
                 }
                 if !f.is_empty() {
+                    hit["fields"] = Value::Object(f);
+                }
+            }
+            // a collapsed hit says which value it stands for
+            if let Some(field) = body.pointer("/collapse/field").and_then(|v| v.as_str()) {
+                let path = format!("/{}", field.replace('.', "/"));
+                if let Some(v) = h.source.pointer(&path) {
+                    let list = match v {
+                        Value::Array(a) => a.clone(),
+                        other => vec![other.clone()],
+                    };
+                    let mut f = match hit.get("fields") {
+                        Some(Value::Object(o)) => o.clone(),
+                        _ => serde_json::Map::new(),
+                    };
+                    f.insert(field.to_string(), Value::Array(list));
                     hit["fields"] = Value::Object(f);
                 }
             }
