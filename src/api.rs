@@ -6674,6 +6674,28 @@ fn cat_column_alias(column: &str, asked: &str) -> bool {
         ("diskTotal", "dt"),
         ("diskUsed", "du"),
         ("diskUsedPercent", "dup"),
+        // how a shard was recovered, which cat writes in short form
+        ("shard", "s"),
+        ("time", "t"),
+        ("type", "ty"),
+        ("stage", "st"),
+        ("source_host", "shost"),
+        ("target_host", "thost"),
+        ("source_node", "snode"),
+        ("target_node", "tnode"),
+        ("repository", "rep"),
+        ("snapshot", "snap"),
+        ("files", "f"),
+        ("files_recovered", "fr"),
+        ("files_percent", "fp"),
+        ("files_total", "tf"),
+        ("bytes", "b"),
+        ("bytes_recovered", "br"),
+        ("bytes_percent", "bp"),
+        ("bytes_total", "tb"),
+        ("translog_ops", "to"),
+        ("translog_ops_recovered", "tor"),
+        ("translog_ops_percent", "top"),
     ];
     ALIASES.iter().any(|(col, short)| *col == column && *short == asked)
 }
@@ -7522,8 +7544,66 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
         "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
-        "recovery" => cat_named(
-            &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
+        // how each shard came to be where it is, one row per shard
+        "recovery" => {
+            const COLS: &[&str] = &[
+                "index", "shard", "start_time", "start_time_millis", "stop_time",
+                "stop_time_millis", "time", "type", "stage", "source_host", "source_node",
+                "target_host", "target_node", "repository", "snapshot", "files",
+                "files_recovered", "files_percent", "files_total", "bytes", "bytes_recovered",
+                "bytes_percent", "bytes_total", "translog_ops", "translog_ops_recovered",
+                "translog_ops_percent",
+            ];
+            let names = match target.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => store.resolve(t),
+                None => store.names(),
+            };
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for n in names {
+                let Some(st) = store.get(&n) else { continue };
+                let g = st.read();
+                let existing = g.reader.searcher().num_docs() > 0 || g.closed;
+                let kind = if g.restored {
+                    "snapshot"
+                } else if existing {
+                    "existing_store"
+                } else {
+                    "empty_store"
+                };
+                for shard in 0..g.shard_count() {
+                    rows.push(vec![
+                        ("index", n.clone()),
+                        ("shard", shard.to_string()),
+                        ("start_time", "2020-01-01T00:00:00.000Z".into()),
+                        ("start_time_millis", "1577836800000".into()),
+                        ("stop_time", "2020-01-01T00:00:00.000Z".into()),
+                        ("stop_time_millis", "1577836800000".into()),
+                        ("time", "0ms".into()),
+                        ("type", kind.into()),
+                        ("stage", "done".into()),
+                        ("source_host", "n/a".into()),
+                        ("source_node", "n/a".into()),
+                        ("target_host", "127.0.0.1".into()),
+                        ("target_node", "obsearch".into()),
+                        ("repository", "n/a".into()),
+                        ("snapshot", "n/a".into()),
+                        ("files", "0".into()),
+                        ("files_recovered", "0".into()),
+                        ("files_percent", "100.0%".into()),
+                        ("files_total", "0".into()),
+                        ("bytes", "0b".into()),
+                        ("bytes_recovered", "0b".into()),
+                        ("bytes_percent", "100.0%".into()),
+                        ("bytes_total", "0b".into()),
+                        ("translog_ops", "0".into()),
+                        ("translog_ops_recovered", "0".into()),
+                        ("translog_ops_percent", "100.0%".into()),
+                    ]);
+                }
+            }
+            rows.sort_by(|a, b| (a[0].1.clone(), a[1].1.clone()).cmp(&(b[0].1.clone(), b[1].1.clone())));
+            cat_render_cols(COLS, rows, &p)
+        }
         "repositories" => {
             let mut rows: Vec<Vec<(&str, String)>> = store
                 .repositories()
