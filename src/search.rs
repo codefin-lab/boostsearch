@@ -4808,27 +4808,35 @@ fn widen_number_keys(
         }
         let Some(terms) = defo.get("terms") else { continue };
         let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("");
-        if !floating.contains(field) {
-            continue;
-        }
         let Some(Value::Array(buckets)) = node.get_mut("buckets") else { continue };
-        for b in buckets.iter_mut() {
-            let Some(o) = b.as_object_mut() else { continue };
-            let widened = o.get("key").and_then(|k| k.as_i64()).map(|i| i as f64);
-            if let Some(f) = widened {
-                o.insert("key".into(), json!(f));
+        if floating.contains(field) {
+            for b in buckets.iter_mut() {
+                let Some(o) = b.as_object_mut() else { continue };
+                let widened = o.get("key").and_then(|k| k.as_i64()).map(|i| i as f64);
+                if let Some(f) = widened {
+                    o.insert("key".into(), json!(f));
+                }
             }
         }
         // an explicit order is the caller's, and is left alone
         if terms.get("order").is_some() {
             continue;
         }
+        // buckets go by count, and a tie between them by key -- ascending,
+        // which for a string is its own order and for a number is its value
         buckets.sort_by(|a, b| {
             let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
-            let key = |v: &Value| v.get("key").and_then(|k| k.as_f64()).unwrap_or(f64::MAX);
-            count(b).cmp(&count(a)).then(
-                key(a).partial_cmp(&key(b)).unwrap_or(Ordering::Equal),
-            )
+            let key = |v: &Value| match v.get("key") {
+                Some(Value::Number(n)) => (None, n.as_f64().unwrap_or(f64::MAX)),
+                Some(Value::String(s)) => (Some(s.clone()), 0.0),
+                _ => (None, f64::MAX),
+            };
+            let (ka, na) = key(a);
+            let (kb, nb) = key(b);
+            count(b).cmp(&count(a)).then_with(|| match (&ka, &kb) {
+                (Some(x), Some(y)) => x.cmp(y),
+                _ => na.partial_cmp(&nb).unwrap_or(Ordering::Equal),
+            })
         });
     }
 }
