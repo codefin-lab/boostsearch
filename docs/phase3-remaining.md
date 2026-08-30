@@ -185,3 +185,19 @@ fitting one would be choosing a number rather than implementing a rule -- the
 same mistake the HDR scale records above.
 
 Left failing by this: `scroll/12_slices` (1).
+
+
+## Sort values are f64, and nanoseconds do not fit
+
+A `date_nanos` column counts nanoseconds, and a timestamp in them is around
+1.5e18 -- past the 9e15 where an f64 still holds every integer. `SortValue`
+keeps numbers as f64, so two timestamps a few hundred microseconds apart can
+land on the same float, and `search_after` then cannot tell one page from the
+next.
+
+The values themselves are right: the parser keeps the whole fraction now and a
+`date_nanos` sort reports nanoseconds. Only paging past one loses. Fixing it
+means carrying integers as integers through the sort path rather than widening
+them to f64, which is a change to `SortValue` and everything that reads it.
+
+Left failing by this: `search/90_search_after` (1).

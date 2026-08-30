@@ -1915,7 +1915,7 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             if matches!(ty, Some("date") | Some("date_nanos")) {
                 let fmt = mapping.field_option(path, "format");
                 let fmt = fmt.as_ref().and_then(|v| v.as_str());
-                if let Some(c) = canonical_date_with(leaf, fmt) {
+                if let Some(c) = canonical_date_prec(leaf, fmt, ty == Some("date_nanos")) {
                     *leaf = Value::String(c);
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
@@ -1985,17 +1985,20 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
             for (i, p) in f.iter().enumerate() {
                 c[i] = p.parse().ok()?;
             }
-            let millis: u32 = if frac.is_empty() {
+            // the fraction is kept whole: a date reports milliseconds and
+            // a date_nanos the nanoseconds, and which one this is has not
+            // been decided yet here
+            let nanos: u32 = if frac.is_empty() {
                 0
             } else {
                 let mut d = frac.trim_end_matches(|c: char| !c.is_ascii_digit()).to_string();
-                d.truncate(3);
-                while d.len() < 3 {
+                d.truncate(9);
+                while d.len() < 9 {
                     d.push('0');
                 }
                 d.parse().ok()?
             };
-            Time::from_hms_milli(c[0] as u8, c[1] as u8, c[2] as u8, millis as u16).ok()?
+            Time::from_hms_nano(c[0] as u8, c[1] as u8, c[2] as u8, nanos).ok()?
         }
     };
     Some(OffsetDateTime::new_utc(date, time))
@@ -2395,6 +2398,15 @@ pub fn canonical_date(v: &Value) -> Option<String> {
 /// A bare number is epoch milliseconds unless the field says otherwise, which
 /// is the assumption OpenSearch makes too.
 pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
+    canonical_date_prec(v, format, false)
+}
+
+/// As `canonical_date_with`, but able to keep the whole fraction.
+///
+/// A `date` reports milliseconds and a `date_nanos` reports nanoseconds; the
+/// finer resolution is the only reason the second type exists, so truncating
+/// on the way in would throw away what it was chosen for.
+pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Option<String> {
     let scale: i128 = match format {
         Some(f) if f.contains("epoch_second") => 1_000_000_000,
         _ => 1_000_000,
@@ -2419,6 +2431,18 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
         },
         _ => return None,
     };
+    if nanos {
+        return Some(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+            dt.year(),
+            dt.month() as u8,
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            dt.nanosecond(),
+        ));
+    }
     Some(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         dt.year(),
