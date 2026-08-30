@@ -107,6 +107,10 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // an index left out of the path leaves an empty segment behind, and
+        // the body is expected to name it instead
+        .route("//_alias/{name}", put(api::put_alias_named).post(api::put_alias_named))
+        .route("//_alias/", put(api::put_alias_body).post(api::put_alias_body))
         .route("/{index}/_alias/{name}", put(api::put_alias).post(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_alias", put(api::put_alias_on_index))
