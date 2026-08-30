@@ -4965,6 +4965,8 @@ fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("top_hits").is_some() {
+        run_top_hits(store, targets, query_json, def)
     } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
         run_significant_terms(store, targets, query_json, def)
     } else if def.get("rare_terms").is_some() {
@@ -5018,7 +5020,7 @@ fn peelable_here(def: &Value) -> bool {
         "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
-        "significant_terms", "significant_text",
+        "significant_terms", "significant_text", "top_hits",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
@@ -6868,6 +6870,35 @@ fn run_auto_date_histogram(
     let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
     out["interval"] = json!(label);
     Ok(out)
+}
+
+/// `top_hits`: the documents themselves, from inside whatever bucket the
+/// aggregation sits in. It is the ordinary search, narrowed and asked again.
+fn run_top_hits(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("top_hits").cloned().unwrap_or(json!({}));
+    let mut body = json!({"query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}}))});
+    for key in [
+        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
+        "stored_fields", "highlight", "explain", "fields", "script_fields", "track_scores",
+    ] {
+        if let Some(v) = spec.get(key) {
+            body[key] = v.clone();
+        }
+    }
+    if body.get("size").is_none() {
+        body["size"] = json!(3);
+    }
+    let out = run(store, &targets.join(","), &body, &Params::new())?;
+    Ok(json!({"hits": {
+        "total": {"value": out.total, "relation": "eq"},
+        "max_score": out.max_score.map(|s| json!(s)).unwrap_or(Value::Null),
+        "hits": out.hits,
+    }}))
 }
 
 /// `significant_terms`: the terms that stand out in what the query matched,
