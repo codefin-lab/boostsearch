@@ -818,9 +818,7 @@ pub async fn resolve_index(
         std::collections::BTreeMap::new();
     // a pattern reaches the states `expand_wildcards` names, which is open
     // ones unless the caller says otherwise
-    // health looks at every index by default, closed ones included: a closed
-    // index still has shards, and they still count
-    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
+    let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     let mut names = store.names();
