@@ -2708,6 +2708,108 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+
+/// The name OpenSearch gives an aggregation's *result* type, which is what
+/// `typed_keys` puts in front of each name. It is not always the name the
+/// aggregation was asked for by: a terms aggregation is named after the kind
+/// of term it produced, and a percentile after the sketch behind it.
+fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -> Option<String> {
+    let Some(o) = def.as_object() else { return None };
+    let kind: String = o
+        .keys()
+        .map(|k| k.to_string())
+        .find(|k| !matches!(k.as_str(), "aggs" | "aggregations" | "meta"))?;
+    let spec = &def[&kind];
+    let field_kind = || -> &'static str {
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        let ty = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+        match ty.as_deref() {
+            Some("unsigned_long") => "u",
+            Some("long" | "integer" | "short" | "byte" | "date" | "date_nanos" | "boolean") => "l",
+            Some("double" | "float" | "half_float" | "scaled_float") => "d",
+            _ => "s",
+        }
+    };
+    Some(match kind.as_str() {
+        "terms" => format!("{}terms", field_kind()),
+        "significant_terms" => format!("sig{}terms", field_kind()),
+        "multi_terms" => "multiterms".into(),
+        "percentiles" => {
+            if spec.get("hdr").is_some() { "hdr_percentiles".into() } else { "tdigest_percentiles".into() }
+        }
+        "percentile_ranks" => {
+            if spec.get("hdr").is_some() {
+                "hdr_percentile_ranks".into()
+            } else {
+                "tdigest_percentile_ranks".into()
+            }
+        }
+        // a pipeline that points at one bucket reports that bucket's value
+        "max_bucket" | "min_bucket" => "bucket_metric_value".into(),
+        "avg_bucket" | "sum_bucket" | "cumulative_sum" | "bucket_script" | "moving_avg"
+        | "moving_fn" | "serial_diff" => "simple_value".into(),
+        "stats_bucket" => "stats_bucket".into(),
+        "extended_stats_bucket" => "extended_stats_bucket".into(),
+        "percentiles_bucket" => "percentiles_bucket".into(),
+        other => other.to_string(),
+    })
+}
+
+/// Rename every aggregation in an answer to `type#name`, all the way down.
+fn apply_typed_keys(store: &Store, targets: &[String], out: &mut Value, request: &Value) {
+    let Some(reqs) = request.as_object().cloned() else { return };
+    let Some(map) = out.as_object_mut() else { return };
+    for (name, def) in reqs {
+        let Some(mut value) = map.remove(&name) else { continue };
+        let subs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+        if let Some(subs) = subs.as_ref() {
+            match value.get_mut("buckets") {
+                // a bucketing aggregation carries its sub-aggregations inside
+                // each bucket rather than beside itself
+                Some(Value::Array(list)) => {
+                    for b in list.iter_mut() {
+                        apply_typed_keys(store, targets, b, subs);
+                    }
+                }
+                Some(Value::Object(named)) => {
+                    for (_, b) in named.iter_mut() {
+                        apply_typed_keys(store, targets, b, subs);
+                    }
+                }
+                _ => apply_typed_keys(store, targets, &mut value, subs),
+            }
+        }
+        match typed_key_prefix(store, targets, &def) {
+            Some(prefix) => {
+                map.insert(format!("{prefix}#{name}"), value);
+            }
+            None => {
+                map.insert(name, value);
+            }
+        }
+    }
+}
+
+/// The same for suggesters, which are named after the kind of suggestion.
+fn apply_typed_keys_suggest(out: &mut Value, request: &Value) {
+    let Some(reqs) = request.as_object().cloned() else { return };
+    let Some(map) = out.as_object_mut() else { return };
+    for (name, def) in reqs {
+        if name == "text" {
+            continue;
+        }
+        let Some(value) = map.remove(&name) else { continue };
+        let kind: String = def
+            .as_object()
+            .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k != "text"))
+            .unwrap_or_else(|| "term".into());
+        map.insert(format!("{kind}#{name}"), value);
+    }
+}
+
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -4174,6 +4276,24 @@ pub fn run(
         empty_shards.min((targets.len() as u64).saturating_sub(1))
     } else {
         0
+    };
+
+    // `typed_keys` asks for every aggregation and suggestion to be named after
+    // what it produced as well as what it was called
+    let (aggs, suggest) = if p.get("typed_keys").map(|v| v != "false").unwrap_or(false) {
+        let mut aggs = aggs;
+        if let (Some(a), Some(req)) =
+            (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+        {
+            apply_typed_keys(store, &targets, a, req);
+        }
+        let mut suggest = suggest;
+        if let (Some(sg), Some(req)) = (suggest.as_mut(), body.get("suggest")) {
+            apply_typed_keys_suggest(sg, req);
+        }
+        (aggs, suggest)
+    } else {
+        (aggs, suggest)
     };
 
     Ok(Outcome {
