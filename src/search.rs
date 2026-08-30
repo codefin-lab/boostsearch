@@ -5202,6 +5202,29 @@ fn run_field_terms_agg(
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    // an order naming a sub-aggregation that is run here cannot be asked of
+    // tantivy, which will not have that aggregation; the buckets are put in
+    // order once it has answered
+    let order = spec.get("order").cloned();
+    let ordered_here = order
+        .as_ref()
+        .and_then(|o| o.as_object())
+        .and_then(|o| o.keys().next().cloned())
+        .map(|k| {
+            let head = k.split('.').next().unwrap_or("").to_string();
+            peeled_subs
+                .as_ref()
+                .and_then(|p| p.as_object())
+                .map(|p| p.contains_key(&head))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let mut spec = spec;
+    if ordered_here {
+        if let Some(o) = spec.as_object_mut() {
+            o.remove("order");
+        }
+    }
     let mut node = json!({"terms": spec});
     if let Some(plain) = plain_subs.as_ref() {
         node["aggs"] = plain.clone();
@@ -5226,6 +5249,19 @@ fn run_field_terms_agg(
                 b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
             }
             filled.push(b);
+        }
+        if ordered_here {
+            if let Some((key, dir)) = order
+                .as_ref()
+                .and_then(|o| o.as_object())
+                .and_then(|o| o.iter().next())
+                .map(|(k, v)| (k.clone(), v.as_str() == Some("desc")))
+            {
+                filled.sort_by(|a, b| {
+                    let ord = compare_bucket_by(a, b, &key);
+                    if dir { ord.reverse() } else { ord }
+                });
+            }
         }
         answer["buckets"] = Value::Array(filled);
     }
