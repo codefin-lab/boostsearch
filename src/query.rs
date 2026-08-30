@@ -529,6 +529,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
+            // every document has an id, so asking whether one exists is asking
+            // for all of them
+            if field == "_id" {
+                return Ok(Box::new(AllQuery));
+            }
             let col = ctx.column_name(field, false);
             Box::new(ExistsQuery::new(col, true))
         }

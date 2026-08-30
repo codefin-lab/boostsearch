@@ -7796,11 +7796,14 @@ pub async fn put_index_template(
     if let Some(order) = body.get("priority").or_else(|| body.get("order")) {
         flat["order"] = order.clone();
     }
-    if let Some(t) = body.get("template").and_then(|t| t.as_object()) {
-        for k in ["settings", "mappings", "aliases"] {
-            if let Some(v) = t.get(k) {
-                flat[k] = v.clone();
-            }
+    // what the template will actually make is its components in the order it
+    // names them and then its own template, each layer winning over the last
+    let composed = compose_template(&store, &body);
+    for k in ["settings", "mappings", "aliases"] {
+        if composed.get(k).map(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+            == Some(true)
+        {
+            flat[k] = composed[k].clone();
         }
     }
     // the body is kept as the composable form's own answer, so it is stored
