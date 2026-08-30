@@ -532,6 +532,23 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     }))
 }
 
+/// A size as written on a condition: a count and a unit.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    let scale: u64 = match unit.trim() {
+        "b" => 1,
+        "kb" => 1024,
+        "mb" => 1024 * 1024,
+        "gb" => 1024 * 1024 * 1024,
+        "tb" => 1024u64.pow(4),
+        _ => return None,
+    };
+    Some((n * scale as f64) as u64)
+}
+
 /// The name that follows this one in a rolled-over series.
 ///
 /// A name ending in digits carries on from that number, padded to six places,
@@ -581,8 +598,14 @@ pub async fn rollover(
             let text = want.as_str().map(|s| s.to_string()).unwrap_or_else(|| want.to_string());
             let hit = match name.as_str() {
                 "max_docs" => docs >= want.as_u64().unwrap_or(u64::MAX),
-                // an index this young and this small meets neither
-                "max_age" | "max_size" | "max_primary_shard_size" => false,
+                // the size an index has been given, against the size asked
+                // about -- an index this young meets no age condition
+                "max_size" | "max_primary_shard_size" => parse_size(&text)
+                    .map(|limit| {
+                        src.read().bytes.load(std::sync::atomic::Ordering::Relaxed) >= limit
+                    })
+                    .unwrap_or(false),
+                "max_age" => false,
                 _ => false,
             };
             met = met || hit;
@@ -2092,6 +2115,7 @@ pub fn write_doc_versioned(
             return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
         }
     }
+    st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -6983,6 +7007,10 @@ pub async fn get_component_template(
             }),
         };
         if keep {
+            let mut body = body.clone();
+            if let Some(set) = body.pointer("/template/settings").cloned() {
+                body["template"]["settings"] = template_settings(&set);
+            }
             out.push(json!({"name": n, "component_template": body}));
         }
     }
