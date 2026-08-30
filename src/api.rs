@@ -2168,6 +2168,28 @@ pub fn write_doc_versioned(
             w.delete_term(term);
         }
     }
+    // a flat_object keeps whatever object it is given; it is not a place to
+    // put a string
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "flat_object" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let ok = match value {
+            Value::Object(_) | Value::Null => true,
+            Value::Array(a) => a.iter().all(|v| v.is_object() || v.is_null()),
+            _ => false,
+        };
+        if !ok {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "parsing_exception",
+                format!("Failed to parse field [{name}] of type [flat_object]"),
+            ));
+        }
+    }
     // a completion field filed under contexts has to be given them: without
     // one the value could never be found again
     if let Some(props) = st.mapping.raw.pointer("/properties").and_then(|p| p.as_object()) {

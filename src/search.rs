@@ -1011,6 +1011,28 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
     let Some(o) = node.as_object() else { return Ok(()) };
     for (name, def) in o {
         check_agg_params(name, def, owner)?;
+        // a flat_object holds whatever it was given, so there is nothing of a
+        // known type under it to aggregate over
+        if let Some(field) = def.get("field").and_then(|f| f.as_str()) {
+            let mut walked = String::new();
+            for part in field.split('.') {
+                walked = if walked.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{walked}.{part}")
+                };
+                if ctx.mapping.type_of(&walked) == Some("flat_object") && walked != field {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "Field [{field}] of type [flat_object] is not supported for \
+                             aggregation [{name}]"
+                        ),
+                    ));
+                }
+            }
+        }
         // `terms` is also the name of a query, which appears inside filter
         // aggregations and inside multi_terms; only an object made entirely of
         // terms-aggregation options is one of those
