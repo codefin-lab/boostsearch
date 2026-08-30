@@ -532,6 +532,14 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let col = ctx.column_name(field, false);
             Box::new(ExistsQuery::new(col, true))
         }
+        // `distance_feature` ranks by how near a value is to an origin; every
+        // document that has the field takes part, and the ranking itself is
+        // worked out once the candidates are known
+        "distance_feature" => {
+            let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
+            let col = ctx.column_name(field, false);
+            Box::new(ExistsQuery::new(col, true))
+        }
         "prefix" => {
             let (field, val, opts) = field_and_value(&body)?;
             let (f, path, view) = ctx.resolve(&field, true);

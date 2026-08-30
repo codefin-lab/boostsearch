@@ -640,6 +640,98 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
     }
 }
 
+/// The `distance_feature` clause of a query, wherever it sits.
+fn find_distance_feature(node: &Value) -> Option<&Value> {
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("distance_feature") {
+                return Some(spec);
+            }
+            o.values().find_map(find_distance_feature)
+        }
+        Value::Array(a) => a.iter().find_map(find_distance_feature),
+        _ => None,
+    }
+}
+
+/// How far apart two moments are, in whatever unit the values are counted in.
+fn date_distance(origin: &Value, value: &Value) -> Option<f64> {
+    let read = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => crate::store::canonical_date(&json!(s))
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+                .map(|d| d.unix_timestamp_nanos() as f64),
+            _ => None,
+        }
+    };
+    Some((read(origin)? - read(value)?).abs())
+}
+
+/// A length of time, written the way a pivot is: a count and a unit.
+fn parse_time_amount(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    Some(n * match unit {
+        "nanos" => 1.0,
+        "micros" => 1e3,
+        "ms" => 1e6,
+        "s" => 1e9,
+        "m" => 60e9,
+        "h" | "H" => 3_600e9,
+        "d" => 86_400e9,
+        _ => return None,
+    })
+}
+
+/// A distance, written the way a pivot is.
+fn parse_distance(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    Some(n * match unit.trim() {
+        "m" => 1.0,
+        "km" => 1000.0,
+        "cm" => 0.01,
+        "mm" => 0.001,
+        "mi" => 1609.344,
+        "ft" => 0.3048,
+        _ => return None,
+    })
+}
+
+/// Metres between two points on the earth, by the haversine formula.
+fn geo_distance_metres(origin: &Value, value: &Value) -> Option<f64> {
+    let point = |v: &Value| -> Option<(f64, f64)> {
+        match v {
+            // a point written as a pair is longitude first
+            Value::Array(a) if a.len() == 2 => {
+                Some((a[1].as_f64()?, a[0].as_f64()?))
+            }
+            Value::Object(o) => Some((
+                o.get("lat").and_then(|x| x.as_f64())?,
+                o.get("lon").and_then(|x| x.as_f64())?,
+            )),
+            Value::String(s) => {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            }
+            _ => None,
+        }
+    };
+    let (lat1, lon1) = point(origin)?;
+    let (lat2, lon2) = point(value)?;
+    let r = 6_371_008.8f64;
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = (lat2 - lat1).to_radians();
+    let dl = (lon2 - lon1).to_radians();
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    Some(2.0 * r * a.sqrt().asin())
+}
+
 /// Read each candidate's arrival order out of the index.
 ///
 /// The writer spreads one bulk request across its worker threads, so which
@@ -3940,6 +4032,31 @@ pub fn run(
         }
     }
 
+    // `distance_feature` scores by how near a value is to an origin. The
+    // candidates are known by now, and each one's value can simply be read.
+    if let Some(spec) = body.get("query").and_then(find_distance_feature) {
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+        let path = format!("/{}", field.replace('.', "/"));
+        let pivot = spec.get("pivot").and_then(|v| v.as_str()).unwrap_or("");
+        let origin = spec.get("origin").cloned().unwrap_or(Value::Null);
+        let geo = origin.is_array() || origin.as_str().map(|s| s.contains(',')).unwrap_or(false);
+        for c in cands.iter_mut() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+            let Some(value) = src.pointer(&path) else { continue };
+            let distance = if geo {
+                geo_distance_metres(&origin, value)
+            } else {
+                date_distance(&origin, value)
+            };
+            let pivot_size = if geo { parse_distance(pivot) } else { parse_time_amount(pivot) };
+            match (distance, pivot_size) {
+                (Some(d), Some(p)) if p > 0.0 => c.score = (p / (p + d)) as f32,
+                _ => {}
+            }
+        }
+    }
     fill_seq(&mut cands, &searchers);
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
