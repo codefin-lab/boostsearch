@@ -3585,6 +3585,8 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
                     || def.get("rare_terms").is_some()
+                    || def.get("nested").is_some()
+                    || def.get("reverse_nested").is_some()
                     || def.get("significant_terms").is_some()
                     || def.get("significant_text").is_some()
                     || def.get("ip_range").is_some()
@@ -5210,6 +5212,18 @@ fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
+        // documents are stored whole here, so the objects a nested aggregation
+        // would descend into are already part of the document it is under
+        run_filter_agg(store, targets, query_json, &{
+            let mut d = def.clone();
+            if let Some(o) = d.as_object_mut() {
+                o.remove("nested");
+                o.remove("reverse_nested");
+                o.insert("filter".into(), json!({"match_all": {}}));
+            }
+            d
+        })
     } else if def.get("top_hits").is_some() {
         run_top_hits(store, targets, query_json, def)
     } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
@@ -5265,7 +5279,7 @@ fn peelable_here(def: &Value) -> bool {
         "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
-        "significant_terms", "significant_text", "top_hits",
+        "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)

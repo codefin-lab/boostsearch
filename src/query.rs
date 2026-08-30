@@ -616,6 +616,15 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             b["type"] = serde_json::json!("cross_fields");
             build_multi_match(ctx, &b)?
         }
+        // documents here are stored whole rather than split into a parent and
+        // its nested children, so a nested query is its inner query asked
+        // against the same document
+        "nested" => {
+            let inner = body
+                .get("query")
+                .ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
+            build(ctx, inner)?
+        }
         "bool" => build_bool(ctx, &body)?,
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
