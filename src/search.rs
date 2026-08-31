@@ -8144,6 +8144,7 @@ fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
     let segs: Vec<&str> = path.split('>').flat_map(|s| s.split('.')).collect();
     let mut node = aggs;
     let mut last = "";
+    let mut crossed = false;
     for (i, seg) in segs.iter().enumerate() {
         last = seg;
         node = node.get(seg)?;
@@ -8161,8 +8162,16 @@ fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
                      numeric metric aggregation, got: [{kind}] at aggregation [{seg}]"
                 ));
             }
-            // stepping through a bucketing aggregation means the rest of the
-            // path is read inside each bucket
+            // a path may step through one bucketing aggregation, reading the
+            // rest inside each bucket; a second one is a list of lists, which
+            // is no single number
+            if crossed {
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, got: [Object[]] at aggregation [{seg}]"
+                ));
+            }
+            crossed = true;
             node = buckets.as_array().and_then(|a| a.first())?;
         }
     }
@@ -8473,8 +8482,12 @@ fn expand_nested_hits(node: &mut Value, path: &str) {
                         let objects: Vec<Value> = match at {
                             Some(Value::Array(a)) => a.clone(),
                             Some(other) => vec![other.clone()],
+                            // with no source to read, the objects cannot be
+                            // listed, but the hit still stands for one of them
                             None => {
-                                out.push(hit.clone());
+                                let mut one = hit.clone();
+                                one["_nested"] = json!({"field": path, "offset": 0});
+                                out.push(one);
                                 continue;
                             }
                         };
