@@ -5453,6 +5453,61 @@ pub fn run(
         millis_in_keys(a);
     }
 
+    // a range aggregation answers for the ranges it was given; a gap between
+    // two of them was not asked about and is not a bucket
+    fn keep_asked_ranges(request: &Value, answer: &mut Value) {
+        let Some(reqs) = request.as_object() else { return };
+        for (name, def) in reqs {
+            let asked: Option<Vec<(Option<f64>, Option<f64>)>> = def
+                .pointer("/range/ranges")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|r| {
+                            (
+                                r.get("from").and_then(|v| v.as_f64()),
+                                r.get("to").and_then(|v| v.as_f64()),
+                            )
+                        })
+                        .collect()
+                });
+            let Some(node) = answer.get_mut(name) else { continue };
+            if let Some(asked) = asked {
+                if let Some(buckets) = node.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+                    buckets.retain(|b| {
+                        let pair = (
+                            b.get("from").and_then(|v| v.as_f64()),
+                            b.get("to").and_then(|v| v.as_f64()),
+                        );
+                        asked.contains(&pair)
+                    });
+                }
+            }
+            let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+            if let Some(subs) = subs {
+                match node.get_mut("buckets") {
+                    Some(Value::Array(list)) => {
+                        for b in list.iter_mut() {
+                            keep_asked_ranges(subs, b);
+                        }
+                    }
+                    Some(Value::Object(named)) => {
+                        for (_, b) in named.iter_mut() {
+                            keep_asked_ranges(subs, b);
+                        }
+                    }
+                    _ => keep_asked_ranges(subs, node),
+                }
+            }
+        }
+    }
+    if let (Some(a), Some(req)) = (
+        aggs.as_mut(),
+        body.get("aggs").or_else(|| body.get("aggregations")),
+    ) {
+        keep_asked_ranges(req, a);
+    }
+
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
     // what makes a nested terms aggregation the expensive one.
