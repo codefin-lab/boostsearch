@@ -3407,6 +3407,13 @@ fn fielddata_fields_of(body: &Value, out: &mut Vec<String>) {
 
 /// Note what this search loaded, so the fielddata statistic can report it.
 fn note_fielddata(store: &Store, expr: &str, body: &Value) {
+    // nothing is loaded by a search that neither sorts nor aggregates
+    if body.get("sort").is_none()
+        && body.get("aggs").is_none()
+        && body.get("aggregations").is_none()
+    {
+        return;
+    }
     let mut fields = Vec::new();
     fielddata_fields_of(body, &mut fields);
     fields.retain(|f| !f.starts_with('_'));
@@ -3416,6 +3423,11 @@ fn note_fielddata(store: &Store, expr: &str, body: &Value) {
     for n in store.resolve(expr) {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        // reading is cheap and shared; the write lock is only worth taking
+        // for a field that has not been loaded before
+        if g.loaded_fielddata.read().is_superset(&fields.iter().cloned().collect()) {
+            continue;
+        }
         let mut loaded = g.loaded_fielddata.write();
         for f in &fields {
             loaded.insert(f.clone());

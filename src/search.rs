@@ -689,6 +689,55 @@ fn replace_routing_exists(node: &mut Value, ids: &[String]) {
     }
 }
 
+/// Which of the clauses that need work after the search are in this query.
+///
+/// Each of them used to be looked for on its own, which is several walks of
+/// the query for a search that has none of them; this is one walk.
+#[derive(Default)]
+struct Extras {
+    geo: bool,
+    intervals: bool,
+    distance_feature: bool,
+    routing_exists: bool,
+    nested_inner_hits: bool,
+    named: bool,
+}
+
+fn scan_extras(node: &Value, out: &mut Extras) {
+    match node {
+        Value::Object(o) => {
+            for (k, v) in o {
+                match k.as_str() {
+                    "geo_shape" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => {
+                        out.geo = true
+                    }
+                    "intervals" => out.intervals = true,
+                    "distance_feature" => out.distance_feature = true,
+                    "_name" => out.named = true,
+                    "exists" => {
+                        if v.get("field").and_then(|f| f.as_str()) == Some("_routing") {
+                            out.routing_exists = true;
+                        }
+                    }
+                    "nested" => {
+                        if v.get("inner_hits").is_some() {
+                            out.nested_inner_hits = true;
+                        }
+                    }
+                    _ => {}
+                }
+                scan_extras(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                scan_extras(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The geo clause of a query: the field it reads and the shape it asks about.
 fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
     match node {
@@ -3781,12 +3830,17 @@ pub fn run(
         return Err(no_such_index(expr));
     }
     // a `terms` lookup names a document to read the term list from
+    let mut extras = Extras::default();
+    if let Some(q) = body.get("query") {
+        scan_extras(q, &mut extras);
+    }
+    let extras = extras;
     let mut query_json = body.get("query").cloned();
     // A document's routing is not part of it -- it is how the document was
     // addressed -- so asking which documents have one is asking after a list
     // of ids rather than after a column.
     if let Some(q) = query_json.as_mut() {
-        if mentions_routing_exists(Some(q)) {
+        if extras.routing_exists {
             let ids: Vec<String> = targets
                 .iter()
                 .filter_map(|n| store.get(n))
@@ -4618,7 +4672,9 @@ pub fn run(
 
     // A geo query asks where a point is. The query built for it only says the
     // field is there, so each candidate's own position is read and placed.
-    if let Some((field, shape)) = body.get("query").and_then(find_geo_clause) {
+    if let Some((field, shape)) =
+        extras.geo.then(|| body.get("query").and_then(find_geo_clause)).flatten()
+    {
         let path = format!("/{}", field.replace('.', "/"));
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
@@ -4638,7 +4694,9 @@ pub fn run(
     // An `intervals` query asks where in a field the words are. The query
     // built for it matches wherever they merely occur, so the candidates are
     // read back and their text analysed again to see whether they really do.
-    if let Some((field, rule)) = body.get("query").and_then(find_intervals) {
+    if let Some((field, rule)) =
+        extras.intervals.then(|| body.get("query").and_then(find_intervals)).flatten()
+    {
         let path = format!("/{}", field.replace('.', "/"));
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
@@ -4657,7 +4715,11 @@ pub fn run(
     }
     // `distance_feature` scores by how near a value is to an origin. The
     // candidates are known by now, and each one's value can simply be read.
-    if let Some(spec) = body.get("query").and_then(find_distance_feature) {
+    if let Some(spec) = extras
+        .distance_feature
+        .then(|| body.get("query").and_then(find_distance_feature))
+        .flatten()
+    {
         let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
         let path = format!("/{}", field.replace('.', "/"));
         let pivot = spec.get("pivot").and_then(|v| v.as_str()).unwrap_or("");
@@ -4899,7 +4961,11 @@ pub fn run(
         .collect();
     // a clause given a name says so on every hit it matched
     let page_ids: Vec<String> = all_hits.iter().map(|h| h.id.clone()).collect();
-    let named = matched_names(store, &targets, body, &page_ids);
+    let named = if extras.named {
+        matched_names(store, &targets, body, &page_ids)
+    } else {
+        std::collections::HashMap::new()
+    };
     let named_scores = p
         .get("include_named_queries_score")
         .map(|v| v != "false")
@@ -5079,7 +5145,11 @@ pub fn run(
                 }
             }
             // a nested query may ask for the objects it matched to be listed
-            if let Some((path, inner)) = body.get("query").and_then(find_nested_inner_hits) {
+            if let Some((path, inner)) = extras
+                .nested_inner_hits
+                .then(|| body.get("query").and_then(find_nested_inner_hits))
+                .flatten()
+            {
                 let name = inner
                     .get("name")
                     .and_then(|n| n.as_str())
@@ -5694,7 +5764,11 @@ pub fn run(
                 "debug": {},
             }));
             // an inner-hits clause fetches documents of its own
-            if let Some((path, _)) = body.get("query").and_then(find_nested_inner_hits) {
+            if let Some((path, _)) = extras
+                .nested_inner_hits
+                .then(|| body.get("query").and_then(find_nested_inner_hits))
+                .flatten()
+            {
                 entries.push(json!({
                     "type": format!("fetch_inner_hits[{path}]"),
                     "description": format!("fetch_inner_hits[{path}]"),
