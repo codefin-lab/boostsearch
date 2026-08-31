@@ -2425,6 +2425,9 @@ fn build_highlight(
     index: &tantivy::Index,
 ) -> Option<Value> {
     let fields = spec.get("fields")?;
+    // where the document itself is not kept, only a field stored in its own
+    // right has any text left to highlight
+    let source_kept = mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
     let patterns: Vec<(String, Value)> = match fields {
         Value::Object(o) => o.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         Value::Array(a) => a
@@ -2434,6 +2437,12 @@ fn build_highlight(
             .collect(),
         _ => return None,
     };
+    let patterns: Vec<(String, Value)> = patterns
+        .into_iter()
+        .filter(|(name, _)| {
+            source_kept || mapping.field_option(name, "store") == Some(json!(true))
+        })
+        .collect();
     let tag = |key: &str, fallback: &str| -> String {
         spec.get(key)
             .and_then(|v| match v {
@@ -2512,7 +2521,16 @@ fn build_highlight(
             }
             _ => text,
         };
-        let terms = terms_for_field(&asked, &name, require_match);
+        // a field may be highlighted against a query of its own rather than
+        // against the one that found the document
+        let own = opts
+            .get("highlight_query")
+            .or_else(|| spec.get("highlight_query"))
+            .map(|q| query_terms_by_field(Some(q)));
+        let terms = match own {
+            Some(ref asked) => terms_for_field(asked, &name, require_match),
+            None => terms_for_field(&asked, &name, require_match),
+        };
         if terms.is_empty() {
             continue;
         }
@@ -4712,13 +4730,22 @@ pub fn run(
                 let size = inner.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
                 let mut list = Vec::new();
                 for (offset, object) in objects.iter().enumerate().take(size) {
+                    let kept = searchers[h.shard_idx]
+                        .2
+                        .read()
+                        .mapping
+                        .raw
+                        .pointer("/_source/enabled")
+                        != Some(&json!(false));
                     let mut inner_hit = json!({
                         "_index": h.index.clone(),
                         "_id": h.id.clone(),
                         "_nested": {"field": path.clone(), "offset": offset},
                         "_score": h.score,
-                        "_source": object.clone(),
                     });
+                    if kept {
+                        inner_hit["_source"] = object.clone();
+                    }
                     if inner.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
                         inner_hit["_version"] = json!(h.version);
                     }
