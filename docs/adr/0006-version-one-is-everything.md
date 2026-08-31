@@ -15,7 +15,7 @@ word, and the word is the whole product.
 
 ## Consequences
 
-Roughly 336 working days on one stream -- fifteen months -- against about
+Roughly 346 working days on one stream -- sixteen months -- against about
 thirty weeks on three, where the cluster work is the critical path that no
 amount of people shortens. The plan in `docs/plan-v1.md` says which phases can
 run beside each other.

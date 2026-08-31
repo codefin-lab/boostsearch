@@ -37,6 +37,23 @@ how each of those numbers is produced, and they are the gates below.
 
 Days are working days on one stream.
 
+### 0. The tree the rest of the work grows in — 10 days
+
+Three streams cannot edit `api.rs` at nine thousand lines without meeting each
+other every day, and a new pair of hands cannot find anything in it. This is
+pure movement: no behaviour changes, and the corpus says so after every step.
+
+| | | days |
+|---|---|---:|
+| 0.1 | `search.rs` (10,984 lines, 184 functions) into `search/`: the request pipeline, collection, sorting, hits and fetch, highlighting, collapse, nested, suggest, profile, and `search/aggs/` beneath it | 3 |
+| 0.2 | `api.rs` (9,283 lines, 245 handlers) into `api/`: documents, search, indices, mapping, settings, aliases, templates, cat, cluster, nodes, snapshot, ingest, data streams, stats, tasks | 2 |
+| 0.3 | `store.rs` and `query.rs` along the same lines: index state, mapping, coercion, translog, routing; and term, text, range, bool, geo, nested, intervals | 2 |
+| 0.4 | The 44 `unwrap()`s on request paths, given errors that say what happened | 2 |
+| 0.5 | `clippy` and `fmt` as CI gates, and a module map in `CONTRIBUTING.md` so three streams put things in the same places | 1 |
+
+Gate: 2,322 sections unchanged, the bench matrix unchanged, and no file over
+about two thousand lines.
+
 ### 1. Analysis — 22 days
 
 An analyzer belongs to a path, and BoostCore learns to pick one per path
@@ -160,18 +177,21 @@ layer, and the response shapes their drivers expect.
 
 | | days | weeks |
 |---|---:|---:|
+| Phase 0, the tree | 10 | 2 |
 | Phases 1–4, single node | 84 | 17 |
 | Phase 5, security | 35 | 7 |
 | Phase 6, cluster | 80 | 16 |
 | Phase 7, proof and release | 29 | 6 |
 | Phases 8–12, the rest of the surface | 108 | 22 |
-| **Total, one stream** | **336** | **67** |
+| **Total, one stream** | **346** | **69** |
 
 | streams | critical path | calendar |
 |---|---|---|
-| one | everything in order | 67 weeks |
-| two | search and ecosystem beside security and cluster | ~34 weeks |
-| three | search · security then cluster · ecosystem | ~30 weeks |
+| one | everything in order | 69 weeks |
+| two | search and ecosystem beside security and cluster | ~36 weeks |
+| three | search · security then cluster · ecosystem | ~31 weeks |
+
+Phase 0 comes before the streams split, and is the reason they can.
 
 The cluster is the critical path and no number of people shortens it.
 
