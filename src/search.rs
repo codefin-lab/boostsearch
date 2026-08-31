@@ -3742,6 +3742,20 @@ pub fn run(
     if let Some(node) = agg_json.as_mut() {
         strip_bucket_pipelines(node, &mut Vec::new(), &mut bucket_pipelines);
     }
+    // one of those written at the top level has no buckets to read
+    if let Some((_, name, def)) = bucket_pipelines.iter().find(|(at, _, _)| at.is_empty()) {
+        let kind = def
+            .as_object()
+            .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| {
+                BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort"
+            }))
+            .unwrap_or_default();
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("{kind} aggregation [{name}] must be declared inside of another aggregation"),
+        ));
+    }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Object(o)) = agg_json.as_mut() {
         let names: Vec<String> = o
@@ -5084,7 +5098,7 @@ pub fn run(
         }
         other => other,
     };
-    let aggs = if pipeline_aggs.is_empty() {
+    let mut aggs = if pipeline_aggs.is_empty() {
         aggs
     } else {
         let mut base = aggs.unwrap_or_else(|| json!({}));
@@ -5093,6 +5107,33 @@ pub fn run(
         }
         Some(base)
     };
+
+    // a date bucket is named to the millisecond, which is the resolution the
+    // key itself is counted in
+    fn millis_in_keys(node: &mut Value) {
+        match node {
+            Value::Object(o) => {
+                if let Some(Value::String(text)) = o.get("key_as_string") {
+                    if text.len() == 20 && text.ends_with('Z') && !text.contains('.') {
+                        let with = format!("{}.000Z", &text[..text.len() - 1]);
+                        o.insert("key_as_string".into(), json!(with));
+                    }
+                }
+                for (_, v) in o.iter_mut() {
+                    millis_in_keys(v);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    millis_in_keys(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = aggs.as_mut() {
+        millis_in_keys(a);
+    }
 
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
@@ -7424,8 +7465,10 @@ fn collect_field_pairs(
 /// buckets rather than documents.
 /// Pipelines that live inside a bucketing aggregation and add a value to each
 /// of its buckets, rather than beside it summarising them all.
-const BUCKET_PIPELINES: &[&str] =
-    &["cumulative_sum", "derivative", "moving_avg", "moving_fn", "serial_diff"];
+const BUCKET_PIPELINES: &[&str] = &[
+    "cumulative_sum", "derivative", "moving_avg", "moving_fn", "serial_diff", "bucket_sort",
+    "bucket_selector", "bucket_script",
+];
 
 /// Take those out of the request, remembering which aggregation each was under.
 fn strip_bucket_pipelines(
