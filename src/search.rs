@@ -1,6 +1,6 @@
 //! The search path: query execution, hit assembly, sorting and aggregations.
 //!
-//! Aggregation requests are handed to tantivy almost untouched -- its
+//! Aggregation requests are handed to BoostCore almost untouched -- its
 //! aggregation JSON already matches OpenSearch's -- after rewriting each
 //! `field` onto the JSON view that backs it.
 
@@ -11,13 +11,13 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{Value, json};
 use std::cmp::Ordering;
-use tantivy::aggregation::AggContextParams;
-use tantivy::aggregation::agg_req::Aggregations;
-use tantivy::aggregation::DistributedAggregationCollector;
-use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResults;
-use tantivy::collector::{Count, TopDocs};
-use tantivy::schema::{OwnedValue, Value as _};
-use tantivy::{DocAddress, Searcher, TantivyDocument};
+use boostcore::aggregation::AggContextParams;
+use boostcore::aggregation::agg_req::Aggregations;
+use boostcore::aggregation::DistributedAggregationCollector;
+use boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
+use boostcore::collector::{Count, TopDocs};
+use boostcore::schema::{OwnedValue, Value as _};
+use boostcore::{DocAddress, Searcher, TantivyDocument};
 
 const DEFAULT_TRACK_TOTAL_HITS: u64 = 10_000;
 
@@ -173,18 +173,18 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
 
 /// Per-segment readers for one sort field, opened once and reused.
 struct SortColumns {
-    per_segment: Vec<(Option<tantivy::columnar::StrColumn>, Option<tantivy::columnar::Column<u64>>, Option<tantivy::columnar::ColumnType>)>,
+    per_segment: Vec<(Option<boostcore::columnar::StrColumn>, Option<boostcore::columnar::Column<u64>>, Option<boostcore::columnar::ColumnType>)>,
 }
 
 /// Decode one raw columnar u64 into the value its column type really holds.
-fn decode_col_value(raw: u64, ty: tantivy::columnar::ColumnType) -> Option<SortValue> {
-    use tantivy::columnar::ColumnType;
+fn decode_col_value(raw: u64, ty: boostcore::columnar::ColumnType) -> Option<SortValue> {
+    use boostcore::columnar::ColumnType;
     match ty {
         ColumnType::I64 | ColumnType::DateTime => Some(SortValue::I64(
-            tantivy::columnar::MonotonicallyMappableToU64::from_u64(raw),
+            boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw),
         )),
         ColumnType::F64 => Some(SortValue::F64(
-            <f64 as tantivy::columnar::MonotonicallyMappableToU64>::from_u64(raw),
+            <f64 as boostcore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
         )),
         ColumnType::U64 => Some(SortValue::U64(raw)),
         ColumnType::Bool => Some(SortValue::I64(raw as i64)),
@@ -194,7 +194,7 @@ fn decode_col_value(raw: u64, ty: tantivy::columnar::ColumnType) -> Option<SortV
 
 impl SortColumns {
     /// Open the readers for a single segment.
-    fn for_segment(reader: &tantivy::SegmentReader, column: &str) -> SortColumns {
+    fn for_segment(reader: &boostcore::SegmentReader, column: &str) -> SortColumns {
         let ff = reader.fast_fields();
         let str_col = ff.str(column).ok().flatten();
         let (num_col, ty) = match ff.u64_lenient(column) {
@@ -205,7 +205,7 @@ impl SortColumns {
     }
 
     /// Every numeric value a document holds for this column.
-    fn numeric_values(&self, doc: tantivy::DocId) -> Vec<f64> {
+    fn numeric_values(&self, doc: boostcore::DocId) -> Vec<f64> {
         let Some((_, num, ty)) = self.per_segment.first() else { return Vec::new() };
         let (Some(col), Some(ty)) = (num, ty) else { return Vec::new() };
         col.values_for_doc(doc)
@@ -214,7 +214,7 @@ impl SortColumns {
     }
 
     /// Read the value for a document inside the segment this was opened for.
-    fn read(&self, doc: tantivy::DocId, desc: bool, mode: Option<&str>) -> SortValue {
+    fn read(&self, doc: boostcore::DocId, desc: bool, mode: Option<&str>) -> SortValue {
         self.value(DocAddress::new(0, doc), desc, mode)
     }
 
@@ -226,13 +226,13 @@ impl SortColumns {
         if let (Some(num), Some(ty)) = (num_col, ty) {
             let mut vals: Vec<SortValue> = Vec::new();
             for raw in num.values_for_doc(addr.doc_id) {
-                use tantivy::columnar::ColumnType;
+                use boostcore::columnar::ColumnType;
                 let decoded = match ty {
                     ColumnType::I64 | ColumnType::DateTime => Some(SortValue::I64(
-                        tantivy::columnar::MonotonicallyMappableToU64::from_u64(raw),
+                        boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw),
                     )),
                     ColumnType::F64 => Some(SortValue::F64(
-                        <f64 as tantivy::columnar::MonotonicallyMappableToU64>::from_u64(raw),
+                        <f64 as boostcore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
                     )),
                     ColumnType::U64 => Some(SortValue::U64(raw)),
                     ColumnType::Bool => Some(SortValue::I64(raw as i64)),
@@ -396,7 +396,7 @@ struct SortSegmentCollector {
     cutoff: Option<SortValue>,
     /// Set when the whole sort is one numeric column, which lets a block of
     /// documents be read from the columnar in one call instead of one at a time.
-    block: Option<tantivy::columnar::ColumnBlockAccessor<u64>>,
+    block: Option<boostcore::columnar::ColumnBlockAccessor<u64>>,
 }
 
 fn cmp_sorted(a: &[SortValue], b: &[SortValue], desc: &[bool]) -> Ordering {
@@ -418,15 +418,15 @@ fn prune_by(buf: &mut Vec<Cand>, limit: usize, desc: &[bool]) {
     buf.truncate(limit);
 }
 
-impl tantivy::collector::Collector for SortCollector {
+impl boostcore::collector::Collector for SortCollector {
     type Fruit = Vec<Cand>;
     type Child = SortSegmentCollector;
 
     fn for_segment(
         &self,
         segment_ord: u32,
-        reader: &tantivy::SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
+        reader: &boostcore::SegmentReader,
+    ) -> boostcore::Result<Self::Child> {
         let columns: Vec<Option<SortColumns>> = self
             .sources
             .iter()
@@ -470,7 +470,7 @@ impl tantivy::collector::Collector for SortCollector {
         self.sources.iter().any(|s| matches!(s, SortSource::Score))
     }
 
-    fn merge_fruits(&self, children: Vec<Vec<Cand>>) -> tantivy::Result<Self::Fruit> {
+    fn merge_fruits(&self, children: Vec<Vec<Cand>>) -> boostcore::Result<Self::Fruit> {
         let mut out: Vec<Cand> = children.into_iter().flatten().collect();
         prune_by(&mut out, self.limit, &self.desc);
         Ok(out)
@@ -491,7 +491,7 @@ fn scaled(v: SortValue, scale: i64) -> SortValue {
 }
 
 impl SortSegmentCollector {
-    fn read_key(&self, i: usize, doc: tantivy::DocId, score: tantivy::Score) -> SortValue {
+    fn read_key(&self, i: usize, doc: boostcore::DocId, score: boostcore::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
             SortSource::Doc => SortValue::I64(doc as i64),
@@ -516,12 +516,12 @@ impl SortSegmentCollector {
     }
 }
 
-impl tantivy::collector::SegmentCollector for SortSegmentCollector {
+impl boostcore::collector::SegmentCollector for SortSegmentCollector {
     type Fruit = Vec<Cand>;
 
     /// Vectorised path: for a single numeric sort key the whole block of
     /// matching documents is pulled out of the columnar in one call.
-    fn collect_block(&mut self, docs: &[tantivy::DocId]) {
+    fn collect_block(&mut self, docs: &[boostcore::DocId]) {
         if self.block.is_none() {
             for &d in docs {
                 self.collect(d, 0.0);
@@ -572,7 +572,7 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
         self.block = Some(block);
     }
 
-    fn collect(&mut self, doc: tantivy::DocId, score: tantivy::Score) {
+    fn collect(&mut self, doc: boostcore::DocId, score: boostcore::Score) {
         let first = self.read_key(0, doc, score);
         // cheap rejection before allocating anything for this document
         if let Some(cut) = &self.cutoff {
@@ -1065,9 +1065,9 @@ fn number_of(v: &Value) -> Option<f64> {
         Value::Number(n) => n.as_f64(),
         // read the text as written: folding it through the resolution the
         // index keeps would wrap a date far enough out
-        Value::String(s) => tantivy::time::OffsetDateTime::parse(
+        Value::String(s) => boostcore::time::OffsetDateTime::parse(
             s,
-            &tantivy::time::format_description::well_known::Rfc3339,
+            &boostcore::time::format_description::well_known::Rfc3339,
         )
         .ok()
         .map(|d| d.unix_timestamp_nanos() as f64)
@@ -1499,7 +1499,7 @@ fn nested_inner_hits(
     kept: bool,
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
-    index: &tantivy::Index,
+    index: &boostcore::Index,
 ) -> serde_json::Map<String, Value> {
     let mut groups = serde_json::Map::new();
     for (path, inner, inner_query) in clauses {
@@ -1735,7 +1735,7 @@ fn fill_seq(
     cands: &mut [Cand],
     searchers: &[(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
 ) {
-    let mut cols: std::collections::HashMap<(usize, u32), Option<tantivy::columnar::Column<u64>>> =
+    let mut cols: std::collections::HashMap<(usize, u32), Option<boostcore::columnar::Column<u64>>> =
         std::collections::HashMap::new();
     for c in cands.iter_mut() {
         let (shard, seg) = (c.shard, c.addr.segment_ord);
@@ -2018,7 +2018,7 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
     Ok(())
 }
 
-/// Dates in aggregation parameters may be date-only; tantivy needs RFC3339.
+/// Dates in aggregation parameters may be date-only; BoostCore needs RFC3339.
 fn normalize_agg_dates(node: &mut Value) {
     match node {
         Value::Object(o) => {
@@ -2043,9 +2043,9 @@ fn normalize_agg_dates(node: &mut Value) {
     }
 }
 
-/// Render a small subset of the query DSL as a tantivy query string, so a
+/// Render a small subset of the query DSL as a BoostCore query string, so a
 /// `filter` aggregation nested inside another bucket can still run.
-fn as_tantivy_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
+fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
     let o = q.as_object()?;
     let (kind, body) = o.iter().next()?;
     match kind.as_str() {
@@ -2081,7 +2081,7 @@ fn as_tantivy_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
                         other => vec![other.clone()],
                     };
                     for it in items {
-                        parts.push(format!("+({})", as_tantivy_query_string(&it, ctx)?));
+                        parts.push(format!("+({})", as_boostcore_query_string(&it, ctx)?));
                     }
                 }
             }
@@ -2091,7 +2091,7 @@ fn as_tantivy_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
                     other => vec![other.clone()],
                 };
                 for it in items {
-                    parts.push(format!("-({})", as_tantivy_query_string(&it, ctx)?));
+                    parts.push(format!("-({})", as_boostcore_query_string(&it, ctx)?));
                 }
             }
             if parts.is_empty() { None } else { Some(parts.join(" ")) }
@@ -2100,7 +2100,7 @@ fn as_tantivy_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
     }
 }
 
-/// Nested `filter` aggregations become tantivy's own filter, which speaks
+/// Nested `filter` aggregations become BoostCore's own filter, which speaks
 /// query strings. Top-level ones are handled by running a separate search.
 fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
     let Some(o) = node.as_object_mut() else { return };
@@ -2110,7 +2110,7 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
                 for (_, sdef) in subo.iter_mut() {
                     if let Some(f) = sdef.get("filter").cloned() {
                         if !f.is_string() {
-                            match as_tantivy_query_string(&f, ctx) {
+                            match as_boostcore_query_string(&f, ctx) {
                                 Some(qs) => {
                                     sdef.as_object_mut().unwrap().insert("filter".into(), json!(qs));
                                 }
@@ -2125,7 +2125,7 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
     }
 }
 
-/// tantivy cannot order a `terms` aggregation by a nested bucket's doc_count,
+/// BoostCore cannot order a `terms` aggregation by a nested bucket's doc_count,
 /// so strip that order and reapply it to the finished buckets ourselves.
 /// Lucene's `StringHelper.murmurhash3_x86_32`, which is what OpenSearch hashes
 /// a string term with when a terms aggregation is split into partitions.
@@ -2198,7 +2198,7 @@ fn term_partition(key: &Value, num: i64) -> i64 {
 }
 
 /// A terms aggregation may ask for one slice of the term space rather than the
-/// whole of it. tantivy has no such notion, so the slice is taken here: the
+/// whole of it. BoostCore has no such notion, so the slice is taken here: the
 /// request goes down without the `include`, asking for enough terms that the
 /// wanted partition is whole, and the rest are dropped from the answer.
 fn extract_partitions(node: &mut Value) -> Vec<(String, i64, i64, usize)> {
@@ -2341,7 +2341,7 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     }
 }
 
-/// tantivy's aggregation model has no room for OpenSearch's `meta`, and it
+/// BoostCore's aggregation model has no room for OpenSearch's `meta`, and it
 /// spells the sub-aggregation key `aggs`. Strip one, normalise the other, and
 /// remember the metadata so it can be put back on the response.
 fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>, top: bool) {
@@ -2899,14 +2899,14 @@ fn source_of(searcher: &Searcher, st: &IdxState, addr: DocAddress) -> Option<(St
 /// beyond building the collector, which is what `initialize` measures.
 fn profiled_agg_search(
     searcher: &Searcher,
-    q: &dyn tantivy::query::Query,
+    q: &dyn boostcore::query::Query,
     aggs: Aggregations,
     ctxp: AggContextParams,
     ctx: &Ctx,
     request: Option<&Value>,
-) -> (tantivy::Result<IntermediateAggregationResults>, Value) {
+) -> (boostcore::Result<IntermediateAggregationResults>, Value) {
     use std::time::Instant;
-    use tantivy::collector::{Collector, SegmentCollector};
+    use boostcore::collector::{Collector, SegmentCollector};
 
     let mut ns = std::collections::BTreeMap::new();
     let mut collected = 0u64;
@@ -2915,8 +2915,8 @@ fn profiled_agg_search(
     ns.insert("initialize", t.elapsed().as_nanos() as u64);
 
     let started = Instant::now();
-    let mut run = || -> tantivy::Result<IntermediateAggregationResults> {
-        let weight = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+    let mut run = || -> boostcore::Result<IntermediateAggregationResults> {
+        let weight = q.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher))?;
         let mut fruits = Vec::new();
         let (mut leaf_ns, mut collect_ns, mut post_ns) = (0u64, 0u64, 0u64);
         for (ord, reader) in searcher.segment_readers().iter().enumerate() {
@@ -3197,17 +3197,17 @@ fn apply_doc_counts(node: &mut Value) {
 /// needs something to occupy that slot.
 struct MaybeAgg(Option<DistributedAggregationCollector>);
 
-struct MaybeAggSegment(Option<tantivy::aggregation::AggregationSegmentCollector>);
+struct MaybeAggSegment(Option<boostcore::aggregation::AggregationSegmentCollector>);
 
-impl tantivy::collector::Collector for MaybeAgg {
+impl boostcore::collector::Collector for MaybeAgg {
     type Fruit = Option<IntermediateAggregationResults>;
     type Child = MaybeAggSegment;
 
     fn for_segment(
         &self,
-        ord: tantivy::SegmentOrdinal,
-        reader: &tantivy::SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
+        ord: boostcore::SegmentOrdinal,
+        reader: &boostcore::SegmentReader,
+    ) -> boostcore::Result<Self::Child> {
         Ok(MaybeAggSegment(match &self.0 {
             Some(c) => Some(c.for_segment(ord, reader)?),
             None => None,
@@ -3220,10 +3220,10 @@ impl tantivy::collector::Collector for MaybeAgg {
 
     fn merge_fruits(
         &self,
-        segment_fruits: Vec<Option<tantivy::Result<IntermediateAggregationResults>>>,
-    ) -> tantivy::Result<Self::Fruit> {
+        segment_fruits: Vec<Option<boostcore::Result<IntermediateAggregationResults>>>,
+    ) -> boostcore::Result<Self::Fruit> {
         let Some(inner) = &self.0 else { return Ok(None) };
-        let present: Vec<tantivy::Result<IntermediateAggregationResults>> =
+        let present: Vec<boostcore::Result<IntermediateAggregationResults>> =
             segment_fruits.into_iter().flatten().collect();
         if present.is_empty() {
             return Ok(None);
@@ -3232,19 +3232,19 @@ impl tantivy::collector::Collector for MaybeAgg {
     }
 }
 
-impl tantivy::collector::SegmentCollector for MaybeAggSegment {
-    type Fruit = Option<tantivy::Result<IntermediateAggregationResults>>;
+impl boostcore::collector::SegmentCollector for MaybeAggSegment {
+    type Fruit = Option<boostcore::Result<IntermediateAggregationResults>>;
 
-    fn collect(&mut self, doc: tantivy::DocId, score: tantivy::Score) {
+    fn collect(&mut self, doc: boostcore::DocId, score: boostcore::Score) {
         if let Some(c) = &mut self.0 {
             c.collect(doc, score);
         }
     }
 
-    /// Forwarding this matters: tantivy's aggregation collects a block at a
+    /// Forwarding this matters: BoostCore's aggregation collects a block at a
     /// time, and the default implementation would unroll it back into one call
     /// per document.
-    fn collect_block(&mut self, docs: &[tantivy::DocId]) {
+    fn collect_block(&mut self, docs: &[boostcore::DocId]) {
         if let Some(c) = &mut self.0 {
             c.collect_block(docs);
         }
@@ -3294,9 +3294,9 @@ fn count_without_walking(query_json: &Option<Value>) -> bool {
 /// and falls back to walking the matches where it does not.
 fn count_matches(
     searcher: &Searcher,
-    query: &dyn tantivy::query::Query,
-) -> tantivy::Result<usize> {
-    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+    query: &dyn boostcore::query::Query,
+) -> boostcore::Result<usize> {
+    let weight = query.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher))?;
     let mut total = 0usize;
     for reader in searcher.segment_readers() {
         total += weight.count(reader)? as usize;
@@ -3306,31 +3306,31 @@ fn count_matches(
 
 /// Run a shard's search, choosing where the per-segment work goes.
 ///
-/// tantivy's own `search` hands the segments to the index's shared executor.
+/// BoostCore's own `search` hands the segments to the index's shared executor.
 /// When a query fans out over many indices the outer parallelism already keeps
 /// every core busy, and asking that same pool for per-segment parallelism from
 /// inside it means each shard queues behind the others: measured on two hundred
 /// empty indices, a search that should be free took 147us of elapsed time
 /// waiting. One index at a time still wants the pool -- that is where
 /// per-segment parallelism pays.
-fn search_shard<C: tantivy::collector::Collector>(
+fn search_shard<C: boostcore::collector::Collector>(
     searcher: &Searcher,
-    query: &dyn tantivy::query::Query,
+    query: &dyn boostcore::query::Query,
     collector: &C,
     fanned_out: bool,
-) -> tantivy::Result<C::Fruit> {
+) -> boostcore::Result<C::Fruit> {
     if !fanned_out {
         return searcher.search(query, collector);
     }
     let scoring = if collector.requires_scoring() {
-        tantivy::query::EnableScoring::enabled_from_statistics_provider(searcher, searcher)
+        boostcore::query::EnableScoring::enabled_from_statistics_provider(searcher, searcher)
     } else {
-        tantivy::query::EnableScoring::disabled_from_searcher(searcher)
+        boostcore::query::EnableScoring::disabled_from_searcher(searcher)
     };
     searcher.search_with_executor(
         query,
         collector,
-        &tantivy::Executor::single_thread(),
+        &boostcore::Executor::single_thread(),
         scoring,
     )
 }
@@ -3347,7 +3347,7 @@ fn build_highlight(
     source: &Value,
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
-    index: &tantivy::Index,
+    index: &boostcore::Index,
 ) -> Option<Value> {
     let fields = spec.get("fields")?;
     // where the document itself is not kept, only a field stored in its own
@@ -3566,7 +3566,7 @@ fn terms_for_field(
 
 /// Mark the tokens of `text` that the query's words match.
 fn mark_terms(
-    index: &tantivy::Index,
+    index: &boostcore::Index,
     text: &str,
     queries: &[(String, bool)],
     analyzer: Option<&str>,
@@ -3808,9 +3808,9 @@ fn completion_suggest(
         let Some(st) = store.get(name) else { continue };
         let g = st.read();
         let searcher = g.reader.searcher();
-        let all = tantivy::query::AllQuery;
+        let all = boostcore::query::AllQuery;
         let addrs = searcher
-            .search(&all, &tantivy::collector::DocSetCollector)
+            .search(&all, &boostcore::collector::DocSetCollector)
             .map_err(|e| {
                 err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
             })?;
@@ -3917,8 +3917,8 @@ fn term_suggest(
         let Some(st) = store.get(name) else { continue };
         let g = st.read();
         let searcher = g.reader.searcher();
-        let all = tantivy::query::AllQuery;
-        let Ok(addrs) = searcher.search(&all, &tantivy::collector::DocSetCollector) else {
+        let all = boostcore::query::AllQuery;
+        let Ok(addrs) = searcher.search(&all, &boostcore::collector::DocSetCollector) else {
             continue;
         };
         for addr in addrs {
@@ -4733,7 +4733,7 @@ pub fn run(
         // a filter aggregation can carry a terms lookup too
         resolve_terms_lookups(store, a)?;
     }
-    // tantivy has `filter` but not `filters`; peel those out and run them
+    // BoostCore has `filter` but not `filters`; peel those out and run them
     // ourselves as one filtered search per named bucket
     // sibling pipelines read the finished buckets, so they are held back and
     // computed once the rest of the aggregations have answered
@@ -4774,12 +4774,12 @@ pub fn run(
             .iter()
             .filter(|(_, def)| {
                 // anything under it that has to be run here drags the whole
-                // aggregation out of tantivy's hands with it
+                // aggregation out of BoostCore's hands with it
                 peelable(def)
                     || def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
-                    // percentiles answer a different question from tantivy's
+                    // percentiles answer a different question from BoostCore's
                     // sketch, which is approximate where OpenSearch's is exact
                     // over the handful of values these aggregations see
                     || def.get("percentiles").is_some()
@@ -4790,7 +4790,7 @@ pub fn run(
                         .and_then(|t| t.get("field"))
                         .and_then(|f| f.as_str())
                         == Some("_index")
-                    // tantivy's own `filter` agg only speaks its query-string
+                    // BoostCore's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
                     || def.get("composite").is_some()
@@ -4811,11 +4811,11 @@ pub fn run(
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
                     // calendar units are not fixed lengths, which is all
-                    // tantivy's date histogram knows how to step by, and a
+                    // BoostCore's date histogram knows how to step by, and a
                     // named zone is a history of offsets it knows nothing of
                     || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
                     // a range field holds no single value to bucket a document
-                    // by, so tantivy's histogram sees nothing there at all
+                    // by, so BoostCore's histogram sees nothing there at all
                     || def
                         .get("histogram")
                         .and_then(|h| h.get("field"))
@@ -5015,7 +5015,7 @@ pub fn run(
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
         };
-        let q: Box<dyn tantivy::query::Query> = match &query_json {
+        let q: Box<dyn boostcore::query::Query> = match &query_json {
             Some(qj) => match crate::query::build(&ctx, qj) {
                 Ok(q) => q,
                 Err(e) => {
@@ -5026,20 +5026,20 @@ pub fn run(
                     ));
                 }
             },
-            None => Box::new(tantivy::query::AllQuery),
+            None => Box::new(boostcore::query::AllQuery),
         };
         // a point in time holds the search to what the index had written when
         // it was opened, which is what makes paging through it stable
-        let q: Box<dyn tantivy::query::Query> = match pit_ceiling.get(name) {
+        let q: Box<dyn boostcore::query::Query> = match pit_ceiling.get(name) {
             Some(ceiling) => {
-                let upper = tantivy::Term::from_field_u64(g.fields.seq, *ceiling);
-                let below = tantivy::query::FastFieldRangeQuery::new(
+                let upper = boostcore::Term::from_field_u64(g.fields.seq, *ceiling);
+                let below = boostcore::query::FastFieldRangeQuery::new(
                     std::ops::Bound::Unbounded,
                     std::ops::Bound::Excluded(upper),
                 );
-                Box::new(tantivy::query::BooleanQuery::new(vec![
-                    (tantivy::query::Occur::Must, q),
-                    (tantivy::query::Occur::Must, Box::new(below) as Box<dyn tantivy::query::Query>),
+                Box::new(boostcore::query::BooleanQuery::new(vec![
+                    (boostcore::query::Occur::Must, q),
+                    (boostcore::query::Occur::Must, Box::new(below) as Box<dyn boostcore::query::Query>),
                 ]))
             }
             None => q,
@@ -6135,7 +6135,7 @@ pub fn run(
         Some(base)
     };
 
-    // an aggregation this engine computes itself never reaches tantivy's
+    // an aggregation this engine computes itself never reaches BoostCore's
     // profiler, so its entry is written here: the aggregator OpenSearch would
     // have used, and what the answer turned out to hold
     if p.get("profile").map(|v| v == "true").unwrap_or(false)
@@ -6717,11 +6717,13 @@ fn collapsed_group(
     inner: &Value,
     p: &Params,
 ) -> Option<Value> {
-    let mut filters = vec![json!({"term": {field: value.clone()}})];
+    // the value the group stands for narrows it; the query that found the
+    // group still scores it, which is what decides the order inside
+    let mut group = json!({"bool": {"filter": [{"term": {field: value.clone()}}]}});
     if let Some(q) = query {
-        filters.push(q.clone());
+        group["bool"]["must"] = json!([q.clone()]);
     }
-    let mut body = json!({"query": {"bool": {"filter": filters}}});
+    let mut body = json!({"query": group});
     for key in [
         "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
         "stored_fields", "highlight", "explain", "fields",
@@ -6925,7 +6927,7 @@ fn combine(main: &Option<Value>, extra: Option<Value>) -> Value {
     }
 }
 
-/// Run one aggregation that tantivy cannot parse itself.
+/// Run one aggregation that BoostCore cannot parse itself.
 ///
 /// These are computed by asking a question per bucket rather than by walking
 /// the documents once, so any of them may appear inside any other: what a
@@ -7054,7 +7056,7 @@ fn run_peeled_agg(
 }
 
 /// Split sub-aggregations into the ones this engine computes itself and the
-/// ones tantivy can parse, so each set can take the path that suits it.
+/// ones BoostCore can parse, so each set can take the path that suits it.
 fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option<Value>) {
     let Some(o) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
         return (None, sub_aggs.clone());
@@ -7082,7 +7084,7 @@ fn peelable(def: &Value) -> bool {
             .unwrap_or(false)
 }
 
-/// Is this an aggregation tantivy has no parser for, which has to be computed
+/// Is this an aggregation BoostCore has no parser for, which has to be computed
 /// a bucket at a time here instead?
 fn peelable_here(def: &Value) -> bool {
     const OWN: &[&str] = &[
@@ -7111,7 +7113,7 @@ fn zoned_or_calendar(spec: &Value) -> bool {
 }
 
 /// Count the documents a query matches, and run its sub-aggregations --
-/// including the ones tantivy cannot parse, which are run here against the
+/// including the ones BoostCore cannot parse, which are run here against the
 /// same query rather than handed down.
 fn count_with_sub_aggs(
     store: &Store,
@@ -7262,7 +7264,7 @@ fn run_filter_agg(
 
 /// `terms` over the `_index` metadata field: one bucket per index that has hits.
 /// `terms` over an ordinary field, run here because something under it has to
-/// be: tantivy still finds the buckets, and each one then narrows the query
+/// be: BoostCore still finds the buckets, and each one then narrows the query
 /// for the aggregations it could not parse.
 fn run_field_terms_agg(
     store: &Store,
@@ -7276,7 +7278,7 @@ fn run_field_terms_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
     // an order naming a sub-aggregation that is run here cannot be asked of
-    // tantivy, which will not have that aggregation; the buckets are put in
+    // BoostCore, which will not have that aggregation; the buckets are put in
     // order once it has answered
     let order = spec.get("order").cloned();
     let ordered_here = order
@@ -7404,7 +7406,7 @@ fn run_index_terms_agg(
 
 /// Every value of one numeric field across the documents a query matches.
 ///
-/// Aggregations that tantivy does not provide are computed from these directly;
+/// Aggregations that BoostCore does not provide are computed from these directly;
 /// the field is read from the columnar, so nothing is materialised per document
 /// beyond the value itself.
 fn collect_field_values(
@@ -7434,7 +7436,7 @@ fn collect_field_values(
         let column = ctx.column_name(field, false);
         let searcher = g.reader.searcher();
         let addrs = searcher
-            .search(&q, &tantivy::collector::DocSetCollector)
+            .search(&q, &boostcore::collector::DocSetCollector)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()))?;
         let cols: Vec<SortColumns> = searcher
             .segment_readers()
@@ -7530,7 +7532,7 @@ fn run_hdr_percentiles(
 
 /// A date histogram stepped by calendar units.
 ///
-/// A month is not a fixed number of milliseconds, so tantivy's histogram --
+/// A month is not a fixed number of milliseconds, so BoostCore's histogram --
 /// which steps by a constant -- cannot express one. Each bucket is instead a
 /// range filter run through the ordinary query path, which also means
 /// sub-aggregations come for free. The cost is one search per bucket, which
@@ -7762,7 +7764,7 @@ fn format_terms_keys(
 
 /// A numeric range bucket names its bounds as doubles.
 ///
-/// tantivy writes `*-50` where the suite expects `*-50.0`; the bounds are
+/// BoostCore writes `*-50` where the suite expects `*-50.0`; the bounds are
 /// already on the bucket, so the key is rebuilt from them rather than parsed.
 fn normalize_range_keys(node: &mut Value) {
     match node {
@@ -8456,7 +8458,7 @@ fn run_multi_terms_agg(
         ));
     }
 
-    // an aggregation tantivy cannot parse cannot ride down with the terms
+    // an aggregation BoostCore cannot parse cannot ride down with the terms
     // request; it is run per bucket once the buckets are known
     let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
     let mut request = plain_subs.clone().unwrap_or_else(|| json!({}));
@@ -8844,7 +8846,7 @@ fn collect_field_pairs(
         let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
         let searcher = g.reader.searcher();
         let addrs = searcher
-            .search(&q, &tantivy::collector::DocSetCollector)
+            .search(&q, &boostcore::collector::DocSetCollector)
             .map_err(|e| {
                 err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
             })?;
@@ -9834,7 +9836,7 @@ fn run_composite_agg(
         ));
     }
 
-    // A date source is bucketed here rather than by tantivy: the column is
+    // A date source is bucketed here rather than by BoostCore: the column is
     // absent from any segment whose documents all lack the field, and a
     // histogram over a column that is only sometimes there answers for only
     // some of the segments. The span is known from the extremes, so the grid
@@ -10150,12 +10152,12 @@ fn run_calendar_histogram(
     main_query: &Option<Value>,
     def: &Value,
 ) -> std::result::Result<Value, Response> {
-    use tantivy::time::{Duration, OffsetDateTime};
+    use boostcore::time::{Duration, OffsetDateTime};
 
     let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     // a histogram steps by a calendar unit or by a fixed length; the fixed
-    // one only comes through here when a zone means tantivy cannot do it
+    // one only comes through here when a zone means BoostCore cannot do it
     let fixed = spec
         .get("fixed_interval")
         .and_then(|v| v.as_str())
@@ -10351,7 +10353,7 @@ fn run_calendar_histogram(
 /// `offset` as written on a date histogram: a signed count of fixed time
 /// units. Calendar units are not allowed here -- only lengths that are the
 /// same wherever on the calendar they land.
-fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
+fn parse_offset(s: &str) -> Option<boostcore::time::Duration> {
     let s = s.trim();
     let (sign, rest) = match s.strip_prefix('-') {
         Some(r) => (-1, r),
@@ -10362,11 +10364,11 @@ fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
     let n: i64 = n.parse().ok()?;
     let n = n * sign;
     Some(match unit {
-        "ms" => tantivy::time::Duration::milliseconds(n),
-        "s" => tantivy::time::Duration::seconds(n),
-        "m" => tantivy::time::Duration::minutes(n),
-        "h" | "H" => tantivy::time::Duration::hours(n),
-        "d" => tantivy::time::Duration::days(n),
+        "ms" => boostcore::time::Duration::milliseconds(n),
+        "s" => boostcore::time::Duration::seconds(n),
+        "m" => boostcore::time::Duration::minutes(n),
+        "h" | "H" => boostcore::time::Duration::hours(n),
+        "d" => boostcore::time::Duration::days(n),
         _ => return None,
     })
 }
@@ -10374,9 +10376,9 @@ fn parse_offset(s: &str) -> Option<tantivy::time::Duration> {
 /// A date written in the zone it is being reported in, which is what puts the
 /// offset on the end of it in place of the `Z`.
 fn iso_millis_at(
-    dt: tantivy::time::OffsetDateTime,
+    dt: boostcore::time::OffsetDateTime,
     zone: &str,
-    offset: tantivy::time::Duration,
+    offset: boostcore::time::Duration,
 ) -> String {
     if zone.is_empty() || offset.is_zero() {
         return iso_millis(dt);
@@ -10400,7 +10402,7 @@ fn iso_millis_at(
     )
 }
 
-fn iso_millis(dt: tantivy::time::OffsetDateTime) -> String {
+fn iso_millis(dt: boostcore::time::OffsetDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         dt.year(),
@@ -10444,8 +10446,8 @@ impl CalendarUnit {
         })
     }
 
-    fn floor(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
-        use tantivy::time::{Date, Month, Time};
+    fn floor(self, dt: boostcore::time::OffsetDateTime) -> boostcore::time::OffsetDateTime {
+        use boostcore::time::{Date, Month, Time};
         let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
         match self {
             CalendarUnit::Second => dt.replace_nanosecond(0).unwrap(),
@@ -10461,11 +10463,11 @@ impl CalendarUnit {
             // calendar weeks start on Monday
             CalendarUnit::Week => {
                 let back = dt.weekday().number_days_from_monday() as i64;
-                midnight(dt.date() - tantivy::time::Duration::days(back))
+                midnight(dt.date() - boostcore::time::Duration::days(back))
             }
             CalendarUnit::WeekSunday => {
                 let back = dt.weekday().number_days_from_sunday() as i64;
-                midnight(dt.date() - tantivy::time::Duration::days(back))
+                midnight(dt.date() - boostcore::time::Duration::days(back))
             }
             CalendarUnit::Month => midnight(
                 Date::from_calendar_date(dt.year(), dt.month(), 1).unwrap(),
@@ -10482,9 +10484,9 @@ impl CalendarUnit {
         }
     }
 
-    fn advance(self, dt: tantivy::time::OffsetDateTime) -> tantivy::time::OffsetDateTime {
-        use tantivy::time::{Date, Duration, Month, Time};
-        let add_months = |dt: tantivy::time::OffsetDateTime, n: u32| {
+    fn advance(self, dt: boostcore::time::OffsetDateTime) -> boostcore::time::OffsetDateTime {
+        use boostcore::time::{Date, Duration, Month, Time};
+        let add_months = |dt: boostcore::time::OffsetDateTime, n: u32| {
             let total = dt.year() * 12 + (dt.month() as i32 - 1) + n as i32;
             let (y, m) = (total.div_euclid(12), total.rem_euclid(12) as u8 + 1);
             Date::from_calendar_date(y, Month::try_from(m).unwrap(), 1)

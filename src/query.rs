@@ -1,17 +1,17 @@
-//! OpenSearch query DSL -> tantivy queries.
+//! OpenSearch query DSL -> BoostCore queries.
 
 use crate::store::{Fields, Mapping};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::ops::Bound;
 use std::sync::Arc;
-use tantivy::query::{
+use boostcore::query::{
     AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
     FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
 };
-use tantivy::schema::{Field, IndexRecordOption, Term, Type};
-use tantivy::{Index, TantivyError};
-use tantivy_fst::Regex;
+use boostcore::schema::{Field, IndexRecordOption, Term, Type};
+use boostcore::{Index, TantivyError};
+use boostcore_fst::Regex;
 
 pub struct Ctx<'a> {
     pub fields: &'a Fields,
@@ -202,9 +202,9 @@ fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
     }
 }
 
-pub fn parse_datetime(s: &str) -> Option<tantivy::DateTime> {
-    use tantivy::time::format_description::well_known::Rfc3339;
-    tantivy::time::OffsetDateTime::parse(s, &Rfc3339).ok().map(tantivy::DateTime::from_utc)
+pub fn parse_datetime(s: &str) -> Option<boostcore::DateTime> {
+    use boostcore::time::format_description::well_known::Rfc3339;
+    boostcore::time::OffsetDateTime::parse(s, &Rfc3339).ok().map(boostcore::DateTime::from_utc)
 }
 
 fn any_of(terms: Vec<Term>) -> Box<dyn Query> {
@@ -246,7 +246,7 @@ impl Clone for JsonAutomatonQuery {
 }
 
 impl Query for JsonAutomatonQuery {
-    fn weight(&self, _s: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, _s: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
         Ok(Box::new(AutomatonWeight::<Regex>::new_for_json_path(
             self.field,
             self.regex.clone(),
@@ -309,7 +309,7 @@ pub fn wildcard_to_regex(pat: &str) -> String {
     s
 }
 
-/// Map OpenSearch analyzer names onto the tokenizers tantivy ships.
+/// Map OpenSearch analyzer names onto the tokenizers BoostCore ships.
 fn tokenizer_name(analyzer: Option<&str>) -> &str {
     match analyzer.unwrap_or("standard") {
         "whitespace" => "whitespace",
@@ -553,7 +553,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     None => terms.extend(term_for(f, &path, &ip_value(ctx, &field, v))),
                 }
             }
-            if subs.is_empty() {
+            // MappedFieldType.termsQuery builds "a constant-scoring query that
+            // matches all values": matching two of the terms says no more about
+            // a document than matching one, so the order falls back to doc id
+            let inner: Box<dyn Query> = if subs.is_empty() {
                 any_of(terms)
             } else {
                 if !terms.is_empty() {
@@ -562,7 +565,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 Box::new(BooleanQuery::new(
                     subs.into_iter().map(|q| (Occur::Should, q)).collect(),
                 ))
-            }
+            };
+            Box::new(ConstScore::new(inner, 1.0))
         }
         "ids" => {
             let arr = body.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -571,7 +575,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .filter_map(|v| v.as_str())
                 .map(|s| Term::from_field_text(ctx.fields.id, s))
                 .collect();
-            any_of(terms)
+            Box::new(ConstScore::new(any_of(terms), 1.0))
         }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
@@ -749,7 +753,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "dis_max" => {
             let qs = body.get("queries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let subs: Result<Vec<_>> = qs.iter().map(|s| build(ctx, s)).collect();
-            Box::new(tantivy::query::DisjunctionMaxQuery::new(subs?))
+            Box::new(boostcore::query::DisjunctionMaxQuery::new(subs?))
         }
                 other => {
             // a near-miss is usually a typo, and saying which name was meant
@@ -1159,7 +1163,7 @@ fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if kind == "most_fields" || kind == "cross_fields" || kind == "bool_prefix" {
         Ok(Box::new(BooleanQuery::union(subs)))
     } else {
-        Ok(Box::new(tantivy::query::DisjunctionMaxQuery::new(subs)))
+        Ok(Box::new(boostcore::query::DisjunctionMaxQuery::new(subs)))
     }
 }
 
@@ -1302,14 +1306,20 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         }
         found
     };
-    if under_flat {
-        for b in [&mut lower, &mut upper] {
-            let Some((Value::String(text), inclusive)) = b.clone() else { continue };
-            if let Some(iso) = crate::store::canonical_date(&Value::String(text.clone())) {
-                *b = Some((Value::String(iso), inclusive));
-            }
-        }
-    }
+    // A date under a flat_object was stored in its canonical spelling, so a
+    // bound written the short way has to be canonicalised to compare with it.
+    // But "2.1" is a version, not a year: rewriting the bound would throw the
+    // text away, so the canonical spelling is asked for as well, not instead.
+    let flat_bounds: Option<(Option<(Value, bool)>, Option<(Value, bool)>)> = under_flat
+        .then(|| {
+            let canon = |b: &Option<(Value, bool)>| -> Option<(Value, bool)> {
+                let (Value::String(text), inclusive) = b.clone()? else { return None };
+                let iso = crate::store::canonical_date(&Value::String(text.clone()))?;
+                (iso != text).then_some((Value::String(iso), inclusive))
+            };
+            (canon(&lower), canon(&upper))
+        })
+        .filter(|(lo, hi)| lo.is_some() || hi.is_some());
     if matches!(ctx.mapping.type_of(&field), Some("ip" | "date" | "date_nanos")) {
         for (is_lower, b) in [(true, &mut lower), (false, &mut upper)] {
             if let Some((v, inclusive)) = b.clone() {
@@ -1415,6 +1425,13 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             continue;
         }
         subs.push(Box::new(RangeQuery::new(lo, hi)));
+        if t == Type::Str {
+            if let Some((flat_lo, flat_hi)) = &flat_bounds {
+                let lo = bound_term(f, &path, flat_lo.as_ref().or(lower.as_ref()), t, true);
+                let hi = bound_term(f, &path, flat_hi.as_ref().or(upper.as_ref()), t, false);
+                subs.push(Box::new(RangeQuery::new(lo, hi)));
+            }
+        }
     }
     let general: Box<dyn Query> = match subs.len() {
         0 => Box::new(EmptyQuery),
@@ -1446,7 +1463,7 @@ fn u64_bound(
     b: Option<&(Value, bool)>,
     is_lower: bool,
 ) -> Option<u64> {
-    use tantivy::columnar::MonotonicallyMappableToU64;
+    use boostcore::columnar::MonotonicallyMappableToU64;
     let Some((v, inclusive)) = b else {
         return Some(if is_lower { u64::MIN } else { u64::MAX });
     };
@@ -1485,7 +1502,7 @@ fn block_range_query(
     upper: Option<&(Value, bool)>,
     general: &Box<dyn Query>,
 ) -> Option<Box<dyn Query>> {
-    use tantivy::columnar::ColumnType;
+    use boostcore::columnar::ColumnType;
     let column_type = match ty {
         Type::I64 => ColumnType::I64,
         Type::U64 => ColumnType::U64,
@@ -1612,7 +1629,7 @@ fn build_span_near(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         return Ok(Box::new(EmptyQuery));
     }
     if prefix_last {
-        let mut q = tantivy::query::PhrasePrefixQuery::new(terms);
+        let mut q = boostcore::query::PhrasePrefixQuery::new(terms);
         q.set_max_expansions(50);
         return Ok(Box::new(q));
     }
@@ -2006,7 +2023,7 @@ fn parse_range_token(value: &str) -> Option<Value> {
 
 /// A constant score over another query.
 ///
-/// tantivy has one of these already, but its weight leaves `for_each_pruning`
+/// BoostCore has one of these already, but its weight leaves `for_each_pruning`
 /// to the blanket implementation, which walks every matching document. That
 /// throws away the block-skipping a term query would otherwise do, and a term
 /// query is exactly what gets wrapped here.
@@ -2018,11 +2035,11 @@ fn parse_range_token(value: &str) -> Option<Value> {
 /// is what the blanket implementation would have arrived at the slow way.
 pub struct ConstScore {
     query: Box<dyn Query>,
-    score: tantivy::Score,
+    score: boostcore::Score,
 }
 
 impl ConstScore {
-    pub fn new(query: Box<dyn Query>, score: tantivy::Score) -> Self {
+    pub fn new(query: Box<dyn Query>, score: boostcore::Score) -> Self {
         ConstScore { query, score }
     }
 }
@@ -2043,7 +2060,7 @@ impl Clone for ConstScore {
 }
 
 impl Query for ConstScore {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
         let inner = self.query.weight(enable_scoring)?;
         // with scoring off the score is never read, so the wrapper is pure cost
         Ok(if enable_scoring.is_scoring_enabled() {
@@ -2060,17 +2077,17 @@ impl Query for ConstScore {
 
 struct ConstWeight {
     inner: Box<dyn Weight>,
-    score: tantivy::Score,
+    score: boostcore::Score,
 }
 
 impl Weight for ConstWeight {
     fn scorer(
         &self,
-        reader: &tantivy::SegmentReader,
-        boost: tantivy::Score,
-    ) -> tantivy::Result<Box<dyn tantivy::query::Scorer>> {
+        reader: &boostcore::SegmentReader,
+        boost: boostcore::Score,
+    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
         let inner = self.inner.scorer(reader, boost)?;
-        Ok(Box::new(tantivy::query::ConstScorer::new(
+        Ok(Box::new(boostcore::query::ConstScorer::new(
             inner,
             boost * self.score,
         )))
@@ -2078,25 +2095,25 @@ impl Weight for ConstWeight {
 
     fn explain(
         &self,
-        reader: &tantivy::SegmentReader,
-        doc: tantivy::DocId,
-    ) -> tantivy::Result<tantivy::query::Explanation> {
-        let mut ex = tantivy::query::Explanation::new("Const", self.score);
+        reader: &boostcore::SegmentReader,
+        doc: boostcore::DocId,
+    ) -> boostcore::Result<boostcore::query::Explanation> {
+        let mut ex = boostcore::query::Explanation::new("Const", self.score);
         ex.add_detail(self.inner.explain(reader, doc)?);
         Ok(ex)
     }
 
-    fn count(&self, reader: &tantivy::SegmentReader) -> tantivy::Result<u32> {
+    fn count(&self, reader: &boostcore::SegmentReader) -> boostcore::Result<u32> {
         self.inner.count(reader)
     }
 
     fn for_each_pruning(
         &self,
-        threshold: tantivy::Score,
-        reader: &tantivy::SegmentReader,
-        callback: &mut dyn FnMut(tantivy::DocId, tantivy::Score) -> tantivy::Score,
-    ) -> tantivy::Result<()> {
-        use tantivy::DocSet;
+        threshold: boostcore::Score,
+        reader: &boostcore::SegmentReader,
+        callback: &mut dyn FnMut(boostcore::DocId, boostcore::Score) -> boostcore::Score,
+    ) -> boostcore::Result<()> {
+        use boostcore::DocSet;
         // nothing here can beat what the collector already holds
         if threshold >= self.score {
             return Ok(());
@@ -2105,7 +2122,7 @@ impl Weight for ConstWeight {
         // would compute is discarded, so ask for the cheaper unscored form
         let mut scorer = self.inner.scorer(reader, 1.0)?;
         let mut doc = scorer.doc();
-        while doc != tantivy::TERMINATED {
+        while doc != boostcore::TERMINATED {
             if callback(doc, self.score) >= self.score {
                 return Ok(());
             }
