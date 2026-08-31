@@ -5643,7 +5643,7 @@ fn run_peeled_agg(
     } else if def.get("top_hits").is_some() {
         run_top_hits(store, targets, query_json, def)
     } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
-        run_significant_terms(store, targets, query_json, def)
+        run_significant_terms(store, targets, query_json, def, name)
     } else if def.get("rare_terms").is_some() {
         run_rare_terms_agg(store, targets, query_json, def, weighted, name)
     } else if def.get("multi_terms").is_some() {
@@ -7901,6 +7901,7 @@ fn run_significant_terms(
     targets: &[String],
     main_query: &Option<Value>,
     def: &Value,
+    asked_as: &str,
 ) -> std::result::Result<Value, Response> {
     let kind = if def.get("significant_text").is_some() {
         "significant_text"
@@ -7912,6 +7913,28 @@ fn run_significant_terms(
         .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k == kind))
         .unwrap_or_else(|| kind.to_string());
     let spec = def.get(&name).cloned().unwrap_or(json!({}));
+    // the measures this aggregation can score by, and the options it takes
+    const KNOWN: &[&str] = &[
+        "field", "script", "size", "shard_size", "min_doc_count", "shard_min_doc_count",
+        "include", "exclude", "execution_hint", "background_filter", "filter_duplicate_text",
+        "source_fields", "jlh", "mutual_information", "chi_square", "gnd",
+        "percentage", "script_heuristic",
+    ];
+    if let Some(stray) = spec
+        .as_object()
+        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| !KNOWN.contains(&k.as_str())))
+    {
+        let near = KNOWN
+            .iter()
+            .find(|k| edit_distance(k, &stray) <= 2)
+            .copied()
+            .unwrap_or("jlh");
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "parsing_exception",
+            format!("[{name}] unknown field [{stray}] did you mean [{near}]?"),
+        ));
+    }
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     // a term seen once or twice is noise, so the floor is higher here than it
@@ -7930,7 +7953,7 @@ fn run_significant_terms(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
                 format!(
-                    "Aggregation [{name}] cannot support regular expression style \
+                    "Aggregation [{asked_as}] cannot support regular expression style \
                      include/exclude settings as they can only be applied to string fields. Use \
                      an array of values for include/exclude clauses"
                 ),
