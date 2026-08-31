@@ -2168,6 +2168,29 @@ pub fn write_doc_versioned(
             w.delete_term(term);
         }
     }
+    // a nested field is a list of documents of its own, and an index says how
+    // many of them one document may carry
+    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
+    let mut nested_count = 0u64;
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "nested" {
+            continue;
+        }
+        if let Some(Value::Array(a)) = source.pointer(&format!("/{}", name.replace('.', "/"))) {
+            nested_count += a.len() as u64;
+        }
+    }
+    if nested_count > nested_limit {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "The number of nested documents has exceeded the allowed limit of \
+                 [{nested_limit}]. This limit can be set by changing the \
+                 [index.mapping.nested_objects.limit] index level setting."
+            ),
+        ));
+    }
     // a flat_object keeps whatever object it is given; it is not a place to
     // put a string
     for (name, kind) in st.mapping.types.iter() {
