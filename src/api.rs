@@ -2168,6 +2168,49 @@ pub fn write_doc_versioned(
             w.delete_term(term);
         }
     }
+    // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
+    // out in 2262
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "date_nanos" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let texts: Vec<String> = match value {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            _ => Vec::new(),
+        };
+        for text in texts {
+            let Some(dt) = crate::store::canonical_date(&json!(text.clone()))
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+            else {
+                continue;
+            };
+            let nanos = dt.unix_timestamp_nanos();
+            let complaint = if nanos < 0 {
+                Some(format!(
+                    "date[{text}] is before the epoch in 1970 and cannot be stored in \
+                     nanosecond resolution"
+                ))
+            } else if nanos > i64::MAX as i128 {
+                Some(format!(
+                    "date[{text}] is after 2262-04-11T23:47:16.854775807 and cannot be stored \
+                     in nanosecond resolution"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = complaint {
+                return Err(err_caused_by(
+                    "mapper_parsing_exception",
+                    &format!("failed to parse field [{name}] of type [date_nanos]"),
+                    &reason,
+                ));
+            }
+        }
+    }
     // a nested field is a list of documents of its own, and an index says how
     // many of them one document may carry
     let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
