@@ -1,6 +1,6 @@
 # ที่เหลือ และบทเรียนระหว่างทาง
 
-รันทั้ง suite (409 ไฟล์): **1,425 ผ่าน · 2 ตก · 77 skip = 99.9%**
+รันทั้ง suite (409 ไฟล์): **1,426 ผ่าน · 1 ตก · 77 skip = 99.9%**
 Phase 1 manifest: **398/398** · Phase 3 manifest: 1,098/1,100
 
 ## บทเรียนใหญ่ที่สุด: อ่านของจริงดีกว่าเดา
@@ -44,16 +44,7 @@ JSON ก็คือฟิลด์ในสคีมาแบน ⇒ BoostCore 
 `MappedFieldType.termsQuery` เขียนไว้ตรง ๆ ว่า "build a constant-scoring query"
 ⇒ แมตช์สองคำไม่ได้บอกอะไรมากกว่าแมตช์คำเดียว ลำดับจึงตกไปที่ doc id
 
-## 2 ตัวที่เหลือ — ยังติดข้อจำกัดของชั้นล่าง
-
-### date เกินช่วงที่ i64 nanosecond เก็บได้
-
-`search.aggregation/40_range :: Date Range Missing` เขียน epoch **seconds**
-ระดับแสนล้าน = ปี 11970 · OpenSearch เก็บ `date` เป็น millisecond จึงรับได้สบาย
-ที่นี่ค่าไปอยู่ใน DateTime ของ tantivy ซึ่งเป็น i64 **nanosecond** หมดที่ปี 2262
-
-แก้ให้ตรงต้องเก็บ date เป็น millisecond ทั้งระบบ ซึ่งกระทบ range query,
-histogram, sort, format ทั้งหมด
+## 1 ตัวที่เหลือ
 
 ### refresh ถึงทีละ shard
 
@@ -61,6 +52,46 @@ histogram, sort, format ทั้งหมด
 `refresh` จึงทำให้ทุกอย่างเห็นพร้อมกัน ไม่มีทางให้ delete บน shard หนึ่ง
 ยังมองไม่เห็นขณะที่อีก shard เห็นแล้ว · จะแก้ต้องกันเอกสารที่ยังไม่ refresh
 ไว้นอก writer ทีละ shard ซึ่งทำให้ realtime GET (ที่อ่านจาก writer) พังทั้งชุด
+
+## date เก็บเป็น millisecond ทั้งระบบแล้ว
+
+เคยเขียนไว้ว่า "แก้ให้ตรงต้องเก็บ date เป็น millisecond ทั้งระบบ ซึ่งกระทบ
+range query, histogram, sort, format ทั้งหมด" — ทำแล้ว
+
+เดิม date ถูกเขียนเป็น ISO text ในดัชนี แล้ว BoostCore อ่านกลับเป็น DateTime
+(i64 **nanosecond** หมดที่ปี 2262) · และ text เทียบด้วยการสะกด ปีเกิน 9999
+ก็เรียงผิด · OpenSearch เก็บเป็น long: `DateFieldMapper.Resolution`
+บอกว่า `date` = millisecond, `date_nanos` = nanosecond และ sort คืนเลขนั้นตรง ๆ
+
+ที่ขยับตามไป: bound ของ query, ปลายทั้งสองของ `date_range`, ช่วงที่
+date/auto date histogram เดิน, composite date source, key ของ
+terms/multi_terms กับ key_as_string, สำเนาที่ multi-field ของ date ถือ,
+และ sort value ที่ไม่ต้อง rescale อีกแล้ว · `_source` ไม่แตะ — ยังเป็นสิ่งที่
+client ส่งมา
+
+ผลพลอยได้:
+
+- `search.aggregation/40_range :: Date Range Missing` ผ่าน — epoch seconds
+  หลักแสนล้าน = ปี 11970 ไม่ overflow อีก
+- bucket ของ date_range เรียงตามจุดเริ่ม ตาม `AbstractRangeBuilder.sortRanges`
+- เอกสารที่ไม่มีค่าไปอยู่ bucket ที่ `missing` ชี้
+- range query อ่าน `format` ของตัวเองแทนของ mapping · `gte: 2019` บน date
+  คือ **ปี** ตามที่ default format อ่าน
+- ใต้ flat_object ไม่ถูกตีความเป็น date อีก — ค่าคงการสะกดที่ส่งมา
+
+เรื่อง perf: date_histogram แบบ fixed step ถูกเขียนใหม่เป็น `histogram`
+ก่อนส่งให้ BoostCore เดินรอบเดียว (ถ้าปล่อยให้ engine เดินเองทีละ bucket
+จะเหลือ 840 req/s จาก 11,500) · calendar unit, zone ที่ไม่ใช่ UTC และ
+date_nanos ยังเดินเองอยู่
+
+| aggregation | ก่อน (date เป็น text) | หลัง |
+| --- | --- | --- |
+| date_histogram 1h | 15,000/s | 10,700/s |
+| histogram บน long | 14,200/s | 15,300/s |
+| terms บน keyword | 15,100/s | 23,700/s |
+
+date histogram เสียไปบ้างเพราะอ่าน column ตัวเลขแทน column วันที่ ·
+ที่เหลือเร็วขึ้นเพราะ 200k วันที่ไม่ได้เป็น 200k สตริงใน term dictionary อีกแล้ว
 
 ## บทเรียนอื่นที่ยังใช้ได้
 
