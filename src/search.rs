@@ -4574,10 +4574,17 @@ pub fn run(
                     hit["fields"] = Value::Object(out);
                 }
             }
-            // `stored_fields` suppresses `_source` unless it was asked for too
-            let want_source = stored.is_none()
-                || explicit_source
-                || stored.as_ref().map(|s| s.iter().any(|n| n == "_source")).unwrap_or(false);
+            // `stored_fields` suppresses `_source` unless it was asked for too,
+            // and a mapping may say the document is not kept at all
+            let kept = searchers[h.shard_idx].2.read().mapping.raw.pointer("/_source/enabled")
+                != Some(&json!(false));
+            let want_source = kept
+                && (stored.is_none()
+                    || explicit_source
+                    || stored
+                        .as_ref()
+                        .map(|s| s.iter().any(|n| n == "_source"))
+                        .unwrap_or(false));
             if want_source {
                 let src = match &sel {
                     Some(s) => apply_source_selector(&h.source, s),
@@ -5637,17 +5644,29 @@ fn run_peeled_agg(
     {
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
-        run_filter_agg(store, targets, query_json, &{
-            let mut d = def.clone();
-            if let Some(o) = d.as_object_mut() {
-                o.remove("nested");
-                o.remove("reverse_nested");
-                o.remove("sampler");
-                o.remove("diversified_sampler");
-                o.insert("filter".into(), json!({"match_all": {}}));
+        {
+            let path = def
+                .pointer("/nested/path")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string());
+            let mut answer = run_filter_agg(store, targets, query_json, &{
+                let mut d = def.clone();
+                if let Some(o) = d.as_object_mut() {
+                    o.remove("nested");
+                    o.remove("reverse_nested");
+                    o.remove("sampler");
+                    o.remove("diversified_sampler");
+                    o.insert("filter".into(), json!({"match_all": {}}));
+                }
+                d
+            })?;
+            // inside a nested aggregation the documents are the objects at
+            // that path, so any hits reported under it are those objects
+            if let Some(path) = path {
+                expand_nested_hits(&mut answer, &path);
             }
-            d
-        })
+            Ok(answer)
+        }
     } else if def.get("top_hits").is_some() {
         run_top_hits(store, targets, query_json, def)
     } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
@@ -7865,6 +7884,49 @@ fn run_percentile_ranks(
         let arr: Vec<Value> =
             wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
         Ok(json!({"values": arr}))
+    }
+}
+
+/// Turn each hit into the nested objects it carries at a path.
+fn expand_nested_hits(node: &mut Value, path: &str) {
+    match node {
+        Value::Object(o) => {
+            if let Some(hits) = o.get_mut("hits").and_then(|h| h.get_mut("hits")) {
+                if let Some(list) = hits.as_array().cloned() {
+                    let mut out = Vec::new();
+                    for hit in list {
+                        let at = hit.pointer(&format!("/_source/{}", path.replace('.', "/")));
+                        let objects: Vec<Value> = match at {
+                            Some(Value::Array(a)) => a.clone(),
+                            Some(other) => vec![other.clone()],
+                            None => {
+                                out.push(hit.clone());
+                                continue;
+                            }
+                        };
+                        for (offset, object) in objects.into_iter().enumerate() {
+                            let mut one = hit.clone();
+                            one["_nested"] = json!({"field": path, "offset": offset});
+                            if one.get("_source").is_some() {
+                                one["_source"] = object;
+                            }
+                            out.push(one);
+                        }
+                    }
+                    *hits = Value::Array(out);
+                }
+                return;
+            }
+            for (_, v) in o.iter_mut() {
+                expand_nested_hits(v, path);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                expand_nested_hits(v, path);
+            }
+        }
+        _ => {}
     }
 }
 
