@@ -1415,6 +1415,13 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         _ => types,
     };
 
+    // Whatever a value under a flat_object looked like, it was stored as text,
+    // so a bound that reads as a date must still be compared as one.
+    let mut types = types;
+    if under_flat && !types.contains(&Type::Str) {
+        types.push(Type::Str);
+    }
+
     // A single numeric type means block statistics can drive the scan, which
     // lets whole runs of documents be skipped instead of compared one by one.
     let mut subs: Vec<Box<dyn Query>> = Vec::new();
@@ -1425,12 +1432,17 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             continue;
         }
         subs.push(Box::new(RangeQuery::new(lo, hi)));
-        if t == Type::Str {
-            if let Some((flat_lo, flat_hi)) = &flat_bounds {
-                let lo = bound_term(f, &path, flat_lo.as_ref().or(lower.as_ref()), t, true);
-                let hi = bound_term(f, &path, flat_hi.as_ref().or(upper.as_ref()), t, false);
-                subs.push(Box::new(RangeQuery::new(lo, hi)));
+    }
+    // The canonical spelling is text whatever the values were narrowed to: a
+    // date under a flat_object is stored as the text of its canonical form.
+    if let Some((flat_lo, flat_hi)) = &flat_bounds {
+        for t in [Type::Str, Type::Date] {
+            let lo = bound_term(f, &path, flat_lo.as_ref().or(lower.as_ref()), t, true);
+            let hi = bound_term(f, &path, flat_hi.as_ref().or(upper.as_ref()), t, false);
+            if matches!(lo, Bound::Unbounded) && matches!(hi, Bound::Unbounded) {
+                continue;
             }
+            subs.push(Box::new(RangeQuery::new(lo, hi)));
         }
     }
     let general: Box<dyn Query> = match subs.len() {
@@ -1443,7 +1455,12 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 
     // A single numeric type means block statistics can drive the scan. The query
     // itself decides per search whether that actually beats the general path.
-    if types.len() == 1 && std::env::var("OBSEARCH_NO_BLOCK_RANGE").is_err() {
+    // the block path scans one typed range, and a flat_object bound asked for
+    // two spellings of the value
+    if types.len() == 1
+        && flat_bounds.is_none()
+        && std::env::var("OBSEARCH_NO_BLOCK_RANGE").is_err()
+    {
         if let Some(q) =
             block_range_query(ctx, &field, types[0], lower.as_ref(), upper.as_ref(), &general)
         {
