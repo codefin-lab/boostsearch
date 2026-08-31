@@ -7911,8 +7911,13 @@ fn compose_template(store: &Store, body: &Value) -> Value {
         if let Some(v) = layer.get("mappings") {
             crate::store::deep_merge(&mut mappings, v);
         }
-        if let Some(v) = layer.get("aliases") {
-            crate::store::deep_merge(&mut aliases, v);
+        // an alias is defined whole: a later layer replaces the definition
+        // rather than adding to it
+        if let Some(Value::Object(o)) = layer.get("aliases") {
+            let slot = aliases.as_object_mut().unwrap();
+            for (name, def) in o {
+                slot.insert(name.clone(), def.clone());
+            }
         }
     }
     json!({"settings": settings, "mappings": mappings, "aliases": aliases})
