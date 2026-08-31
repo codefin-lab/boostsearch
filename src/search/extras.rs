@@ -119,19 +119,26 @@ pub(crate) fn parse_time_amount(s: &str) -> Option<f64> {
     let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
     let (n, unit) = s.split_at(split);
     let n: f64 = n.parse().ok()?;
-    Some(n * match unit {
-        "nanos" => 1.0,
-        "micros" => 1e3,
-        "ms" => 1e6,
-        "s" => 1e9,
-        "m" => 60e9,
-        "h" | "H" => 3_600e9,
-        "d" => 86_400e9,
-        _ => return None,
-    })
+    Some(
+        n * match unit {
+            "nanos" => 1.0,
+            "micros" => 1e3,
+            "ms" => 1e6,
+            "s" => 1e9,
+            "m" => 60e9,
+            "h" | "H" => 3_600e9,
+            "d" => 86_400e9,
+            _ => return None,
+        },
+    )
 }
 
-pub(crate) fn settle_by_value(cands: &mut Vec<Cand>, searchers: &Searchers, body: &Value, extras: &Extras) {
+pub(crate) fn settle_by_value(
+    cands: &mut Vec<Cand>,
+    searchers: &Searchers,
+    body: &Value,
+    extras: &Extras,
+) {
     // A geo query asks where a point is. The query built for it only says the
     // field is there, so each candidate's own position is read and placed.
     if let Some((field, shape)) =
@@ -175,10 +182,8 @@ pub(crate) fn settle_by_value(cands: &mut Vec<Cand>, searchers: &Searchers, body
     }
     // `distance_feature` scores by how near a value is to an origin. The
     // candidates are known by now, and each one's value can simply be read.
-    if let Some(spec) = extras
-        .distance_feature
-        .then(|| body.get("query").and_then(find_distance_feature))
-        .flatten()
+    if let Some(spec) =
+        extras.distance_feature.then(|| body.get("query").and_then(find_distance_feature)).flatten()
     {
         let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
         let path = format!("/{}", field.replace('.', "/"));

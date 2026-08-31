@@ -1,7 +1,7 @@
 //! The aggregations that answer with a number rather than with buckets.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
 /// The field an HDR percentiles aggregation reads, if the request has one.
 pub(crate) fn hdr_percentiles_field(node: &Value) -> Option<String> {
@@ -54,9 +54,9 @@ pub(crate) fn collect_field_values(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let column = ctx.column_name(field, false);
         let searcher = g.reader.searcher();
-        let addrs = searcher
-            .search(&q, &boostcore::collector::DocSetCollector)
-            .map_err(|e| err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()))?;
+        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })?;
         let cols: Vec<SortColumns> = searcher
             .segment_readers()
             .iter()
@@ -135,15 +135,13 @@ pub(crate) fn run_hdr_percentiles(
     if keyed {
         let mut map = serde_json::Map::new();
         for p in &percents {
-            let key = format!("{:.1}", p);
+            let key = format!("{p:.1}");
             map.insert(key, value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
         }
         Ok(json!({ "values": Value::Object(map) }))
     } else {
-        let arr: Vec<Value> = percents
-            .iter()
-            .map(|p| json!({"key": p, "value": value_at(*p)}))
-            .collect();
+        let arr: Vec<Value> =
+            percents.iter().map(|p| json!({"key": p, "value": value_at(*p)})).collect();
         Ok(json!({ "values": arr }))
     }
 }
@@ -206,11 +204,9 @@ pub(crate) fn collect_field_pairs(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
         let searcher = g.reader.searcher();
-        let addrs = searcher
-            .search(&q, &boostcore::collector::DocSetCollector)
-            .map_err(|e| {
-                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
-            })?;
+        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })?;
         let cols: Vec<(SortColumns, SortColumns)> = searcher
             .segment_readers()
             .iter()
@@ -259,15 +255,11 @@ pub(crate) fn run_percentile_ranks(
     if keyed {
         let mut map = serde_json::Map::new();
         for v in &wanted {
-            map.insert(
-                format!("{v:.1}"),
-                rank(*v).map(|r| json!(r)).unwrap_or(Value::Null),
-            );
+            map.insert(format!("{v:.1}"), rank(*v).map(|r| json!(r)).unwrap_or(Value::Null));
         }
         Ok(json!({"values": Value::Object(map)}))
     } else {
-        let arr: Vec<Value> =
-            wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
+        let arr: Vec<Value> = wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
         Ok(json!({"values": arr}))
     }
 }
@@ -283,8 +275,19 @@ pub(crate) fn run_top_hits(
     let spec = def.get("top_hits").cloned().unwrap_or(json!({}));
     let mut body = json!({"query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}}))});
     for key in [
-        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
-        "stored_fields", "highlight", "explain", "fields", "script_fields", "track_scores",
+        "size",
+        "from",
+        "sort",
+        "_source",
+        "version",
+        "seq_no_primary_term",
+        "docvalue_fields",
+        "stored_fields",
+        "highlight",
+        "explain",
+        "fields",
+        "script_fields",
+        "track_scores",
     ] {
         if let Some(v) = spec.get(key) {
             body[key] = v.clone();

@@ -16,20 +16,25 @@ pub async fn create_pit(
     }
     let keep = p.get("keep_alive").map(|v| keep_alive_millis(v)).unwrap_or(0);
     let id = store.open_pit(&expr, keep);
-    respond(&p, json!({
-        "pit_id": id,
-        "_shards": shards_over(&store, &names),
-        "creation_time": 0,
-    }))
+    respond(
+        &p,
+        json!({
+            "pit_id": id,
+            "_shards": shards_over(&store, &names),
+            "creation_time": 0,
+        }),
+    )
 }
 
 pub async fn get_all_pits(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let pits: Vec<Value> = store
         .all_pits()
         .into_iter()
-        .map(|(id, st)| json!({
-            "pit_id": id, "creation_time": 0, "keep_alive": st.keep_alive_ms,
-        }))
+        .map(|(id, st)| {
+            json!({
+                "pit_id": id, "creation_time": 0, "keep_alive": st.keep_alive_ms,
+            })
+        })
         .collect();
     respond(&p, json!({"pits": pits}))
 }
@@ -58,8 +63,13 @@ pub async fn delete_pit(
     respond(&p, json!({"pits": pits}))
 }
 
-pub(crate) fn check_scroll(store: &Store, expr: &str, body: &Value, p: &Params) -> Option<Response> {
-    let Some(keep) = p.get("scroll") else { return None };
+pub(crate) fn check_scroll(
+    store: &Store,
+    expr: &str,
+    body: &Value,
+    p: &Params,
+) -> Option<Response> {
+    let keep = p.get("scroll")?;
     if body.get("size").and_then(|v| v.as_i64()) == Some(0)
         || p.get("size").map(|v| v == "0").unwrap_or(false)
     {
@@ -200,7 +210,10 @@ pub async fn scroll(
     };
     // the ceiling applies every time the scroll is asked to live longer, not
     // only when it was opened
-    let asked = body.get("scroll").and_then(|v| v.as_str()).map(|s| s.to_string())
+    let asked = body
+        .get("scroll")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
         .or_else(|| p.get("scroll").cloned());
     if let (Some(keep), Some(limit)) = (
         asked.as_deref(),
@@ -256,7 +269,9 @@ pub async fn clear_scroll(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let mut ids: Vec<String> = match body.get("scroll_id") {
         Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+        }
         _ => Vec::new(),
     };
     if let Some(Path(i)) = id_path {
@@ -310,9 +325,9 @@ pub async fn msearch(
             .get("index")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.clone()),
-                Value::Array(a) => Some(
-                    a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","),
-                ),
+                Value::Array(a) => {
+                    Some(a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                }
                 _ => None,
             })
             .unwrap_or_else(|| default_index.clone());
@@ -385,9 +400,9 @@ pub async fn field_caps(
         .get("fields")
         .map(|f| f.split(',').map(|s| s.trim().to_string()).collect())
         .or_else(|| {
-            body.get("fields").and_then(|f| f.as_array()).map(|a| {
-                a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
-            })
+            body.get("fields")
+                .and_then(|f| f.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         })
         .unwrap_or_else(|| vec!["*".into()]);
 
@@ -427,10 +442,7 @@ pub async fn field_caps(
             let has_doc_values = g
                 .mapping
                 .raw
-                .pointer(&format!(
-                    "/properties/{}/doc_values",
-                    name.replace('.', "/properties/")
-                ))
+                .pointer(&format!("/properties/{}/doc_values", name.replace('.', "/properties/")))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             // a field the mapping says not to index cannot be searched for
@@ -441,38 +453,38 @@ pub async fn field_caps(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             for kind in kinds {
-            let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
-            let slot = entry_of(entry, &kind, || caps_for(&kind));
-            if !has_doc_values {
-                let where_not = entry_of(slot, "__unaggregatable", || json!([]));
-                if let Some(a) = where_not.as_array_mut() {
-                    a.push(json!(n));
+                let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
+                let slot = entry_of(entry, &kind, || caps_for(&kind));
+                if !has_doc_values {
+                    let where_not = entry_of(slot, "__unaggregatable", || json!([]));
+                    if let Some(a) = where_not.as_array_mut() {
+                        a.push(json!(n));
+                    }
                 }
-            }
-            if !indexed {
-                // remember where it is not searchable; if that is everywhere,
-                // the field simply is not searchable
-                let where_not = entry_of(slot, "__unsearchable", || json!([]));
-                if let Some(a) = where_not.as_array_mut() {
-                    a.push(json!(n));
+                if !indexed {
+                    // remember where it is not searchable; if that is everywhere,
+                    // the field simply is not searchable
+                    let where_not = entry_of(slot, "__unsearchable", || json!([]));
+                    if let Some(a) = where_not.as_array_mut() {
+                        a.push(json!(n));
+                    }
                 }
-            }
-            if let Some(m) = meta.clone().and_then(|m| m.as_object().cloned()) {
-                let dst = entry_of(slot, "meta", || json!({}));
-                for (mk, mv) in m {
-                    let list = entry_of(dst, &mk, || json!([]));
-                    if let Some(a) = list.as_array_mut() {
-                        if !a.contains(&mv) {
-                            a.push(mv);
+                if let Some(m) = meta.clone().and_then(|m| m.as_object().cloned()) {
+                    let dst = entry_of(slot, "meta", || json!({}));
+                    for (mk, mv) in m {
+                        let list = entry_of(dst, &mk, || json!([]));
+                        if let Some(a) = list.as_array_mut() {
+                            if !a.contains(&mv) {
+                                a.push(mv);
+                            }
                         }
                     }
                 }
-            }
-            // a type seen in only some indices lists the ones it came from
-            let indices = entry_of(slot, "__indices", || json!([]));
-            if let Some(a) = indices.as_array_mut() {
-                a.push(json!(n));
-            }
+                // a type seen in only some indices lists the ones it came from
+                let indices = entry_of(slot, "__indices", || json!([]));
+                if let Some(a) = indices.as_array_mut() {
+                    a.push(json!(n));
+                }
             }
         }
     }
@@ -491,8 +503,7 @@ pub async fn field_caps(
                     }
                 }
             }
-            let missing: Vec<String> =
-                kept.iter().filter(|n| !has.contains(n)).cloned().collect();
+            let missing: Vec<String> = kept.iter().filter(|n| !has.contains(n)).cloned().collect();
             if !missing.is_empty() {
                 extra.push((name.clone(), json!(missing)));
             }
@@ -639,9 +650,8 @@ pub async fn search_shards(
     // `preference: _shards:...` narrows to the shards it names before
     // anything else looks at the list
     let preferred: Option<Vec<u64>> = p.get("preference").and_then(|v| {
-        v.strip_prefix("_shards:").map(|list| {
-            list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect()
-        })
+        v.strip_prefix("_shards:")
+            .map(|list| list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect())
     });
     let mut listed: Vec<(String, u64)> = Vec::new();
     for n in &names {
@@ -662,61 +672,66 @@ pub async fn search_shards(
         .into_iter()
         .enumerate()
         .filter(|(i, _)| slice.is_none() || *i as u64 % slice_max == slice_id)
-        .map(|(_, (n, shard))| json!([{
-            "state": "STARTED", "primary": true, "node": "node-0",
-            "relocating_node": null, "shard": shard, "index": n,
-            "allocation_id": {"id": "_na_"}
-        }]))
+        .map(|(_, (n, shard))| {
+            json!([{
+                "state": "STARTED", "primary": true, "node": "node-0",
+                "relocating_node": null, "shard": shard, "index": n,
+                "allocation_id": {"id": "_na_"}
+            }])
+        })
         .collect();
-    respond(&p, json!({
-        "nodes": {"node-0": {"name": "boostsearch", "ephemeral_id": "_na_",
-                             "transport_address": "127.0.0.1:9300", "attributes": {}}},
-        "indices": names
-            .iter()
-            .map(|n| {
-                let mut entry = json!({});
-                let own: Vec<String> = via
-                    .iter()
-                    .filter(|a| store.resolve(a).iter().any(|r| r == n))
-                    .cloned()
-                    .collect();
-                if !own.is_empty() {
-                    // an alias may narrow what the index shows, and a caller
-                    // routing its own search needs that filter
-                    if let Some(st) = store.get(n) {
-                        let g = st.read();
-                        // several aliases reaching the same index each narrow
-                        // it, and a document matching any of them is visible
-                        let filters: Vec<Value> = own
-                            .iter()
-                            .filter_map(|a| g.aliases.get(a).and_then(|d| d.get("filter")))
-                            .map(expand_filter)
-                            .collect();
-                        // an alias with no filter of its own opens the index
-                        // up again, so there is nothing left to narrow
-                        if filters.len() == own.len() {
-                            match filters.len() {
-                                0 => {}
-                                1 => entry["filter"] = filters[0].clone(),
-                                // the bool a combined filter becomes carries
-                                // the defaults a bool query is built with
-                                _ => {
-                                    entry["filter"] = json!({"bool": {
-                                        "should": filters,
-                                        "adjust_pure_negative": true,
-                                        "boost": 1.0,
-                                    }})
+    respond(
+        &p,
+        json!({
+            "nodes": {"node-0": {"name": "boostsearch", "ephemeral_id": "_na_",
+                                 "transport_address": "127.0.0.1:9300", "attributes": {}}},
+            "indices": names
+                .iter()
+                .map(|n| {
+                    let mut entry = json!({});
+                    let own: Vec<String> = via
+                        .iter()
+                        .filter(|a| store.resolve(a).iter().any(|r| r == n))
+                        .cloned()
+                        .collect();
+                    if !own.is_empty() {
+                        // an alias may narrow what the index shows, and a caller
+                        // routing its own search needs that filter
+                        if let Some(st) = store.get(n) {
+                            let g = st.read();
+                            // several aliases reaching the same index each narrow
+                            // it, and a document matching any of them is visible
+                            let filters: Vec<Value> = own
+                                .iter()
+                                .filter_map(|a| g.aliases.get(a).and_then(|d| d.get("filter")))
+                                .map(expand_filter)
+                                .collect();
+                            // an alias with no filter of its own opens the index
+                            // up again, so there is nothing left to narrow
+                            if filters.len() == own.len() {
+                                match filters.len() {
+                                    0 => {}
+                                    1 => entry["filter"] = filters[0].clone(),
+                                    // the bool a combined filter becomes carries
+                                    // the defaults a bool query is built with
+                                    _ => {
+                                        entry["filter"] = json!({"bool": {
+                                            "should": filters,
+                                            "adjust_pure_negative": true,
+                                            "boost": 1.0,
+                                        }})
+                                    }
                                 }
                             }
                         }
+                        entry["aliases"] = json!(own);
                     }
-                    entry["aliases"] = json!(own);
-                }
-                (n.clone(), entry)
-            })
-            .collect::<serde_json::Map<_, _>>(),
-        "shards": shards,
-    }))
+                    (n.clone(), entry)
+                })
+                .collect::<serde_json::Map<_, _>>(),
+            "shards": shards,
+        }),
+    )
 }
 
 pub async fn validate_query(
@@ -846,7 +861,9 @@ pub async fn analyze(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let text = match body.get("text") {
         Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+        }
         _ => p.get("text").map(|t| vec![t.clone()]).unwrap_or_default(),
     };
     let analyzer = body
@@ -857,8 +874,8 @@ pub async fn analyze(
     let st = store.resolve(&expr).into_iter().next().and_then(|n| store.get(&n));
     // a tokenizer only splits; folding case is a filter, and naming one
     // without the other asks for the split alone
-    let tokenizer_only = analyzer.is_none()
-        && (body.get("tokenizer").is_some() || p.contains_key("tokenizer"));
+    let tokenizer_only =
+        analyzer.is_none() && (body.get("tokenizer").is_some() || p.contains_key("tokenizer"));
     let mut tokens = Vec::new();
     let mut pos = 0usize;
     for t in &text {
@@ -937,7 +954,8 @@ pub async fn analyze(
                             let kept: Vec<Value> = tokens
                                 .iter()
                                 .filter(|t| {
-                                    let text = t.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                                    let text =
+                                        t.get("token").and_then(|v| v.as_str()).unwrap_or("");
                                     !stop.iter().any(|w| w == text)
                                 })
                                 .cloned()

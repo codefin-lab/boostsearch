@@ -8,12 +8,12 @@ use anyhow::Result;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use boostcore::TantivyDocument;
 use boostcore::collector::TopDocs;
 use boostcore::query::TermQuery;
 use boostcore::schema::{IndexRecordOption, Term, Value as _};
-use boostcore::TantivyDocument;
+use serde_json::{Value, json};
+use std::collections::HashMap;
 
 mod alias;
 // The handlers are re-exported flat, so the routing table reads as one list
@@ -54,215 +54,81 @@ pub use template::*;
 
 pub type Params = HashMap<String, String>;
 
-
-
-
-
-
-
-
-
-
-
-
 // ---------------------------------------------------------------- index CRUD
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ------------------------------------------------------------------ mappings
 
-
-
-
-
-
-
-
-
-
-
-
-
 // -------------------------------------------------------------- document CRUD
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------------- bulk
 
-
 // ------------------------------------------------------------ source filtering
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // -------------------------------------------------------------------- scroll
 
-
-
-
 // ------------------------------------------------------------- field mappings
-
-
-
 
 // ----------------------------------------------------------------------- mget
 
-
-
-
-
 // -------------------------------------------------------------------- update
-
 
 // ------------------------------------------------------------- memory report
 
-
 // --------------------------------------------------------------- force merge
 
-
 const CAT_SEGMENT_COLS: &[&str] = &[
-    "index", "shard", "prirep", "ip", "id", "segment", "generation", "docs.count",
-    "docs.deleted", "size", "size.memory", "committed", "searchable", "version", "compound",
+    "index",
+    "shard",
+    "prirep",
+    "ip",
+    "id",
+    "segment",
+    "generation",
+    "docs.count",
+    "docs.deleted",
+    "size",
+    "size.memory",
+    "committed",
+    "searchable",
+    "version",
+    "compound",
 ];
 
-
-
-
 // --------------------------------------------------------------------- stats
-
-
-
-
-
 
 /// `/_stats/{metric}` selects which sections to report; we always report all,
 /// so the metric is only consumed to keep it off the index path.
 pub const STATS_METRICS: &[&str] = &[
-    "docs", "store", "indexing", "get", "search", "merges", "refresh", "flush", "warmer",
-    "query_cache", "fielddata", "completion", "segments", "translog", "request_cache",
-    "recovery", "_all",
+    "docs",
+    "store",
+    "indexing",
+    "get",
+    "search",
+    "merges",
+    "refresh",
+    "flush",
+    "warmer",
+    "query_cache",
+    "fielddata",
+    "completion",
+    "segments",
+    "translog",
+    "request_cache",
+    "recovery",
+    "_all",
     // the section is named `merges` but the metric may be asked for either way
     "merge",
 ];
 
-
-
-
-
-
-
-
-
-
 // ------------------------------------------------------------------- explain
 
-
 // ---------------------------------------------------------------- field_caps
-
-
 
 // -------------------------------------------------------------------- alias
 
 // -------------------------------------------------------------- cluster info
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // -------------------------------------------------------------------- aliases
-
-
-
-
-
-
-
-
-
-
 
 /// The keys an alias body may carry that are not part of the alias itself.
 const ALIAS_ADDRESSING: &[&str] = &["index", "indices", "alias", "aliases"];
@@ -276,146 +142,117 @@ const ALIAS_OPTIONS: &[&str] = &[
     "must_exist",
 ];
 
-
-
-
-
-
-
-
 // ------------------------------------------------------------------ templates
-
-
-
-
 
 // ------------------------------------------------------- index open/close/get
 
-
-
-
-
-
 // ---------------------------------------------------------------- cat helpers
 
-
-
-
-
-
-
 pub const CAT_INDEX_COLS: &[&str] = &[
-    "health", "status", "index", "uuid", "pri", "rep", "docs.count", "docs.deleted",
-    "store.size", "pri.store.size", "creation.date", "creation.date.string",
+    "health",
+    "status",
+    "index",
+    "uuid",
+    "pri",
+    "rep",
+    "docs.count",
+    "docs.deleted",
+    "store.size",
+    "pri.store.size",
+    "creation.date",
+    "creation.date.string",
 ];
-
-
 
 pub const CAT_TEMPLATE_COLS: &[&str] =
     &["name", "index_patterns", "order", "version", "composed_of"];
 
 pub const CAT_ALLOCATION_COLS: &[&str] = &[
-    "shards", "disk.indices", "disk.used", "disk.avail", "disk.total", "disk.percent",
-    "host", "ip", "node",
+    "shards",
+    "disk.indices",
+    "disk.used",
+    "disk.avail",
+    "disk.total",
+    "disk.percent",
+    "host",
+    "ip",
+    "node",
 ];
 
+pub const CAT_NODEATTRS_COLS: &[&str] =
+    &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
 
-pub const CAT_NODEATTRS_COLS: &[&str] = &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
-
-
-
-pub const CAT_PLUGINS_COLS: &[&str] =
-    &["id", "name", "component", "version", "description"];
-
+pub const CAT_PLUGINS_COLS: &[&str] = &["id", "name", "component", "version", "description"];
 
 pub const CAT_THREAD_POOL_COLS: &[&str] = &[
-    "node_name", "node_id", "id", "pid", "host", "ip", "port", "ephemeral_node_id",
-    "name", "type", "active", "pool_size", "size", "queue",
-    "queue_size", "rejected", "largest", "completed", "core", "min", "max", "keep_alive",
-    "total_wait_time", "twt",
+    "node_name",
+    "node_id",
+    "id",
+    "pid",
+    "host",
+    "ip",
+    "port",
+    "ephemeral_node_id",
+    "name",
+    "type",
+    "active",
+    "pool_size",
+    "size",
+    "queue",
+    "queue_size",
+    "rejected",
+    "largest",
+    "completed",
+    "core",
+    "min",
+    "max",
+    "keep_alive",
+    "total_wait_time",
+    "twt",
 ];
-
 
 pub const CAT_TASKS_COLS: &[&str] = &[
-    "action", "task_id", "parent_task_id", "type", "start_time", "timestamp",
-    "running_time", "ip", "node", "description", "x_opaque_id",
+    "action",
+    "task_id",
+    "parent_task_id",
+    "type",
+    "start_time",
+    "timestamp",
+    "running_time",
+    "ip",
+    "node",
+    "description",
+    "x_opaque_id",
 ];
-
 
 pub const CAT_ALIAS_COLS: &[&str] =
     &["alias", "index", "filter", "routing.index", "routing.search", "is_write_index"];
 
-
-
 pub const CAT_HEALTH_COLS: &[&str] = &[
-    "epoch", "timestamp", "cluster", "status", "node.total", "node.data",
-    "discovered_cluster_manager", "shards", "pri", "relo", "init", "unassign",
-    "pending_tasks", "max_task_wait_time", "active_shards_percent",
+    "epoch",
+    "timestamp",
+    "cluster",
+    "status",
+    "node.total",
+    "node.data",
+    "discovered_cluster_manager",
+    "shards",
+    "pri",
+    "relo",
+    "init",
+    "unassign",
+    "pending_tasks",
+    "max_task_wait_time",
+    "active_shards_percent",
 ];
-
 
 // ------------------------------------------------------------ generic cat API
 
-
-
-
 // -------------------------------------------------- composable index templates
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------- snapshots
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ---------------------------------------------------------------- pipelines
-
-
-
-
-
-
-
-
-
-
 
 // ------------------------------------------------------------- data streams
 
-
-
-
-
-
-
-
 // --------------------------------------------------------------- nodes & misc
-
-
-
-
-
-
-
-
-

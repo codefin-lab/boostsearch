@@ -69,8 +69,7 @@ pub async fn put_mapping(
         let Some(props) = node.get("properties").and_then(|p| p.as_object()) else {
             return false;
         };
-        props.keys().any(|k| k.trim().is_empty())
-            || props.values().any(empty_named)
+        props.keys().any(|k| k.trim().is_empty()) || props.values().any(empty_named)
     }
     if empty_named(&body) {
         return err(
@@ -115,7 +114,8 @@ pub async fn get_field_mapping(
         let declared = g.mapping.raw.get("properties").and_then(|v| v.as_object()).cloned();
         for (path_name, kind) in g.all_field_types() {
             let hit = wanted.iter().any(|w| {
-                *w == "*" || *w == path_name
+                *w == "*"
+                    || *w == path_name
                     || crate::store::wildcard_to_regex(w).is_match(&path_name)
                     || path_name.rsplit('.').next() == Some(*w)
             });
@@ -136,15 +136,17 @@ pub async fn get_field_mapping(
             if flag(&p, "include_defaults") {
                 if let Some(o) = def.as_object_mut() {
                     if o.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        o.entry("analyzer".to_string())
-                            .or_insert_with(|| json!("default"));
+                        o.entry("analyzer".to_string()).or_insert_with(|| json!("default"));
                     }
                 }
             }
-            mappings.insert(path_name.clone(), json!({
-                "full_name": path_name,
-                "mapping": { leaf: def }
-            }));
+            mappings.insert(
+                path_name.clone(),
+                json!({
+                    "full_name": path_name,
+                    "mapping": { leaf: def }
+                }),
+            );
         }
         out.insert(n.clone(), json!({"mappings": Value::Object(mappings)}));
     }

@@ -22,14 +22,14 @@ impl Mapping {
     /// Returns the offending field name when the mapping is strict about
     /// fields no template claims.
     pub fn apply_dynamic_templates(&mut self, source: &Value) -> Result<(), String> {
-        let dynamic = self
+        let dynamic =
+            self.raw.get("dynamic").and_then(|v| v.as_str()).unwrap_or("true").to_string();
+        let templates = self
             .raw
-            .get("dynamic")
-            .and_then(|v| v.as_str())
-            .unwrap_or("true")
-            .to_string();
-        let templates =
-            self.raw.get("dynamic_templates").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            .get("dynamic_templates")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         if templates.is_empty() && !dynamic.starts_with("strict") {
             return Ok(());
         }
@@ -159,11 +159,7 @@ impl Mapping {
         for seg in parent.split('.').skip(1) {
             node = node.get("properties")?.as_object()?.get(seg)?;
         }
-        node.get("fields")?
-            .get(sub)?
-            .get("normalizer")?
-            .as_str()
-            .map(|s| s.to_string())
+        node.get("fields")?.get(sub)?.get("normalizer")?.as_str().map(|s| s.to_string())
     }
 
     pub fn normalized_subfields(&self) -> Vec<(String, String, String)> {
@@ -190,9 +186,8 @@ impl Mapping {
     /// A field declared as an `alias` is another name for a field that is
     /// really there; this is the name behind it.
     pub fn target_of(&self, field: &str) -> Option<&str> {
-        let path = self
-            .raw
-            .pointer(&format!("/properties/{}", field.replace('.', "/properties/")))?;
+        let path =
+            self.raw.pointer(&format!("/properties/{}", field.replace('.', "/properties/")))?;
         if path.get("type").and_then(|t| t.as_str()) != Some("alias") {
             return None;
         }
@@ -223,12 +218,10 @@ impl Mapping {
                                     let parent = existing
                                         .entry(head.to_string())
                                         .or_insert_with(|| serde_json::json!({}));
-                                    let inner = parent
-                                        .as_object_mut()
-                                        .map(|o| {
-                                            o.entry("properties".to_string())
-                                                .or_insert_with(|| serde_json::json!({}))
-                                        });
+                                    let inner = parent.as_object_mut().map(|o| {
+                                        o.entry("properties".to_string())
+                                            .or_insert_with(|| serde_json::json!({}))
+                                    });
                                     if let Some(inner) = inner.and_then(|i| i.as_object_mut()) {
                                         inner.insert(rest.to_string(), v.clone());
                                     }
@@ -240,10 +233,8 @@ impl Mapping {
                         }
                     }
                 }
-            } else {
-                if let Some(o) = self.raw.as_object_mut() {
-                    o.insert(key.clone(), val.clone());
-                }
+            } else if let Some(o) = self.raw.as_object_mut() {
+                o.insert(key.clone(), val.clone());
             }
         }
     }
@@ -270,7 +261,11 @@ pub(crate) fn collect_normalizers(
     }
 }
 
-pub(crate) fn flatten_props(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, String>) {
+pub(crate) fn flatten_props(
+    props: &Map<String, Value>,
+    prefix: &str,
+    out: &mut HashMap<String, String>,
+) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {

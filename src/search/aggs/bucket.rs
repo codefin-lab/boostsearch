@@ -1,7 +1,7 @@
 //! The aggregations that make buckets this engine fills itself.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
 /// Run one `filters` aggregation: a separate filtered search per bucket, with
 /// the bucket's sub-aggregations evaluated inside it.
@@ -13,10 +13,8 @@ pub(crate) fn run_filters_agg(
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("filters").cloned().unwrap_or(json!({}));
     let inner = spec.get("filters").cloned().unwrap_or(Value::Null);
-    let other_bucket_key = spec
-        .get("other_bucket_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let other_bucket_key =
+        spec.get("other_bucket_key").and_then(|v| v.as_str()).map(|s| s.to_string());
     let other_bucket = spec.get("other_bucket").and_then(|v| v.as_bool()).unwrap_or(false)
         || other_bucket_key.is_some();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
@@ -117,11 +115,16 @@ pub(crate) fn run_peeled_agg(
         run_filter_agg(store, targets, query_json, def)
     } else if def.get("global").is_some() {
         // `global` ignores the query and aggregates over every document
-        run_filter_agg(store, targets, &None, &json!({
-            "filter": {"match_all": {}},
-            "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
-                .unwrap_or_else(|| json!({}))
-        }))
+        run_filter_agg(
+            store,
+            targets,
+            &None,
+            &json!({
+                "filter": {"match_all": {}},
+                "aggs": def.get("aggs").or_else(|| def.get("aggregations")).cloned()
+                    .unwrap_or_else(|| json!({}))
+            }),
+        )
     } else if def.get("weighted_avg").is_some() {
         run_weighted_avg(store, targets, query_json, def)
     } else if def.get("variable_width_histogram").is_some() {
@@ -134,9 +137,7 @@ pub(crate) fn run_peeled_agg(
         .get("terms")
         .and_then(|t| t.get("field"))
         .and_then(|f| f.as_str())
-        .map(|f| {
-            def.pointer("/terms/missing").is_some() && unmapped_field(store, targets, f)
-        })
+        .map(|f| def.pointer("/terms/missing").is_some() && unmapped_field(store, targets, f))
         .unwrap_or(false)
     {
         run_missing_terms_agg(store, targets, query_json, def)
@@ -164,19 +165,13 @@ pub(crate) fn run_peeled_agg(
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
         {
-            let path = def
-                .pointer("/nested/path")
-                .and_then(|p| p.as_str())
-                .map(|s| s.to_string());
+            let path = def.pointer("/nested/path").and_then(|p| p.as_str()).map(|s| s.to_string());
             // what sits under a nested aggregation works on the objects at that
             // path, and only the hits it may ask for come from the documents
             let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
-            let asks_for_hits = sub_aggs
-                .as_ref()
-                .map(|s| s.to_string().contains("top_hits"))
-                .unwrap_or(false);
-            if let (Some(path), false, true) =
-                (path.as_deref(), asks_for_hits, sub_aggs.is_some())
+            let asks_for_hits =
+                sub_aggs.as_ref().map(|s| s.to_string().contains("top_hits")).unwrap_or(false);
+            if let (Some(path), false, true) = (path.as_deref(), asks_for_hits, sub_aggs.is_some())
             {
                 return run_nested_over_objects(store, targets, query_json, path, &sub_aggs);
             }
@@ -379,16 +374,10 @@ pub(crate) fn run_index_terms_agg(
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
-    let size = def
-        .get("terms")
-        .and_then(|t| t.get("size"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10) as usize;
-    let min_doc_count = def
-        .get("terms")
-        .and_then(|t| t.get("min_doc_count"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1);
+    let size = def.get("terms").and_then(|t| t.get("size")).and_then(|v| v.as_u64()).unwrap_or(10)
+        as usize;
+    let min_doc_count =
+        def.get("terms").and_then(|t| t.get("min_doc_count")).and_then(|v| v.as_u64()).unwrap_or(1);
     let query = combine(main_query, None);
     let mut buckets = Vec::new();
     for name in targets {
@@ -435,20 +424,14 @@ pub(crate) fn run_date_range_agg(
     let missing = spec.get("missing").cloned();
 
     // the request may name its own format; otherwise the mapping's applies
-    let mapped_format = targets
-        .iter()
-        .filter_map(|n| store.get(n))
-        .next()
-        .and_then(|st| {
-            st.read().mapping.field_option(&field, "format").and_then(|v| {
-                v.as_str().map(|s| s.to_string())
-            })
-        });
-    let format = spec
-        .get("format")
-        .and_then(|f| f.as_str())
-        .map(|s| s.to_string())
-        .or(mapped_format);
+    let mapped_format = targets.iter().filter_map(|n| store.get(n)).next().and_then(|st| {
+        st.read()
+            .mapping
+            .field_option(&field, "format")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    });
+    let format =
+        spec.get("format").and_then(|f| f.as_str()).map(|s| s.to_string()).or(mapped_format);
 
     // a bound is the number the index holds, and the date it stands for
     let millis = |v: &Value| crate::store::date_number(v, format.as_deref(), false);
@@ -472,12 +455,7 @@ pub(crate) fn run_date_range_agg(
     let mut asked: Vec<Value> =
         spec.get("ranges").and_then(|r| r.as_array()).cloned().unwrap_or_default();
     let edge = |range: &Value, key: &str, open: f64| -> f64 {
-        range
-            .get(key)
-            .filter(|v| !v.is_null())
-            .and_then(millis)
-            .map(|ms| ms as f64)
-            .unwrap_or(open)
+        range.get(key).filter(|v| !v.is_null()).and_then(millis).map(|ms| ms as f64).unwrap_or(open)
     };
     asked.sort_by(|a, b| {
         edge(a, "from", f64::NEG_INFINITY)
@@ -667,9 +645,8 @@ pub(crate) fn run_range_field_histogram(
                 "__max": {"max": {"field": format!("{field}.lte")}},
             });
             let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
-            let read = |k: &str| -> Option<f64> {
-                extremes.as_ref()?.get(k)?.get("value")?.as_f64()
-            };
+            let read =
+                |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
             match (a.or_else(|| read("__min")), b.or_else(|| read("__max"))) {
                 (Some(x), Some(y)) => (x, y),
                 _ => return Ok(json!({"buckets": []})),
@@ -797,11 +774,7 @@ pub(crate) fn run_adjacency_matrix_agg(
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("adjacency_matrix").cloned().unwrap_or(json!({}));
-    let separator = spec
-        .get("separator")
-        .and_then(|v| v.as_str())
-        .unwrap_or("&")
-        .to_string();
+    let separator = spec.get("separator").and_then(|v| v.as_str()).unwrap_or("&").to_string();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let Some(filters) = spec.get("filters").and_then(|f| f.as_object()) else {
         return Err(err(
@@ -810,11 +783,13 @@ pub(crate) fn run_adjacency_matrix_agg(
             "[filters] cannot be empty",
         ));
     };
-    let named: Vec<(String, Value)> =
-        filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let named: Vec<(String, Value)> = filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     let mut buckets = Vec::new();
-    let push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
+    let push = |key: String,
+                filter: Value,
+                buckets: &mut Vec<Value>|
+     -> std::result::Result<(), Response> {
         let combined = combine(main_query, Some(filter));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count == 0 {
@@ -937,8 +912,8 @@ pub(crate) fn run_rare_terms_agg(
             let matches = |list: &Vec<String>| {
                 list.iter().any(|want| term_filter_matches(want, &shown, ty.as_deref()))
             };
-            include.as_ref().map(|l| matches(l)).unwrap_or(true)
-                && !exclude.as_ref().map(|l| matches(l)).unwrap_or(false)
+            include.as_ref().map(matches).unwrap_or(true)
+                && !exclude.as_ref().map(matches).unwrap_or(false)
         })
         .map(|mut b| {
             if let Some(o) = b.as_object_mut() {
@@ -1120,10 +1095,7 @@ pub(crate) fn run_multi_terms_agg(
                     .filter_map(|n| store.get(n))
                     .find_map(|st| st.read().routing.get(id).cloned())
                     .unwrap_or_else(|| id.to_string());
-                per_shard
-                    .entry(routing_shard(&placed_by, shards))
-                    .or_default()
-                    .extend(combos);
+                per_shard.entry(routing_shard(&placed_by, shards)).or_default().extend(combos);
             }
             let mut merged: std::collections::HashMap<String, (Vec<Value>, u64)> =
                 std::collections::HashMap::new();
@@ -1137,7 +1109,7 @@ pub(crate) fn run_multi_terms_agg(
                 }
                 let here: u64 = counts.values().map(|(_, n)| *n).sum();
                 let mut ranked: Vec<(String, (Vec<Value>, u64))> = counts.into_iter().collect();
-                ranked.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(&b.0)));
+                ranked.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
                 ranked.truncate(shard_size);
                 let kept: u64 = ranked.iter().map(|(_, (_, n))| *n).sum();
                 other += here - kept;
@@ -1146,10 +1118,7 @@ pub(crate) fn run_multi_terms_agg(
                     slot.1 += n;
                 }
             }
-            flat = merged
-                .into_values()
-                .map(|(key, n)| (key, n, serde_json::Map::new()))
-                .collect();
+            flat = merged.into_values().map(|(key, n)| (key, n, serde_json::Map::new())).collect();
             total = flat.iter().map(|(_, c, _)| *c).sum::<u64>() + other;
         }
     }
@@ -1210,14 +1179,15 @@ pub(crate) fn run_multi_terms_agg(
             }
         }
         // a settled order among equals
-        let k = |v: &Value| {
-            v.get("key_as_string").and_then(|s| s.as_str()).unwrap_or("").to_string()
-        };
+        let k =
+            |v: &Value| v.get("key_as_string").and_then(|s| s.as_str()).unwrap_or("").to_string();
         k(a).cmp(&k(b))
     });
-    let kept: u64 = buckets.iter().take(size).map(|b| {
-        b.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0)
-    }).sum();
+    let kept: u64 = buckets
+        .iter()
+        .take(size)
+        .map(|b| b.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0))
+        .sum();
     buckets.truncate(size);
     // now that the buckets are settled, each one narrows the query for the
     // aggregations that had to be left behind
@@ -1293,11 +1263,9 @@ pub(crate) fn compare_bucket_by(a: &Value, b: &Value, key: &str) -> Ordering {
 /// A key element in the spelling its field's type is read in.
 pub(crate) fn multi_terms_key(v: Value, ty: Option<&str>) -> Value {
     match ty {
-        Some("ip") => v
-            .as_str()
-            .and_then(crate::store::ip_from_canonical)
-            .map(Value::String)
-            .unwrap_or(v),
+        Some("ip") => {
+            v.as_str().and_then(crate::store::ip_from_canonical).map(Value::String).unwrap_or(v)
+        }
         Some("boolean") => match v.as_u64() {
             Some(n) => Value::Bool(n != 0),
             None => v,
@@ -1306,9 +1274,7 @@ pub(crate) fn multi_terms_key(v: Value, ty: Option<&str>) -> Value {
         Some(ty @ ("date" | "date_nanos")) => {
             let millis = v.as_f64().map(|n| if ty == "date_nanos" { n / 1e6 } else { n });
             millis
-                .and_then(|ms| {
-                    crate::store::format_millis(ms as i64, "strict_date_optional_time")
-                })
+                .and_then(|ms| crate::store::format_millis(ms as i64, "strict_date_optional_time"))
                 .map(Value::String)
                 .unwrap_or(v)
         }
@@ -1336,7 +1302,10 @@ pub(crate) fn flatten_multi_terms(
             let mut subs = serde_json::Map::new();
             if let Some(o) = b.as_object() {
                 for (k, v) in o {
-                    if k != "key" && k != "doc_count" && k != "key_as_string" && !k.starts_with("__m")
+                    if k != "key"
+                        && k != "doc_count"
+                        && k != "key_as_string"
+                        && !k.starts_with("__m")
                     {
                         subs.insert(k.clone(), v.clone());
                     }
@@ -1373,7 +1342,8 @@ pub(crate) fn run_variable_width_histogram(
     let mut gaps: Vec<(f64, usize)> =
         (1..values.len()).map(|i| (values[i] - values[i - 1], i)).collect();
     gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-    let mut cuts: Vec<usize> = gaps.into_iter().take(want.saturating_sub(1)).map(|(_, i)| i).collect();
+    let mut cuts: Vec<usize> =
+        gaps.into_iter().take(want.saturating_sub(1)).map(|(_, i)| i).collect();
     cuts.sort_unstable();
 
     let mut buckets = Vec::new();
@@ -1498,20 +1468,30 @@ pub(crate) fn run_significant_terms(
     let spec = def.get(&name).cloned().unwrap_or(json!({}));
     // the measures this aggregation can score by, and the options it takes
     const KNOWN: &[&str] = &[
-        "field", "script", "size", "shard_size", "min_doc_count", "shard_min_doc_count",
-        "include", "exclude", "execution_hint", "background_filter", "filter_duplicate_text",
-        "source_fields", "jlh", "mutual_information", "chi_square", "gnd",
-        "percentage", "script_heuristic",
+        "field",
+        "script",
+        "size",
+        "shard_size",
+        "min_doc_count",
+        "shard_min_doc_count",
+        "include",
+        "exclude",
+        "execution_hint",
+        "background_filter",
+        "filter_duplicate_text",
+        "source_fields",
+        "jlh",
+        "mutual_information",
+        "chi_square",
+        "gnd",
+        "percentage",
+        "script_heuristic",
     ];
     if let Some(stray) = spec
         .as_object()
         .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| !KNOWN.contains(&k.as_str())))
     {
-        let near = KNOWN
-            .iter()
-            .find(|k| edit_distance(k, &stray) <= 2)
-            .copied()
-            .unwrap_or("jlh");
+        let near = KNOWN.iter().find(|k| edit_distance(k, &stray) <= 2).copied().unwrap_or("jlh");
         return Err(err(
             StatusCode::BAD_REQUEST,
             "parsing_exception",
@@ -1586,8 +1566,7 @@ pub(crate) fn run_significant_terms(
         }
         let probe = json!({"query": q.clone(), "size": 10_000, "_source": [field.clone()]});
         let answer = run(store, &targets.join(","), &probe, &Params::new())?;
-        let mut counts: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         // `filter_duplicate_text` is for text that repeats itself across
         // documents -- boilerplate, signatures, quoted replies. A run of words
         // already seen in an earlier document says nothing new about this one,
@@ -1597,8 +1576,7 @@ pub(crate) fn run_significant_terms(
         const RUN: usize = 3;
         let total = answer.hits.len() as u64;
         for hit in &answer.hits {
-            let Some(text) = hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
-            else {
+            let Some(text) = hit.pointer(&format!("/_source/{}", field.replace('.', "/"))) else {
                 continue;
             };
             let text = match text {
@@ -1640,18 +1618,15 @@ pub(crate) fn run_significant_terms(
                 *counts.entry(token).or_insert(0) += 1;
             }
         }
-        let mut out: Vec<(Value, u64)> =
-            counts.into_iter().map(|(k, c)| (json!(k), c)).collect();
+        let mut out: Vec<(Value, u64)> = counts.into_iter().map(|(k, c)| (json!(k), c)).collect();
         out.sort_by(|a, b| b.1.cmp(&a.1));
         Ok((total, out))
     };
     let (fg_total, fg) = counted(&query)?;
     let (bg_total, bg) = counted(&json!({"match_all": {}}))?;
     let read = |res: &Vec<(Value, u64)>| -> Vec<(Value, u64)> { res.clone() };
-    let background: std::collections::HashMap<String, u64> = read(&bg)
-        .into_iter()
-        .map(|(k, c)| (k.to_string(), c))
-        .collect();
+    let background: std::collections::HashMap<String, u64> =
+        read(&bg).into_iter().map(|(k, c)| (k.to_string(), c)).collect();
 
     let ip_field = targets
         .iter()
@@ -1664,10 +1639,7 @@ pub(crate) fn run_significant_terms(
         }
         let bg_count = background.get(&key.to_string()).copied().unwrap_or(count);
         let key = if ip_field {
-            key.as_str()
-                .and_then(crate::store::ip_from_canonical)
-                .map(Value::String)
-                .unwrap_or(key)
+            key.as_str().and_then(crate::store::ip_from_canonical).map(Value::String).unwrap_or(key)
         } else {
             key
         };

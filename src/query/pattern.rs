@@ -18,8 +18,7 @@ pub(crate) fn json_term_prefix_regex(field: Field, path: &str) -> String {
 
 pub(crate) fn regex_query(field: Field, path: &str, pattern: &str) -> Result<Box<dyn Query>> {
     let anchored = format!("{}{pattern}", json_term_prefix_regex(field, path));
-    let re = Regex::new(&anchored)
-        .map_err(|e| anyhow!("bad regex `{pattern}`: {e}"))?;
+    let re = Regex::new(&anchored).map_err(|e| anyhow!("bad regex `{pattern}`: {e}"))?;
     Ok(Box::new(JsonAutomatonQuery {
         field,
         regex: Arc::new(re),
@@ -97,8 +96,7 @@ pub(crate) fn case_insensitive_regex(pattern: &str) -> String {
             escaped = !escaped && c == '\\';
             continue;
         }
-        let (lo, up): (String, String) =
-            (c.to_lowercase().collect(), c.to_uppercase().collect());
+        let (lo, up): (String, String) = (c.to_lowercase().collect(), c.to_uppercase().collect());
         if lo == up {
             out.push(c);
         } else {

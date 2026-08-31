@@ -7,14 +7,24 @@ use super::*;
 pub(crate) fn pipeline_keys(kind: &str) -> &'static [&'static str] {
     match kind {
         "search" => &[
-            "description", "version", "request_processors", "response_processors",
-            "phase_results_processors", "_meta",
+            "description",
+            "version",
+            "request_processors",
+            "response_processors",
+            "phase_results_processors",
+            "_meta",
         ],
         _ => &["description", "version", "processors", "on_failure", "_meta"],
     }
 }
 
-pub(crate) async fn put_pipeline(store: Store, kind: &str, name: String, p: Params, body: String) -> Response {
+pub(crate) async fn put_pipeline(
+    store: Store,
+    kind: &str,
+    name: String,
+    p: Params,
+    body: String,
+) -> Response {
     let body: Value = match parse_body(&body) {
         Ok(b) => b,
         Err(r) => return r,
@@ -32,15 +42,22 @@ pub(crate) async fn put_pipeline(store: Store, kind: &str, name: String, p: Para
         return err(
             StatusCode::BAD_REQUEST,
             "parse_exception",
-            format!("[{stray}] pipeline doesn't support one or more provided configuration \
-                     parameters"),
+            format!(
+                "[{stray}] pipeline doesn't support one or more provided configuration \
+                     parameters"
+            ),
         );
     }
     store.put_pipeline(kind, &name, body);
     respond(&p, json!({"acknowledged": true}))
 }
 
-pub(crate) async fn get_pipeline(store: Store, kind: &str, name: Option<String>, p: Params) -> Response {
+pub(crate) async fn get_pipeline(
+    store: Store,
+    kind: &str,
+    name: Option<String>,
+    p: Params,
+) -> Response {
     let all = store.pipelines(kind);
     let want = name.filter(|n| !n.is_empty());
     let picked: serde_json::Map<String, Value> = all

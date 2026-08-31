@@ -1,8 +1,13 @@
 //! `composite`: one bucket per combination, walked in key order.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
+/// A composite aggregation over `terms` sources.
+///
+/// The sources are run as nested `terms` aggregations and the resulting tree is
+/// flattened into one bucket per combination, which is what a composite is. Key
+/// order is ascending across the whole tuple, as the paging contract requires.
 pub(crate) fn run_composite_agg(
     store: &Store,
     targets: &[String],
@@ -100,10 +105,7 @@ pub(crate) fn run_composite_agg(
                 // a day in a zone begins where that zone's midnight falls in
                 // UTC, which is as far the other way as the zone sits from it
                 let shift = (offset - zone).rem_euclid(step);
-                (
-                    json!({"histogram": {"field": field, "interval": step, "offset": shift}}),
-                    true,
-                )
+                (json!({"histogram": {"field": field, "interval": step, "offset": shift}}), true)
             }
             other => {
                 return Err(err(
@@ -132,10 +134,7 @@ pub(crate) fn run_composite_agg(
                 .iter()
                 .filter_map(|n| store.get(n))
                 .any(|st| st.read().mapping.type_of(&field) == Some("ip")),
-            missing_bucket: source
-                .get("missing_bucket")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            missing_bucket: source.get("missing_bucket").and_then(|v| v.as_bool()).unwrap_or(false),
             missing_last: source.get("missing_order").and_then(|v| v.as_str()) != Some("first"),
             field: field.clone(),
         });
@@ -156,10 +155,11 @@ pub(crate) fn run_composite_agg(
     let mut flat: Vec<Value> = Vec::new();
     if let Some(at) = sources.iter().position(|s| s.date) {
         let source = &sources[at];
-        let field =
-            source.node.pointer("/histogram/field").and_then(|f| f.as_str()).unwrap_or("");
-        let step = source.node.pointer("/histogram/interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
-        let shift = source.node.pointer("/histogram/offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let field = source.node.pointer("/histogram/field").and_then(|f| f.as_str()).unwrap_or("");
+        let step =
+            source.node.pointer("/histogram/interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let shift =
+            source.node.pointer("/histogram/offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
         let probe = json!({
             "__min": {"min": {"field": field}},
@@ -188,11 +188,7 @@ pub(crate) fn run_composite_agg(
             .get("sources")
             .and_then(|v| v.as_array())
             .map(|a| {
-                a.iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != at)
-                    .map(|(_, v)| v.clone())
-                    .collect()
+                a.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, v)| v.clone()).collect()
             })
             .unwrap_or_default();
         let mut cursor = first;
@@ -268,8 +264,7 @@ pub(crate) fn run_composite_agg(
         for source in sources.iter().filter(|s| s.missing_bucket) {
             let absent = json!({"bool": {"must_not": [{"exists": {"field": source.field}}]}});
             let narrowed = combine(main_query, Some(absent));
-            let (count, sub) =
-                count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+            let (count, sub) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
             if count == 0 {
                 continue;
             }
@@ -335,9 +330,7 @@ pub(crate) fn run_composite_agg(
             else {
                 continue;
             };
-            if let Some(text) =
-                crate::store::format_millis_at(ms, pattern, source.zone_ms)
-            {
+            if let Some(text) = crate::store::format_millis_at(ms, pattern, source.zone_ms) {
                 b["key"][source.name.clone()] = json!(text);
             }
         }
@@ -370,9 +363,7 @@ pub(crate) fn flatten_composite(
         }
         let mut raw = b.get("key").cloned().unwrap_or(Value::Null);
         if sources[depth].ip {
-            if let Some(text) =
-                raw.as_str().and_then(crate::store::ip_from_canonical)
-            {
+            if let Some(text) = raw.as_str().and_then(crate::store::ip_from_canonical) {
                 raw = json!(text);
             }
         }
@@ -395,7 +386,9 @@ pub(crate) fn flatten_composite(
                 for (k, v) in o {
                     // the key belongs to the composite, written its own way,
                     // and the bucketing agg's spelling of it is not wanted
-                    if k != "key" && k != "key_as_string" && k != "doc_count"
+                    if k != "key"
+                        && k != "key_as_string"
+                        && k != "doc_count"
                         && !k.starts_with("__c")
                     {
                         bucket[k] = v.clone();

@@ -10,9 +10,9 @@
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use boostcore::schema::document::Value as _;
 use boostcore::TantivyDocument;
-use serde_json::{json, Value};
+use boostcore::schema::document::Value as _;
+use serde_json::{Value, json};
 
 use crate::store::{IdxState, Store};
 
@@ -42,10 +42,8 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
     if repo.get("type").and_then(|t| t.as_str()) != Some("fs") {
         return None;
     }
-    let named = repo
-        .pointer("/settings/location")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())?;
+    let named =
+        repo.pointer("/settings/location").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
     let path = PathBuf::from(named);
     if path.is_absolute() {
         return Some(path);
@@ -63,7 +61,13 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
 }
 
 /// Everything an index needs to come back: what it was, and what was in it.
-pub fn write(store: &Store, dir: &Path, name: &str, indices: &[String], record: &Value) -> std::io::Result<()> {
+pub fn write(
+    store: &Store,
+    dir: &Path,
+    name: &str,
+    indices: &[String],
+    record: &Value,
+) -> std::io::Result<()> {
     let root = dir.join(name);
     std::fs::create_dir_all(&root)?;
     for index in indices {
@@ -171,15 +175,8 @@ pub fn restore_index(
         if let Some(r) = record.get("_routing").and_then(|v| v.as_str()) {
             g.routing.insert(id.to_string(), r.to_string());
         }
-        if crate::api::write_doc_versioned(
-            &mut g,
-            id,
-            source,
-            "index",
-            Some(raw.to_string()),
-            None,
-        )
-        .is_ok()
+        if crate::api::write_doc_versioned(&mut g, id, source, "index", Some(raw.to_string()), None)
+            .is_ok()
         {
             count += 1;
         }

@@ -109,11 +109,8 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
     let docs = searcher.num_docs();
     // only a field whose ordinals were actually read counts as fielddata
     let loaded = st.loaded_fielddata.read().clone();
-    let cols: std::collections::HashMap<String, u64> = st
-        .field_column_bytes()
-        .into_iter()
-        .filter(|(k, _)| loaded.contains(k))
-        .collect();
+    let cols: std::collections::HashMap<String, u64> =
+        st.field_column_bytes().into_iter().filter(|(k, _)| loaded.contains(k)).collect();
     let fielddata_total: u64 = cols.values().sum();
     // a per-field breakdown is reported only where the request asked for one,
     // and a field appears under the statistic its type can carry: fielddata
@@ -135,7 +132,7 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
         .filter(|(_, t)| t.as_str() == Some("completion"))
         .map(|(k, _)| k.clone())
         .collect();
-    let completion_total: u64 = completion_names.len() as u64 * 64 * docs.max(1) as u64;
+    let completion_total: u64 = completion_names.len() as u64 * 64 * docs.max(1);
     let completion_fields: Value = match stats_field_patterns(p, "completion_fields") {
         None => Value::Null,
         Some(pats) => Value::Object(
@@ -165,17 +162,18 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
         .filter(|(k, _)| match want_groups {
             None => false,
             // the request may name groups outright, or by pattern
-            Some(w) => w.iter().any(|g| {
-                g == "_all" || g == *k || crate::store::glob_match(g, k)
-            }),
+            Some(w) => w.iter().any(|g| g == "_all" || g == *k || crate::store::glob_match(g, k)),
         })
         .map(|(k, v)| {
-            (k.clone(), json!({
-                "query_total": v, "query_time_in_millis": 1, "query_current": 0,
-                "fetch_total": v, "fetch_time_in_millis": 1, "fetch_current": 0,
-                "scroll_total": 0, "scroll_time_in_millis": 0, "scroll_current": 0,
-                "suggest_total": 0, "suggest_time_in_millis": 0, "suggest_current": 0
-            }))
+            (
+                k.clone(),
+                json!({
+                    "query_total": v, "query_time_in_millis": 1, "query_current": 0,
+                    "fetch_total": v, "fetch_time_in_millis": 1, "fetch_current": 0,
+                    "scroll_total": 0, "scroll_time_in_millis": 0, "scroll_current": 0,
+                    "suggest_total": 0, "suggest_time_in_millis": 0, "suggest_current": 0
+                }),
+            )
         })
         .collect();
     let groups_field = match want_groups {
@@ -299,24 +297,20 @@ pub(crate) fn stats_filtered(
         .collect();
     for w in &wanted {
         if !STATS_METRICS.contains(&w.as_str()) {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                {
-                    // a near miss is usually a typo, so the closest known
-                    // metric is offered rather than only the complaint
-                    let close = STATS_METRICS.iter().find(|m| one_edit_apart(m, w));
-                    match close {
-                        Some(m) => format!(
-                            "request [/_stats/{metric}] contains unrecognized metric: \
+            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", {
+                // a near miss is usually a typo, so the closest known
+                // metric is offered rather than only the complaint
+                let close = STATS_METRICS.iter().find(|m| one_edit_apart(m, w));
+                match close {
+                    Some(m) => format!(
+                        "request [/_stats/{metric}] contains unrecognized metric: \
                              [{w}] -> did you mean [{m}]?"
-                        ),
-                        None => format!(
-                            "request [/_stats/{metric}] contains unrecognized metric: [{w}]"
-                        ),
+                    ),
+                    None => {
+                        format!("request [/_stats/{metric}] contains unrecognized metric: [{w}]")
                     }
-                },
-            );
+                }
+            });
         }
     }
     if wanted.iter().any(|w| w == "_all") {
@@ -372,7 +366,11 @@ pub(crate) fn stats_impl(store: Store, expr: String, p: Params) -> Response {
     }
 }
 
-pub(crate) fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Value, Response> {
+pub(crate) fn stats_value(
+    store: &Store,
+    expr: &str,
+    p: &Params,
+) -> std::result::Result<Value, Response> {
     let targets = store.resolve(expr);
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(p) {
         return Err(no_such_index(expr));
@@ -385,7 +383,7 @@ pub(crate) fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result:
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read(), want_groups.as_deref(), &p);
+        let s = index_stats(&st.read(), want_groups.as_deref(), p);
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",
@@ -406,7 +404,7 @@ pub(crate) fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result:
         }
         indices.insert(n.clone(), entry);
     }
-    let total_shards = shard_total(&store, &targets);
+    let total_shards = shard_total(store, &targets);
     let mut body = json!({
         "_shards": {"total": total_shards, "successful": total_shards, "failed": 0},
         "_all": {"primaries": all.clone(), "total": all},

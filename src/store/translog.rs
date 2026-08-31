@@ -6,15 +6,19 @@ impl IdxState {
     /// Open the translog for an index that lives on disk.
     pub(crate) fn open_translog(&mut self) {
         let Some(dir) = self.path.clone() else { return };
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(TRANSLOG));
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(TRANSLOG));
         self.translog = file.ok().map(std::io::BufWriter::new);
     }
 
     /// Record a write, so a crash can find it again.
-    pub fn log_write(&mut self, id: &str, routing: Option<&str>, version: u64, seq: u64, source: Option<&str>) {
+    pub fn log_write(
+        &mut self,
+        id: &str,
+        routing: Option<&str>,
+        version: u64,
+        seq: u64,
+        source: Option<&str>,
+    ) {
         use std::io::Write;
         let Some(log) = self.translog.as_mut() else { return };
         let record = serde_json::json!({
@@ -145,12 +149,8 @@ impl IdxState {
         self.realtime.reload()?;
         // what this shard held is in the index now, so the copy kept for a
         // realtime read is no longer the only place it lives
-        let mine: Vec<String> = self
-            .pending
-            .keys()
-            .filter(|id| self.shard_of_doc(id) == shard)
-            .cloned()
-            .collect();
+        let mine: Vec<String> =
+            self.pending.keys().filter(|id| self.shard_of_doc(id) == shard).cloned().collect();
         for id in mine {
             self.pending.remove(&id);
             self.pending_seq.remove(&id);

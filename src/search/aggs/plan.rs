@@ -1,8 +1,8 @@
 //! Who answers which aggregation, and what has to happen to the request
 //! before BoostCore is given it.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
 /// Reject a numeric metric over a string field the way OpenSearch does.
 pub(crate) fn check_agg_types(node: &Value, ctx: &Ctx) -> std::result::Result<(), Response> {
@@ -11,7 +11,11 @@ pub(crate) fn check_agg_types(node: &Value, ctx: &Ctx) -> std::result::Result<()
 
 /// Numeric parameter bounds OpenSearch enforces; `owner` is the aggregation
 /// name the message has to quote.
-pub(crate) fn check_agg_params(name: &str, def: &Value, owner: &str) -> std::result::Result<(), Response> {
+pub(crate) fn check_agg_params(
+    name: &str,
+    def: &Value,
+    owner: &str,
+) -> std::result::Result<(), Response> {
     let bad = |param: &str, got: f64, bound: &str| {
         err(
             StatusCode::BAD_REQUEST,
@@ -107,7 +111,11 @@ pub(crate) fn check_agg_bounds(node: &Value, owner: &str) -> std::result::Result
     Ok(())
 }
 
-pub(crate) fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(), Response> {
+pub(crate) fn check_agg_node(
+    node: &Value,
+    ctx: &Ctx,
+    owner: &str,
+) -> std::result::Result<(), Response> {
     let Some(o) = node.as_object() else { return Ok(()) };
     for (name, def) in o {
         check_agg_params(name, def, owner)?;
@@ -116,11 +124,8 @@ pub(crate) fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::resul
         if let Some(field) = def.get("field").and_then(|f| f.as_str()) {
             let mut walked = String::new();
             for part in field.split('.') {
-                walked = if walked.is_empty() {
-                    part.to_string()
-                } else {
-                    format!("{walked}.{part}")
-                };
+                walked =
+                    if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
                 if ctx.mapping.type_of(&walked) == Some("flat_object") && walked != field {
                     return Err(err(
                         StatusCode::BAD_REQUEST,
@@ -137,9 +142,21 @@ pub(crate) fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::resul
         // aggregations and inside multi_terms; only an object made entirely of
         // terms-aggregation options is one of those
         const TERMS_AGG_OPTIONS: &[&str] = &[
-            "field", "script", "size", "shard_size", "order", "include", "exclude",
-            "min_doc_count", "shard_min_doc_count", "missing", "execution_hint",
-            "collect_mode", "value_type", "format", "show_term_doc_count_error",
+            "field",
+            "script",
+            "size",
+            "shard_size",
+            "order",
+            "include",
+            "exclude",
+            "min_doc_count",
+            "shard_min_doc_count",
+            "missing",
+            "execution_hint",
+            "collect_mode",
+            "value_type",
+            "format",
+            "show_term_doc_count_error",
         ];
         if name == "terms" && def.get("field").is_none() && def.get("script").is_none() {
             let all_options = def
@@ -300,13 +317,10 @@ pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
                 for (_, sdef) in subo.iter_mut() {
                     if let Some(f) = sdef.get("filter").cloned() {
                         if !f.is_string() {
-                            match as_boostcore_query_string(&f, ctx) {
-                                Some(qs) => {
-                                    if let Some(o) = sdef.as_object_mut() {
-                                        o.insert("filter".into(), json!(qs));
-                                    }
+                            if let Some(qs) = as_boostcore_query_string(&f, ctx) {
+                                if let Some(o) = sdef.as_object_mut() {
+                                    o.insert("filter".into(), json!(qs));
                                 }
-                                None => {}
                             }
                         }
                     }
@@ -329,10 +343,8 @@ pub(crate) fn extract_partitions(node: &mut Value) -> Vec<(String, i64, i64, usi
             continue;
         };
         let part = terms.get("include").and_then(|i| i.get("partition")).and_then(|v| v.as_i64());
-        let num = terms
-            .get("include")
-            .and_then(|i| i.get("num_partitions"))
-            .and_then(|v| v.as_i64());
+        let num =
+            terms.get("include").and_then(|i| i.get("num_partitions")).and_then(|v| v.as_i64());
         let (Some(part), Some(num)) = (part, num) else { continue };
         let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
         terms.remove("include");
@@ -399,8 +411,8 @@ pub(crate) fn substitute_unusable_missing(body: &mut Value, ctx: &Ctx) {
         return;
     }
     let Some(field) = o.get("field").and_then(|f| f.as_str()) else { return };
-    let unobserved = ctx.kinds_complete
-        && ctx.observed_kinds.get(field).map(|k| *k == 0).unwrap_or(true);
+    let unobserved =
+        ctx.kinds_complete && ctx.observed_kinds.get(field).map(|k| *k == 0).unwrap_or(true);
     if unobserved {
         o.insert("missing".into(), json!(0));
     }
@@ -431,19 +443,16 @@ pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // Strings must stay on `_raw`, whose values are untokenised.
                 let numeric_only = std::env::var("BOOSTSEARCH_NO_NUMERIC_DYN_AGG").is_err()
                     && ctx
-                    .observed_kinds
-                    .get(base)
-                    .map(|k| {
-                        *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0
-                    })
-                    .unwrap_or(false);
-                let analyzed = matches!(ctx.view(f, false), View::Dyn)
-                    && ctx.mapping.type_of(f).is_some();
-                let prefix = if analyzed || numeric_only {
-                    crate::store::DYN
-                } else {
-                    crate::store::RAW
-                };
+                        .observed_kinds
+                        .get(base)
+                        .map(|k| {
+                            *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0
+                        })
+                        .unwrap_or(false);
+                let analyzed =
+                    matches!(ctx.view(f, false), View::Dyn) && ctx.mapping.type_of(f).is_some();
+                let prefix =
+                    if analyzed || numeric_only { crate::store::DYN } else { crate::store::RAW };
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }
@@ -511,8 +520,7 @@ pub(crate) fn recompute_extended_stats(v: &mut Value) {
                 if count > 0.0 {
                     let centred = sq - ((sum * sum) / count);
                     let var = centred / count;
-                    let var_samp =
-                        if count > 1.0 { centred / (count - 1.0) } else { f64::NAN };
+                    let var_samp = if count > 1.0 { centred / (count - 1.0) } else { f64::NAN };
                     let sd = var.sqrt();
                     let sd_samp = var_samp.sqrt();
                     let sigma = o
@@ -612,7 +620,8 @@ pub(crate) fn apply_doc_counts(node: &mut Value) {
                 // before it was applied
                 if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
                     buckets.sort_by(|a, b| {
-                        let get = |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let get =
+                            |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
                         get(b).cmp(&get(a))
                     });
                 }
@@ -651,10 +660,7 @@ pub(crate) fn count_without_walking(query_json: &Option<Value>) -> bool {
             .values()
             .next()
             .and_then(|v| v.as_object())
-            .map(|o| {
-                o.len() == 1
-                    && o.values().next().map(|v| !v.is_object()).unwrap_or(false)
-            })
+            .map(|o| o.len() == 1 && o.values().next().map(|v| !v.is_object()).unwrap_or(false))
             .unwrap_or(false),
         _ => false,
     }
@@ -726,6 +732,13 @@ pub(crate) fn check_max_buckets(
     Ok(())
 }
 
+/// Turn what the shards collected into the answer a client reads.
+///
+/// The shards hand back intermediate results; combining them is BoostCore's
+/// job, and everything after that is this engine's: the shapes OpenSearch
+/// writes a bucket key in, the orders and partitions taken off the request
+/// before it was parsed, and the `meta` a caller attached.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn finalise_aggs(
     store: &Store,
     targets: &[String],
@@ -750,7 +763,12 @@ pub(crate) fn finalise_aggs(
                         .iter()
                         .filter_map(|n| store.get(n))
                         .flat_map(|st| {
-                            st.read().mapping.types.iter().map(|(k, t)| (k.clone(), t.clone())).collect::<Vec<_>>()
+                            st.read()
+                                .mapping
+                                .types
+                                .iter()
+                                .map(|(k, t)| (k.clone(), t.clone()))
+                                .collect::<Vec<_>>()
                         })
                         .collect();
                     date_histogram_keys(&mut v, req, &types);
@@ -775,9 +793,9 @@ pub(crate) fn finalise_aggs(
                 if weighted {
                     apply_doc_counts(&mut v);
                 }
-                apply_bucket_orders(&mut v, &bucket_orders);
-                apply_partitions(&mut v, &partitions);
-                reattach_meta(&mut v, &agg_meta);
+                apply_bucket_orders(&mut v, bucket_orders);
+                apply_partitions(&mut v, partitions);
+                reattach_meta(&mut v, agg_meta);
                 v
             }),
             Err(e) => {
@@ -834,10 +852,7 @@ pub(crate) fn plan_aggs(
         check_agg_bounds(a, "")?;
     }
     // buckets have to be weighted only where a document stands for several
-    let weighted = targets
-        .iter()
-        .filter_map(|n| store.get(n))
-        .any(|st| st.read().has_doc_count);
+    let weighted = targets.iter().filter_map(|n| store.get(n)).any(|st| st.read().has_doc_count);
     if weighted {
         if let Some(a) = agg_json.as_mut() {
             inject_doc_count_helpers(a);
@@ -872,9 +887,11 @@ pub(crate) fn plan_aggs(
     if let Some((_, name, def)) = bucket_pipelines.iter().find(|(at, _, _)| at.is_empty()) {
         let kind = def
             .as_object()
-            .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| {
-                BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort"
-            }))
+            .and_then(|o| {
+                o.keys()
+                    .map(|k| k.to_string())
+                    .find(|k| BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort")
+            })
             .unwrap_or_default();
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -934,7 +951,7 @@ pub(crate) fn plan_aggs(
                         .get("histogram")
                         .and_then(|h| h.get("field"))
                         .and_then(|f| f.as_str())
-                        .map(|f| range_field(store, &targets, f))
+                        .map(|f| range_field(store, targets, f))
                         .unwrap_or(false)
                     // a field no document has, standing in for every document
                     || def
@@ -943,7 +960,7 @@ pub(crate) fn plan_aggs(
                         .and_then(|f| f.as_str())
                         .map(|f| {
                             def.pointer("/terms/missing").is_some()
-                                && unmapped_field(store, &targets, f)
+                                && unmapped_field(store, targets, f)
                         })
                         .unwrap_or(false)
             })
@@ -1009,11 +1026,28 @@ pub(crate) fn peelable(def: &Value) -> bool {
 /// a bucket at a time here instead?
 pub(crate) fn peelable_here(def: &Value) -> bool {
     const OWN: &[&str] = &[
-        "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
-        "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
-        "adjacency_matrix", "rare_terms", "multi_terms", "composite",
-        "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
-        "geo_distance", "percentile_ranks", "sampler", "diversified_sampler",
+        "missing",
+        "median_absolute_deviation",
+        "filter",
+        "global",
+        "weighted_avg",
+        "variable_width_histogram",
+        "auto_date_histogram",
+        "date_range",
+        "ip_range",
+        "adjacency_matrix",
+        "rare_terms",
+        "multi_terms",
+        "composite",
+        "significant_terms",
+        "significant_text",
+        "top_hits",
+        "nested",
+        "reverse_nested",
+        "geo_distance",
+        "percentile_ranks",
+        "sampler",
+        "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(walked_here).unwrap_or(false)
@@ -1107,8 +1141,7 @@ pub(crate) fn count_with_sub_aggs(
     let Some(subs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
         return filtered_count(store, targets, query_json, sub_aggs);
     };
-    let (mine, theirs): (Vec<_>, Vec<_>) =
-        subs.iter().partition(|(_, d)| peelable(d));
+    let (mine, theirs): (Vec<_>, Vec<_>) = subs.iter().partition(|(_, d)| peelable(d));
     if mine.is_empty() {
         return filtered_count(store, targets, query_json, sub_aggs);
     }
@@ -1152,19 +1185,17 @@ pub(crate) fn filtered_count(
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let searcher = g.reader.searcher();
-        total += searcher
-            .search(&q, &Count)
-            .map_err(|e| err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()))?
-            as u64;
+        total += searcher.search(&q, &Count).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })? as u64;
 
         if let Some(sa) = sub_aggs {
             let mut rewritten = sa.clone();
             let mut ignored = Vec::new();
             normalize_aggs(&mut rewritten, &mut ignored, false);
             rewrite_agg_fields(&mut rewritten, &ctx);
-            let parsed: Aggregations = serde_json::from_value(rewritten).map_err(|e| {
-                err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string())
-            })?;
+            let parsed: Aggregations = serde_json::from_value(rewritten)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let res = searcher
                 .search(&q, &DistributedAggregationCollector::from_aggs(parsed.clone(), ctxp))
@@ -1181,7 +1212,10 @@ pub(crate) fn filtered_count(
         }
     }
     let sub = match (acc, req) {
-        (Some(a), Some(r)) => a.into_final_result(r, Default::default()).ok().and_then(|v| serde_json::to_value(v).ok()),
+        (Some(a), Some(r)) => a
+            .into_final_result(r, Default::default())
+            .ok()
+            .and_then(|v| serde_json::to_value(v).ok()),
         _ => None,
     };
     Ok((total, sub))

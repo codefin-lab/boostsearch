@@ -122,13 +122,15 @@ pub async fn cleanup_repository(
     respond(&p, json!({"results": {"deleted_bytes": 0, "deleted_blobs": 0}}))
 }
 
-pub(crate) fn snapshot_record(store: &Store, name: &str, indices: Vec<String>, global: bool) -> Value {
+pub(crate) fn snapshot_record(
+    store: &Store,
+    name: &str,
+    indices: Vec<String>,
+    global: bool,
+) -> Value {
     let now = IdxState::now_iso();
-    let shards: u64 = indices
-        .iter()
-        .filter_map(|n| store.get(n))
-        .map(|st| st.read().shard_count())
-        .sum();
+    let shards: u64 =
+        indices.iter().filter_map(|n| store.get(n)).map(|st| st.read().shard_count()).sum();
     json!({
         "snapshot": name,
         "uuid": crate::store::index_uuid(name),
@@ -198,8 +200,10 @@ pub async fn create_snapshot(
     // without keeps the bookkeeping and nothing else, and says so.
     match store.repositories().get(&repo).and_then(crate::snapshot::location) {
         Some(dir) => {
-            let kept: Vec<String> =
-                record["indices"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+            let kept: Vec<String> = record["indices"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
             if let Err(e) = crate::snapshot::write(&store, &dir, &name, &kept, &record) {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,7 +229,11 @@ pub async fn create_snapshot(
 
 /// The snapshots a name or pattern reaches, and whether anything named
 /// outright was missing.
-pub(crate) fn pick_snapshots(store: &Store, repo: &str, want: &str) -> (Vec<Value>, Option<String>) {
+pub(crate) fn pick_snapshots(
+    store: &Store,
+    repo: &str,
+    want: &str,
+) -> (Vec<Value>, Option<String>) {
     let held = store.snapshots(repo);
     let mut out = Vec::new();
     let mut missing = None;
@@ -435,9 +443,10 @@ pub async fn restore_snapshot(
     // an index comes back from a snapshot open, and says so when asked how it
     // was recovered
     let mut restored = Vec::new();
-    for n in held_indices.iter().filter(|n| {
-        wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n))
-    }) {
+    for n in held_indices
+        .iter()
+        .filter(|n| wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n)))
+    {
         let target = rename(n);
         if let Some(st) = store.get(&target) {
             // still here: a restore over it says it is back, as it does today
@@ -463,9 +472,12 @@ pub async fn restore_snapshot(
         }
     }
     let shards = restored.len().max(1);
-    respond(&p, json!({"snapshot": {
-        "snapshot": name,
-        "indices": restored,
-        "shards": {"total": shards, "failed": 0, "successful": shards},
-    }}))
+    respond(
+        &p,
+        json!({"snapshot": {
+            "snapshot": name,
+            "indices": restored,
+            "shards": {"total": shards, "failed": 0, "successful": shards},
+        }}),
+    )
 }

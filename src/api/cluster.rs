@@ -8,90 +8,94 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
     let mut docs = 0u64;
     for n in &names {
         if let Some(st) = store.get(n) {
-            docs += st.read().reader.searcher().num_docs() as u64;
+            docs += st.read().reader.searcher().num_docs();
         }
     }
-    let replicated = names.iter().filter_map(|n| store.get(n)).any(|st| {
-        st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0
-    });
-    respond(&p, json!({
-        "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "boostsearch",
-        "cluster_uuid": "_na_",
-        "timestamp": 1_577_836_800_000u64,
-        "status": if replicated { "yellow" } else { "green" },
-        "indices": {
-            "count": names.len(),
-            "shards": {
-                "total": names.len(), "primaries": names.len(),
-                "replication": 0.0,
-                "index": {
-                    "shards": {"min": 1, "max": 1, "avg": 1.0},
-                    "primaries": {"min": 1, "max": 1, "avg": 1.0},
-                    "replication": {"min": 0.0, "max": 0.0, "avg": 0.0},
+    let replicated = names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
+    respond(
+        &p,
+        json!({
+            "_nodes": {"total": 1, "successful": 1, "failed": 0},
+            "cluster_name": "boostsearch",
+            "cluster_uuid": "_na_",
+            "timestamp": 1_577_836_800_000u64,
+            "status": if replicated { "yellow" } else { "green" },
+            "indices": {
+                "count": names.len(),
+                "shards": {
+                    "total": names.len(), "primaries": names.len(),
+                    "replication": 0.0,
+                    "index": {
+                        "shards": {"min": 1, "max": 1, "avg": 1.0},
+                        "primaries": {"min": 1, "max": 1, "avg": 1.0},
+                        "replication": {"min": 0.0, "max": 0.0, "avg": 0.0},
+                    },
                 },
-            },
-            "docs": {"count": docs, "deleted": 0},
-            "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
-            "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
-            "query_cache": {
-                "memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
-                "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0,
-            },
-            "completion": {"size_in_bytes": 0},
-            "segments": {
-                "count": 0, "memory_in_bytes": 0, "terms_memory_in_bytes": 0,
-                "stored_fields_memory_in_bytes": 0, "term_vectors_memory_in_bytes": 0,
-                "norms_memory_in_bytes": 0, "points_memory_in_bytes": 0,
-                "doc_values_memory_in_bytes": 0, "index_writer_memory_in_bytes": 0,
-                "version_map_memory_in_bytes": 0, "fixed_bit_set_memory_in_bytes": 0,
-                "max_unsafe_auto_id_timestamp": -1, "file_sizes": {},
-            },
-            "mappings": {"field_types": []},
-            "analysis": {"char_filter_types": [], "tokenizer_types": [],
-                         "filter_types": [], "analyzer_types": [],
-                         "built_in_char_filters": [], "built_in_tokenizers": [],
-                         "built_in_filters": [], "built_in_analyzers": []},
-        },
-        "nodes": {
-            "count": {"total": 1, "cluster_manager": 1, "coordinating_only": 0,
-                      "data": 1, "ingest": 1, "master": 1, "remote_cluster_client": 1,
-                      "search": 0, "warm": 0},
-            "versions": ["3.0.0"],
-            "os": {
-                "available_processors": 1, "allocated_processors": 1,
-                "names": [], "pretty_names": [], "roles": [],
-                "mem": {
-                    "total_in_bytes": 1_073_741_824u64,
-                    "free_in_bytes": 536_870_912u64,
-                    "used_in_bytes": 536_870_912u64,
-                    "free_percent": 50, "used_percent": 50,
+                "docs": {"count": docs, "deleted": 0},
+                "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+                "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
+                "query_cache": {
+                    "memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
+                    "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0,
                 },
+                "completion": {"size_in_bytes": 0},
+                "segments": {
+                    "count": 0, "memory_in_bytes": 0, "terms_memory_in_bytes": 0,
+                    "stored_fields_memory_in_bytes": 0, "term_vectors_memory_in_bytes": 0,
+                    "norms_memory_in_bytes": 0, "points_memory_in_bytes": 0,
+                    "doc_values_memory_in_bytes": 0, "index_writer_memory_in_bytes": 0,
+                    "version_map_memory_in_bytes": 0, "fixed_bit_set_memory_in_bytes": 0,
+                    "max_unsafe_auto_id_timestamp": -1, "file_sizes": {},
+                },
+                "mappings": {"field_types": []},
+                "analysis": {"char_filter_types": [], "tokenizer_types": [],
+                             "filter_types": [], "analyzer_types": [],
+                             "built_in_char_filters": [], "built_in_tokenizers": [],
+                             "built_in_filters": [], "built_in_analyzers": []},
             },
-            "process": {
-                "cpu": {"percent": 0},
-                "open_file_descriptors": {"min": 0, "max": 0, "avg": 0},
+            "nodes": {
+                "count": {"total": 1, "cluster_manager": 1, "coordinating_only": 0,
+                          "data": 1, "ingest": 1, "master": 1, "remote_cluster_client": 1,
+                          "search": 0, "warm": 0},
+                "versions": ["3.0.0"],
+                "os": {
+                    "available_processors": 1, "allocated_processors": 1,
+                    "names": [], "pretty_names": [], "roles": [],
+                    "mem": {
+                        "total_in_bytes": 1_073_741_824u64,
+                        "free_in_bytes": 536_870_912u64,
+                        "used_in_bytes": 536_870_912u64,
+                        "free_percent": 50, "used_percent": 50,
+                    },
+                },
+                "process": {
+                    "cpu": {"percent": 0},
+                    "open_file_descriptors": {"min": 0, "max": 0, "avg": 0},
+                },
+                "jvm": {
+                    "max_uptime_in_millis": 0, "versions": [],
+                    "mem": {"heap_used_in_bytes": 0, "heap_max_in_bytes": 0},
+                    "threads": 1,
+                },
+                "fs": {
+                    "total_in_bytes": 2_147_483_648u64,
+                    "free_in_bytes": 1_073_741_824u64,
+                    "available_in_bytes": 1_073_741_824u64,
+                },
+                "plugins": [],
+                "network_types": {
+                    "transport_types": {"transport": 1},
+                    "http_types": {"http": 1},
+                },
+                "discovery_types": {"single-node": 1},
+                "packaging_types": [],
+                "ingest": {"number_of_pipelines": 0, "processor_stats": {}},
             },
-            "jvm": {
-                "max_uptime_in_millis": 0, "versions": [],
-                "mem": {"heap_used_in_bytes": 0, "heap_max_in_bytes": 0},
-                "threads": 1,
-            },
-            "fs": {
-                "total_in_bytes": 2_147_483_648u64,
-                "free_in_bytes": 1_073_741_824u64,
-                "available_in_bytes": 1_073_741_824u64,
-            },
-            "plugins": [],
-            "network_types": {
-                "transport_types": {"transport": 1},
-                "http_types": {"http": 1},
-            },
-            "discovery_types": {"single-node": 1},
-            "packaging_types": [],
-            "ingest": {"number_of_pipelines": 0, "processor_stats": {}},
-        },
-    }))
+        }),
+    )
 }
 
 /// `_remote/info` -- the clusters this one is connected to, of which there
@@ -121,12 +125,15 @@ pub async fn reroute(
         for n in store.names() {
             let Some(st) = store.get(&n) else { continue };
             let g = st.read();
-            indices.insert(g.name.clone(), json!({
-                "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
-                "mappings": g.mapping.raw,
-                "settings": g.effective_settings(),
-                "state": if g.closed { "close" } else { "open" },
-            }));
+            indices.insert(
+                g.name.clone(),
+                json!({
+                    "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
+                    "mappings": g.mapping.raw,
+                    "settings": g.effective_settings(),
+                    "state": if g.closed { "close" } else { "open" },
+                }),
+            );
         }
         let mut state = json!({
             "cluster_name": "boostsearch", "cluster_uuid": "_na_",
@@ -200,9 +207,10 @@ pub async fn cluster_health(
 
     // one node can hold one copy of a shard, so an index asking for replicas
     // has some it will never get, and the cluster is yellow while it is in view
-    let unassignable = names.iter().filter_map(|n| store.get(n)).any(|st| {
-        st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0
-    });
+    let unassignable = names
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
     let status = if unassignable { "yellow" } else { "green" };
 
     // a wait this engine cannot satisfy is answered as a timeout rather than
@@ -227,9 +235,8 @@ pub async fn cluster_health(
             .unwrap_or(true);
 
     // a shard is a shard whether or not the index it belongs to is open
-    let shards_of = |name: &str| {
-        store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1)
-    };
+    let shards_of =
+        |name: &str| store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1);
     let n: usize = names.iter().map(|name| shards_of(name)).sum();
     let mut out = json!({
         "cluster_name": "boostsearch", "status": status, "timed_out": !satisfied,
@@ -261,12 +268,15 @@ pub async fn cluster_health(
             if level == "shards" {
                 let mut per = serde_json::Map::new();
                 for shard in 0..shards {
-                    per.insert(shard.to_string(), json!({
-                        "status": if short { "yellow" } else { "green" },
-                        "primary_active": true, "active_shards": 1,
-                        "relocating_shards": 0, "initializing_shards": 0,
-                        "unassigned_shards": replicas,
-                    }));
+                    per.insert(
+                        shard.to_string(),
+                        json!({
+                            "status": if short { "yellow" } else { "green" },
+                            "primary_active": true, "active_shards": 1,
+                            "relocating_shards": 0, "initializing_shards": 0,
+                            "unassigned_shards": replicas,
+                        }),
+                    );
                 }
                 entry["shards"] = Value::Object(per);
             }
@@ -384,15 +394,11 @@ pub async fn post_voting_config_exclusions(
     Query(p): Query<Params>,
 ) -> Response {
     let ids = p.get("node_ids").filter(|v| !v.is_empty());
-    let names = p
-        .get("node_names")
-        .or_else(|| p.get("node_name"))
-        .filter(|v| !v.is_empty());
+    let names = p.get("node_names").or_else(|| p.get("node_name")).filter(|v| !v.is_empty());
     let entries: Vec<Value> = match (ids, names) {
-        (Some(ids), None) => ids
-            .split(',')
-            .map(|n| json!({"node_id": n.trim(), "node_name": "_absent_"}))
-            .collect(),
+        (Some(ids), None) => {
+            ids.split(',').map(|n| json!({"node_id": n.trim(), "node_name": "_absent_"})).collect()
+        }
         (None, Some(names)) => names
             .split(',')
             .map(|n| json!({"node_id": "_absent_", "node_name": n.trim()}))
@@ -487,13 +493,16 @@ pub(crate) fn cluster_state_inner(
         while routing_shards * 2 <= 1024 {
             routing_shards *= 2;
         }
-        indices.insert(g.name.clone(), json!({
-            "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
-            "mappings": g.mapping.raw,
-            "settings": g.effective_settings(),
-            "state": if g.closed { "close" } else { "open" },
-            "routing_num_shards": routing_shards,
-        }));
+        indices.insert(
+            g.name.clone(),
+            json!({
+                "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
+                "mappings": g.mapping.raw,
+                "settings": g.effective_settings(),
+                "state": if g.closed { "close" } else { "open" },
+                "routing_num_shards": routing_shards,
+            }),
+        );
     }
 
     let mut out = serde_json::Map::new();
@@ -512,19 +521,25 @@ pub(crate) fn cluster_state_inner(
         out.insert("cluster_manager_node".into(), json!("node-0"));
     }
     if want("nodes") {
-        out.insert("nodes".into(), json!({"node-0": {
+        out.insert(
+            "nodes".into(),
+            json!({"node-0": {
             "name": "boostsearch", "ephemeral_id": "_na_",
-            "transport_address": "127.0.0.1:9300", "attributes": {}}}));
+            "transport_address": "127.0.0.1:9300", "attributes": {}}}),
+        );
     }
     if want("metadata") {
-        out.insert("metadata".into(), json!({
-            "cluster_uuid": "_na_",
-            "templates": store.get_templates(),
-            "indices": Value::Object(indices.clone()),
-            "cluster_coordination": {
-                "voting_config_exclusions": store.voting_exclusions(),
-            },
-        }));
+        out.insert(
+            "metadata".into(),
+            json!({
+                "cluster_uuid": "_na_",
+                "templates": store.get_templates(),
+                "indices": Value::Object(indices.clone()),
+                "cluster_coordination": {
+                    "voting_config_exclusions": store.voting_exclusions(),
+                },
+            }),
+        );
     }
     if want("blocks") {
         // an index held still, or closed, is one the cluster is blocking
@@ -534,75 +549,99 @@ pub(crate) fn cluster_state_inner(
             let g = st.read();
             let mut held = serde_json::Map::new();
             if g.closed {
-                held.insert("4".into(), json!({
-                    "description": "index closed", "retryable": false,
-                    "levels": ["read", "write"],
-                }));
+                held.insert(
+                    "4".into(),
+                    json!({
+                        "description": "index closed", "retryable": false,
+                        "levels": ["read", "write"],
+                    }),
+                );
             }
             if g.setting("blocks.write").as_deref() == Some("true") {
-                held.insert("8".into(), json!({
-                    "description": "index write (api)", "retryable": false,
-                    "levels": ["write"],
-                }));
+                held.insert(
+                    "8".into(),
+                    json!({
+                        "description": "index write (api)", "retryable": false,
+                        "levels": ["write"],
+                    }),
+                );
             }
             // a read-only index refuses writes and metadata changes both
             if g.setting("blocks.read_only").as_deref() == Some("true") {
-                held.insert("5".into(), json!({
-                    "description": "index read-only (api)", "retryable": false,
-                    "levels": ["write", "metadata_write"],
-                }));
+                held.insert(
+                    "5".into(),
+                    json!({
+                        "description": "index read-only (api)", "retryable": false,
+                        "levels": ["write", "metadata_write"],
+                    }),
+                );
             }
             if g.setting("blocks.metadata").as_deref() == Some("true") {
-                held.insert("9".into(), json!({
-                    "description": "index metadata (api)", "retryable": false,
-                    "levels": ["metadata_write", "metadata_read"],
-                }));
+                held.insert(
+                    "9".into(),
+                    json!({
+                        "description": "index metadata (api)", "retryable": false,
+                        "levels": ["metadata_write", "metadata_read"],
+                    }),
+                );
             }
             if g.setting("blocks.read").as_deref() == Some("true") {
-                held.insert("7".into(), json!({
-                    "description": "index read (api)", "retryable": false,
-                    "levels": ["read"],
-                }));
+                held.insert(
+                    "7".into(),
+                    json!({
+                        "description": "index read (api)", "retryable": false,
+                        "levels": ["read"],
+                    }),
+                );
             }
             if !held.is_empty() {
                 per_index.insert(name.clone(), Value::Object(held));
             }
         }
-        out.insert("blocks".into(), if per_index.is_empty() {
-            json!({})
-        } else {
-            json!({"indices": Value::Object(per_index)})
-        });
+        out.insert(
+            "blocks".into(),
+            if per_index.is_empty() {
+                json!({})
+            } else {
+                json!({"indices": Value::Object(per_index)})
+            },
+        );
     }
     if want("routing_table") {
         let mut tables = serde_json::Map::new();
         for name in indices.keys() {
-            tables.insert(name.clone(), json!({"shards": {"0": [{
-                "state": "STARTED", "primary": true, "node": "node-0",
-                "relocating_node": Value::Null, "shard": 0, "index": name,
-            }]}}));
+            tables.insert(
+                name.clone(),
+                json!({"shards": {"0": [{
+                    "state": "STARTED", "primary": true, "node": "node-0",
+                    "relocating_node": Value::Null, "shard": 0, "index": name,
+                }]}}),
+            );
         }
         out.insert("routing_table".into(), json!({"indices": Value::Object(tables)}));
     }
     if want("routing_nodes") {
         let shards: Vec<Value> = indices
             .keys()
-            .map(|name| json!({
-                "state": "STARTED", "primary": true, "node": "node-0",
-                "relocating_node": Value::Null, "shard": 0, "index": name,
-            }))
+            .map(|name| {
+                json!({
+                    "state": "STARTED", "primary": true, "node": "node-0",
+                    "relocating_node": Value::Null, "shard": 0, "index": name,
+                })
+            })
             .collect();
-        out.insert(
-            "routing_nodes".into(),
-            json!({"unassigned": [], "nodes": {"node-0": shards}}),
-        );
+        out.insert("routing_nodes".into(), json!({"unassigned": [], "nodes": {"node-0": shards}}));
     }
     respond(p, Value::Object(out))
 }
 
 /// Walk a settings body into dotted keys with text values, whichever way the
 /// caller wrote it.
-pub(crate) fn flatten_cluster_settings(node: &Value, prefix: &str, out: &mut serde_json::Map<String, Value>) {
+pub(crate) fn flatten_cluster_settings(
+    node: &Value,
+    prefix: &str,
+    out: &mut serde_json::Map<String, Value>,
+) {
     match node {
         Value::Object(o) => {
             for (k, v) in o {
@@ -631,10 +670,8 @@ pub(crate) fn check_cluster_setting(key: &str, value: &Value) -> Option<Response
     // a cancellation rate or ratio of zero would cancel nothing, which is not
     // a setting so much as a way of turning the feature off by halves
     if key.starts_with("search_backpressure.") && key.contains("cancellation_") {
-        let n = value
-            .as_f64()
-            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(1.0);
+        let n =
+            value.as_f64().or_else(|| value.as_str().and_then(|s| s.parse().ok())).unwrap_or(1.0);
         if n <= 0.0 {
             return Some(err(
                 StatusCode::BAD_REQUEST,
@@ -656,10 +693,7 @@ pub(crate) fn check_cluster_setting(key: &str, value: &Value) -> Option<Response
     None
 }
 
-pub async fn cluster_settings_get(
-    State(store): State<Store>,
-    Query(p): Query<Params>,
-) -> Response {
+pub async fn cluster_settings_get(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let raw = store.cluster_settings();
     let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
     let view = |scope: &str| match raw.get(scope) {
@@ -678,11 +712,14 @@ pub async fn cluster_settings_get(
             defaults = nest_settings(&defaults);
         }
     }
-    respond(&p, json!({
-        "persistent": view("persistent"),
-        "transient": view("transient"),
-        "defaults": defaults,
-    }))
+    respond(
+        &p,
+        json!({
+            "persistent": view("persistent"),
+            "transient": view("transient"),
+            "defaults": defaults,
+        }),
+    )
 }
 
 pub async fn cluster_settings_put(
@@ -717,9 +754,12 @@ pub async fn cluster_settings_put(
         Some(v) => nest_settings(v),
         None => json!({}),
     };
-    respond(&p, json!({
-        "acknowledged": true,
-        "persistent": echo("persistent"),
-        "transient": echo("transient"),
-    }))
+    respond(
+        &p,
+        json!({
+            "acknowledged": true,
+            "persistent": echo("persistent"),
+            "transient": echo("transient"),
+        }),
+    )
 }

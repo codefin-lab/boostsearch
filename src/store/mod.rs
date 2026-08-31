@@ -1,15 +1,15 @@
 //! Index registry: one BoostCore index per OpenSearch index, plus its mapping.
 
 use anyhow::{Result, anyhow};
+use boostcore::directory::MmapDirectory;
+use boostcore::schema::*;
+use boostcore::{Index, IndexReader, IndexWriter, TantivyDocument};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasherDefault;
-use std::sync::Arc;
-use boostcore::schema::*;
 use std::path::{Path as FsPath, PathBuf};
-use boostcore::directory::MmapDirectory;
-use boostcore::{Index, IndexReader, IndexWriter, TantivyDocument};
+use std::sync::Arc;
 
 mod coerce;
 pub use coerce::*;
@@ -123,7 +123,6 @@ pub fn index_uuid(name: &str) -> String {
     out
 }
 
-
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("_id", STRING | STORED | FAST);
@@ -143,11 +142,14 @@ pub fn build_schema() -> (Schema, Fields) {
     // the write path, which is not worth the semantics.
     let raw = sb.add_json_field(
         RAW,
-        JsonObjectOptions::default().set_fast(Some("raw")).set_expand_dots_enabled().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("raw")
-                .set_index_option(IndexRecordOption::Basic),
-        ),
+        JsonObjectOptions::default()
+            .set_fast(Some("raw"))
+            .set_expand_dots_enabled()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::Basic),
+            ),
     );
     // The writer spreads one bulk request across its worker threads, so a
     // document's segment and doc id do not follow the order it was sent in.
@@ -165,19 +167,7 @@ pub struct Mapping {
     pub raw: Value,
 }
 
-impl Mapping {
-
-
-
-
-
-
-
-
-
-
-
-}
+impl Mapping {}
 
 /// Record the value kinds present under each path.
 ///
@@ -204,7 +194,11 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
         leaf if !path.is_empty() => {
             let bit = match leaf {
                 Value::String(s) => {
-                    if crate::query::parse_datetime(s).is_some() { KIND_DATE } else { KIND_STR }
+                    if crate::query::parse_datetime(s).is_some() {
+                        KIND_DATE
+                    } else {
+                        KIND_STR
+                    }
                 }
                 Value::Bool(_) => KIND_BOOL,
                 Value::Number(n) => {
@@ -228,9 +222,6 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
         _ => {}
     }
 }
-
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct DocMeta {
@@ -356,49 +347,7 @@ pub struct IdxState {
     pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl IdxState {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-}
+impl IdxState {}
 
 #[derive(Clone)]
 pub struct Store {
@@ -471,10 +420,9 @@ impl Store {
                 ceiling.insert(name, st.read().seq_no);
             }
         }
-        self.pits.write().insert(
-            id.clone(),
-            PitState { expr: expr.to_string(), ceiling, keep_alive_ms },
-        );
+        self.pits
+            .write()
+            .insert(id.clone(), PitState { expr: expr.to_string(), ceiling, keep_alive_ms });
         id
     }
 
@@ -598,50 +546,7 @@ pub fn dir_name(index: &str) -> String {
     out
 }
 
-impl Store {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-}
+impl Store {}
 
 /// A scroll is a cursor over a search: the request that opened it plus how far
 /// the client has read.
@@ -666,7 +571,6 @@ pub struct ScrollState {
     pub pit: String,
 }
 
-
 pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
     let mut s = String::from("^");
     for c in pat.chars() {
@@ -679,10 +583,6 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
     s.push('$');
     regex::Regex::new(&s).unwrap_or_else(|_| regex::Regex::new("^$").unwrap())
 }
-
-
-
-
 
 fn walk_malformed(
     node: &Value,
@@ -736,9 +636,6 @@ fn walk_malformed(
     Ok(())
 }
 
-
-
-
 /// The window a date column can hold. Nanoseconds in an i64 reach about 292
 /// years either side of the epoch, so an open-ended range is filled to the
 /// edges of that rather than to a year the column could not represent.
@@ -746,10 +643,6 @@ fn walk_malformed(
 /// milliseconds here, so these are the ends of what a range can reach.
 const DATE_FLOOR: i64 = -8_520_336_000_000;
 const DATE_CEIL: i64 = 8_835_004_800_000;
-
-
-
-
 
 /// `date_*` against a field name -- the only wildcard a template `match` uses.
 pub fn glob_match(pattern: &str, name: &str) -> bool {
@@ -824,17 +717,18 @@ pub fn resolve_date_math_name(name: &str) -> String {
     out
 }
 
-
-
 fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
-    let dt = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .ok()?;
+    let dt =
+        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).ok()?;
     Some(match format {
         "epoch_millis" => ms.to_string(),
         "epoch_second" => (ms / 1000).to_string(),
         "strict_date" | "date" | "yyyy-MM-dd" => format_with_pattern(dt, "yyyy-MM-dd"),
         "basic_date" => format_with_pattern(dt, "yyyyMMdd"),
-        "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+        "iso8601"
+        | "strict_date_optional_time"
+        | "date_optional_time"
+        | "date_time"
         | "strict_date_time" => format!(
             "{}.{:03}Z",
             format_with_pattern(dt, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
@@ -846,11 +740,6 @@ fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
         other => format_with_pattern(dt, other),
     })
 }
-
-
-
-
-
 
 fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
     use boostcore::time::Month::*;
@@ -866,18 +755,6 @@ fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// The value at `key` inside `node`, made by `make` if it is not there.
 ///

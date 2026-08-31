@@ -58,17 +58,19 @@ pub(crate) fn analyze(ctx: &Ctx, view: View, text: &str) -> Vec<String> {
     analyze_with(ctx, view, text, None)
 }
 
-pub(crate) fn analyze_with(ctx: &Ctx, view: View, text: &str, analyzer: Option<&str>) -> Vec<String> {
+pub(crate) fn analyze_with(
+    ctx: &Ctx,
+    view: View,
+    text: &str,
+    analyzer: Option<&str>,
+) -> Vec<String> {
     if view == View::Raw && analyzer.is_none() {
         return vec![text.to_string()];
     }
     let name = tokenizer_name(analyzer);
     let mut out = Vec::new();
-    if let Ok(mut tk) = ctx
-        .index
-        .tokenizers()
-        .get(name)
-        .ok_or(TantivyError::InvalidArgument("no tokenizer".into()))
+    if let Ok(mut tk) =
+        ctx.index.tokenizers().get(name).ok_or(TantivyError::InvalidArgument("no tokenizer".into()))
     {
         let mut stream = tk.token_stream(text);
         while stream.advance() {

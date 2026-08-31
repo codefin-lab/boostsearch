@@ -75,11 +75,8 @@ pub(crate) fn objects_agg(
                 .collect()
         };
         if let Some(spec) = def.get("filter") {
-            let kept: Vec<(String, Value)> = objects
-                .iter()
-                .filter(|(_, o)| object_matches(spec, o, path))
-                .cloned()
-                .collect();
+            let kept: Vec<(String, Value)> =
+                objects.iter().filter(|(_, o)| object_matches(spec, o, path)).cloned().collect();
             out[name.clone()] = objects_agg(store, targets, &kept, path, &subs);
         } else if let Some(spec) = def.get("nested") {
             let deeper = spec.get("path").and_then(|p| p.as_str()).unwrap_or("");
@@ -121,18 +118,15 @@ pub(crate) fn objects_agg(
                     None => groups.push((value, vec![(id.clone(), object.clone())])),
                 }
             }
-            groups.sort_by(|a, b| {
-                b.1.len().cmp(&a.1.len()).then_with(|| key_order(&a.0, &b.0))
-            });
+            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| key_order(&a.0, &b.0)));
             let buckets: Vec<Value> = groups
                 .into_iter()
                 .filter(|(_, list)| list.len() as u64 >= min)
                 .take(size)
                 .map(|(key, list)| {
                     let mut b = json!({"key": key, "doc_count": list.len()});
-                    if let Some(Value::Object(inner)) = subs
-                        .as_ref()
-                        .map(|_| objects_agg(store, targets, &list, path, &subs))
+                    if let Some(Value::Object(inner)) =
+                        subs.as_ref().map(|_| objects_agg(store, targets, &list, path, &subs))
                     {
                         for (k, v) in inner {
                             if k != "doc_count" {
@@ -163,9 +157,10 @@ pub(crate) fn objects_agg(
                 .unwrap_or_default();
             let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             // a marker says which page was already seen
-            let after: Option<Vec<Value>> = spec.get("after").and_then(|a| a.as_object()).map(
-                |o| sources.iter().map(|(n, _)| o.get(n).cloned().unwrap_or(Value::Null)).collect(),
-            );
+            let after: Option<Vec<Value>> =
+                spec.get("after").and_then(|a| a.as_object()).map(|o| {
+                    sources.iter().map(|(n, _)| o.get(n).cloned().unwrap_or(Value::Null)).collect()
+                });
             let mut groups: Vec<(Vec<Value>, usize)> = Vec::new();
             for (_, object) in objects {
                 let mut key = Vec::new();
@@ -197,11 +192,8 @@ pub(crate) fn objects_agg(
                 .into_iter()
                 .take(size)
                 .map(|(key, n)| {
-                    let named: serde_json::Map<String, Value> = sources
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .zip(key.into_iter())
-                        .collect();
+                    let named: serde_json::Map<String, Value> =
+                        sources.iter().map(|(name, _)| name.clone()).zip(key.into_iter()).collect();
                     json!({"key": Value::Object(named), "doc_count": n})
                 })
                 .collect();
@@ -288,8 +280,7 @@ pub(crate) fn scope_sorts_to(node: &mut Value, path: &str) {
                                 match opts {
                                     Value::String(order) => {
                                         let order = order.clone();
-                                        *opts =
-                                            json!({"order": order, "nested": {"path": path}});
+                                        *opts = json!({"order": order, "nested": {"path": path}});
                                     }
                                     Value::Object(oo) => {
                                         oo.insert("nested".into(), json!({"path": path}));
@@ -328,9 +319,7 @@ pub(crate) fn number_of(v: &Value) -> Option<f64> {
         )
         .ok()
         .map(|d| d.unix_timestamp_nanos() as f64)
-        .or_else(|| {
-            crate::store::parse_date_lenient(s).map(|d| d.unix_timestamp_nanos() as f64)
-        })
+        .or_else(|| crate::store::parse_date_lenient(s).map(|d| d.unix_timestamp_nanos() as f64))
         .or_else(|| s.parse().ok()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
@@ -461,6 +450,10 @@ pub(crate) fn collect_nested_inner_hits(node: &Value, out: &mut Vec<(String, Val
     }
 }
 
+/// The inner-hits groups that belong directly under one object: those whose
+/// path is the object's own path plus one step, each carrying the groups that
+/// belong under *its* objects in turn.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn nested_inner_hits(
     h: &Hit,
     source: &Value,
@@ -499,7 +492,7 @@ pub(crate) fn nested_inner_hits(
             .filter(|(_, o)| object_matches(inner_query, o, path))
             .collect();
         let mut list = Vec::new();
-        for (offset, object) in objects.iter().cloned().take(size) {
+        for (offset, object) in objects.iter().take(size) {
             let mut one = json!({
                 "_index": h.index.clone(),
                 "_id": h.id.clone(),
@@ -528,8 +521,7 @@ pub(crate) fn nested_inner_hits(
                 for name in asked {
                     if name == "_seq_no" {
                         fields.insert(name.clone(), json!([h.seq]));
-                    } else if let Some(v) =
-                        object.pointer(&format!("/{}", name.replace('.', "/")))
+                    } else if let Some(v) = object.pointer(&format!("/{}", name.replace('.', "/")))
                     {
                         fields.insert(
                             name.clone(),
@@ -558,8 +550,7 @@ pub(crate) fn nested_inner_hits(
                 }
             }
             // whatever was asked of the objects under this one
-            let deeper =
-                nested_inner_hits(h, &object, path, clauses, kept, query, mapping, index);
+            let deeper = nested_inner_hits(h, object, path, clauses, kept, query, mapping, index);
             if !deeper.is_empty() {
                 one["inner_hits"] = Value::Object(deeper);
             }

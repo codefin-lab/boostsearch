@@ -77,11 +77,7 @@ impl Store {
     }
 
     pub fn put_snapshot(&self, repo: &str, name: &str, body: Value) {
-        self.snapshots
-            .write()
-            .entry(repo.to_string())
-            .or_default()
-            .insert(name.to_string(), body);
+        self.snapshots.write().entry(repo.to_string()).or_default().insert(name.to_string(), body);
     }
 
     pub fn remove_snapshots(&self, repo: &str, pattern: &str) -> usize {
@@ -104,11 +100,7 @@ impl Store {
     }
 
     pub fn put_pipeline(&self, kind: &str, name: &str, body: Value) {
-        self.pipelines
-            .write()
-            .entry(kind.to_string())
-            .or_default()
-            .insert(name.to_string(), body);
+        self.pipelines.write().entry(kind.to_string()).or_default().insert(name.to_string(), body);
     }
 
     /// Remove the pipelines of one kind whose names a pattern reaches.
@@ -173,11 +165,8 @@ impl Store {
         let mut matched: Vec<(i64, &Value)> = templates
             .values()
             .filter(|t| {
-                let pats = t
-                    .get("index_patterns")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
+                let pats =
+                    t.get("index_patterns").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                 pats.iter()
                     .filter_map(|p| p.as_str())
                     .any(|p| p == index || wildcard_to_regex(p).is_match(index))

@@ -23,23 +23,24 @@ pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Respon
     let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
     let action = if what.starts_with("open") {
         "indices:admin/open"
-    } else if what.starts_with("shrink") || what.starts_with("split")
-        || what.starts_with("clone")
-    {
+    } else if what.starts_with("shrink") || what.starts_with("split") || what.starts_with("clone") {
         "indices:admin/resize"
     } else {
         "indices:admin/tasks"
     };
-    respond(&p, json!({
-        "completed": true,
-        "task": {
-            "node": "node-0", "id": 1, "type": "transport",
-            "action": action,
-            "description": what,
-            "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
-        },
-        "response": {"acknowledged": true, "shards_acknowledged": true},
-    }))
+    respond(
+        &p,
+        json!({
+            "completed": true,
+            "task": {
+                "node": "node-0", "id": 1, "type": "transport",
+                "action": action,
+                "description": what,
+                "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
+            },
+            "response": {"acknowledged": true, "shards_acknowledged": true},
+        }),
+    )
 }
 
 pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) -> Response {
@@ -71,14 +72,17 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
         Some("parents") => return respond(&p, json!({"tasks": {"node-0:1": task}})),
         _ => {}
     }
-    respond(&p, json!({
-        "nodes": {"node-0": {
-            "name": "boostsearch", "transport_address": "127.0.0.1:9300",
-            "host": "127.0.0.1", "ip": "127.0.0.1",
-            "roles": ["cluster_manager", "data", "ingest"],
-            "tasks": {"node-0:1": task},
-        }},
-    }))
+    respond(
+        &p,
+        json!({
+            "nodes": {"node-0": {
+                "name": "boostsearch", "transport_address": "127.0.0.1:9300",
+                "host": "127.0.0.1", "ip": "127.0.0.1",
+                "roles": ["cluster_manager", "data", "ingest"],
+                "tasks": {"node-0:1": task},
+            }},
+        }),
+    )
 }
 
 /// `_tasks/_cancel` -- nothing here runs long enough to be cancelled.

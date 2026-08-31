@@ -2,9 +2,6 @@
 
 use crate::store::{Fields, Mapping};
 use anyhow::{Result, anyhow};
-use serde_json::Value;
-use std::ops::Bound;
-use std::sync::Arc;
 use boostcore::query::{
     AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
     FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
@@ -12,6 +9,9 @@ use boostcore::query::{
 use boostcore::schema::{Field, IndexRecordOption, Term, Type};
 use boostcore::{Index, TantivyError};
 use boostcore_fst::Regex;
+use serde_json::Value;
+use std::ops::Bound;
+use std::sync::Arc;
 
 mod analyze;
 pub(crate) use analyze::*;
@@ -61,7 +61,10 @@ impl<'a> Ctx<'a> {
     pub fn view(&self, field: &str, analyzed: bool) -> View {
         match self.mapping.type_of(field) {
             Some("text") | Some("match_only_text") | Some("search_as_you_type") => View::Dyn,
-            Some("keyword") | Some("constant_keyword") | Some("wildcard") | Some("ip")
+            Some("keyword")
+            | Some("constant_keyword")
+            | Some("wildcard")
+            | Some("ip")
             | Some("flat_object") => View::Raw,
             Some(_) => View::Dyn, // numeric, date, boolean: identical in both views
             None => {
@@ -74,11 +77,7 @@ impl<'a> Ctx<'a> {
                     }
                     prefix = head;
                 }
-                if analyzed {
-                    View::Dyn
-                } else {
-                    View::Raw
-                }
+                if analyzed { View::Dyn } else { View::Raw }
             }
         }
     }
@@ -97,11 +96,11 @@ impl<'a> Ctx<'a> {
             let v = self.view(field, analyzed);
             return (self.field_of(v), path, v);
         }
+        // `.keyword` is how a text field's untouched view is addressed, and a
+        // mapping that does not declare the sub-field does not change that
         if self.mapping.type_of(field).is_none() {
             if let Some(base) = field.strip_suffix(".keyword") {
-                if self.mapping.type_of(base).is_some() || base.contains('.') || true {
-                    return (self.fields.raw, base.to_string(), View::Raw);
-                }
+                return (self.fields.raw, base.to_string(), View::Raw);
             }
         }
         let v = self.view(field, analyzed);
@@ -114,12 +113,6 @@ impl<'a> Ctx<'a> {
         format!("{prefix}.{path}")
     }
 }
-
-
-
-
-
-
 
 /// A regex/automaton query scoped to one JSON path.
 struct JsonAutomatonQuery {
@@ -153,15 +146,6 @@ impl Query for JsonAutomatonQuery {
         )))
     }
 }
-
-
-
-
-
-
-
-
-
 
 fn single_key(o: &Value) -> Result<(String, Value)> {
     let obj = o.as_object().ok_or_else(|| anyhow!("expected object"))?;
@@ -293,11 +277,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let exact = any_of(term_for(f, &path, &val));
             // an exact match on a field that is not analysed has nothing to
             // rank by: every match is equally exact, so each scores one
-            if view == View::Raw {
-                Box::new(ConstScore::new(exact, 1.0))
-            } else {
-                exact
-            }
+            if view == View::Raw { Box::new(ConstScore::new(exact, 1.0)) } else { exact }
         }
         "terms" => {
             let (field, vals) = single_key(&body)?;
@@ -332,9 +312,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             for v in &arr {
                 // a CIDR entry names a range, not a term, so it cannot join the
                 // flat term set the common case builds
-                match v.as_str().filter(|s| s.contains('/')).and(
-                    ip_term_query(ctx, &field, f, &path, v),
-                ) {
+                match v
+                    .as_str()
+                    .filter(|s| s.contains('/'))
+                    .and(ip_term_query(ctx, &field, f, &path, v))
+                {
                     Some(q) => subs.push(q),
                     None => terms.extend(term_for(f, &path, &ip_value(ctx, &field, v))),
                 }
@@ -348,9 +330,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 if !terms.is_empty() {
                     subs.push(any_of(terms));
                 }
-                Box::new(BooleanQuery::new(
-                    subs.into_iter().map(|q| (Occur::Should, q)).collect(),
-                ))
+                Box::new(BooleanQuery::new(subs.into_iter().map(|q| (Occur::Should, q)).collect()))
             };
             Box::new(ConstScore::new(inner, 1.0))
         }
@@ -388,11 +368,19 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let field = body
                 .as_object()
                 .and_then(|o| {
-                    o.keys()
-                        .map(|k| k.to_string())
-                        .find(|k| !matches!(k.as_str(), "boost" | "_name" | "ignore_unmapped"
-                            | "validation_method" | "type" | "distance" | "distance_type"
-                            | "relation"))
+                    o.keys().map(|k| k.to_string()).find(|k| {
+                        !matches!(
+                            k.as_str(),
+                            "boost"
+                                | "_name"
+                                | "ignore_unmapped"
+                                | "validation_method"
+                                | "type"
+                                | "distance"
+                                | "distance_type"
+                                | "relation"
+                        )
+                    })
                 })
                 .unwrap_or_default();
             let col = ctx.column_name(&field, false);
@@ -481,9 +469,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         // its nested children, so a nested query is its inner query asked
         // against the same document
         "nested" => {
-            let inner = body
-                .get("query")
-                .ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
+            let inner =
+                body.get("query").ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
             build(ctx, inner)?
         }
         // an `intervals` query is a little language of rules over one field.
@@ -501,11 +488,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let Some((field, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
                 return Err(anyhow!("[terms_set] requires a field"));
             };
-            let terms: Vec<Value> = spec
-                .get("terms")
-                .and_then(|t| t.as_array())
-                .cloned()
-                .unwrap_or_default();
+            let terms: Vec<Value> =
+                spec.get("terms").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let clauses: Vec<Value> = terms
                 .iter()
                 .map(|t| serde_json::json!({"term": {field.clone(): t.clone()}}))
@@ -527,10 +511,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
             let boost = body.get("boost").and_then(|b| b.as_f64()).unwrap_or(1.0) as f32;
-            Box::new(BoostQuery::new(
-                Box::new(ConstScore::new(build(ctx, f)?, 1.0)),
-                boost,
-            ))
+            Box::new(BoostQuery::new(Box::new(ConstScore::new(build(ctx, f)?, 1.0)), boost))
         }
         "boosting" => {
             let pos = body.get("positive").ok_or_else(|| anyhow!("boosting needs positive"))?;
@@ -541,19 +522,37 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let subs: Result<Vec<_>> = qs.iter().map(|s| build(ctx, s)).collect();
             Box::new(boostcore::query::DisjunctionMaxQuery::new(subs?))
         }
-                other => {
+        other => {
             // a near-miss is usually a typo, and saying which name was meant
             // saves the caller reading the whole list
             const KNOWN: &[&str] = &[
-                "bool", "term", "terms", "match", "match_all", "match_none", "range",
-                "prefix", "wildcard", "regexp", "fuzzy", "exists", "ids", "nested",
-                "match_phrase", "multi_match", "query_string", "simple_query_string",
-                "constant_score", "dis_max", "boosting", "function_score", "more_like_this",
+                "bool",
+                "term",
+                "terms",
+                "match",
+                "match_all",
+                "match_none",
+                "range",
+                "prefix",
+                "wildcard",
+                "regexp",
+                "fuzzy",
+                "exists",
+                "ids",
+                "nested",
+                "match_phrase",
+                "multi_match",
+                "query_string",
+                "simple_query_string",
+                "constant_score",
+                "dis_max",
+                "boosting",
+                "function_score",
+                "more_like_this",
             ];
             let near = KNOWN.iter().find(|k| {
                 k.len().abs_diff(other.len()) <= 2
-                    && k.chars().zip(other.chars()).filter(|(a, b)| a == b).count() + 2
-                        >= k.len()
+                    && k.chars().zip(other.chars()).filter(|(a, b)| a == b).count() + 2 >= k.len()
             });
             return Err(match near {
                 Some(k) => anyhow!("unknown query [{other}] did you mean [{k}]?"),
@@ -569,8 +568,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     // would rather not
     if !ctx.allow_expensive {
         let tail = match kind.as_str() {
-            "prefix" => Some(" For optimised prefix queries on text fields please enable \
-                              [index_prefixes]."),
+            "prefix" => Some(
+                " For optimised prefix queries on text fields please enable \
+                              [index_prefixes].",
+            ),
             "fuzzy" | "regexp" | "wildcard" => Some(""),
             _ => None,
         };
@@ -622,24 +623,6 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     })
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// A pragmatic `query_string` subset: `field:term`, quoted phrases, wildcards,
 /// AND/OR/NOT, and `default_field` / `default_operator`.
 fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
@@ -658,11 +641,8 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             ));
         }
     }
-    let default_operator = body
-        .get("default_operator")
-        .and_then(|v| v.as_str())
-        .unwrap_or("or")
-        .to_ascii_lowercase();
+    let default_operator =
+        body.get("default_operator").and_then(|v| v.as_str()).unwrap_or("or").to_ascii_lowercase();
     let mut default_fields: Vec<String> = Vec::new();
     if let Some(f) = body.get("default_field").and_then(|v| v.as_str()) {
         default_fields.push(f.to_string());
@@ -704,7 +684,9 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             _ => {}
         }
         let (field_part, value) = match tok.split_once(':') {
-            Some((f, v)) if !f.is_empty() && !f.contains(' ') => (Some(f.to_string()), v.to_string()),
+            Some((f, v)) if !f.is_empty() && !f.contains(' ') => {
+                (Some(f.to_string()), v.to_string())
+            }
             _ => (None, tok.clone()),
         };
         let targets: Vec<String> =
@@ -797,7 +779,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         let mut per_field = per_field;
         let sub: Box<dyn Query> = match per_field.len() {
             1 => per_field.remove(0),
-            _ => Box::new(BooleanQuery::union(per_field))
+            _ => Box::new(BooleanQuery::union(per_field)),
         };
         let occur = if pending_not {
             Occur::MustNot
@@ -821,7 +803,8 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if clauses.iter().all(|(o, _)| *o == Occur::MustNot) {
         clauses.push((Occur::Must, Box::new(AllQuery)));
     }
-    let required = if should_count > 0 && clauses.iter().all(|(o, _)| *o != Occur::Must) { 1 } else { 0 };
+    let required =
+        if should_count > 0 && clauses.iter().all(|(o, _)| *o != Occur::Must) { 1 } else { 0 };
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
 }
 
@@ -924,10 +907,7 @@ impl std::fmt::Debug for ConstScore {
 
 impl Clone for ConstScore {
     fn clone(&self) -> Self {
-        ConstScore {
-            query: self.query.box_clone(),
-            score: self.score,
-        }
+        ConstScore { query: self.query.box_clone(), score: self.score }
     }
 }
 
@@ -959,10 +939,7 @@ impl Weight for ConstWeight {
         boost: boostcore::Score,
     ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
         let inner = self.inner.scorer(reader, boost)?;
-        Ok(Box::new(boostcore::query::ConstScorer::new(
-            inner,
-            boost * self.score,
-        )))
+        Ok(Box::new(boostcore::query::ConstScorer::new(inner, boost * self.score)))
     }
 
     fn explain(
@@ -1037,18 +1014,21 @@ pub fn interval_spans(
             let places: Vec<Vec<usize>> = words
                 .iter()
                 .map(|w| {
-                    tokens
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| *t == w)
-                        .map(|(i, _)| i)
-                        .collect()
+                    tokens.iter().enumerate().filter(|(_, t)| *t == w).map(|(i, _)| i).collect()
                 })
                 .collect();
-            combine_spans(&places.iter().map(|p| p.iter().map(|i| (*i, *i)).collect()).collect::<Vec<Vec<Span>>>(), ordered, no_overlap)
+            combine_spans(
+                &places
+                    .iter()
+                    .map(|p| p.iter().map(|i| (*i, *i)).collect())
+                    .collect::<Vec<Vec<Span>>>(),
+                ordered,
+                no_overlap,
+            )
         }
         "prefix" => {
-            let want = spec.get("prefix").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            let want =
+                spec.get("prefix").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
             single_spans(tokens, &|t| t.starts_with(&want))
         }
         "wildcard" => {
@@ -1069,8 +1049,7 @@ pub fn interval_spans(
             }
         }
         "fuzzy" => {
-            let want =
-                spec.get("term").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            let want = spec.get("term").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
             let edits = spec.get("fuzziness").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
             single_spans(tokens, &|t| levenshtein_within(t, &want, edits))
         }
@@ -1138,12 +1117,7 @@ fn rule_width(rule: &Value, analyse: &dyn Fn(&str) -> Vec<String>) -> i64 {
 }
 
 fn single_spans(tokens: &[String], hit: &dyn Fn(&str) -> bool) -> Vec<Span> {
-    tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| hit(t))
-        .map(|(i, _)| (i, i))
-        .collect()
+    tokens.iter().enumerate().filter(|(_, t)| hit(t)).map(|(i, _)| (i, i)).collect()
 }
 
 /// The shortest stretch covering one span from each part, in order or not.

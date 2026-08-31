@@ -165,9 +165,7 @@ pub(crate) fn source_selector_from_params(p: &Params) -> Option<Value> {
 
 /// `stored_fields` is answered from `_source`; every value comes back as a list.
 pub(crate) fn wants_source_via_stored_fields(p: &Params) -> bool {
-    p.get("stored_fields")
-        .map(|s| s.split(',').any(|f| f.trim() == "_source"))
-        .unwrap_or(false)
+    p.get("stored_fields").map(|s| s.split(',').any(|f| f.trim() == "_source")).unwrap_or(false)
 }
 
 pub(crate) fn stored_fields(src: &Value, p: &Params) -> Option<Value> {

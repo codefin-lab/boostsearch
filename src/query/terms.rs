@@ -41,10 +41,7 @@ pub(crate) fn ip_term_query(
         l.append_type_and_str(&lo);
         let mut h = Term::from_field_json_path(f, path, true);
         h.append_type_and_str(&hi);
-        return Some(Box::new(RangeQuery::new(
-            Bound::Included(l),
-            Bound::Included(h),
-        )));
+        return Some(Box::new(RangeQuery::new(Bound::Included(l), Bound::Included(h))));
     }
     Some(any_of(term_for(f, path, &ip_value(ctx, field, v))))
 }
@@ -110,7 +107,10 @@ pub(crate) fn any_of(mut terms: Vec<Term>) -> Box<dyn Query> {
             terms
                 .into_iter()
                 .map(|t| {
-                    (Occur::Should, Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>)
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    )
                 })
                 .collect(),
         )),

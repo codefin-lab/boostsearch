@@ -62,7 +62,7 @@ pub async fn create_index(
                 .as_object()
                 .map(|o| {
                     o.iter()
-                        .filter(|(k, _)| k.to_string() != "type")
+                        .filter(|(k, _)| *k != "type")
                         .map(|(k, v)| {
                             format!(
                                 "{k} : {}",
@@ -108,11 +108,8 @@ pub async fn create_index(
             let mut inside_nested = false;
             let mut walked = String::new();
             for part in name.split('.').rev().skip(1).collect::<Vec<_>>().into_iter().rev() {
-                walked = if walked.is_empty() {
-                    part.to_string()
-                } else {
-                    format!("{walked}.{part}")
-                };
+                walked =
+                    if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
                 if body
                     .pointer(&format!(
                         "/mappings/properties/{}/type",
@@ -222,9 +219,7 @@ pub async fn resize_index(
     // unusable, so those blocks are refused on the way in rather than left to
     // fail the copy
     for blocked in ["blocks.read_only", "blocks.metadata", "blocks.read_only_allow_delete"] {
-        let set = setting(blocked)
-            .map(|v| v == json!(true) || v == json!("true"))
-            .unwrap_or(false);
+        let set = setting(blocked).map(|v| v == json!(true) || v == json!("true")).unwrap_or(false);
         if set {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -252,9 +247,7 @@ pub async fn resize_index(
                     return err(
                         StatusCode::BAD_REQUEST,
                         "illegal_state_exception",
-                        format!(
-                            "the number of source shards [{from}] must be a factor of [{to}]"
-                        ),
+                        format!("the number of source shards [{from}] must be a factor of [{to}]"),
                     );
                 }
             }
@@ -274,9 +267,7 @@ pub async fn resize_index(
                     return err(
                         StatusCode::BAD_REQUEST,
                         "illegal_argument_exception",
-                        format!(
-                            "the number of source shards [{from}] must be equal to [{to}]"
-                        ),
+                        format!("the number of source shards [{from}] must be equal to [{to}]"),
                     );
                 }
             }
@@ -290,7 +281,8 @@ pub async fn resize_index(
         // write to it, not only read from it. The request may lift the block
         // as part of the same call, which is how a caller unwinds one.
         let lifted = matches!(setting("blocks.read_only"), Some(Value::Null))
-            || setting("blocks.read_only").map(|v| v == json!(false) || v == json!("false"))
+            || setting("blocks.read_only")
+                .map(|v| v == json!(false) || v == json!("false"))
                 .unwrap_or(false);
         if !lifted && g.setting("blocks.read_only").as_deref() == Some("true") {
             return err(
@@ -351,8 +343,7 @@ pub async fn resize_index(
     // would otherwise refuse
     let mut held_back = serde_json::Map::new();
     if let Some(o) = settings.pointer_mut("/index").and_then(|v| v.as_object_mut()) {
-        let blocked: Vec<String> =
-            o.keys().filter(|k| k.starts_with("blocks")).cloned().collect();
+        let blocked: Vec<String> = o.keys().filter(|k| k.starts_with("blocks")).cloned().collect();
         for k in blocked {
             if let Some(v) = o.remove(&k) {
                 held_back.insert(k, v);
@@ -396,13 +387,19 @@ pub async fn resize_index(
     // `wait_for_completion=false` asks for the work to be tracked rather than
     // waited on; the copy is already done, so the task is a finished one
     if p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false) {
-        return respond(&p, json!({
-            "task": format!("node-0:{kind} from [{source}] to [{target}]")
-        }));
+        return respond(
+            &p,
+            json!({
+                "task": format!("node-0:{kind} from [{source}] to [{target}]")
+            }),
+        );
     }
-    respond(&p, json!({
-        "acknowledged": true, "shards_acknowledged": true, "index": target
-    }))
+    respond(
+        &p,
+        json!({
+            "acknowledged": true, "shards_acknowledged": true, "index": target
+        }),
+    )
 }
 
 pub async fn split_index(
@@ -471,7 +468,7 @@ pub async fn rollover(
         );
     };
     let Some(src) = store.get(&old) else { return no_such_index(&old) };
-    let docs = src.read().reader.searcher().num_docs() as u64;
+    let docs = src.read().reader.searcher().num_docs();
 
     // every condition is reported with whether it was met, met or not
     let mut conditions = serde_json::Map::new();
@@ -500,9 +497,7 @@ pub async fn rollover(
         return err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
-            format!(
-                "index name [{old}] does not match pattern '^.*-\\d+$'"
-            ),
+            format!("index name [{old}] does not match pattern '^.*-\\d+$'"),
         );
     };
     // the characters a name may not carry, which a caller supplying one of
@@ -511,7 +506,9 @@ pub async fn rollover(
         return err(
             StatusCode::BAD_REQUEST,
             "invalid_index_name_exception",
-            format!("Invalid index name [{new_index}], must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]"),
+            format!(
+                "Invalid index name [{new_index}], must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]"
+            ),
         );
     }
     if store.exists(&new_index) {
@@ -524,15 +521,19 @@ pub async fn rollover(
 
     let rolled = met && !dry_run;
     if rolled {
-        let create = body.get("mappings").or_else(|| body.get("settings")).map(|_| {
-            let mut c = json!({});
-            for k in ["settings", "mappings", "aliases"] {
-                if let Some(v) = body.get(k) {
-                    c[k] = v.clone();
+        let create = body
+            .get("mappings")
+            .or_else(|| body.get("settings"))
+            .map(|_| {
+                let mut c = json!({});
+                for k in ["settings", "mappings", "aliases"] {
+                    if let Some(v) = body.get(k) {
+                        c[k] = v.clone();
+                    }
                 }
-            }
-            c
-        }).unwrap_or_else(|| json!({}));
+                c
+            })
+            .unwrap_or_else(|| json!({}));
         if let Err(e) = store.create(&new_index, &create) {
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
         }
@@ -543,15 +544,18 @@ pub async fn rollover(
         }
         src.write().aliases.remove(&alias);
     }
-    respond(&p, json!({
-        "acknowledged": true,
-        "shards_acknowledged": rolled,
-        "old_index": old,
-        "new_index": new_index,
-        "rolled_over": rolled,
-        "dry_run": dry_run,
-        "conditions": Value::Object(conditions),
-    }))
+    respond(
+        &p,
+        json!({
+            "acknowledged": true,
+            "shards_acknowledged": rolled,
+            "old_index": old,
+            "new_index": new_index,
+            "rolled_over": rolled,
+            "dry_run": dry_run,
+            "conditions": Value::Object(conditions),
+        }),
+    )
 }
 
 /// `_shard_stores` -- where each shard's copies are.
@@ -583,14 +587,17 @@ pub async fn shard_stores(
             let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
             let mut per = serde_json::Map::new();
             for i in 0..shards {
-                per.insert(i.to_string(), json!({"stores": [{
-                    "node-0": {
-                        "name": "boostsearch", "ephemeral_id": "_na_",
-                        "transport_address": "127.0.0.1:9300", "attributes": {},
-                    },
-                    "allocation_id": "_na_",
-                    "allocation": "primary",
-                }]}));
+                per.insert(
+                    i.to_string(),
+                    json!({"stores": [{
+                        "node-0": {
+                            "name": "boostsearch", "ephemeral_id": "_na_",
+                            "transport_address": "127.0.0.1:9300", "attributes": {},
+                        },
+                        "allocation_id": "_na_",
+                        "allocation": "primary",
+                    }]}),
+                );
             }
             indices.insert(g.name.clone(), json!({"shards": Value::Object(per)}));
         }
@@ -630,7 +637,10 @@ pub async fn resolve_index(
         }
         let hit = name.split(',').any(|pat| {
             let pat = pat.trim();
-            pat == "*" || pat == "_all" || pat == g.name || crate::store::glob_match(pat, &g.name)
+            pat == "*"
+                || pat == "_all"
+                || pat == g.name
+                || crate::store::glob_match(pat, &g.name)
                 || own.iter().any(|a| a == pat || crate::store::glob_match(pat, a))
         });
         if hit {
@@ -654,9 +664,12 @@ pub async fn resolve_index(
             json!({"name": a, "indices": idx})
         })
         .collect();
-    respond(&p, json!({
-        "indices": indices, "aliases": alias_list, "data_streams": [],
-    }))
+    respond(
+        &p,
+        json!({
+            "indices": indices, "aliases": alias_list, "data_streams": [],
+        }),
+    )
 }
 
 /// `_block/{block}` -- hold an index still without closing it.
@@ -683,9 +696,12 @@ pub async fn add_block(
         g.save_meta();
         blocked.push(json!({"name": g.name.clone(), "blocked": true}));
     }
-    respond(&p, json!({
-        "acknowledged": true, "shards_acknowledged": true, "indices": blocked
-    }))
+    respond(
+        &p,
+        json!({
+            "acknowledged": true, "shards_acknowledged": true, "indices": blocked
+        }),
+    )
 }
 
 pub async fn delete_index(
@@ -899,11 +915,8 @@ pub async fn force_merge(
             shards * copies
         })
         .sum();
-    let max_segments: usize = p
-        .get("max_num_segments")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
-        .max(1);
+    let max_segments: usize =
+        p.get("max_num_segments").and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
 
     for name in targets {
         let Some(st) = store.get(&name) else { continue };
@@ -935,9 +948,12 @@ pub async fn force_merge(
             let _ = g.refresh();
         }
     }
-    respond(&p, json!({
-        "_shards": {"total": touched, "successful": touched, "failed": 0}
-    }))
+    respond(
+        &p,
+        json!({
+            "_shards": {"total": touched, "successful": touched, "failed": 0}
+        }),
+    )
 }
 
 /// `_segments` -- what each shard is made of.
@@ -956,10 +972,13 @@ pub async fn segments(
         if !allow_none || (!expr.is_empty() && !expr.contains('*') && !store.exists(&expr)) {
             return no_such_index(&expr);
         }
-        return respond(&p, json!({
-            "_shards": {"total": 0, "successful": 0, "failed": 0},
-            "indices": {},
-        }));
+        return respond(
+            &p,
+            json!({
+                "_shards": {"total": 0, "successful": 0, "failed": 0},
+                "indices": {},
+            }),
+        );
     }
     let mut indices = serde_json::Map::new();
     let mut total = 0u64;
@@ -1008,10 +1027,13 @@ pub async fn segments(
             }]}}),
         );
     }
-    respond(&p, json!({
-        "_shards": {"total": total, "successful": total, "failed": 0},
-        "indices": Value::Object(indices),
-    }))
+    respond(
+        &p,
+        json!({
+            "_shards": {"total": total, "successful": total, "failed": 0},
+            "indices": Value::Object(indices),
+        }),
+    )
 }
 
 /// `_recovery` -- how each shard came to be where it is.
@@ -1037,57 +1059,60 @@ pub async fn indices_recovery(
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
         let existing = g.reader.searcher().num_docs() > 0 || g.closed;
-        out.insert(g.name.clone(), json!({"shards": [{
-            "id": 0,
-            "type": if g.restored {
-                "SNAPSHOT"
-            } else if existing {
-                "EXISTING_STORE"
-            } else {
-                "EMPTY_STORE"
-            },
-            "stage": "DONE",
-            "primary": true,
-            "start_time": "2020-01-01T00:00:00.000Z",
-            "start_time_in_millis": 1_577_836_800_000u64,
-            "stop_time": "2020-01-01T00:00:00.000Z",
-            "stop_time_in_millis": 1_577_836_800_000u64,
-            "total_time": "0s",
-            "total_time_in_millis": 0,
-            "source": {},
-            "target": {
-                "id": "node-0", "host": "127.0.0.1", "transport_address": "127.0.0.1:9300",
-                "ip": "127.0.0.1", "name": "boostsearch",
-            },
-            "index": {
-                "size": {
-                    "total": if g.restored { "1kb" } else { "0b" },
-                    "total_in_bytes": if g.restored { 1024 } else { 0 },
-                    "reused": "0b", "reused_in_bytes": 0,
-                    "recovered": if g.restored { "1kb" } else { "0b" },
-                    "recovered_in_bytes": if g.restored { 1024 } else { 0 },
-                    "percent": "100.0%",
+        out.insert(
+            g.name.clone(),
+            json!({"shards": [{
+                "id": 0,
+                "type": if g.restored {
+                    "SNAPSHOT"
+                } else if existing {
+                    "EXISTING_STORE"
+                } else {
+                    "EMPTY_STORE"
                 },
-                "files": {
-                    "total": if g.restored { 1 } else { 0 },
-                    "reused": 0,
-                    "recovered": if g.restored { 1 } else { 0 },
-                    "percent": "100.0%",
-                    "details": [],
+                "stage": "DONE",
+                "primary": true,
+                "start_time": "2020-01-01T00:00:00.000Z",
+                "start_time_in_millis": 1_577_836_800_000u64,
+                "stop_time": "2020-01-01T00:00:00.000Z",
+                "stop_time_in_millis": 1_577_836_800_000u64,
+                "total_time": "0s",
+                "total_time_in_millis": 0,
+                "source": {},
+                "target": {
+                    "id": "node-0", "host": "127.0.0.1", "transport_address": "127.0.0.1:9300",
+                    "ip": "127.0.0.1", "name": "boostsearch",
                 },
-                "total_time": "0s", "total_time_in_millis": 0,
-                "source_throttle_time": "0s", "source_throttle_time_in_millis": 0,
-                "target_throttle_time": "0s", "target_throttle_time_in_millis": 0,
-            },
-            "translog": {
-                "recovered": 0, "total": 0, "percent": "100.0%",
-                "total_on_start": 0, "total_time": "0s", "total_time_in_millis": 0,
-            },
-            "verify_index": {
-                "check_index_time": "0s", "check_index_time_in_millis": 0,
-                "total_time": "0s", "total_time_in_millis": 0,
-            },
-        }]}));
+                "index": {
+                    "size": {
+                        "total": if g.restored { "1kb" } else { "0b" },
+                        "total_in_bytes": if g.restored { 1024 } else { 0 },
+                        "reused": "0b", "reused_in_bytes": 0,
+                        "recovered": if g.restored { "1kb" } else { "0b" },
+                        "recovered_in_bytes": if g.restored { 1024 } else { 0 },
+                        "percent": "100.0%",
+                    },
+                    "files": {
+                        "total": if g.restored { 1 } else { 0 },
+                        "reused": 0,
+                        "recovered": if g.restored { 1 } else { 0 },
+                        "percent": "100.0%",
+                        "details": [],
+                    },
+                    "total_time": "0s", "total_time_in_millis": 0,
+                    "source_throttle_time": "0s", "source_throttle_time_in_millis": 0,
+                    "target_throttle_time": "0s", "target_throttle_time_in_millis": 0,
+                },
+                "translog": {
+                    "recovered": 0, "total": 0, "percent": "100.0%",
+                    "total_on_start": 0, "total_time": "0s", "total_time_in_millis": 0,
+                },
+                "verify_index": {
+                    "check_index_time": "0s", "check_index_time_in_millis": 0,
+                    "total_time": "0s", "total_time_in_millis": 0,
+                },
+            }]}),
+        );
     }
     respond(&p, Value::Object(out))
 }
@@ -1113,10 +1138,13 @@ pub async fn indices_upgrade(
     for n in names {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
-        upgraded.insert(g.name.clone(), json!({
-            "upgrade_version": "3.0.0",
-            "oldest_lucene_segment_version": "9.0.0",
-        }));
+        upgraded.insert(
+            g.name.clone(),
+            json!({
+                "upgrade_version": "3.0.0",
+                "oldest_lucene_segment_version": "9.0.0",
+            }),
+        );
     }
     respond(&p, json!({"_shards": tally, "upgraded_indices": Value::Object(upgraded)}))
 }
@@ -1181,11 +1209,14 @@ pub async fn get_index(
         if flag(&p, "human") {
             add_human_settings(&mut settings, &g);
         }
-        out.insert(n.clone(), json!({
-            "aliases": Value::Object(aliases),
-            "mappings": if g.mapping.raw.is_null() { json!({}) } else { g.mapping.raw.clone() },
-            "settings": settings,
-        }));
+        out.insert(
+            n.clone(),
+            json!({
+                "aliases": Value::Object(aliases),
+                "mappings": if g.mapping.raw.is_null() { json!({}) } else { g.mapping.raw.clone() },
+                "settings": settings,
+            }),
+        );
     }
     respond(&p, Value::Object(out))
 }

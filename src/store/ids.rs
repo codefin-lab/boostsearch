@@ -27,10 +27,8 @@ impl IdxState {
         let fp = id_fingerprint(id);
         let known = existed || self.versions.contains_key(id);
         let version = if known {
-            let m = self
-                .versions
-                .entry(id.to_string())
-                .or_insert(DocMeta { version: 1, live: true });
+            let m =
+                self.versions.entry(id.to_string()).or_insert(DocMeta { version: 1, live: true });
             m.version += 1;
             m.live = live;
             m.version
@@ -129,12 +127,12 @@ impl IdxState {
                 if alive.map(|a| a.is_deleted(doc)).unwrap_or(false) {
                     continue;
                 }
-                for ord in col.term_ords(doc) {
+                // a document has one id, so there is one ordinal to read
+                if let Some(ord) = col.term_ords(doc).next() {
                     let mut buf = String::new();
                     if col.ord_to_str(ord, &mut buf).is_ok() {
                         out.push(buf);
                     }
-                    break;
                 }
             }
         }

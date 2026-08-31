@@ -73,7 +73,7 @@ fn read_block(data: &[u8], at: usize, time_width: usize) -> Option<(Zone, usize)
         .unwrap_or(0);
     let transitions = times
         .into_iter()
-        .zip(indices.into_iter())
+        .zip(indices)
         .filter_map(|(t, i)| types.get(i as usize).map(|(off, _)| (t, *off)))
         .collect();
     Some((Zone { transitions, initial }, p))

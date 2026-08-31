@@ -60,9 +60,9 @@ pub async fn get_template(
         let hit = match &want {
             None => true,
             Some(n) if n == "*" || n == "_all" => true,
-            Some(n) => n.split(',').any(|pat| {
-                pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)
-            }),
+            Some(n) => n
+                .split(',')
+                .any(|pat| pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)),
         };
         if hit {
             // a template reports its settings the way an index does: nested
@@ -75,13 +75,16 @@ pub async fn get_template(
                 if let Some(set) = o.get("settings").cloned() {
                     let nested = template_settings(&set);
                     let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
-                    o.insert("settings".into(), if flat {
-                        let mut m = serde_json::Map::new();
-                        flatten_cluster_settings(&nested, "", &mut m);
-                        Value::Object(m)
-                    } else {
-                        nested
-                    });
+                    o.insert(
+                        "settings".into(),
+                        if flat {
+                            let mut m = serde_json::Map::new();
+                            flatten_cluster_settings(&nested, "", &mut m);
+                            Value::Object(m)
+                        } else {
+                            nested
+                        },
+                    );
                 }
                 if let Some(Value::Object(aliases)) = o.get("aliases").cloned() {
                     let expanded: serde_json::Map<String, Value> = aliases
@@ -111,7 +114,8 @@ pub async fn get_template(
 pub async fn exists_template(State(store): State<Store>, Path(name): Path<String>) -> Response {
     let all = store.get_templates();
     let hit = all.keys().any(|k| {
-        name.split(',').any(|pat| pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(k))
+        name.split(',')
+            .any(|pat| pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(k))
     });
     if hit { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
@@ -179,9 +183,9 @@ pub async fn get_component_template(
     for (n, body) in &all {
         let keep = match wanted.as_deref() {
             None | Some("*") | Some("_all") => true,
-            Some(w) => w.split(',').any(|pat| {
-                pat.trim() == n || crate::store::glob_match(pat.trim(), n)
-            }),
+            Some(w) => {
+                w.split(',').any(|pat| pat.trim() == n || crate::store::glob_match(pat.trim(), n))
+            }
         };
         if keep {
             let mut body = body.clone();
@@ -310,10 +314,13 @@ pub async fn simulate_template(
         _ => Vec::new(),
     };
     let skip = named.unwrap_or_default();
-    respond(&p, json!({
-        "template": compose_template(&store, &source),
-        "overlapping": overlapping_templates(&store, &skip, &patterns),
-    }))
+    respond(
+        &p,
+        json!({
+            "template": compose_template(&store, &source),
+            "overlapping": overlapping_templates(&store, &skip, &patterns),
+        }),
+    )
 }
 
 /// `_index_template/_simulate_index/{index}` -- which template a name would
@@ -338,11 +345,8 @@ pub async fn simulate_index_template(
         if !pats.iter().any(|pat| crate::store::glob_match(pat, &index)) {
             return;
         }
-        let prio = t
-            .get("priority")
-            .or_else(|| t.get("order"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let prio =
+            t.get("priority").or_else(|| t.get("order")).and_then(|v| v.as_i64()).unwrap_or(0);
         matching.push((name.clone(), pats));
         if best.as_ref().map(|(p, _, _)| prio > *p).unwrap_or(true) {
             best = Some((prio, name, t.clone()));
@@ -380,10 +384,13 @@ pub async fn simulate_index_template(
         }
     }
     overlapping.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    respond(&p, json!({
-        "template": compose_template(&store, &source),
-        "overlapping": overlapping,
-    }))
+    respond(
+        &p,
+        json!({
+            "template": compose_template(&store, &source),
+            "overlapping": overlapping,
+        }),
+    )
 }
 
 pub async fn put_index_template(
@@ -432,10 +439,8 @@ pub async fn put_index_template(
     }
     // an alias's routing stands for both halves of it
     if let Some(Value::Object(aliases)) = kept.pointer("/template/aliases").cloned() {
-        let expanded: serde_json::Map<String, Value> = aliases
-            .into_iter()
-            .map(|(a, def)| (a, crate::store::normalize_alias(&def)))
-            .collect();
+        let expanded: serde_json::Map<String, Value> =
+            aliases.into_iter().map(|(a, def)| (a, crate::store::normalize_alias(&def))).collect();
         kept["template"]["aliases"] = Value::Object(expanded);
     }
     if p.get("create").map(|v| v != "false").unwrap_or(false)
@@ -463,9 +468,9 @@ pub async fn get_index_template(
         let hit = match &want {
             None => true,
             Some(n) if n == "*" || n == "_all" => true,
-            Some(n) => n.split(',').any(|pat| {
-                pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)
-            }),
+            Some(n) => n
+                .split(',')
+                .any(|pat| pat == k || crate::store::wildcard_to_regex(pat.trim()).is_match(&k)),
         };
         if !hit {
             continue;
@@ -494,12 +499,8 @@ pub async fn delete_index_template(
 ) -> Response {
     // a template a data stream was actually made from cannot be taken away;
     // one that merely claims the same patterns can
-    let in_use: Vec<String> = store
-        .data_streams()
-        .into_iter()
-        .filter(|(_, t)| *t == name)
-        .map(|(n, _)| n)
-        .collect();
+    let in_use: Vec<String> =
+        store.data_streams().into_iter().filter(|(_, t)| *t == name).map(|(n, _)| n).collect();
     if !in_use.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,

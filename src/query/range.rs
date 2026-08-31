@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Both ends of a range as a flat_object holds them: either may be absent, and
+/// each carries whether it is inclusive.
+type FlatBounds = (Option<(Value, bool)>, Option<(Value, bool)>);
+
 /// A `*_range` field stores an interval per document, so a range query over it
 /// compares two intervals rather than a value against bounds. The stored
 /// endpoints are already separate numeric paths, so each relation is a pair of
@@ -15,11 +19,8 @@ pub(crate) fn build_range_field_query(
     if !kind.ends_with("_range") {
         return None;
     }
-    let relation = spec
-        .get("relation")
-        .and_then(|v| v.as_str())
-        .unwrap_or("intersects")
-        .to_ascii_lowercase();
+    let relation =
+        spec.get("relation").and_then(|v| v.as_str()).unwrap_or("intersects").to_ascii_lowercase();
     // a date bound may be written as date math, which names a whole unit; the
     // bound decides which end of it is meant
     let bound = |inclusive_key: &str, exclusive_key: &str, up_when_inclusive: bool| {
@@ -51,10 +52,12 @@ pub(crate) fn build_range_field_query(
         // the stored interval overlaps the query interval
         "intersects" => {
             if let Some((hi, inc)) = &q_hi {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {upper_key(*inc): hi}}}));
+                clauses
+                    .push(serde_json::json!({"range": {lo_field.clone(): {upper_key(*inc): hi}}}));
             }
             if let Some((lo, inc)) = &q_lo {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {lower_key(*inc): lo}}}));
+                clauses
+                    .push(serde_json::json!({"range": {hi_field.clone(): {lower_key(*inc): lo}}}));
             }
         }
         // the stored interval covers the query interval
@@ -69,10 +72,12 @@ pub(crate) fn build_range_field_query(
         // the stored interval sits inside the query interval
         "within" => {
             if let Some((lo, inc)) = &q_lo {
-                clauses.push(serde_json::json!({"range": {lo_field.clone(): {lower_key(*inc): lo}}}));
+                clauses
+                    .push(serde_json::json!({"range": {lo_field.clone(): {lower_key(*inc): lo}}}));
             }
             if let Some((hi, inc)) = &q_hi {
-                clauses.push(serde_json::json!({"range": {hi_field.clone(): {upper_key(*inc): hi}}}));
+                clauses
+                    .push(serde_json::json!({"range": {hi_field.clone(): {upper_key(*inc): hi}}}));
             }
         }
         other => {
@@ -124,11 +129,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         let mut walked = String::new();
         let mut found = false;
         for part in field.split('.') {
-            walked = if walked.is_empty() {
-                part.to_string()
-            } else {
-                format!("{walked}.{part}")
-            };
+            walked = if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
             if ctx.mapping.type_of(&walked) == Some("flat_object") {
                 found = true;
             }
@@ -139,7 +140,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // bound written the short way has to be canonicalised to compare with it.
     // But "2.1" is a version, not a year: rewriting the bound would throw the
     // text away, so the canonical spelling is asked for as well, not instead.
-    let flat_bounds: Option<(Option<(Value, bool)>, Option<(Value, bool)>)> = under_flat
+    let flat_bounds: Option<FlatBounds> = under_flat
         .then(|| {
             let canon = |b: &Option<(Value, bool)>| -> Option<(Value, bool)> {
                 let (Value::String(text), inclusive) = b.clone()? else { return None };
@@ -176,8 +177,14 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // OpenSearch -- "5" and "400" are both below 500, "ingesting..." is not.
     if matches!(
         ctx.mapping.type_of(&field),
-        Some("keyword" | "text" | "wildcard" | "constant_keyword" | "search_as_you_type"
-            | "match_only_text")
+        Some(
+            "keyword"
+                | "text"
+                | "wildcard"
+                | "constant_keyword"
+                | "search_as_you_type"
+                | "match_only_text"
+        )
     ) {
         for b in [&mut lower, &mut upper] {
             if let Some((Value::Number(n), inclusive)) = b.clone() {
@@ -195,10 +202,10 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if sample.is_boolean() {
         let ok = |b: bool| {
             lower.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
-                Some(l) => b > l || (*inc && b == l),
+                Some(l) => b & !l || (*inc && b == l),
                 None => true,
             }) && upper.as_ref().is_none_or(|(v, inc)| match v.as_bool() {
-                Some(u) => b < u || (*inc && b == u),
+                Some(u) => !b & u || (*inc && b == u),
                 None => true,
             })
         };
@@ -285,9 +292,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let general: Box<dyn Query> = match subs.len() {
         0 => Box::new(EmptyQuery),
         1 => subs.remove(0),
-        _ => Box::new(BooleanQuery::new(
-            subs.into_iter().map(|s| (Occur::Should, s)).collect(),
-        )),
+        _ => Box::new(BooleanQuery::new(subs.into_iter().map(|s| (Occur::Should, s)).collect())),
     };
 
     // A single numeric type means block statistics can drive the scan. The query
@@ -312,11 +317,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 /// Returns `None` whenever the bound cannot be represented exactly -- an
 /// exclusive float bound, say -- so the caller falls back to the general path
 /// rather than answering a slightly different question.
-pub(crate) fn u64_bound(
-    ty: Type,
-    b: Option<&(Value, bool)>,
-    is_lower: bool,
-) -> Option<u64> {
+pub(crate) fn u64_bound(ty: Type, b: Option<&(Value, bool)>, is_lower: bool) -> Option<u64> {
     use boostcore::columnar::MonotonicallyMappableToU64;
     let Some((v, inclusive)) = b else {
         return Some(if is_lower { u64::MIN } else { u64::MAX });
@@ -354,7 +355,7 @@ pub(crate) fn block_range_query(
     ty: Type,
     lower: Option<&(Value, bool)>,
     upper: Option<&(Value, bool)>,
-    general: &Box<dyn Query>,
+    general: &dyn Query,
 ) -> Option<Box<dyn Query>> {
     use boostcore::columnar::ColumnType;
     let column_type = match ty {
@@ -382,8 +383,15 @@ pub(crate) fn block_range_query(
 pub(crate) fn is_numeric_type(t: Option<&str>) -> bool {
     matches!(
         t,
-        Some("long") | Some("integer") | Some("short") | Some("byte") | Some("double")
-            | Some("float") | Some("half_float") | Some("scaled_float") | Some("unsigned_long")
+        Some("long")
+            | Some("integer")
+            | Some("short")
+            | Some("byte")
+            | Some("double")
+            | Some("float")
+            | Some("half_float")
+            | Some("scaled_float")
+            | Some("unsigned_long")
     )
 }
 

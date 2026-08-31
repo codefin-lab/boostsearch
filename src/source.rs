@@ -47,9 +47,8 @@ fn walk(v: &Value, path: &str, inc: &[String], exc: &[String]) -> Option<Value> 
             for (k, child) in o {
                 let child_path = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
                 // keep descending while an include pattern still points deeper
-                let keep_going = included || inc.iter().any(|p| {
-                    matches(p, &child_path) || prefix_of(p, &child_path)
-                });
+                let keep_going = included
+                    || inc.iter().any(|p| matches(p, &child_path) || prefix_of(p, &child_path));
                 if !keep_going {
                     continue;
                 }
@@ -66,8 +65,7 @@ fn walk(v: &Value, path: &str, inc: &[String], exc: &[String]) -> Option<Value> 
             if !included {
                 return None;
             }
-            let kept: Vec<Value> =
-                a.iter().filter_map(|x| walk(x, path, inc, exc)).collect();
+            let kept: Vec<Value> = a.iter().filter_map(|x| walk(x, path, inc, exc)).collect();
             Some(Value::Array(kept))
         }
         leaf => {
@@ -133,12 +131,7 @@ fn excluded(exc: &[Vec<String>], path: &[String]) -> bool {
     !path.is_empty() && exc.iter().any(|p| pattern_state(p, path).0)
 }
 
-fn prune(
-    v: &Value,
-    path: &[String],
-    inc: &[Vec<String>],
-    exc: &[Vec<String>],
-) -> Option<Value> {
+fn prune(v: &Value, path: &[String], inc: &[Vec<String>], exc: &[Vec<String>]) -> Option<Value> {
     if excluded(exc, path) {
         return None;
     }
@@ -191,7 +184,6 @@ fn prune(
     }
 }
 
-
 /// Reformat a date the way a `format` option on a `fields` entry asks for.
 ///
 /// Only the pattern letters the suite uses are handled; anything else is left
@@ -228,13 +220,19 @@ pub fn format_date(value: &Value, pattern: &str) -> Option<Value> {
     }
     // the shapes OpenSearch gives names to are written by name, not by pattern
     const NAMED: &[&str] = &[
-        "strict_date_optional_time", "date_optional_time", "strict_date_time", "date_time",
-        "iso8601", "strict_date", "date", "basic_date", "strict_date_hour_minute_second",
+        "strict_date_optional_time",
+        "date_optional_time",
+        "strict_date_time",
+        "date_time",
+        "iso8601",
+        "strict_date",
+        "date",
+        "basic_date",
+        "strict_date_hour_minute_second",
         "date_hour_minute_second",
     ];
     if NAMED.contains(&pattern) {
-        return crate::store::format_millis((nanos / 1_000_000) as i64, pattern)
-            .map(Value::String);
+        return crate::store::format_millis((nanos / 1_000_000) as i64, pattern).map(Value::String);
     }
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
@@ -303,7 +301,8 @@ fn collect(
 ) {
     let matches = |p: &str| {
         patterns.iter().any(|pat| {
-            pat == p || pat == "*"
+            pat == p
+                || pat == "*"
                 || (pat.contains('*') && crate::store::wildcard_to_regex(pat).is_match(p))
         })
     };

@@ -40,7 +40,8 @@ pub fn expand_dotted_properties(node: &mut Value) {
             if node.get("properties").is_none() {
                 node["properties"] = serde_json::json!({});
             }
-            node = entry_of(&mut node["properties"], part, || serde_json::json!({"properties": {}}));
+            node =
+                entry_of(&mut node["properties"], part, || serde_json::json!({"properties": {}}));
         }
         if node.get("properties").is_none() {
             node["properties"] = serde_json::json!({});
@@ -106,8 +107,9 @@ pub(crate) fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool 
             Value::String(s) => s.parse::<f64>().is_ok(),
             _ => false,
         },
-        "boolean" => matches!(v, Value::Bool(_))
-            || matches!(v.as_str(), Some("true") | Some("false")),
+        "boolean" => {
+            matches!(v, Value::Bool(_)) || matches!(v.as_str(), Some("true") | Some("false"))
+        }
         _ => true,
     }
 }
@@ -269,21 +271,13 @@ pub(crate) fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         if !has_lower {
             node.insert(
                 "gte".into(),
-                if dated {
-                    Value::from(DATE_FLOOR)
-                } else {
-                    serde_json::json!(f64::MIN)
-                },
+                if dated { Value::from(DATE_FLOOR) } else { serde_json::json!(f64::MIN) },
             );
         }
         if !has_upper {
             node.insert(
                 "lte".into(),
-                if dated {
-                    Value::from(DATE_CEIL)
-                } else {
-                    serde_json::json!(f64::MAX)
-                },
+                if dated { Value::from(DATE_CEIL) } else { serde_json::json!(f64::MAX) },
             );
         }
     }

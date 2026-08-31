@@ -30,10 +30,8 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                             .unwrap_or(false),
                         _ => false,
                     };
-                    let mode = opts
-                        .get("mode")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_ascii_lowercase());
+                    let mode =
+                        opts.get("mode").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase());
                     let missing_last = opts
                         .get("missing")
                         .and_then(|v| v.as_str())
@@ -53,14 +51,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .pointer("/nested/filter")
                         .or_else(|| opts.get("nested_filter"))
                         .cloned();
-                    out.push(SortKey {
-                        field,
-                        desc,
-                        mode,
-                        missing_last,
-                        nested,
-                        nested_filter,
-                    });
+                    out.push(SortKey { field, desc, mode, missing_last, nested, nested_filter });
                 }
             }
             _ => {}
@@ -73,9 +64,9 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
 pub(crate) fn decode_col_value(raw: u64, ty: boostcore::columnar::ColumnType) -> Option<SortValue> {
     use boostcore::columnar::ColumnType;
     match ty {
-        ColumnType::I64 | ColumnType::DateTime => Some(SortValue::I64(
-            boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw),
-        )),
+        ColumnType::I64 | ColumnType::DateTime => {
+            Some(SortValue::I64(boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw)))
+        }
         ColumnType::F64 => Some(SortValue::F64(
             <f64 as boostcore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
         )),
@@ -90,7 +81,7 @@ pub(crate) fn decode_col_value(raw: u64, ty: boostcore::columnar::ColumnType) ->
 /// OpenSearch does this with Java `long` arithmetic, so `sum` and `avg` wrap on
 /// overflow -- `[i64::MAX, 1]` really does sort as a large negative number --
 /// while `median` averages the two middle values in floating point.
-pub(crate) fn reduce_sort_values(vals: &mut Vec<SortValue>, mode: &str) -> SortValue {
+pub(crate) fn reduce_sort_values(vals: &mut [SortValue], mode: &str) -> SortValue {
     let n = vals.len();
     match mode {
         "max" | "min" => {
@@ -146,7 +137,7 @@ pub(crate) fn reduce_sort_values(vals: &mut Vec<SortValue>, mode: &str) -> SortV
                 };
                 let lo = as_u64(&vals[n / 2 - 1]);
                 let hi = as_u64(&vals[n / 2]);
-                return SortValue::U64((lo.wrapping_add(hi) + 1) / 2);
+                return SortValue::U64(lo.wrapping_add(hi).div_ceil(2));
             }
             let lo = vals[n / 2 - 1].as_f64().unwrap_or(0.0);
             let hi = vals[n / 2].as_f64().unwrap_or(0.0);
@@ -188,14 +179,13 @@ pub(crate) fn prune_by(buf: &mut Vec<Cand>, limit: usize, desc: &[bool]) {
 /// Which kind of date a sort key names, if it names one at all: `Some(false)`
 /// for a `date`, `Some(true)` for a `date_nanos`.
 pub(crate) fn date_sort_kind(store: &Store, targets: &[String], field: &str) -> Option<bool> {
-    targets
-        .iter()
-        .filter_map(|n| store.get(n))
-        .find_map(|st| match st.read().mapping.type_of(field) {
+    targets.iter().filter_map(|n| store.get(n)).find_map(|st| {
+        match st.read().mapping.type_of(field) {
             Some("date") => Some(false),
             Some("date_nanos") => Some(true),
             _ => None,
-        })
+        }
+    })
 }
 
 /// Read one `search_after` element back into the value the sort produced.
@@ -235,8 +225,10 @@ pub(crate) fn fill_seq(
     cands: &mut [Cand],
     searchers: &[(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
 ) {
-    let mut cols: std::collections::HashMap<(usize, u32), Option<boostcore::columnar::Column<u64>>> =
-        std::collections::HashMap::new();
+    let mut cols: std::collections::HashMap<
+        (usize, u32),
+        Option<boostcore::columnar::Column<u64>>,
+    > = std::collections::HashMap::new();
     for c in cands.iter_mut() {
         let (shard, seg) = (c.shard, c.addr.segment_ord);
         let col = cols.entry((shard, seg)).or_insert_with(|| {
@@ -262,11 +254,7 @@ pub(crate) fn cmp_cands(a: &Cand, b: &Cand, sort_keys: &[SortKey]) -> Ordering {
             .then(a.addr.doc_id.cmp(&b.addr.doc_id))
     };
     if sort_keys.is_empty() {
-        return b
-            .score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(by_doc);
+        return b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal).then_with(by_doc);
     }
     for (i, k) in sort_keys.iter().enumerate() {
         let ord = cmp_with_missing(&a.sort[i], &b.sort[i], k);
@@ -320,10 +308,8 @@ pub(crate) fn sort_by_filtered_nested(
     searchers: &Searchers,
     sort_keys: &[SortKey],
 ) {
-
     for (i, key) in sort_keys.iter().enumerate() {
-        let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref())
-        else {
+        let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref()) else {
             continue;
         };
         let leaf = key.field.strip_prefix(&format!("{path}.")).unwrap_or(&key.field);
@@ -331,8 +317,7 @@ pub(crate) fn sort_by_filtered_nested(
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
             let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
-            let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/")))
-            {
+            let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/"))) {
                 Some(Value::Array(a)) => a.clone(),
                 Some(other) => vec![other.clone()],
                 None => Vec::new(),
@@ -364,19 +349,12 @@ pub(crate) fn sort_by_filtered_nested(
             let picked = match key.mode.as_deref() {
                 Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                 Some("sum") => values.iter().sum(),
-                Some("avg") => {
-                    values.iter().sum::<f64>() / (values.len().max(1) as f64)
-                }
+                Some("avg") => values.iter().sum::<f64>() / (values.len().max(1) as f64),
                 _ => values.iter().cloned().fold(f64::INFINITY, f64::min),
             };
             if let Some(slot) = c.sort.get_mut(i) {
-                *slot = if values.is_empty() {
-                    SortValue::Missing
-                } else {
-                    SortValue::F64(picked)
-                };
+                *slot = if values.is_empty() { SortValue::Missing } else { SortValue::F64(picked) };
             }
         }
     }
-    
 }

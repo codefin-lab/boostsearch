@@ -9,15 +9,15 @@ use crate::query::{Ctx, View};
 use crate::store::{IdxState, Store};
 use axum::http::StatusCode;
 use axum::response::Response;
-use serde_json::{Value, json};
-use std::cmp::Ordering;
 use boostcore::aggregation::AggContextParams;
-use boostcore::aggregation::agg_req::Aggregations;
 use boostcore::aggregation::DistributedAggregationCollector;
+use boostcore::aggregation::agg_req::Aggregations;
 use boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use boostcore::collector::{Count, TopDocs};
 use boostcore::schema::Value as _;
 use boostcore::{DocAddress, Searcher, TantivyDocument};
+use serde_json::{Value, json};
+use std::cmp::Ordering;
 
 mod extras;
 pub(crate) use extras::*;
@@ -76,10 +76,7 @@ impl SortValue {
             (SortValue::Str(a), SortValue::Str(b)) => a.cmp(b),
             (SortValue::Str(_), _) => Ordering::Greater,
             (_, SortValue::Str(_)) => Ordering::Less,
-            (a, b) => a
-                .as_f64()
-                .partial_cmp(&b.as_f64())
-                .unwrap_or(Ordering::Equal),
+            (a, b) => a.as_f64().partial_cmp(&b.as_f64()).unwrap_or(Ordering::Equal),
         }
     }
 
@@ -113,12 +110,18 @@ pub(crate) struct SortKey {
     nested_filter: Option<Value>,
 }
 
+/// One segment's readers for one sort field: the strings, the numbers, and
+/// which of the two the column turned out to be.
+type SegmentColumn = (
+    Option<boostcore::columnar::StrColumn>,
+    Option<boostcore::columnar::Column<u64>>,
+    Option<boostcore::columnar::ColumnType>,
+);
 
 /// Per-segment readers for one sort field, opened once and reused.
 struct SortColumns {
-    per_segment: Vec<(Option<boostcore::columnar::StrColumn>, Option<boostcore::columnar::Column<u64>>, Option<boostcore::columnar::ColumnType>)>,
+    per_segment: Vec<SegmentColumn>,
 }
-
 
 impl SortColumns {
     /// Open the readers for a single segment.
@@ -188,7 +191,6 @@ impl SortColumns {
     }
 }
 
-
 pub(crate) struct Hit {
     shard_idx: usize,
     index: String,
@@ -206,11 +208,7 @@ pub(crate) struct Hit {
 enum SortSource {
     Score,
     Doc,
-    Column {
-        name: String,
-        desc: bool,
-        mode: Option<String>,
-    },
+    Column { name: String, desc: bool, mode: Option<String> },
 }
 
 /// Top-K collector that evaluates the sort keys while collecting, so a query
@@ -243,8 +241,6 @@ struct SortSegmentCollector {
     block: Option<boostcore::columnar::ColumnBlockAccessor<u64>>,
 }
 
-
-
 impl boostcore::collector::Collector for SortCollector {
     type Fruit = Vec<Cand>;
     type Child = SortSegmentCollector;
@@ -273,9 +269,7 @@ impl boostcore::collector::Collector for SortCollector {
                     let (str_col, num, _) = &c.per_segment[0];
                     // a multi-valued column would yield several rows per doc,
                     // which the block path has no way to reduce
-                    num.as_ref()
-                        .map(|n| n.index.get_cardinality().is_full())
-                        .unwrap_or(false)
+                    num.as_ref().map(|n| n.index.get_cardinality().is_full()).unwrap_or(false)
                         && str_col.is_none()
                 })
                 .unwrap_or(false);
@@ -287,7 +281,7 @@ impl boostcore::collector::Collector for SortCollector {
             missing_last: self.missing_last.clone(),
             limit: self.limit,
             after: self.after.clone(),
-            buf: Vec::with_capacity(self.limit.saturating_mul(4).max(512).min(4096)),
+            buf: Vec::with_capacity(self.limit.saturating_mul(4).clamp(512, 4096)),
             cutoff: None,
             block: if single_numeric { Some(Default::default()) } else { None },
         })
@@ -468,21 +462,6 @@ pub(crate) struct Cand {
     seq: u64,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// Which of the clauses that need work after the search are in this query.
 ///
 /// Each of them used to be looked for on its own, which is several walks of
@@ -497,71 +476,19 @@ pub(crate) struct Extras {
     named: bool,
 }
 
-
-
-
-
-
-
-
-
-/// The inner-hits groups that belong directly under one object: those whose
-/// path is the object's own path plus one step, each carrying the groups that
-/// belong under *its* objects in turn.
-#[allow(clippy::too_many_arguments)]
-
-
-
-
-
-
-
-
-
-
-
-
 /// Aggregations address fields by name; rewrite each onto the JSON view that
 /// actually carries the doc values for it.
 const NUMERIC_AGGS: &[&str] = &[
-    "avg", "sum", "min", "max", "stats", "extended_stats", "percentiles", "histogram",
+    "avg",
+    "sum",
+    "min",
+    "max",
+    "stats",
+    "extended_stats",
+    "percentiles",
+    "histogram",
     "date_histogram",
 ];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Weight aggregation buckets by `_doc_count`.
 ///
@@ -572,9 +499,6 @@ const NUMERIC_AGGS: &[&str] = &[
 /// once, documents with it count what it says.
 const DC_SUM: &str = "__bs_dc_sum";
 const DC_CNT: &str = "__bs_dc_count";
-
-
-
 
 /// An aggregation collector that may not be there.
 ///
@@ -643,10 +567,6 @@ impl boostcore::collector::SegmentCollector for MaybeAggSegment {
     }
 }
 
-
-
-
-
 /// Run a shard's search, choosing where the per-segment work goes.
 ///
 /// BoostCore's own `search` hands the segments to the index's shared executor.
@@ -670,28 +590,8 @@ fn search_shard<C: boostcore::collector::Collector>(
     } else {
         boostcore::query::EnableScoring::disabled_from_searcher(searcher)
     };
-    searcher.search_with_executor(
-        query,
-        collector,
-        &boostcore::Executor::single_thread(),
-        scoring,
-    )
+    searcher.search_with_executor(query, collector, &boostcore::Executor::single_thread(), scoring)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 pub struct Outcome {
     pub took_ms: u64,
@@ -715,9 +615,10 @@ fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value>
 pub fn validate_params(body: &Value, p: &Params) -> std::result::Result<(), Response> {
     // an int total is only meaningful when the count is exact
     if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
-        let track = body.get("track_total_hits").cloned().or_else(|| {
-            p.get("track_total_hits").map(|v| json!(v))
-        });
+        let track = body
+            .get("track_total_hits")
+            .cloned()
+            .or_else(|| p.get("track_total_hits").map(|v| json!(v)));
         let inaccurate = match &track {
             Some(Value::Bool(false)) => None,
             Some(Value::Number(n)) => Some(n.to_string()),
@@ -762,8 +663,7 @@ fn check_limits(
     let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
 
     // a scroll has to know how much is left to walk
-    if p.contains_key("scroll")
-        && matches!(body.get("track_total_hits"), Some(Value::Bool(false)))
+    if p.contains_key("scroll") && matches!(body.get("track_total_hits"), Some(Value::Bool(false)))
     {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -938,7 +838,6 @@ fn as_usize(v: Option<Value>) -> Option<usize> {
     }
 }
 
-
 // One shard's work touches only its own index, so the fan-out runs across
 // cores. Searching many small indices is otherwise bounded by walking them
 // one at a time.
@@ -974,18 +873,13 @@ fn apply_rescores(
     };
     let mut rescored = false;
     for spec in &rescores {
-
-        let window = spec
-            .get("window_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10)
-            .max(1) as usize;
+        let window = spec.get("window_size").and_then(|v| v.as_u64()).unwrap_or(10).max(1) as usize;
         let inner = spec.get("query").cloned().unwrap_or(Value::Null);
         let Some(rq) = inner.get("rescore_query").cloned() else { continue };
         let qw = inner.get("query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
         let rw = inner.get("rescore_query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
         let mode = inner.get("score_mode").and_then(|v| v.as_str()).unwrap_or("total");
-        cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
+        cands.sort_by(|a, b| cmp_cands(a, b, sort_keys));
         let ids: Vec<String> = cands
             .iter()
             .take(window)
@@ -1003,8 +897,7 @@ fn apply_rescores(
             "size": ids.len(),
         });
         let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
-        let mut scored: std::collections::HashMap<String, f32> =
-            std::collections::HashMap::new();
+        let mut scored: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
         for hit in &answer.hits {
             if let (Some(id), Some(score)) = (
                 hit.get("_id").and_then(|v| v.as_str()),
@@ -1019,8 +912,7 @@ fn apply_rescores(
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
             let extra = if at < window {
-                source_of(searcher, &g, c.addr)
-                    .and_then(|(id, _)| scored.get(&id).copied())
+                source_of(searcher, &g, c.addr).and_then(|(id, _)| scored.get(&id).copied())
             } else {
                 None
             };
@@ -1039,7 +931,6 @@ fn apply_rescores(
                 None => {}
             }
         }
-    
     }
     Ok(rescored)
 }
@@ -1055,7 +946,6 @@ fn apply_indices_boost(
     boosts: &Value,
     p: &Params,
 ) -> std::result::Result<(), Response> {
-
     let mut pairs: Vec<(String, f32)> = Vec::new();
     let mut take = |o: &serde_json::Map<String, Value>| {
         for (k, v) in o {
@@ -1080,9 +970,7 @@ fn apply_indices_boost(
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
     if !lenient {
         for (pat, _) in &pairs {
-            let known = pat.contains('*')
-                || store.exists(pat)
-                || store.get(pat).is_some();
+            let known = pat.contains('*') || store.exists(pat) || store.get(pat).is_some();
             if !known {
                 return Err(err(
                     StatusCode::NOT_FOUND,
@@ -1102,10 +990,7 @@ fn apply_indices_boost(
                     .find(|(pat, _)| {
                         pat == n
                             || crate::store::glob_match(pat, n)
-                            || store
-                                .get(pat)
-                                .map(|st| st.read().name == *n)
-                                .unwrap_or(false)
+                            || store.get(pat).map(|st| st.read().name == *n).unwrap_or(false)
                     })
                     .map(|(_, b)| *b)
                     .unwrap_or(1.0)
@@ -1117,11 +1002,9 @@ fn apply_indices_boost(
             }
         }
     }
-    
+
     Ok(())
 }
-
-
 
 /// Search one index, as one shard of the whole request.
 #[allow(clippy::too_many_arguments)]
@@ -1140,7 +1023,6 @@ fn search_one_shard(
     page_want: usize,
     fanned_out: bool,
 ) -> std::result::Result<Option<ShardOut>, Response> {
-
     let Some(st) = store.get(name) else { return Ok(None) };
     let g = st.read();
     g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1169,11 +1051,7 @@ fn search_one_shard(
         Some(qj) => match crate::query::build(&ctx, qj) {
             Ok(q) => q,
             Err(e) => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "parsing_exception",
-                    e.to_string(),
-                ));
+                return Err(err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()));
             }
         },
         None => Box::new(boostcore::query::AllQuery),
@@ -1189,7 +1067,10 @@ fn search_one_shard(
             );
             Box::new(boostcore::query::BooleanQuery::new(vec![
                 (boostcore::query::Occur::Must, q),
-                (boostcore::query::Occur::Must, Box::new(below) as Box<dyn boostcore::query::Query>),
+                (
+                    boostcore::query::Occur::Must,
+                    Box::new(below) as Box<dyn boostcore::query::Query>,
+                ),
             ]))
         }
         None => q,
@@ -1244,8 +1125,7 @@ fn search_one_shard(
     let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
     let agg_collector = MaybeAgg(match (&this_agg, profiling) {
         (Some(a), false) => {
-            let ctxp =
-                AggContextParams::new(Default::default(), g.index.tokenizers().clone());
+            let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             Some(DistributedAggregationCollector::from_aggs(a.clone(), ctxp))
         }
         _ => None,
@@ -1257,9 +1137,7 @@ fn search_one_shard(
         // result that is thrown away.
         search_shard(&searcher, &q, &(Count, agg_collector), fanned_out)
             .map(|(c, agg)| (c, Vec::new(), agg))
-    } else if sort_keys.is_empty()
-        && agg_collector.0.is_none()
-        && count_without_walking(&query_json)
+    } else if sort_keys.is_empty() && agg_collector.0.is_none() && count_without_walking(query_json)
     {
         // Nothing else needs every document, so the top-k collector can
         // prune: once its heap is full, whole blocks that cannot beat the
@@ -1274,12 +1152,8 @@ fn search_one_shard(
         // are kept. Splitting its segments across the pool costs more in
         // coordination than the walk itself, and steals cores from the
         // aggregations, which are the expensive shape and do need them.
-        let topk = search_shard(
-            &searcher,
-            &q,
-            &TopDocs::with_limit(want.max(1)).order_by_score(),
-            true,
-        );
+        let topk =
+            search_shard(&searcher, &q, &TopDocs::with_limit(want.max(1)).order_by_score(), true);
         topk.and_then(|docs| {
             let cands = docs
                 .into_iter()
@@ -1297,8 +1171,7 @@ fn search_one_shard(
     } else if sort_keys.is_empty() {
         // an aggregation needs every document anyway, so there is nothing
         // to prune and hits ride along in the same pass
-        let collector =
-            (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
+        let collector = (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
         search_shard(&searcher, &q, &collector, fanned_out).map(|(c, docs, agg)| {
             let cands = docs
                 .into_iter()
@@ -1395,14 +1268,8 @@ fn search_one_shard(
     }
     if let (Some(a), true) = (this_agg, profiling) {
         let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-        let (res, prof) = profiled_agg_search(
-            &searcher,
-            &q,
-            a.clone(),
-            ctxp,
-            &ctx,
-            agg_request_json.as_ref(),
-        );
+        let (res, prof) =
+            profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx, agg_request_json.as_ref());
         shard_profile = Some(prof);
         match res {
             Ok(res) => {
@@ -1432,27 +1299,7 @@ fn search_one_shard(
         bucket_orders,
         profile: shard_profile,
     }))
-    
 }
-
-
-
-/// Write the page of hits the client reads.
-///
-/// Everything expensive has happened by now: these are the documents that made
-/// the page, and this is where each one is dressed -- source selection, the
-/// values `fields` asked for, inner hits, highlighting, the names of the
-/// clauses it matched.
-#[allow(clippy::too_many_arguments)]
-
-/// Turn what the shards collected into the answer a client reads.
-///
-/// The shards hand back intermediate results; combining them is BoostCore's
-/// job, and everything after that is this engine's: the shapes OpenSearch
-/// writes a bucket key in, the orders and partitions taken off the request
-/// before it was parsed, and the `meta` a caller attached.
-#[allow(clippy::too_many_arguments)]
-
 
 /// The parts of a query that only a document's own values can settle.
 ///
@@ -1462,7 +1309,6 @@ fn search_one_shard(
 /// to BoostCore matches more widely than that, and the candidates it found are
 /// read back here and judged properly.
 type Searchers = [(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)];
-
 
 /// The aggregations a request asks for, sorted into who answers them.
 ///
@@ -1483,7 +1329,6 @@ pub(crate) struct AggPlan {
     weighted: bool,
 }
 
-
 /// What a hit should carry back besides its `_source`.
 ///
 /// `fields` and `docvalue_fields` name the same values -- both are read out of
@@ -1495,8 +1340,6 @@ pub(crate) struct OutputSpecs {
     stored: Option<Vec<String>>,
 }
 
-
-
 /// Run a search across every resolved index and merge the results.
 pub fn run(
     store: &Store,
@@ -1505,12 +1348,40 @@ pub fn run(
     p: &Params,
 ) -> std::result::Result<Outcome, Response> {
     const BODY_KEYS: &[&str] = &[
-        "query", "from", "size", "sort", "_source", "aggs", "aggregations", "post_filter",
-        "highlight", "track_total_hits", "track_scores", "stored_fields", "docvalue_fields",
-        "script_fields", "explain", "version", "seq_no_primary_term", "min_score", "timeout",
-        "terminate_after", "search_after", "collapse", "rescore", "indices_boost", "profile",
-        "suggest", "fields", "runtime_mappings", "slice", "pit", "stats", "batched_reduce_size",
-        "ext", "knn",
+        "query",
+        "from",
+        "size",
+        "sort",
+        "_source",
+        "aggs",
+        "aggregations",
+        "post_filter",
+        "highlight",
+        "track_total_hits",
+        "track_scores",
+        "stored_fields",
+        "docvalue_fields",
+        "script_fields",
+        "explain",
+        "version",
+        "seq_no_primary_term",
+        "min_score",
+        "timeout",
+        "terminate_after",
+        "search_after",
+        "collapse",
+        "rescore",
+        "indices_boost",
+        "profile",
+        "suggest",
+        "fields",
+        "runtime_mappings",
+        "slice",
+        "pit",
+        "stats",
+        "batched_reduce_size",
+        "ext",
+        "knn",
     ];
     if let Some(o) = body.as_object() {
         for k in o.keys() {
@@ -1553,7 +1424,9 @@ pub fn run(
         }
     }
     if let Some(n) = as_i64(
-        body.get("track_total_hits").cloned().or_else(|| p.get("track_total_hits").map(|v| json!(v))),
+        body.get("track_total_hits")
+            .cloned()
+            .or_else(|| p.get("track_total_hits").map(|v| json!(v))),
     ) {
         if n < -1 {
             return Err(err(
@@ -1612,10 +1485,8 @@ pub fn run(
             }
         }
     }
-    for name in expr
-        .split(',')
-        .map(|n| n.trim())
-        .filter(|n| !n.is_empty() && !n.contains('*') && !lenient)
+    for name in
+        expr.split(',').map(|n| n.trim()).filter(|n| !n.is_empty() && !n.contains('*') && !lenient)
     {
         if store.is_closed(name) {
             return Err(err(
@@ -1625,12 +1496,7 @@ pub fn run(
             ));
         }
     }
-    if targets.is_empty()
-        && !expr.contains('*')
-        && expr != "_all"
-        && !expr.is_empty()
-        && !lenient
-    {
+    if targets.is_empty() && !expr.contains('*') && expr != "_all" && !expr.is_empty() && !lenient {
         // a date-math name is reported as the index it stands for, since that
         // is the one that was not there
         return Err(no_such_index(&crate::store::resolve_date_math_name(expr)));
@@ -1649,10 +1515,8 @@ pub fn run(
     // Here the one that fails is the one holding a value the sketch refuses.
     let mut failures: Vec<Value> = Vec::new();
     let mut excluded_ids: Vec<String> = Vec::new();
-    if let Some(field) = body
-        .get("aggs")
-        .or_else(|| body.get("aggregations"))
-        .and_then(hdr_percentiles_field)
+    if let Some(field) =
+        body.get("aggs").or_else(|| body.get("aggregations")).and_then(hdr_percentiles_field)
     {
         let shards = targets
             .iter()
@@ -1715,9 +1579,7 @@ pub fn run(
         }
     }
     if let Some(q) = query_json.as_mut() {
-        if let Err(r) = resolve_terms_lookups(store, q) {
-            return Err(r);
-        }
+        resolve_terms_lookups(store, q)?;
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
     }
@@ -1732,9 +1594,7 @@ pub fn run(
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!(
-                    "The same entry [{both}] cannot be both included and excluded in _source."
-                ),
+                format!("The same entry [{both}] cannot be both included and excluded in _source."),
             ));
         }
     }
@@ -1776,32 +1636,29 @@ pub fn run(
     // `_doc` is the order the index holds its documents in, and an index that
     // was told to sort itself holds them in that order
     if sort_keys.len() == 1 && sort_keys[0].field == "_doc" {
-        let declared = targets
-            .iter()
-            .filter_map(|n| store.get(n))
-            .find_map(|st| {
-                let g = st.read();
-                let fields = g.setting("sort.field")?;
-                let orders = g.setting("sort.order").unwrap_or_default();
-                let orders: Vec<String> =
-                    orders.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
-                let keys: Vec<SortKey> = fields
-                    .trim_matches(|c| c == '[' || c == ']')
-                    .split(',')
-                    .map(|f| f.trim().trim_matches('"').to_string())
-                    .filter(|f| !f.is_empty())
-                    .enumerate()
-                    .map(|(i, field)| SortKey {
-                        field,
-                        desc: orders.get(i).map(|o| o == "desc").unwrap_or(false),
-                        mode: None,
-                        missing_last: true,
-                        nested: None,
-                        nested_filter: None,
-                    })
-                    .collect();
-                (!keys.is_empty()).then_some(keys)
-            });
+        let declared = targets.iter().filter_map(|n| store.get(n)).find_map(|st| {
+            let g = st.read();
+            let fields = g.setting("sort.field")?;
+            let orders = g.setting("sort.order").unwrap_or_default();
+            let orders: Vec<String> =
+                orders.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
+            let keys: Vec<SortKey> = fields
+                .trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .map(|f| f.trim().trim_matches('"').to_string())
+                .filter(|f| !f.is_empty())
+                .enumerate()
+                .map(|(i, field)| SortKey {
+                    field,
+                    desc: orders.get(i).map(|o| o == "desc").unwrap_or(false),
+                    mode: None,
+                    missing_last: true,
+                    nested: None,
+                    nested_filter: None,
+                })
+                .collect();
+            (!keys.is_empty()).then_some(keys)
+        });
         if let Some(keys) = declared {
             sort_keys = keys;
         }
@@ -1866,11 +1723,8 @@ pub fn run(
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
     // which slice of the term space was asked for is a property of the
     // request, not of any one shard, so it is read once here
-    let partitions: Vec<(String, i64, i64, usize)> = agg_json
-        .clone()
-        .map(|mut a| extract_partitions(&mut a))
-        .unwrap_or_default();
-
+    let partitions: Vec<(String, i64, i64, usize)> =
+        agg_json.clone().map(|mut a| extract_partitions(&mut a)).unwrap_or_default();
 
     // `search_after` names where the previous page ended
     let search_after: Option<Vec<SortValue>> = body
@@ -1882,38 +1736,32 @@ pub fn run(
         .map(|a| {
             a.iter()
                 .zip(sort_keys.iter())
-                .map(|(v, k)| {
-                    sort_value_from_json(v, date_sort_kind(store, &targets, &k.field))
-                })
+                .map(|(v, k)| sort_value_from_json(v, date_sort_kind(store, &targets, &k.field)))
                 .collect()
         });
     let fanned_out = targets.len() > 1;
-    let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
-        search_one_shard(
-            store,
-            shard_idx,
-            name,
-            body,
-            p,
-            &query_json,
-            &sort_keys,
-            &search_after,
-            &pit_ceiling,
-            &agg_json,
-            &filters_aggs,
-            page_want,
-            fanned_out,
-        )
-    };
-
+    let run_shard =
+        |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
+            search_one_shard(
+                store,
+                shard_idx,
+                name,
+                body,
+                p,
+                &query_json,
+                &sort_keys,
+                &search_after,
+                &pit_ceiling,
+                &agg_json,
+                &filters_aggs,
+                page_want,
+                fanned_out,
+            )
+        };
 
     let outs: Vec<std::result::Result<Option<ShardOut>, Response>> = if targets.len() > 1 {
         use rayon::prelude::*;
-        targets
-            .par_iter()
-            .enumerate()
-            .map(|(i, n)| run_shard(i, n))
-            .collect()
+        targets.par_iter().enumerate().map(|(i, n)| run_shard(i, n)).collect()
     } else {
         targets.iter().enumerate().map(|(i, n)| run_shard(i, n)).collect()
     };
@@ -1983,8 +1831,7 @@ pub fn run(
 
     // `rescore` runs a second query over the top of the page and mixes its
     // score into the one already there
-    let rescored =
-        apply_rescores(store, &targets, &mut cands, &searchers, body, &sort_keys)?;
+    let rescored = apply_rescores(store, &targets, &mut cands, &searchers, body, &sort_keys)?;
     // Where a sort names a filter on the nested objects it reads, only the
     // objects that match it have anything to say. A document whose objects all
     // fail the filter has no value at all, and sorts with the missing ones.
@@ -2080,9 +1927,8 @@ pub fn run(
     if let Some(spec) = body.get("highlight") {
         for h in &all_hits {
             let g = searchers[h.shard_idx].2.read();
-            let Some(cap) = g
-                .setting("highlight.max_analyzed_offset")
-                .and_then(|v| v.parse::<usize>().ok())
+            let Some(cap) =
+                g.setting("highlight.max_analyzed_offset").and_then(|v| v.parse::<usize>().ok())
             else {
                 break;
             };
@@ -2137,10 +1983,7 @@ pub fn run(
     } else {
         std::collections::HashMap::new()
     };
-    let named_scores = p
-        .get("include_named_queries_score")
-        .map(|v| v != "false")
-        .unwrap_or(false);
+    let named_scores = p.get("include_named_queries_score").map(|v| v != "false").unwrap_or(false);
     let page = write_page(
         store,
         &targets,
@@ -2197,7 +2040,9 @@ pub fn run(
                 continue;
             };
             for entry in entries.iter_mut() {
-                let Some(name) = entry.get("description").and_then(|d| d.as_str()) else { continue };
+                let Some(name) = entry.get("description").and_then(|d| d.as_str()) else {
+                    continue;
+                };
                 // a bucket that had to be filled in to close a gap was never
                 // built while collecting, so it is not one of the buckets the
                 // aggregation counts
@@ -2243,17 +2088,15 @@ pub fn run(
         millis_in_keys(a);
     }
 
-    if let (Some(a), Some(req)) = (
-        aggs.as_mut(),
-        body.get("aggs").or_else(|| body.get("aggregations")),
-    ) {
+    if let (Some(a), Some(req)) =
+        (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+    {
         keep_asked_ranges(req, a);
     }
 
-    if let (Some(a), Some(req)) = (
-        aggs.as_mut(),
-        body.get("aggs").or_else(|| body.get("aggregations")),
-    ) {
+    if let (Some(a), Some(req)) =
+        (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+    {
         name_date_metrics(store, &targets, req, a);
     }
 
@@ -2268,13 +2111,12 @@ pub fn run(
         .map(needs_all_shards)
         .unwrap_or(false);
 
-    let skipped = if p.contains_key("pre_filter_shard_size") && query_json.is_some()
-        && !agg_forces_all
-    {
-        empty_shards.min((targets.len() as u64).saturating_sub(1))
-    } else {
-        0
-    };
+    let skipped =
+        if p.contains_key("pre_filter_shard_size") && query_json.is_some() && !agg_forces_all {
+            empty_shards.min((targets.len() as u64).saturating_sub(1))
+        } else {
+            0
+        };
 
     // `typed_keys` asks for every aggregation and suggestion to be named after
     // what it produced as well as what it was called
@@ -2298,15 +2140,7 @@ pub fn run(
     // sub-phases that filled it in
     if !shard_profiles.is_empty() {
         let nanos = started.elapsed().as_nanos().max(1) as u64;
-        fetch_profiles(
-            &mut shard_profiles,
-            body,
-            &extras,
-            &named,
-            size,
-            page.len() as u64,
-            nanos,
-        );
+        fetch_profiles(&mut shard_profiles, body, &extras, &named, size, page.len() as u64, nanos);
     }
 
     Ok(Outcome {
@@ -2323,106 +2157,23 @@ pub fn run(
     })
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/// A date histogram stepped by calendar units.
-///
-/// A month is not a fixed number of milliseconds, so BoostCore's histogram --
-/// which steps by a constant -- cannot express one. Each bucket is instead a
-/// range filter run through the ordinary query path, which also means
-/// sub-aggregations come for free. The cost is one search per bucket, which
-/// suits the handful of buckets a calendar histogram usually spans.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/// A composite aggregation over `terms` sources.
-///
-/// The sources are run as nested `terms` aggregations and the resulting tree is
-/// flattened into one bucket per combination, which is what a composite is. Key
-/// order is ascending across the whole tuple, as the paging contract requires.
-
-
-
 /// The sibling pipelines: aggregations whose input is other aggregations'
 /// buckets rather than documents.
 /// Pipelines that live inside a bucketing aggregation and add a value to each
 /// of its buckets, rather than beside it summarising them all.
 const BUCKET_PIPELINES: &[&str] = &[
-    "cumulative_sum", "derivative", "moving_avg", "moving_fn", "serial_diff", "bucket_sort",
-    "bucket_selector", "bucket_script",
+    "cumulative_sum",
+    "derivative",
+    "moving_avg",
+    "moving_fn",
+    "serial_diff",
+    "bucket_sort",
+    "bucket_selector",
+    "bucket_script",
 ];
-
-
 
 const PIPELINES: &[&str] =
     &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// One source of a composite aggregation: what to bucket by, and how the key
 /// it produces should be read back.
@@ -2446,12 +2197,6 @@ pub(crate) struct CompSource {
     /// the field the source reads, for finding the documents that lack it
     field: String,
 }
-
-
-
-
-
-
 
 #[derive(Clone, Copy)]
 enum CalendarUnit {
@@ -2558,4 +2303,3 @@ impl CalendarUnit {
         }
     }
 }
-

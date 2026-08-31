@@ -83,11 +83,8 @@ impl HdrHistogram {
         if self.buckets.is_empty() {
             return;
         }
-        self.buckets = self
-            .buckets
-            .iter()
-            .map(|(k, n)| (if up { k << 1 } else { k >> 1 }, *n))
-            .collect();
+        self.buckets =
+            self.buckets.iter().map(|(k, n)| (if up { k << 1 } else { k >> 1 }, *n)).collect();
     }
 
     /// The integers per unit of value, once the range has settled.
@@ -126,17 +123,14 @@ impl HdrHistogram {
                 return Some((floor + unit - 1) as f64 / scale);
             }
         }
-        self.buckets
-            .keys()
-            .next_back()
-            .map(|floor| (floor + unit_size(*floor) - 1) as f64 / scale)
+        self.buckets.keys().next_back().map(|floor| (floor + unit_size(*floor) - 1) as f64 / scale)
     }
 }
 
 /// Median absolute deviation: the median of each value's distance from the
 /// median. OpenSearch computes it on a t-digest sketch, so it reports an
 /// approximation rather than the exact statistic.
-pub fn median_absolute_deviation(values: &mut Vec<f64>) -> Option<f64> {
+pub fn median_absolute_deviation(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

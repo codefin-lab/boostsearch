@@ -132,11 +132,8 @@ pub(crate) fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
 /// A `terms` clause may carry its list as a bitmap rather than as an array.
 pub(crate) fn expand_bitmap_terms(node: &mut Value) {
     let Some(o) = node.as_object_mut() else { return };
-    let is_bitmap = o
-        .get("terms")
-        .and_then(|t| t.get("value_type"))
-        .and_then(|v| v.as_str())
-        == Some("bitmap");
+    let is_bitmap =
+        o.get("terms").and_then(|t| t.get("value_type")).and_then(|v| v.as_str()) == Some("bitmap");
     if is_bitmap {
         if let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
             terms.remove("value_type");
@@ -144,17 +141,16 @@ pub(crate) fn expand_bitmap_terms(node: &mut Value) {
             for f in fields {
                 let encoded = match terms.get(&f) {
                     Some(Value::String(b)) => Some(b.clone()),
-                    Some(Value::Array(a)) if a.len() == 1 => {
-                        a[0].as_str().map(|s| s.to_string())
-                    }
+                    Some(Value::Array(a)) if a.len() == 1 => a[0].as_str().map(|s| s.to_string()),
                     _ => None,
                 };
                 let Some(encoded) = encoded else { continue };
                 // the 32-bit form starts with its cookie; the 64-bit form
                 // starts with a count of the high words it groups by
-                let Some(values) = base64_decode(&encoded).as_deref().and_then(|b| {
-                    decode_roaring(b).or_else(|| decode_roaring64(b))
-                }) else {
+                let Some(values) = base64_decode(&encoded)
+                    .as_deref()
+                    .and_then(|b| decode_roaring(b).or_else(|| decode_roaring64(b)))
+                else {
                     continue;
                 };
                 terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
@@ -247,8 +243,9 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
     };
 
     // words a document contributes, by field
-    let collect = |items: &[Value], out: &mut std::collections::BTreeMap<String, Vec<String>>,
-                       ids: &mut Vec<String>| {
+    let collect = |items: &[Value],
+                   out: &mut std::collections::BTreeMap<String, Vec<String>>,
+                   ids: &mut Vec<String>| {
         for item in items {
             let Some((id, src)) = source_of_item(item) else { continue };
             if let Some(id) = id {
@@ -279,13 +276,14 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
 
     let mut should = Vec::new();
     for (field, words) in &like {
-        let taken_back: Vec<&String> = unlike.get(field).map(|w| w.iter().collect()).unwrap_or_default();
+        let taken_back: Vec<&String> =
+            unlike.get(field).map(|w| w.iter().collect()).unwrap_or_default();
         let mut counts: std::collections::BTreeMap<&String, u64> = Default::default();
         for w in words {
             *counts.entry(w).or_insert(0) += 1;
         }
         for (word, tf) in counts {
-            if tf < min_tf || taken_back.iter().any(|u| *u == word) {
+            if tf < min_tf || taken_back.contains(&word) {
                 continue;
             }
             // how many documents hold the word, which is what min_doc_freq caps
@@ -299,8 +297,8 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
                         mapping: &g.mapping,
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
-            max_regex_length: g.max_regex_length(),
-            allow_expensive: crate::search::expensive_allowed(store),
+                        max_regex_length: g.max_regex_length(),
+                        allow_expensive: crate::search::expensive_allowed(store),
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
@@ -329,19 +327,19 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
     // the documents the query was built from are left out unless asked for
     let include = spec.get("include").and_then(|v| v.as_bool()).unwrap_or(false);
     if !include && !like_ids.is_empty() {
-        bool_q.insert(
-            "must_not".into(),
-            json!([{"terms": {"_id": like_ids}}]),
-        );
+        bool_q.insert("must_not".into(), json!([{"terms": {"_id": like_ids}}]));
     }
     o.remove("more_like_this");
     *node = json!({"bool": Value::Object(bool_q)});
 }
 
-pub(crate) fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result<(), Response> {
+pub(crate) fn resolve_terms_lookups(
+    store: &Store,
+    node: &mut Value,
+) -> std::result::Result<(), Response> {
     match node {
         Value::Object(o) => {
-            if let Some(Value::Object(spec)) = o.get("terms").cloned().map(|v| v) {
+            if let Some(Value::Object(spec)) = o.get("terms").cloned() {
                 for (field, def) in spec {
                     let Some(d) = def.as_object() else { continue };
                     let (Some(index), Some(path)) = (
@@ -373,8 +371,8 @@ pub(crate) fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::res
                             mapping: &g.mapping,
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
-            max_regex_length: g.max_regex_length(),
-            allow_expensive: crate::search::expensive_allowed(store),
+                            max_regex_length: g.max_regex_length(),
+                            allow_expensive: crate::search::expensive_allowed(store),
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
@@ -384,7 +382,10 @@ pub(crate) fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::res
                         })?;
                         let searcher = g.reader.searcher();
                         let hits = searcher
-                            .search(&built, &TopDocs::with_limit(g.max_terms_count()).order_by_score())
+                            .search(
+                                &built,
+                                &TopDocs::with_limit(g.max_terms_count()).order_by_score(),
+                            )
                             .map_err(|e| {
                                 err(
                                     StatusCode::BAD_REQUEST,

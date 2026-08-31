@@ -2,14 +2,14 @@
 //!
 //! Splits one aggregation request into the stages our code actually performs,
 //! so the expensive one can be found rather than guessed at.
-use boostsearch::store::Store;
-use serde_json::json;
-use std::time::Instant;
 use boostcore::aggregation::agg_req::Aggregations;
 use boostcore::aggregation::{
     AggContextParams, AggregationCollector, DistributedAggregationCollector,
 };
 use boostcore::query::AllQuery;
+use boostsearch::store::Store;
+use serde_json::json;
+use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/blk".into());
@@ -25,16 +25,28 @@ fn main() -> anyhow::Result<()> {
         ("agg_terms_dyn", json!({"by_status": {"terms": {"field": "_dyn.status", "size": 10}}})),
         ("agg_terms_kw_raw", json!({"by_region": {"terms": {"field": "_raw.region", "size": 10}}})),
         ("agg_terms_kw_dyn", json!({"by_region": {"terms": {"field": "_dyn.region", "size": 10}}})),
-        ("agg_date_hist", json!({"over_time": {
-            "date_histogram": {"field": "_raw.@timestamp", "fixed_interval": "1d"}}})),
-        ("agg_date_hist_dyn", json!({"over_time": {
-            "date_histogram": {"field": "_dyn.@timestamp", "fixed_interval": "1d"}}})),
-        ("agg_nested", json!({"by_region": {"terms": {"field": "_raw.region"},
+        (
+            "agg_date_hist",
+            json!({"over_time": {
+            "date_histogram": {"field": "_raw.@timestamp", "fixed_interval": "1d"}}}),
+        ),
+        (
+            "agg_date_hist_dyn",
+            json!({"over_time": {
+            "date_histogram": {"field": "_dyn.@timestamp", "fixed_interval": "1d"}}}),
+        ),
+        (
+            "agg_nested",
+            json!({"by_region": {"terms": {"field": "_raw.region"},
             "aggs": {"avg_ms": {"avg": {"field": "_raw.response_ms"}},
-                     "p_size": {"stats": {"field": "_raw.size"}}}}})),
-        ("agg_nested_dyn", json!({"by_region": {"terms": {"field": "_dyn.region"},
+                     "p_size": {"stats": {"field": "_raw.size"}}}}}),
+        ),
+        (
+            "agg_nested_dyn",
+            json!({"by_region": {"terms": {"field": "_dyn.region"},
             "aggs": {"avg_ms": {"avg": {"field": "_dyn.response_ms"}},
-                     "p_size": {"stats": {"field": "_dyn.size"}}}}})),
+                     "p_size": {"stats": {"field": "_dyn.size"}}}}}),
+        ),
     ];
 
     let bench = |name: &str, f: &mut dyn FnMut()| {
@@ -62,7 +74,10 @@ fn main() -> anyhow::Result<()> {
         let mut b = || {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let res = searcher
-                .search(&AllQuery, &DistributedAggregationCollector::from_aggs(parsed.clone(), ctxp))
+                .search(
+                    &AllQuery,
+                    &DistributedAggregationCollector::from_aggs(parsed.clone(), ctxp),
+                )
                 .unwrap();
             let _ = res.into_final_result(parsed.clone(), Default::default()).unwrap();
         };

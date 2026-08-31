@@ -127,10 +127,15 @@ pub(crate) fn cat_column_matches(column: &str, asked: &str) -> bool {
         return true;
     }
     let initials: String = column.split('.').filter_map(|p| p.chars().next()).collect();
-    initials == asked || column.starts_with(asked) && asked.len() >= 1 && column.len() > asked.len()
+    initials == asked
+        || column.starts_with(asked) && !asked.is_empty() && column.len() > asked.len()
 }
 
-pub(crate) fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response {
+pub(crate) fn cat_render_cols(
+    columns: &[&str],
+    rows: Vec<Vec<(&str, String)>>,
+    p: &Params,
+) -> Response {
     if p.contains_key("help") {
         return cat_help(columns);
     }
@@ -206,9 +211,7 @@ pub(crate) fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, 
     if p.get("format").map(|f| f == "json").unwrap_or(false) {
         let arr: Vec<Value> = rows
             .iter()
-            .map(|r| {
-                Value::Object(r.iter().map(|(k, v)| (k.to_string(), json!(v))).collect())
-            })
+            .map(|r| Value::Object(r.iter().map(|(k, v)| (k.to_string(), json!(v))).collect()))
             .collect();
         return axum::Json(arr).into_response();
     }
@@ -227,11 +230,8 @@ pub(crate) fn cat_render_cols(columns: &[&str], rows: Vec<Vec<(&str, String)>>, 
         None if !asked.is_empty() => asked,
         None => columns.to_vec(),
     };
-    let mut widths: Vec<usize> = if show_head {
-        head.iter().map(|h| h.len()).collect()
-    } else {
-        vec![0; head.len()]
-    };
+    let mut widths: Vec<usize> =
+        if show_head { head.iter().map(|h| h.len()).collect() } else { vec![0; head.len()] };
     for r in &rows {
         for (i, (_, v)) in r.iter().enumerate() {
             if i < widths.len() {
@@ -298,9 +298,7 @@ pub async fn cat_indices(
             return err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!(
-                    "Invalid health value [{h}], allowed values are [green, yellow, red]"
-                ),
+                format!("Invalid health value [{h}], allowed values are [green, yellow, red]"),
             );
         }
     }
@@ -364,10 +362,22 @@ pub async fn cat_indices(
         ]);
     }
     rows.sort_by(|a, b| a[2].1.cmp(&b[2].1));
-    let rows = cat_only_default(rows, &[
-        "health", "status", "index", "uuid", "pri", "rep", "docs.count",
-        "docs.deleted", "store.size", "pri.store.size",
-    ], &p);
+    let rows = cat_only_default(
+        rows,
+        &[
+            "health",
+            "status",
+            "index",
+            "uuid",
+            "pri",
+            "rep",
+            "docs.count",
+            "docs.deleted",
+            "store.size",
+            "pri.store.size",
+        ],
+        &p,
+    );
     cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
 
@@ -464,10 +474,7 @@ pub async fn cat_plugins(Query(p): Query<Params>) -> Response {
 ///
 /// `generic` reports -1 for wait time, which is how OpenSearch says a pool
 /// does not measure it.
-pub async fn cat_thread_pool(
-    patterns: Option<Path<String>>,
-    Query(p): Query<Params>,
-) -> Response {
+pub async fn cat_thread_pool(patterns: Option<Path<String>>, Query(p): Query<Params>) -> Response {
     // the pools a request passes through, and how each is sized: a fixed pool
     // has a set number of threads, a scaling one grows and shrinks
     let pools: &[(&str, &str, &str)] = &[
@@ -497,9 +504,9 @@ pub async fn cat_thread_pool(
     for (name, kind, wait) in pools {
         if let Some(w) = wanted.as_ref() {
             // a pattern names pools the way an index expression names indices
-            let hit = w.iter().any(|x| {
-                x == name || (x.contains('*') && crate::store::glob_match(x, name))
-            });
+            let hit = w
+                .iter()
+                .any(|x| x == name || (x.contains('*') && crate::store::glob_match(x, name)));
             if !hit {
                 continue;
             }
@@ -530,22 +537,14 @@ pub async fn cat_thread_pool(
             ("twt", wait.to_string()),
         ]);
     }
-    let rows = cat_only_default(
-        rows,
-        &["node_name", "name", "active", "queue", "rejected"],
-        &p,
-    );
+    let rows = cat_only_default(rows, &["node_name", "name", "active", "queue", "rejected"], &p);
     cat_render_cols(CAT_THREAD_POOL_COLS, rows, &p)
 }
 
 /// `_cat/tasks` -- the request asking is itself a task, which is the one row
 /// every caller of this endpoint sees.
 pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) -> Response {
-    let opaque = headers
-        .get("x-opaque-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let opaque = headers.get("x-opaque-id").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let mut row = vec![
         ("action", "cluster:monitor/tasks/lists".to_string()),
         ("task_id", "node-0:1".to_string()),
@@ -563,8 +562,15 @@ pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) 
     row.push(("x_opaque_id", if opaque.is_empty() { "-".to_string() } else { opaque }));
     let detailed = p.get("detailed").map(|v| v != "false").unwrap_or(false);
     let mut defaults: Vec<&str> = vec![
-        "action", "task_id", "parent_task_id", "type", "start_time", "timestamp",
-        "running_time", "ip", "node",
+        "action",
+        "task_id",
+        "parent_task_id",
+        "type",
+        "start_time",
+        "timestamp",
+        "running_time",
+        "ip",
+        "node",
     ];
     if detailed {
         defaults.push("description");
@@ -607,9 +613,9 @@ pub async fn cat_aliases(
             }
             let cell = |k: &str| {
                 def.get(k)
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        other => Some(other.to_string()),
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
                     })
                     .unwrap_or_else(|| "-".to_string())
             };
@@ -638,22 +644,36 @@ pub async fn cat_count(
     let total: u64 = names
         .iter()
         .filter_map(|n| store.get(n))
-        .map(|st| st.read().reader.searcher().num_docs() as u64)
+        .map(|st| st.read().reader.searcher().num_docs())
         .sum();
-    cat_render(vec![vec![("epoch", "0".into()), ("timestamp", "00:00:00".into()),
-                        ("count", total.to_string())]], &p)
+    cat_render(
+        vec![vec![
+            ("epoch", "0".into()),
+            ("timestamp", "00:00:00".into()),
+            ("count", total.to_string()),
+        ]],
+        &p,
+    )
 }
 
 pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let n = store.names().len().to_string();
     let mut row: Vec<(&str, String)> = vec![
-        ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
-        ("cluster", "boostsearch".into()), ("status", "green".into()),
-        ("node.total", "1".into()), ("node.data", "1".into()),
+        ("epoch", "0".into()),
+        ("timestamp", "00:00:00".into()),
+        ("cluster", "boostsearch".into()),
+        ("status", "green".into()),
+        ("node.total", "1".into()),
+        ("node.data", "1".into()),
         ("discovered_cluster_manager", "true".into()),
-        ("shards", n.clone()), ("pri", n), ("relo", "0".into()), ("init", "0".into()),
-        ("unassign", "0".into()), ("pending_tasks", "0".into()),
-        ("max_task_wait_time", "-".into()), ("active_shards_percent", "100.0%".into()),
+        ("shards", n.clone()),
+        ("pri", n),
+        ("relo", "0".into()),
+        ("init", "0".into()),
+        ("unassign", "0".into()),
+        ("pending_tasks", "0".into()),
+        ("max_task_wait_time", "-".into()),
+        ("active_shards_percent", "100.0%".into()),
     ];
     // `ts=false` drops the two time columns, leaving the cluster's own state
     if p.get("ts").map(|v| v == "false").unwrap_or(false) {
@@ -680,7 +700,12 @@ pub async fn cat_dispatch(
     cat_by_name(store, what, None, p).await
 }
 
-pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Params) -> Response {
+pub(crate) async fn cat_by_name(
+    store: Store,
+    what: String,
+    target: Option<String>,
+    p: Params,
+) -> Response {
     let what = what.split('/').next().unwrap_or("").to_string();
     match what.as_str() {
         "indices" => cat_indices(State(store), None, Query(p)).await,
@@ -688,43 +713,97 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
         "count" => cat_count(State(store), None, Query(p)).await,
         "health" => cat_health(State(store), Query(p)).await,
         "master" | "cluster_manager" => cat_render(
-            vec![vec![("id", "node-0".into()), ("host", "127.0.0.1".into()),
-                      ("ip", "127.0.0.1".into()), ("node", "boostsearch".into())]], &p),
+            vec![vec![
+                ("id", "node-0".into()),
+                ("host", "127.0.0.1".into()),
+                ("ip", "127.0.0.1".into()),
+                ("node", "boostsearch".into()),
+            ]],
+            &p,
+        ),
         "nodes" => {
             let row: Vec<(&str, String)> = vec![
                 // `full_id` asks for the whole node identifier rather than
                 // the short form a table shows by default
-                ("id", if p.get("full_id").map(|v| v != "false").unwrap_or(false) {
-                    "node-0".to_string()
-                } else {
-                    "node".to_string()
-                }),
+                (
+                    "id",
+                    if p.get("full_id").map(|v| v != "false").unwrap_or(false) {
+                        "node-0".to_string()
+                    } else {
+                        "node".to_string()
+                    },
+                ),
                 ("ip", "127.0.0.1".into()),
-                ("file_desc.current", "0".into()), ("file_desc.percent", "0".into()),
+                ("file_desc.current", "0".into()),
+                ("file_desc.percent", "0".into()),
                 ("file_desc.max", "0".into()),
-                ("heap.current", "0b".into()), ("heap.percent", "0".into()),
+                ("heap.current", "0b".into()),
+                ("heap.percent", "0".into()),
                 ("heap.max", "0b".into()),
-                ("ram.current", "0b".into()), ("ram.percent", "0".into()),
+                ("ram.current", "0b".into()),
+                ("ram.percent", "0".into()),
                 ("ram.max", "0b".into()),
-                ("http", "127.0.0.1:9200".into()), ("cpu", "0".into()),
-                ("load_1m", "0.00".into()), ("load_5m", "0.00".into()),
+                ("http", "127.0.0.1:9200".into()),
+                ("cpu", "0".into()),
+                ("load_1m", "0.00".into()),
+                ("load_5m", "0.00".into()),
                 ("load_15m", "0.00".into()),
-                ("node.role", "dimr".into()), ("node.roles", "data,ingest".into()),
-                ("cluster_manager", "*".into()), ("name", "boostsearch".into()),
-                ("diskAvail", "1gb".into()), ("diskTotal", "2gb".into()),
-                ("diskUsed", "1gb".into()), ("diskUsedPercent", "50.00".into()),
+                ("node.role", "dimr".into()),
+                ("node.roles", "data,ingest".into()),
+                ("cluster_manager", "*".into()),
+                ("name", "boostsearch".into()),
+                ("diskAvail", "1gb".into()),
+                ("diskTotal", "2gb".into()),
+                ("diskUsed", "1gb".into()),
+                ("diskUsedPercent", "50.00".into()),
             ];
-            let rows = cat_only_default(vec![row], &[
-                "ip", "heap.percent", "ram.percent", "cpu", "load_1m", "load_5m",
-                "load_15m", "node.role", "node.roles", "cluster_manager", "name",
-            ], &p);
-            cat_render_cols(&[
-                "id", "ip", "file_desc.current", "file_desc.percent", "file_desc.max",
-                "heap.current", "heap.percent", "heap.max", "ram.current", "ram.percent",
-                "ram.max", "http", "cpu", "load_1m", "load_5m", "load_15m", "node.role",
-                "node.roles", "cluster_manager", "name", "diskAvail", "diskTotal",
-                "diskUsed", "diskUsedPercent",
-            ], rows, &p)
+            let rows = cat_only_default(
+                vec![row],
+                &[
+                    "ip",
+                    "heap.percent",
+                    "ram.percent",
+                    "cpu",
+                    "load_1m",
+                    "load_5m",
+                    "load_15m",
+                    "node.role",
+                    "node.roles",
+                    "cluster_manager",
+                    "name",
+                ],
+                &p,
+            );
+            cat_render_cols(
+                &[
+                    "id",
+                    "ip",
+                    "file_desc.current",
+                    "file_desc.percent",
+                    "file_desc.max",
+                    "heap.current",
+                    "heap.percent",
+                    "heap.max",
+                    "ram.current",
+                    "ram.percent",
+                    "ram.max",
+                    "http",
+                    "cpu",
+                    "load_1m",
+                    "load_5m",
+                    "load_15m",
+                    "node.role",
+                    "node.roles",
+                    "cluster_manager",
+                    "name",
+                    "diskAvail",
+                    "diskTotal",
+                    "diskUsed",
+                    "diskUsedPercent",
+                ],
+                rows,
+                &p,
+            )
         }
         "templates" => {
             let mut rows: Vec<Vec<(&str, String)>> = store
@@ -763,7 +842,10 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
                                 .get("composed_of")
                                 .and_then(|v| v.as_array())
                                 .map(|a| {
-                                    a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                                    a.iter()
+                                        .filter_map(|x| x.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(",")
                                 })
                                 .unwrap_or_default();
                             // a template composed of nothing names nothing
@@ -831,9 +913,11 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
                 }
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
-            let rows = cat_only_default(rows, &[
-                "index", "shard", "prirep", "state", "docs", "store", "ip", "node",
-            ], &p);
+            let rows = cat_only_default(
+                rows,
+                &["index", "shard", "prirep", "state", "docs", "store", "ip", "node"],
+                &p,
+            );
             cat_render(rows, &p)
         }
         "segments" => {
@@ -849,8 +933,10 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
                         .enumerate()
                         .map(|(i, sr)| {
                             vec![
-                                ("index", n.clone()), ("shard", "0".into()),
-                                ("prirep", "p".into()), ("segment", format!("_{i}")),
+                                ("index", n.clone()),
+                                ("shard", "0".into()),
+                                ("prirep", "p".into()),
+                                ("segment", format!("_{i}")),
                                 ("docs.count", sr.num_docs().to_string()),
                                 ("docs.deleted", sr.num_deleted_docs().to_string()),
                             ]
@@ -894,19 +980,50 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
             cat_render_cols(&["id", "host", "ip", "node", "field", "size"], rows, &p)
         }
         "allocation" => cat_named(
-            &["shards", "disk.indices", "disk.used", "disk.avail", "disk.total",
-              "disk.percent", "host", "ip", "node"], &p),
+            &[
+                "shards",
+                "disk.indices",
+                "disk.used",
+                "disk.avail",
+                "disk.total",
+                "disk.percent",
+                "host",
+                "ip",
+                "node",
+            ],
+            &p,
+        ),
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
         "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
         // how each shard came to be where it is, one row per shard
         "recovery" => {
             const COLS: &[&str] = &[
-                "index", "shard", "start_time", "start_time_millis", "stop_time",
-                "stop_time_millis", "time", "type", "stage", "source_host", "source_node",
-                "target_host", "target_node", "repository", "snapshot", "files",
-                "files_recovered", "files_percent", "files_total", "bytes", "bytes_recovered",
-                "bytes_percent", "bytes_total", "translog_ops", "translog_ops_recovered",
+                "index",
+                "shard",
+                "start_time",
+                "start_time_millis",
+                "stop_time",
+                "stop_time_millis",
+                "time",
+                "type",
+                "stage",
+                "source_host",
+                "source_node",
+                "target_host",
+                "target_node",
+                "repository",
+                "snapshot",
+                "files",
+                "files_recovered",
+                "files_percent",
+                "files_total",
+                "bytes",
+                "bytes_recovered",
+                "bytes_percent",
+                "bytes_total",
+                "translog_ops",
+                "translog_ops_recovered",
                 "translog_ops_percent",
             ];
             let names = match target.as_deref().filter(|t| !t.is_empty()) {
@@ -956,7 +1073,9 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
                     ]);
                 }
             }
-            rows.sort_by(|a, b| (a[0].1.clone(), a[1].1.clone()).cmp(&(b[0].1.clone(), b[1].1.clone())));
+            rows.sort_by(|a, b| {
+                (a[0].1.clone(), a[1].1.clone()).cmp(&(b[0].1.clone(), b[1].1.clone()))
+            });
             cat_render_cols(COLS, rows, &p)
         }
         "repositories" => {
@@ -975,8 +1094,17 @@ pub(crate) async fn cat_by_name(store: Store, what: String, target: Option<Strin
         }
         "snapshots" => {
             const COLS: &[&str] = &[
-                "id", "status", "start_epoch", "start_time", "end_epoch", "end_time",
-                "duration", "indices", "successful_shards", "failed_shards", "total_shards",
+                "id",
+                "status",
+                "start_epoch",
+                "start_time",
+                "end_epoch",
+                "end_time",
+                "duration",
+                "indices",
+                "successful_shards",
+                "failed_shards",
+                "total_shards",
                 "reason",
             ];
             let repos: Vec<String> = match target.as_deref().filter(|t| !t.is_empty()) {

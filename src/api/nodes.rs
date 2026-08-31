@@ -4,28 +4,36 @@ use super::*;
 
 /// `_script_context` -- the places a script may run and what each hands it.
 pub async fn script_contexts(Query(p): Query<Params>) -> Response {
-    let ctx = |name: &str, ret: &str| json!({
-        "name": name,
-        "methods": [{"name": "execute", "return_type": ret, "params": []}],
-    });
-    respond(&p, json!({"contexts": [
-        ctx("aggs", "double"),
-        ctx("filter", "boolean"),
-        ctx("score", "double"),
-        ctx("update", "void"),
-    ]}))
+    let ctx = |name: &str, ret: &str| {
+        json!({
+            "name": name,
+            "methods": [{"name": "execute", "return_type": ret, "params": []}],
+        })
+    };
+    respond(
+        &p,
+        json!({"contexts": [
+            ctx("aggs", "double"),
+            ctx("filter", "boolean"),
+            ctx("score", "double"),
+            ctx("update", "void"),
+        ]}),
+    )
 }
 
 /// `_script_language` -- which languages scripts may be written in, and how
 /// they may be supplied.
 pub async fn script_languages(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({
-        "types_allowed": ["inline", "stored"],
-        "language_contexts": [{
-            "language": "painless",
-            "contexts": ["aggs", "filter", "score", "update"],
-        }],
-    }))
+    respond(
+        &p,
+        json!({
+            "types_allowed": ["inline", "stored"],
+            "language_contexts": [{
+                "language": "painless",
+                "contexts": ["aggs", "filter", "score", "update"],
+            }],
+        }),
+    )
 }
 
 /// `_nodes/stats` -- what the one node has been doing.
@@ -37,18 +45,37 @@ pub async fn nodes_stats(
     // the path may name which metrics are wanted, and a name that is not one
     // of them is a mistake rather than something to pass over
     const METRICS: &[&str] = &[
-        "_all", "indices", "os", "process", "jvm", "thread_pool", "fs", "transport",
-        "http", "breaker", "script", "discovery", "ingest", "adaptive_selection",
-        "script_cache", "indexing_pressure", "shard_indexing_pressure",
-        "search_backpressure", "cluster_manager_throttling", "weighted_routing",
-        "resource_usage_stats", "segment_replication_backpressure", "repositories",
-        "admission_control", "caches", "remote_store",
+        "_all",
+        "indices",
+        "os",
+        "process",
+        "jvm",
+        "thread_pool",
+        "fs",
+        "transport",
+        "http",
+        "breaker",
+        "script",
+        "discovery",
+        "ingest",
+        "adaptive_selection",
+        "script_cache",
+        "indexing_pressure",
+        "shard_indexing_pressure",
+        "search_backpressure",
+        "cluster_manager_throttling",
+        "weighted_routing",
+        "resource_usage_stats",
+        "segment_replication_backpressure",
+        "repositories",
+        "admission_control",
+        "caches",
+        "remote_store",
     ];
     // only the first path part names the metrics; anything after it narrows
     // within one, and is checked by whatever owns that metric
-    let rest_parts: Vec<String> = rest
-        .map(|Path(r)| r.split('/').map(|s| s.to_string()).collect())
-        .unwrap_or_default();
+    let rest_parts: Vec<String> =
+        rest.map(|Path(r)| r.split('/').map(|s| s.to_string()).collect()).unwrap_or_default();
     let asked: Vec<String> = rest_parts
         .first()
         .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
@@ -77,7 +104,7 @@ pub async fn nodes_stats(
     let mut docs = 0u64;
     for n in store.names() {
         if let Some(st) = store.get(&n) {
-            docs += st.read().reader.searcher().num_docs() as u64;
+            docs += st.read().reader.searcher().num_docs();
         }
     }
     // a second path part narrows within `indices` to the metrics it names
@@ -184,12 +211,26 @@ pub async fn memory_report(State(store): State<Store>, Query(p): Query<Params>) 
     if flag(&p, "collect") {
         unsafe { libmimalloc_sys::mi_collect(true) };
     }
-    let (mut elapsed, mut user, mut sys, mut rss, mut peak_rss, mut commit, mut peak_commit, mut faults) =
-        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let (
+        mut elapsed,
+        mut user,
+        mut sys,
+        mut rss,
+        mut peak_rss,
+        mut commit,
+        mut peak_commit,
+        mut faults,
+    ) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     unsafe {
         libmimalloc_sys::mi_process_info(
-            &mut elapsed, &mut user, &mut sys, &mut rss, &mut peak_rss,
-            &mut commit, &mut peak_commit, &mut faults,
+            &mut elapsed,
+            &mut user,
+            &mut sys,
+            &mut rss,
+            &mut peak_rss,
+            &mut commit,
+            &mut peak_commit,
+            &mut faults,
         );
     }
     let mb = |v: usize| (v as f64 / 1_048_576.0 * 10.0).round() / 10.0;
@@ -218,20 +259,23 @@ pub async fn memory_report(State(store): State<Store>, Query(p): Query<Params>) 
             }));
         }
     }
-    respond(&p, json!({
-        "allocator": {
-            "rss_mb": mb(rss), "peak_rss_mb": mb(peak_rss),
-            "committed_mb": mb(commit), "peak_committed_mb": mb(peak_commit),
-            "page_faults": faults,
-        },
-        "indices": {
-            "count": store.names().len(), "live_writers": writers,
-            "total_segments": segments, "total_live_ids": live_ids,
-            "total_versions": versions, "total_pending": pending,
-            "total_shapes": shapes, "total_kind_paths": kinds,
-        },
-        "sample": per_index,
-    }))
+    respond(
+        &p,
+        json!({
+            "allocator": {
+                "rss_mb": mb(rss), "peak_rss_mb": mb(peak_rss),
+                "committed_mb": mb(commit), "peak_committed_mb": mb(peak_commit),
+                "page_faults": faults,
+            },
+            "indices": {
+                "count": store.names().len(), "live_writers": writers,
+                "total_segments": segments, "total_live_ids": live_ids,
+                "total_versions": versions, "total_pending": pending,
+                "total_shapes": shapes, "total_kind_paths": kinds,
+            },
+            "sample": per_index,
+        }),
+    )
 }
 
 /// `_list/wlm_stats` -- workload group statistics as a table.
@@ -282,8 +326,13 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
             .into_response();
     }
     let cols = [
-        "NODE_ID", "WORKLOAD_GROUP_ID", "TOTAL_COMPLETIONS", "TOTAL_REJECTIONS",
-        "TOTAL_CANCELLATIONS", "CPU_USAGE", "MEMORY_USAGE",
+        "NODE_ID",
+        "WORKLOAD_GROUP_ID",
+        "TOTAL_COMPLETIONS",
+        "TOTAL_REJECTIONS",
+        "TOTAL_CANCELLATIONS",
+        "CPU_USAGE",
+        "MEMORY_USAGE",
     ];
     let row = ["node-0", "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
     let mut out = String::new();
@@ -314,21 +363,24 @@ pub fn node_attrs() -> Vec<(String, String)> {
 }
 
 pub async fn nodes_info(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({
-        "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "boostsearch",
-        "nodes": {"node-0": {
-            "name": "boostsearch", "transport_address": "127.0.0.1:9300",
-            "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
-            "build_type": "tar", "build_hash": "boostsearch", "roles": ["data", "ingest"],
-            "attributes": {},
-            "os": {"refresh_interval_in_millis": 1000,
-                   "available_processors": num_cpus(),
-                   "allocated_processors": num_cpus()},
-            "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
-                        "mlockall": false},
-            "plugins": [], "modules": [], "ingest": {"processors": []},
-            "thread_pool": {}, "transport": {}, "http": {},
-        }},
-    }))
+    respond(
+        &p,
+        json!({
+            "_nodes": {"total": 1, "successful": 1, "failed": 0},
+            "cluster_name": "boostsearch",
+            "nodes": {"node-0": {
+                "name": "boostsearch", "transport_address": "127.0.0.1:9300",
+                "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
+                "build_type": "tar", "build_hash": "boostsearch", "roles": ["data", "ingest"],
+                "attributes": {},
+                "os": {"refresh_interval_in_millis": 1000,
+                       "available_processors": num_cpus(),
+                       "allocated_processors": num_cpus()},
+                "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
+                            "mlockall": false},
+                "plugins": [], "modules": [], "ingest": {"processors": []},
+                "thread_pool": {}, "transport": {}, "http": {},
+            }},
+        }),
+    )
 }

@@ -45,13 +45,15 @@ pub(crate) fn add_human_settings(view: &mut Value, st: &IdxState) {
             .and_then(|v| v.get("created"))
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "136407827".to_string());
-        o.insert("version".into(), json!({
-            "created": ver, "created_string": "3.9.0",
-        }));
+        o.insert(
+            "version".into(),
+            json!({
+                "created": ver, "created_string": "3.9.0",
+            }),
+        );
     } else if let Some(o) = view.as_object_mut() {
         o.insert("index.creation_date_string".into(), json!(text));
-        o.entry("index.creation_date".to_string())
-            .or_insert_with(|| json!(created.to_string()));
+        o.entry("index.creation_date".to_string()).or_insert_with(|| json!(created.to_string()));
     }
 }
 

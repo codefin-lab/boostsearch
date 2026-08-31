@@ -30,9 +30,7 @@ pub(crate) fn build_highlight(
     };
     let patterns: Vec<(String, Value)> = patterns
         .into_iter()
-        .filter(|(name, _)| {
-            source_kept || mapping.field_option(name, "store") == Some(json!(true))
-        })
+        .filter(|(name, _)| source_kept || mapping.field_option(name, "store") == Some(json!(true)))
         .collect();
     let tag = |key: &str, fallback: &str| -> String {
         spec.get(key)
@@ -45,10 +43,7 @@ pub(crate) fn build_highlight(
     };
     let pre = tag("pre_tags", "<em>");
     let post = tag("post_tags", "</em>");
-    let require_match = spec
-        .get("require_field_match")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let require_match = spec.get("require_field_match").and_then(|v| v.as_bool()).unwrap_or(true);
 
     let asked = query_terms_by_field(query.as_ref());
     // every path the mapping knows, plus whatever the document itself carries
@@ -65,9 +60,9 @@ pub(crate) fn build_highlight(
 
     let mut out = serde_json::Map::new();
     for name in candidates {
-        let wanted = patterns.iter().any(|(pat, _)| {
-            pat == &name || pat == "*" || crate::store::glob_match(pat, &name)
-        });
+        let wanted = patterns
+            .iter()
+            .any(|(pat, _)| pat == &name || pat == "*" || crate::store::glob_match(pat, &name));
         if !wanted {
             continue;
         }
@@ -78,18 +73,13 @@ pub(crate) fn build_highlight(
             .and_then(|v| v.as_str())
             .or_else(|| {
                 let (parent, _) = name.rsplit_once('.')?;
-                source
-                    .pointer(&format!("/{}", parent.replace('.', "/")))?
-                    .as_str()
+                source.pointer(&format!("/{}", parent.replace('.', "/")))?.as_str()
             });
         let Some(text) = text else { continue };
 
         // a value longer than `ignore_above` was never indexed, so there is
         // nothing in it that could have matched
-        if let Some(limit) = mapping
-            .field_option(&name, "ignore_above")
-            .and_then(|v| v.as_u64())
-        {
+        if let Some(limit) = mapping.field_option(&name, "ignore_above").and_then(|v| v.as_u64()) {
             if text.chars().count() as u64 > limit {
                 continue;
             }
@@ -125,9 +115,8 @@ pub(crate) fn build_highlight(
         if terms.is_empty() {
             continue;
         }
-        let analyzer = mapping
-            .field_option(&name, "analyzer")
-            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        let analyzer =
+            mapping.field_option(&name, "analyzer").and_then(|v| v.as_str().map(|s| s.to_string()));
         let marked = mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post);
         if let Some(marked) = marked {
             out.insert(name, json!([marked]));
@@ -148,8 +137,13 @@ pub(crate) fn query_terms_by_field(query: Option<&Value>) -> Vec<(String, String
         };
         for (kind, body) in o {
             match kind.as_str() {
-                "match" | "match_phrase" | "match_phrase_prefix" | "term" | "prefix"
-                | "wildcard" | "match_bool_prefix" => {
+                "match"
+                | "match_phrase"
+                | "match_phrase_prefix"
+                | "term"
+                | "prefix"
+                | "wildcard"
+                | "match_bool_prefix" => {
                     if let Some(inner) = body.as_object() {
                         for (field, spec) in inner {
                             let text = match spec {
@@ -166,7 +160,9 @@ pub(crate) fn query_terms_by_field(query: Option<&Value>) -> Vec<(String, String
                                 // word rather than the whole of it
                                 let partial = matches!(
                                     kind.as_str(),
-                                    "prefix" | "wildcard" | "match_phrase_prefix"
+                                    "prefix"
+                                        | "wildcard"
+                                        | "match_phrase_prefix"
                                         | "match_bool_prefix"
                                 );
                                 out.push((field.clone(), t, partial));
@@ -192,10 +188,7 @@ pub(crate) fn query_terms_by_field(query: Option<&Value>) -> Vec<(String, String
                 }
                 "query_string" | "simple_query_string" => {
                     let text = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let field = body
-                        .get("default_field")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("*");
+                    let field = body.get("default_field").and_then(|v| v.as_str()).unwrap_or("*");
                     out.push((field.to_string(), text.to_string(), false));
                 }
                 _ => walk(body, out),
@@ -264,9 +257,7 @@ pub(crate) fn mark_terms(
         };
         out.push_str(&rest[..start]);
         let word = &rest[start..];
-        let end = word
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(word.len());
+        let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
         let (word, tail) = word.split_at(end);
         let lower = word.to_lowercase();
         if whole.contains(&lower) || starts.iter().any(|p| lower.starts_with(p)) {

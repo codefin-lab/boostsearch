@@ -8,16 +8,19 @@ pub(crate) fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
         Value::Object(o) => {
             for kind in ["geo_shape", "geo_bounding_box", "geo_distance", "geo_polygon"] {
                 if let Some(spec) = o.get(kind).and_then(|v| v.as_object()) {
-                    let field = spec
-                        .keys()
-                        .map(|k| k.to_string())
-                        .find(|k| {
-                            !matches!(
-                                k.as_str(),
-                                "boost" | "_name" | "ignore_unmapped" | "validation_method"
-                                    | "type" | "distance" | "distance_type" | "relation"
-                            )
-                        })?;
+                    let field = spec.keys().map(|k| k.to_string()).find(|k| {
+                        !matches!(
+                            k.as_str(),
+                            "boost"
+                                | "_name"
+                                | "ignore_unmapped"
+                                | "validation_method"
+                                | "type"
+                                | "distance"
+                                | "distance_type"
+                                | "relation"
+                        )
+                    })?;
                     let mut shape = json!({"__kind": kind, "__spec": spec.get(&field)});
                     // a distance query keeps the radius beside the field
                     if let Some(d) = spec.get("distance") {
@@ -40,11 +43,9 @@ pub(crate) fn point_within(shape: &Value, point: &Value) -> bool {
     let spec = shape.get("__spec").cloned().unwrap_or(Value::Null);
     match kind {
         "geo_bounding_box" => {
-            let corner = |name: &str| spec.get(name).and_then(|v| read_point(v));
+            let corner = |name: &str| spec.get(name).and_then(read_point);
             match (corner("top_left"), corner("bottom_right")) {
-                (Some((t, l)), Some((b, r))) => {
-                    lat <= t && lat >= b && lon >= l && lon <= r
-                }
+                (Some((t, l)), Some((b, r))) => lat <= t && lat >= b && lon >= l && lon <= r,
                 _ => false,
             }
         }
@@ -120,10 +121,9 @@ pub(crate) fn read_point(v: &Value) -> Option<(f64, f64)> {
         // a pair is longitude first
         Value::Array(a) if a.len() == 2 => Some((a[1].as_f64()?, a[0].as_f64()?)),
         Value::Object(o) => {
-            if let (Some(lat), Some(lon)) = (
-                o.get("lat").and_then(|x| x.as_f64()),
-                o.get("lon").and_then(|x| x.as_f64()),
-            ) {
+            if let (Some(lat), Some(lon)) =
+                (o.get("lat").and_then(|x| x.as_f64()), o.get("lon").and_then(|x| x.as_f64()))
+            {
                 return Some((lat, lon));
             }
             // written the way GeoJSON writes it: longitude first
@@ -191,8 +191,7 @@ pub(crate) fn inside_polygon(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
     for i in 0..ring.len() {
         let (yi, xi) = ring[i];
         let (yj, xj) = ring[j];
-        if (yi > lat) != (yj > lat)
-            && lon < (xj - xi) * (lat - yi) / (yj - yi + f64::EPSILON) + xi
+        if (yi > lat) != (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi + f64::EPSILON) + xi
         {
             inside = !inside;
         }
@@ -207,15 +206,17 @@ pub(crate) fn parse_distance(s: &str) -> Option<f64> {
     let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
     let (n, unit) = s.split_at(split);
     let n: f64 = n.parse().ok()?;
-    Some(n * match unit.trim() {
-        "m" => 1.0,
-        "km" => 1000.0,
-        "cm" => 0.01,
-        "mm" => 0.001,
-        "mi" => 1609.344,
-        "ft" => 0.3048,
-        _ => return None,
-    })
+    Some(
+        n * match unit.trim() {
+            "m" => 1.0,
+            "km" => 1000.0,
+            "cm" => 0.01,
+            "mm" => 0.001,
+            "mi" => 1609.344,
+            "ft" => 0.3048,
+            _ => return None,
+        },
+    )
 }
 
 /// Metres between two points on the earth, by the haversine formula.
@@ -223,9 +224,7 @@ pub(crate) fn geo_distance_metres(origin: &Value, value: &Value) -> Option<f64> 
     let point = |v: &Value| -> Option<(f64, f64)> {
         match v {
             // a point written as a pair is longitude first
-            Value::Array(a) if a.len() == 2 => {
-                Some((a[1].as_f64()?, a[0].as_f64()?))
-            }
+            Value::Array(a) if a.len() == 2 => Some((a[1].as_f64()?, a[0].as_f64()?)),
             Value::Object(o) => Some((
                 o.get("lat").and_then(|x| x.as_f64())?,
                 o.get("lon").and_then(|x| x.as_f64())?,
@@ -296,14 +295,15 @@ pub(crate) fn run_geo_distance_agg(
             .filter(|(_, d)| to.map(|t| *d < t).unwrap_or(true))
             .map(|(id, _)| id.clone())
             .collect();
-        let key = range.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()).unwrap_or_else(
-            || match (from, to) {
-                (None, Some(t)) => format!("*-{t:?}"),
-                (Some(f), None) => format!("{f:?}-*"),
-                (Some(f), Some(t)) => format!("{f:?}-{t:?}"),
-                (None, None) => "*-*".to_string(),
-            },
-        );
+        let key =
+            range.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()).unwrap_or_else(|| {
+                match (from, to) {
+                    (None, Some(t)) => format!("*-{t:?}"),
+                    (Some(f), None) => format!("{f:?}-*"),
+                    (Some(f), Some(t)) => format!("{f:?}-{t:?}"),
+                    (None, None) => "*-*".to_string(),
+                }
+            });
         let mut b = json!({"key": key.clone(), "doc_count": ids.len()});
         if let Some(f) = from {
             b["from"] = json!(f);
@@ -315,13 +315,8 @@ pub(crate) fn run_geo_distance_agg(
             // the documents in this bucket are named outright, which is the
             // only handle a distance leaves behind
             let narrowed = json!({"bool": {"filter": [{"terms": {"_id": ids}}]}});
-            let (_, sub) = count_with_sub_aggs(
-                store,
-                targets,
-                &narrowed,
-                &Some(subs.clone()),
-                weighted,
-            )?;
+            let (_, sub) =
+                count_with_sub_aggs(store, targets, &narrowed, &Some(subs.clone()), weighted)?;
             if let Some(Value::Object(o)) = sub {
                 for (k, v) in o {
                     b[k] = v;

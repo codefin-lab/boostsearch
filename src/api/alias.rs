@@ -101,7 +101,11 @@ pub(crate) fn aliases_missing_response(names: &[String], view: &Value) -> Respon
 /// not missing -- it is excluded. Only a name nothing carries is missing.
 /// Exclusions at the head of the list are a separate complaint: they have
 /// nothing to exclude from, and are reported as written.
-pub(crate) fn alias_names_missing(store: &Store, idx: Option<&str>, expr: Option<&str>) -> Vec<String> {
+pub(crate) fn alias_names_missing(
+    store: &Store,
+    idx: Option<&str>,
+    expr: Option<&str>,
+) -> Vec<String> {
     let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
     // the run of plain exclusions at the head, ending at the first entry that
     // adds something or carries a wildcard
@@ -126,9 +130,7 @@ pub(crate) fn alias_names_missing(store: &Store, idx: Option<&str>, expr: Option
         .collect();
     expr.split(',')
         .map(|p| p.trim())
-        .filter(|p| {
-            !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty()
-        })
+        .filter(|p| !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty())
         .filter(|p| !existing.contains(*p))
         .map(|p| p.to_string())
         .collect()
@@ -143,7 +145,10 @@ pub async fn index_alias_list(
     if store.resolve(&index).is_empty() {
         return no_such_index(&index);
     }
-    respond(&p, alias_view(&store, Some(&index), None, p.get("expand_wildcards").map(|v| v.as_str())))
+    respond(
+        &p,
+        alias_view(&store, Some(&index), None, p.get("expand_wildcards").map(|v| v.as_str())),
+    )
 }
 
 pub async fn get_alias_scoped(
@@ -157,7 +162,12 @@ pub async fn get_alias_scoped(
         1 => (None, Some(parts[0].clone())),
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
-    let view = alias_view(&store, idx.as_deref(), name.as_deref(), p.get("expand_wildcards").map(|v| v.as_str()));
+    let view = alias_view(
+        &store,
+        idx.as_deref(),
+        name.as_deref(),
+        p.get("expand_wildcards").map(|v| v.as_str()),
+    );
     let missing = alias_names_missing(&store, idx.as_deref(), name.as_deref());
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
@@ -170,7 +180,12 @@ pub async fn index_alias_get(
     Path((index, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    let view = alias_view(&store, Some(&index), Some(&name), p.get("expand_wildcards").map(|v| v.as_str()));
+    let view = alias_view(
+        &store,
+        Some(&index),
+        Some(&name),
+        p.get("expand_wildcards").map(|v| v.as_str()),
+    );
     let missing = alias_names_missing(&store, Some(&index), Some(&name));
     if !missing.is_empty() {
         return aliases_missing_response(&missing, &view);
@@ -194,10 +209,7 @@ pub async fn index_alias_head(
     if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
 
-pub async fn exists_alias(
-    State(store): State<Store>,
-    path: Option<Path<Vec<String>>>,
-) -> Response {
+pub async fn exists_alias(State(store): State<Store>, path: Option<Path<Vec<String>>>) -> Response {
     let parts = path.map(|Path(v)| v).unwrap_or_default();
     let (idx, name) = match parts.len() {
         0 => (None, None),
@@ -205,11 +217,14 @@ pub async fn exists_alias(
         _ => (Some(parts[0].clone()), Some(parts[1].clone())),
     };
     let view = alias_view(&store, idx.as_deref(), name.as_deref(), None);
-    let any = view.as_object().map(|o| {
-        o.values().any(|v| {
-            v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+    let any = view
+        .as_object()
+        .map(|o| {
+            o.values().any(|v| {
+                v.get("aliases").and_then(|a| a.as_object()).map(|a| !a.is_empty()).unwrap_or(false)
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
     if any { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
 
@@ -278,11 +293,13 @@ pub(crate) async fn put_alias_inner(
             format!("Invalid alias name [{name}]"),
         );
     }
-    if store.names().iter().any(|n| *n == name) {
+    if store.names().contains(&name) {
         return err(
             StatusCode::BAD_REQUEST,
             "invalid_alias_name_exception",
-            format!("Invalid alias name [{name}]: an index or data stream exists with the same name as the alias"),
+            format!(
+                "Invalid alias name [{name}]: an index or data stream exists with the same name as the alias"
+            ),
         );
     }
     let targets = store.resolve(&index);
@@ -416,9 +433,9 @@ pub async fn update_aliases(
             .and_then(|v| v.as_str())
             .map(|s| vec![s.to_string()])
             .or_else(|| {
-                spec.get("aliases").and_then(|v| v.as_array()).map(|a| {
-                    a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
-                })
+                spec.get("aliases")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
             })
             .unwrap_or_default();
         // an explicit empty list is a request that names nothing
@@ -472,10 +489,7 @@ pub async fn update_aliases(
         }
         // must_exist spelled out decides it either way; left unsaid, a remove
         // that matched nothing at all is still an error
-        let complain = match spec.get("must_exist").and_then(|v| v.as_bool()) {
-            Some(explicit) => explicit,
-            None => true,
-        };
+        let complain = spec.get("must_exist").and_then(|v| v.as_bool()).unwrap_or(true);
         if verb == "remove" && !removed_any && !names.is_empty() && complain {
             missing_required.extend(names.iter().cloned());
         }

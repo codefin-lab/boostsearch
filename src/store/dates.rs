@@ -88,7 +88,10 @@ pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
         let sign = if total < 0 { '-' } else { '+' };
         let total = total.abs();
         let body = match format {
-            "iso8601" | "strict_date_optional_time" | "date_optional_time" | "date_time"
+            "iso8601"
+            | "strict_date_optional_time"
+            | "date_optional_time"
+            | "date_time"
             | "strict_date_time" => format!(
                 "{}.{:03}",
                 format_with_pattern(local, "yyyy-MM-dd'T'HH:mm:ss").replace('\'', ""),
@@ -200,7 +203,9 @@ pub(crate) fn round_down(
             midnight(dt.date() - Duration::days(back))
         }
         "d" => midnight(dt.date()),
-        "H" | "h" => dt.replace_minute(0).ok()?.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
+        "H" | "h" => {
+            dt.replace_minute(0).ok()?.replace_second(0).ok()?.replace_nanosecond(0).ok()?
+        }
         "m" => dt.replace_second(0).ok()?.replace_nanosecond(0).ok()?,
         "s" => dt.replace_nanosecond(0).ok()?,
         _ => return None,
@@ -314,7 +319,8 @@ pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Opti
         Value::String(s) => match s.parse::<f64>() {
             // a number written as text still means what the format says
             Ok(n) if format.is_some() => {
-                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
+                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale)
+                    .ok()?
             }
             // `2019` is a year before it is a count of milliseconds, so the
             // date reading is tried first and the epoch only where nothing

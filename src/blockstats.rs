@@ -11,12 +11,14 @@
 //! rather than persisted: a BoostCore segment id never refers to different data,
 //! which makes the cache key exact and merges self-invalidating.
 
+use boostcore::columnar::{Column, ColumnType};
+use boostcore::query::{
+    BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight,
+};
+use boostcore::{DocId, Score, SegmentReader, TantivyError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use boostcore::columnar::{Column, ColumnType};
-use boostcore::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
-use boostcore::{DocId, SegmentReader, Score, TantivyError};
 
 /// Documents per statistics block. Matches the columnar's own block size, so a
 /// surviving block maps onto work the column is already organised to do.

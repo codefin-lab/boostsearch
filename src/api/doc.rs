@@ -30,9 +30,12 @@ pub async fn termvectors(
     };
     let source = read_source_as_asked(&g, &id, &p);
     let Some(source) = source else {
-        return respond(&p, json!({
-            "_index": g.name, "_id": id, "_version": 0, "found": false, "took": 0,
-        }));
+        return respond(
+            &p,
+            json!({
+                "_index": g.name, "_id": id, "_version": 0, "found": false, "took": 0,
+            }),
+        );
     };
     let want_stats = body
         .get("term_statistics")
@@ -43,15 +46,16 @@ pub async fn termvectors(
         .get("fields")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-        .or_else(|| {
-            p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect())
-        });
+        .or_else(|| p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect()));
 
     let fields = term_vectors_of(&g, &source, want_stats, only.as_deref());
-    return respond(&p, json!({
-        "_index": g.name, "_id": id, "_version": g.version_of(&id),
-        "found": true, "took": 0, "term_vectors": fields,
-    }));
+    respond(
+        &p,
+        json!({
+            "_index": g.name, "_id": id, "_version": g.version_of(&id),
+            "found": true, "took": 0, "term_vectors": fields,
+        }),
+    )
 }
 
 /// The terms each field of a document became once analysed.
@@ -96,7 +100,7 @@ pub(crate) fn term_vectors_of(
                     mapping: &g.mapping,
                     index: &g.index,
                     max_terms_count: g.max_terms_count(),
-            max_regex_length: g.max_regex_length(),
+                    max_regex_length: g.max_regex_length(),
                     allow_expensive: true,
                     observed_kinds: &g.observed_kinds,
                     kinds_complete: g.kinds_complete,
@@ -144,9 +148,9 @@ pub async fn mtermvectors(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .or_else(|| {
-                    p.get("ids").filter(|v| !v.is_empty()).map(|v| {
-                        v.split(',').map(|s| json!(s.trim())).collect()
-                    })
+                    p.get("ids")
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.split(',').map(|s| json!(s.trim())).collect())
                 })
                 .unwrap_or_default();
             listed.into_iter().map(|id| json!({"_id": id})).collect()
@@ -508,10 +512,7 @@ pub fn write_doc_versioned(
         return Err(err(
             StatusCode::FORBIDDEN,
             "cluster_block_exception",
-            format!(
-                "index [{}] blocked by: [FORBIDDEN/8/index write (api)];",
-                st.name
-            ),
+            format!("index [{}] blocked by: [FORBIDDEN/8/index write (api)];", st.name),
         ));
     }
     // an id is carried in the index's terms, which caps how long it may be
@@ -558,10 +559,8 @@ pub fn write_doc_versioned(
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
         return Err(err_caused_by(&kind, &reason, &cause));
     }
-    let default_lenient = st
-        .setting("mapping.ignore_malformed")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    let default_lenient =
+        st.setting("mapping.ignore_malformed").map(|v| v == "true").unwrap_or(false);
     let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
         Ok(v) => v,
         Err((field, ty)) => {
@@ -579,7 +578,10 @@ pub fn write_doc_versioned(
     } else {
         let mut with = source.clone();
         if let Some(o) = with.as_object_mut() {
-            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+            o.insert(
+                "_ignored".into(),
+                Value::Array(ignored.iter().cloned().map(Value::from).collect()),
+            );
         }
         with.to_string()
     };
@@ -605,7 +607,10 @@ pub fn write_doc_versioned(
             crate::store::remove_path(&mut indexed, f);
         }
         if let Some(o) = indexed.as_object_mut() {
-            o.insert("_ignored".into(), Value::Array(ignored.iter().cloned().map(Value::from).collect()));
+            o.insert(
+                "_ignored".into(),
+                Value::Array(ignored.iter().cloned().map(Value::from).collect()),
+            );
         }
     }
     let doc = make_doc(&st.fields, id, indexed, &raw, seq);
@@ -745,7 +750,9 @@ pub(crate) fn refuse_unless_alias(store: &Store, index: &str, p: &Params) -> Opt
         return Some(err(
             StatusCode::NOT_FOUND,
             "index_not_found_exception",
-            format!("no such index [{index}] and [require_alias] request flag is [true] and [{index}] is not an alias"),
+            format!(
+                "no such index [{index}] and [require_alias] request flag is [true] and [{index}] is not an alias"
+            ),
         ));
     }
     None
@@ -927,10 +934,7 @@ pub async fn head_doc(
     // the same view a `_get` would take, so `realtime=false` says whether a
     // search can see the document rather than whether it was written -- and
     // the wrong routing reaches nothing, here as there
-    if read_source_as_asked(&g, &id, &p)
-        .filter(|_| routing_matches(&g, &id, &p))
-        .is_some()
-    {
+    if read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)).is_some() {
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -968,8 +972,7 @@ pub async fn delete_doc_route(
                 "_shards": shards_of(&g), "_seq_no": seq, "_primary_term": 1,
             });
             note_forced_refresh(&mut body, &p);
-            let status =
-                if existed { StatusCode::OK } else { StatusCode::NOT_FOUND };
+            let status = if existed { StatusCode::OK } else { StatusCode::NOT_FOUND };
             return (status, axum::Json(body)).into_response();
         }
         Ok(None) => {}
@@ -1048,10 +1051,7 @@ pub async fn bulk(
             );
         };
         let op = op.clone();
-        let idx = meta
-            .get("_index")
-            .and_then(scalar_str)
-            .or_else(|| default_index.clone());
+        let idx = meta.get("_index").and_then(scalar_str).or_else(|| default_index.clone());
         let Some(idx) = idx else {
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "missing index");
         };
@@ -1072,10 +1072,8 @@ pub async fn bulk(
         if std::env::var("BOOSTSEARCH_SERIAL_BULK").is_ok() {
             ops.iter().map(prepare).collect()
         } else {
-        use rayon::prelude::*;
-        ops.par_iter()
-            .map(prepare)
-            .collect()
+            use rayon::prelude::*;
+            ops.par_iter().map(prepare).collect()
         };
 
     // consume the prepared documents rather than cloning them back out
@@ -1222,10 +1220,8 @@ pub async fn bulk(
                 }
                 // an index action may be conditional too, on the sequence
                 // number the caller believes the document is at
-                let cond = meta
-                    .get("if_seq_no")
-                    .and_then(|v| v.as_u64())
-                    .filter(|_| exists_doc(&g, &id));
+                let cond =
+                    meta.get("if_seq_no").and_then(|v| v.as_u64()).filter(|_| exists_doc(&g, &id));
                 if let Some(want) = cond {
                     let have = read_seq(&g, &id).unwrap_or(0);
                     if have != want {
@@ -1291,14 +1287,12 @@ pub async fn bulk(
                 let existing = read_source(&g, &id);
                 // the same conditional write the single-document update takes,
                 // reported per item rather than as the whole request failing
-                let stale = match (
-                    meta.get("if_seq_no").and_then(|v| v.as_u64()),
-                    existing.is_some(),
-                ) {
-                    (Some(want), true) => Some((want, read_seq(&g, &id).unwrap_or(0)))
-                        .filter(|(want, have)| want != have),
-                    _ => None,
-                };
+                let stale =
+                    match (meta.get("if_seq_no").and_then(|v| v.as_u64()), existing.is_some()) {
+                        (Some(want), true) => Some((want, read_seq(&g, &id).unwrap_or(0)))
+                            .filter(|(want, have)| want != have),
+                        _ => None,
+                    };
                 if let Some((want, have)) = stale {
                     errors = true;
                     items.push(json!({ "update": {
@@ -1323,11 +1317,9 @@ pub async fn bulk(
                         // an update that changes nothing is reported as such,
                         // and counted, the same way the single-document API
                         // reports it
-                        let noop = patch
-                            .get("detect_noop")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(true)
-                            && base == before;
+                        let noop =
+                            patch.get("detect_noop").and_then(|v| v.as_bool()).unwrap_or(true)
+                                && base == before;
                         if noop {
                             g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -1354,10 +1346,8 @@ pub async fn bulk(
                         }
                     }
                     (None, _) => {
-                        let as_upsert = patch
-                            .get("doc_as_upsert")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+                        let as_upsert =
+                            patch.get("doc_as_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
                         let upsert_doc = patch
                             .get("upsert")
                             .or_else(|| if as_upsert { patch.get("doc") } else { None });
@@ -1455,10 +1445,13 @@ pub async fn count(
         Ok(out) => {
             let n = out.shards;
             let skipped = out.skipped;
-            respond(&p, json!({
-                "count": out.total,
-                "_shards": {"total": n, "successful": n, "skipped": skipped, "failed": 0}
-            }))
+            respond(
+                &p,
+                json!({
+                    "count": out.total,
+                    "_shards": {"total": n, "successful": n, "skipped": skipped, "failed": 0}
+                }),
+            )
         }
         Err(r) => r,
     }
@@ -1481,12 +1474,9 @@ pub async fn mget(
 
     let mut requested: Vec<(Option<String>, Option<String>, Option<Value>)> = Vec::new();
     let mut per_doc_routing: Vec<Option<String>> = Vec::new();
-    let empty_docs = body
-        .get("docs")
-        .and_then(|d| d.as_array())
-        .map(|a| a.is_empty())
-        .unwrap_or(false)
-        || body.get("ids").and_then(|d| d.as_array()).map(|a| a.is_empty()).unwrap_or(false);
+    let empty_docs =
+        body.get("docs").and_then(|d| d.as_array()).map(|a| a.is_empty()).unwrap_or(false)
+            || body.get("ids").and_then(|d| d.as_array()).map(|a| a.is_empty()).unwrap_or(false);
     if let Some(docs) = body.get("docs").and_then(|d| d.as_array()) {
         for d in docs {
             // `routing` is a real field here; the underscored spellings are
@@ -1515,9 +1505,9 @@ pub async fn mget(
             requested.push((
                 d.get("_index").and_then(scalar_str),
                 d.get("_id").and_then(scalar_str),
-                d.get("_source").cloned().or_else(|| {
-                    d.get("stored_fields").map(|sf| json!({"__stored": sf}))
-                }),
+                d.get("_source")
+                    .cloned()
+                    .or_else(|| d.get("stored_fields").map(|sf| json!({"__stored": sf}))),
             ));
         }
     } else if let Some(ids) = body.get("ids").and_then(|d| d.as_array()) {
@@ -1622,8 +1612,8 @@ pub async fn mget(
                     if let Some(f) = stored_fields(&src, &sub) {
                         d["fields"] = f;
                     }
-                    wants_source = spec.split(',').any(|f| f.trim() == "_source")
-                        || explicit_source.is_some();
+                    wants_source =
+                        spec.split(',').any(|f| f.trim() == "_source") || explicit_source.is_some();
                 }
                 if wants_source {
                     let filtered = match &explicit_source {
@@ -1656,8 +1646,15 @@ pub async fn update_doc(
         Err(r) => return r,
     };
     const UPDATE_KEYS: &[&str] = &[
-        "doc", "upsert", "doc_as_upsert", "detect_noop", "_source", "script",
-        "scripted_upsert", "if_seq_no", "if_primary_term",
+        "doc",
+        "upsert",
+        "doc_as_upsert",
+        "detect_noop",
+        "_source",
+        "script",
+        "scripted_upsert",
+        "if_seq_no",
+        "if_primary_term",
     ];
     if let Some(o) = patch.as_object() {
         for k in o.keys() {
@@ -1698,10 +1695,9 @@ pub async fn update_doc(
     // `if_seq_no` makes the write conditional on the document not having moved
     // since the caller read it. A document that is not there at all is a
     // different complaint, and is left to the missing-document path below.
-    if let (Some(want), true) = (
-        p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok()),
-        existing.is_some(),
-    ) {
+    if let (Some(want), true) =
+        (p.get("if_seq_no").and_then(|v| v.parse::<u64>().ok()), existing.is_some())
+    {
         let have = read_seq(&g, &id).unwrap_or(0);
         if have != want {
             return err(
@@ -1714,8 +1710,7 @@ pub async fn update_doc(
             );
         }
     }
-    let detect_noop =
-        patch.get("detect_noop").and_then(|v| v.as_bool()).unwrap_or(true);
+    let detect_noop = patch.get("detect_noop").and_then(|v| v.as_bool()).unwrap_or(true);
     let doc_as_upsert = patch.get("doc_as_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (next, result) = match (existing.clone(), patch.get("doc")) {
@@ -1803,13 +1798,8 @@ pub async fn explain(
         Err(r) => return r,
     };
     // a body that holds something other than a query is not asking about one
-    if body.as_object().map(|o| !o.is_empty()).unwrap_or(false)
-        && body.get("query").is_none()
-    {
-        let first = body
-            .as_object()
-            .and_then(|o| o.keys().next().cloned())
-            .unwrap_or_default();
+    if body.as_object().map(|o| !o.is_empty()).unwrap_or(false) && body.get("query").is_none() {
+        let first = body.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
         return err(
             StatusCode::BAD_REQUEST,
             "parsing_exception",

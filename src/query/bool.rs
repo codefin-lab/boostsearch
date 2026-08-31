@@ -21,11 +21,8 @@ pub(crate) fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         };
         for item in list {
             let sub = build(ctx, &item)?;
-            let sub: Box<dyn Query> = if key == "filter" {
-                Box::new(ConstScore::new(sub, 0.0))
-            } else {
-                sub
-            };
+            let sub: Box<dyn Query> =
+                if key == "filter" { Box::new(ConstScore::new(sub, 0.0)) } else { sub };
             if occur == Occur::Should {
                 should_count += 1;
             }
@@ -62,9 +59,5 @@ pub(crate) fn parse_msm(v: &Value) -> Option<i64> {
 }
 
 pub(crate) fn resolve_msm(n: i64, should_count: usize) -> usize {
-    if n < 0 {
-        (should_count as i64 + n).max(0) as usize
-    } else {
-        (n as usize).min(should_count)
-    }
+    if n < 0 { (should_count as i64 + n).max(0) as usize } else { (n as usize).min(should_count) }
 }

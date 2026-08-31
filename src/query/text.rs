@@ -141,11 +141,8 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         return Ok(any_of(exact));
     }
 
-    let operator = opts
-        .get("operator")
-        .and_then(|o| o.as_str())
-        .unwrap_or("or")
-        .to_ascii_lowercase();
+    let operator =
+        opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
     let n = terms.len();
     let clauses: Vec<(Occur, Box<dyn Query>)> = terms
@@ -238,9 +235,7 @@ pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query
         };
         let mut per = shared.clone();
         per.insert("query".into(), q.clone());
-        let clause = Value::Object(
-            [(name.to_string(), Value::Object(per))].into_iter().collect(),
-        );
+        let clause = Value::Object([(name.to_string(), Value::Object(per))].into_iter().collect());
         let sub = match kind {
             "bool_prefix" => build_match_bool_prefix(ctx, &clause)?,
             "phrase" => build_match(ctx, "match_phrase", &clause)?,
@@ -359,11 +354,8 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
     if tokens.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
-    let operator = opts
-        .get("operator")
-        .and_then(|o| o.as_str())
-        .unwrap_or("or")
-        .to_ascii_lowercase();
+    let operator =
+        opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
     let fuzziness = opts
         .get("fuzziness")

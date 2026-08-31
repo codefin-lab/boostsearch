@@ -18,6 +18,11 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+
       # Only the test suite is needed, and it is a small corner of a large
       # repository.
       - name: Fetch OpenSearch's rest-api-spec

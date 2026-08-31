@@ -56,7 +56,11 @@ enum Source {
     /// the whole text, as one token
     Keyword,
     Pattern(String),
-    Ngram { min: usize, max: usize, edges: bool },
+    Ngram {
+        min: usize,
+        max: usize,
+        edges: bool,
+    },
 }
 
 /// One step of a chain, in the order OpenSearch writes them.
@@ -66,7 +70,10 @@ enum Step {
     AsciiFolding,
     Stop(Vec<String>),
     Stem(String),
-    Length { min: usize, max: usize },
+    Length {
+        min: usize,
+        max: usize,
+    },
     Trim,
     Reverse,
     Unique,
@@ -119,12 +126,10 @@ impl Chain {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
                 Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
             },
-            Source::Ngram { min, max, edges } => {
-                match NgramTokenizer::new(*min, *max, *edges) {
-                    Ok(t) => TextAnalyzer::builder(t).dynamic(),
-                    Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
-                }
-            }
+            Source::Ngram { min, max, edges } => match NgramTokenizer::new(*min, *max, *edges) {
+                Ok(t) => TextAnalyzer::builder(t).dynamic(),
+                Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+            },
         };
         // a token longer than a term may be is dropped, as it is upstream
         base.filter_dynamic(RemoveLongFilter::limit(255)).build()
@@ -143,14 +148,12 @@ fn apply_here(
     tokens: Vec<(String, usize, usize, usize)>,
 ) -> Vec<(String, usize, usize, usize)> {
     match step {
-        Step::Lowercase => tokens
-            .into_iter()
-            .map(|(t, p, a, b)| (t.to_lowercase(), p, a, b))
-            .collect(),
-        Step::AsciiFolding => tokens
-            .into_iter()
-            .map(|(t, p, a, b)| (fold_to_ascii(&t), p, a, b))
-            .collect(),
+        Step::Lowercase => {
+            tokens.into_iter().map(|(t, p, a, b)| (t.to_lowercase(), p, a, b)).collect()
+        }
+        Step::AsciiFolding => {
+            tokens.into_iter().map(|(t, p, a, b)| (fold_to_ascii(&t), p, a, b)).collect()
+        }
         Step::Stop(words) => {
             let set: std::collections::HashSet<String> =
                 words.iter().map(|w| w.to_lowercase()).collect();
@@ -182,18 +185,16 @@ fn apply_here(
             .map(|(t, p, a, b)| (t.trim().to_string(), p, a, b))
             .filter(|(t, _, _, _)| !t.is_empty())
             .collect(),
-        Step::Reverse => tokens
-            .into_iter()
-            .map(|(t, p, a, b)| (t.chars().rev().collect(), p, a, b))
-            .collect(),
+        Step::Reverse => {
+            tokens.into_iter().map(|(t, p, a, b)| (t.chars().rev().collect(), p, a, b)).collect()
+        }
         Step::Unique => {
             let mut seen = std::collections::HashSet::new();
             tokens.into_iter().filter(|(t, _, _, _)| seen.insert(t.clone())).collect()
         }
-        Step::Truncate(n) => tokens
-            .into_iter()
-            .map(|(t, p, a, b)| (t.chars().take(*n).collect(), p, a, b))
-            .collect(),
+        Step::Truncate(n) => {
+            tokens.into_iter().map(|(t, p, a, b)| (t.chars().take(*n).collect(), p, a, b)).collect()
+        }
         Step::Limit(n) => tokens.into_iter().take(*n).collect(),
         Step::Synonym(map) => {
             let mut out = Vec::new();
@@ -227,11 +228,7 @@ fn fold_to_ascii(text: &str) -> String {
     let mut analyzer =
         TextAnalyzer::builder(RawTokenizer::default()).filter(AsciiFoldingFilter).build();
     let mut stream = analyzer.token_stream(text);
-    if stream.advance() {
-        stream.token().text.clone()
-    } else {
-        text.to_string()
-    }
+    if stream.advance() { stream.token().text.clone() } else { text.to_string() }
 }
 
 /// The stop words OpenSearch uses when a filter names a language and no list.
@@ -243,18 +240,18 @@ fn stop_words(language: &str) -> Vec<String> {
             "there", "these", "they", "this", "to", "was", "will", "with",
         ],
         "_french_" | "french" => &[
-            "au", "aux", "avec", "ce", "ces", "dans", "de", "des", "du", "elle", "en", "et",
-            "eux", "il", "je", "la", "le", "les", "leur", "lui", "ma", "mais", "me", "même",
-            "mes", "moi", "mon", "ne", "nos", "notre", "nous", "on", "ou", "par", "pas", "pour",
-            "qu", "que", "qui", "sa", "se", "ses", "son", "sur", "ta", "te", "tes", "toi", "ton",
-            "tu", "un", "une", "vos", "votre", "vous",
+            "au", "aux", "avec", "ce", "ces", "dans", "de", "des", "du", "elle", "en", "et", "eux",
+            "il", "je", "la", "le", "les", "leur", "lui", "ma", "mais", "me", "même", "mes", "moi",
+            "mon", "ne", "nos", "notre", "nous", "on", "ou", "par", "pas", "pour", "qu", "que",
+            "qui", "sa", "se", "ses", "son", "sur", "ta", "te", "tes", "toi", "ton", "tu", "un",
+            "une", "vos", "votre", "vous",
         ],
         "_german_" | "german" => &[
             "aber", "alle", "als", "also", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis",
             "da", "das", "dass", "dem", "den", "der", "des", "die", "doch", "du", "ein", "eine",
             "er", "es", "für", "hat", "ich", "ihr", "im", "in", "ist", "mit", "nicht", "noch",
-            "nur", "oder", "sich", "sie", "sind", "über", "um", "und", "von", "vor", "war",
-            "was", "wenn", "werden", "wie", "wir", "zu", "zum", "zur",
+            "nur", "oder", "sich", "sie", "sind", "über", "um", "und", "von", "vor", "war", "was",
+            "wenn", "werden", "wie", "wir", "zu", "zum", "zur",
         ],
         "_spanish_" | "spanish" => &[
             "a", "al", "algo", "como", "con", "de", "del", "el", "en", "entre", "era", "es",
@@ -263,9 +260,9 @@ fn stop_words(language: &str) -> Vec<String> {
             "te", "tu", "un", "una", "uno", "y", "ya",
         ],
         "_italian_" | "italian" => &[
-            "a", "ad", "al", "alla", "che", "chi", "come", "con", "da", "del", "della", "di",
-            "e", "ed", "il", "in", "la", "le", "lo", "ma", "mi", "ne", "non", "per", "più",
-            "quale", "se", "si", "sono", "su", "sul", "una", "uno",
+            "a", "ad", "al", "alla", "che", "chi", "come", "con", "da", "del", "della", "di", "e",
+            "ed", "il", "in", "la", "le", "lo", "ma", "mi", "ne", "non", "per", "più", "quale",
+            "se", "si", "sono", "su", "sul", "una", "uno",
         ],
         "_portuguese_" | "portuguese" => &[
             "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos", "e", "em",
@@ -274,19 +271,106 @@ fn stop_words(language: &str) -> Vec<String> {
             "também", "um", "uma",
         ],
         "_russian_" | "russian" => &[
-            "а", "без", "более", "бы", "был", "была", "были", "было", "быть", "в", "вам", "вас",
-            "весь", "во", "вот", "все", "всего", "всех", "вы", "где", "да", "даже", "для", "до",
-            "его", "ее", "если", "есть", "еще", "же", "за", "здесь", "и", "из", "или", "им",
-            "их", "к", "как", "ко", "когда", "кто", "ли", "либо", "мне", "может", "мы", "на",
-            "надо", "наш", "не", "него", "нее", "нет", "ни", "них", "но", "ну", "о", "об",
-            "они", "оно", "от", "очень", "по", "под", "при", "с", "со", "так", "также", "такой",
-            "там", "те", "тем", "то", "того", "тоже", "той", "только", "том", "ты", "у", "уже",
-            "хотя", "чего", "чей", "чем", "что", "чтобы", "чье", "чья", "эта", "эти", "это",
+            "а",
+            "без",
+            "более",
+            "бы",
+            "был",
+            "была",
+            "были",
+            "было",
+            "быть",
+            "в",
+            "вам",
+            "вас",
+            "весь",
+            "во",
+            "вот",
+            "все",
+            "всего",
+            "всех",
+            "вы",
+            "где",
+            "да",
+            "даже",
+            "для",
+            "до",
+            "его",
+            "ее",
+            "если",
+            "есть",
+            "еще",
+            "же",
+            "за",
+            "здесь",
+            "и",
+            "из",
+            "или",
+            "им",
+            "их",
+            "к",
+            "как",
+            "ко",
+            "когда",
+            "кто",
+            "ли",
+            "либо",
+            "мне",
+            "может",
+            "мы",
+            "на",
+            "надо",
+            "наш",
+            "не",
+            "него",
+            "нее",
+            "нет",
+            "ни",
+            "них",
+            "но",
+            "ну",
+            "о",
+            "об",
+            "они",
+            "оно",
+            "от",
+            "очень",
+            "по",
+            "под",
+            "при",
+            "с",
+            "со",
+            "так",
+            "также",
+            "такой",
+            "там",
+            "те",
+            "тем",
+            "то",
+            "того",
+            "тоже",
+            "той",
+            "только",
+            "том",
+            "ты",
+            "у",
+            "уже",
+            "хотя",
+            "чего",
+            "чей",
+            "чем",
+            "что",
+            "чтобы",
+            "чье",
+            "чья",
+            "эта",
+            "эти",
+            "это",
             "я",
         ],
-        "_arabic_" | "arabic" => &[
-            "من", "في", "على", "و", "أن", "إلى", "عن", "ما", "هذا", "هذه", "التي", "الذي",
-        ],
+        "_arabic_" | "arabic" => {
+            &["من", "في", "على", "و", "أن", "إلى", "عن", "ما", "هذا", "هذه", "التي", "الذي"]
+        }
         _ => &[],
     };
     list.iter().map(|s| s.to_string()).collect()
@@ -353,7 +437,8 @@ fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
     let named = spec.get("tokenizer").and_then(|t| t.as_str()).unwrap_or("standard");
     let source = tokenizer_source(named, tokenizers);
     let mut steps = Vec::new();
-    for step in spec.get("filter").into_iter().flat_map(|f| f.as_array().cloned().unwrap_or_default())
+    for step in
+        spec.get("filter").into_iter().flat_map(|f| f.as_array().cloned().unwrap_or_default())
     {
         let Some(name) = step.as_str() else { continue };
         if let Some(s) = token_filter(name, filters) {
@@ -374,7 +459,9 @@ fn tokenizer_source(name: &str, defined: &Value) -> Source {
             "pattern" | "simple_pattern" | "simple_pattern_split" => Source::Pattern(
                 spec.get("pattern").and_then(|p| p.as_str()).unwrap_or(r"\w+").to_string(),
             ),
-            "ngram" => Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: false },
+            "ngram" => {
+                Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: false }
+            }
             "edge_ngram" => {
                 Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: true }
             }
@@ -453,8 +540,11 @@ fn synonyms(spec: &Value) -> HashMap<String, Vec<String>> {
     for line in lines.iter().filter_map(|l| l.as_str()) {
         match line.split_once("=>") {
             Some((from, to)) => {
-                let targets: Vec<String> =
-                    to.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
+                let targets: Vec<String> = to
+                    .split(',')
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .collect();
                 for word in from.split(',').map(|w| w.trim().to_lowercase()) {
                     if !word.is_empty() {
                         map.insert(word, targets.clone());
@@ -462,8 +552,11 @@ fn synonyms(spec: &Value) -> HashMap<String, Vec<String>> {
                 }
             }
             None => {
-                let group: Vec<String> =
-                    line.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
+                let group: Vec<String> = line
+                    .split(',')
+                    .map(|w| w.trim().to_lowercase())
+                    .filter(|w| !w.is_empty())
+                    .collect();
                 for word in &group {
                     map.insert(word.clone(), group.clone());
                 }
@@ -477,16 +570,10 @@ fn synonyms(spec: &Value) -> HashMap<String, Vec<String>> {
 pub fn builtin(name: &str) -> Option<Chain> {
     let lang = |l: &str| Chain {
         source: Source::Standard,
-        steps: vec![
-            Step::Lowercase,
-            Step::Stop(stop_words(l)),
-            Step::Stem(l.to_string()),
-        ],
+        steps: vec![Step::Lowercase, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
     };
     Some(match name {
-        "standard" | "default" => {
-            Chain { source: Source::Standard, steps: vec![Step::Lowercase] }
-        }
+        "standard" | "default" => Chain { source: Source::Standard, steps: vec![Step::Lowercase] },
         "simple" => Chain { source: Source::Letter, steps: vec![Step::Lowercase] },
         "whitespace" => Chain { source: Source::Whitespace, steps: vec![] },
         "stop" => Chain {
@@ -494,9 +581,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
         },
         "keyword" | "raw" => Chain { source: Source::Keyword, steps: vec![] },
-        "pattern" => {
-            Chain { source: Source::Pattern(r"\w+".into()), steps: vec![Step::Lowercase] }
-        }
+        "pattern" => Chain { source: Source::Pattern(r"\w+".into()), steps: vec![Step::Lowercase] },
         "fingerprint" => Chain {
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint],

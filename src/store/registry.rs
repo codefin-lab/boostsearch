@@ -2,6 +2,12 @@
 
 use super::*;
 
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Store {
     /// Periodically hand back indexing resources for indices that have gone
     /// quiet. With one index this is invisible; with hundreds it is the
@@ -36,7 +42,9 @@ impl Store {
             data_dir: None,
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
-            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            cluster_settings: Arc::new(RwLock::new(
+                serde_json::json!({"persistent": {}, "transient": {}}),
+            )),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
@@ -64,7 +72,9 @@ impl Store {
             data_dir: Some(dir.clone()),
             executor: shared_executor(),
             live_writers: Arc::new(RwLock::new(Vec::new())),
-            cluster_settings: Arc::new(RwLock::new(serde_json::json!({"persistent": {}, "transient": {}}))),
+            cluster_settings: Arc::new(RwLock::new(
+                serde_json::json!({"persistent": {}, "transient": {}}),
+            )),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
@@ -89,10 +99,7 @@ impl Store {
             };
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let learned = (
-                meta.get("dynamic_types").cloned(),
-                meta.get("observed_kinds").cloned(),
-            );
+            let learned = (meta.get("dynamic_types").cloned(), meta.get("observed_kinds").cloned());
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
@@ -100,7 +107,8 @@ impl Store {
                     if let Some(st) = store.get(name) {
                         {
                             let mut g = st.write();
-                            if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok()) {
+                            if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok())
+                            {
                                 g.dynamic_types = v;
                             }
                             match learned.1.and_then(|v| serde_json::from_value(v).ok()) {
@@ -356,7 +364,8 @@ impl Store {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
-        let reader = index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
+        let reader =
+            index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
         let realtime =
             index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
         let mapping = body
@@ -385,7 +394,7 @@ impl Store {
             closed: false,
             versions: HashMap::new(),
             routing: HashMap::new(),
-            uuid: index_uuid(&name),
+            uuid: index_uuid(name),
             created_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)

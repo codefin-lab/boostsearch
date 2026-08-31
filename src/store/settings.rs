@@ -82,7 +82,11 @@ impl IdxState {
                 leaf if !prefix.is_empty() => {
                     let kind = match leaf {
                         Value::String(s) => {
-                            if crate::query::parse_datetime(s).is_some() { "date" } else { "text" }
+                            if crate::query::parse_datetime(s).is_some() {
+                                "date"
+                            } else {
+                                "text"
+                            }
                         }
                         Value::Bool(_) => "boolean",
                         Value::Number(n) if n.is_f64() && n.as_i64().is_none() => "float",
@@ -126,10 +130,7 @@ impl IdxState {
                 return Some(v);
             }
         }
-        settings
-            .get(key)
-            .or_else(|| settings.get(&format!("index.{key}")))
-            .filter(|v| !v.is_null())
+        settings.get(key).or_else(|| settings.get(&format!("index.{key}"))).filter(|v| !v.is_null())
     }
 
     /// The moment now, written the way a timestamp is reported.
@@ -164,11 +165,18 @@ impl IdxState {
     pub fn created_string(&self) -> String {
         let ms = self.created_millis() as i128;
         boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
-            .map(|d| format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-                d.year(), d.month() as u8, d.day(), d.hour(), d.minute(), d.second(),
-                d.millisecond(),
-            ))
+            .map(|d| {
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    d.year(),
+                    d.month() as u8,
+                    d.day(),
+                    d.hour(),
+                    d.minute(),
+                    d.second(),
+                    d.millisecond(),
+                )
+            })
             .unwrap_or_default()
     }
 

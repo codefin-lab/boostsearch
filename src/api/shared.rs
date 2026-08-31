@@ -158,7 +158,8 @@ pub fn merge_into(base: &mut Value, patch: &Value) {
 }
 
 pub(crate) fn as_list(p: &Params, key: &str) -> Option<Vec<String>> {
-    p.get(key).map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+    p.get(key)
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
 }
 
 pub async fn not_ported() -> Response {
@@ -278,12 +279,8 @@ pub(crate) fn scalar_str(v: &Value) -> Option<String> {
 
 /// A size the way `cat` writes one: a number and the unit it is in.
 pub(crate) fn readable_bytes(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 4] = [
-        (1024 * 1024 * 1024, "gb"),
-        (1024 * 1024, "mb"),
-        (1024, "kb"),
-        (1, "b"),
-    ];
+    const UNITS: [(u64, &str); 4] =
+        [(1024 * 1024 * 1024, "gb"), (1024 * 1024, "mb"), (1024, "kb"), (1, "b")];
     for (scale, unit) in UNITS {
         if bytes >= scale {
             if scale == 1 {

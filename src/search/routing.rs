@@ -27,7 +27,8 @@ pub(crate) fn murmur3_x86_32(data: &[u8], seed: u32) -> i32 {
     let mut h1 = seed;
     let blocks = data.len() / 4;
     for i in 0..blocks {
-        let mut k1 = u32::from_le_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
+        let mut k1 =
+            u32::from_le_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
         k1 = k1.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
         h1 ^= k1;
         h1 = h1.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);

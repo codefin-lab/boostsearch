@@ -8,8 +8,15 @@ pub(crate) fn composite_under_a_parent(node: &Value) -> bool {
     // an aggregation that produces one bucket does not multiply the work,
     // so a composite may sit inside one of those
     const SINGLE: &[&str] = &[
-        "filter", "global", "nested", "reverse_nested", "sampler", "diversified_sampler",
-        "missing", "children", "parent",
+        "filter",
+        "global",
+        "nested",
+        "reverse_nested",
+        "sampler",
+        "diversified_sampler",
+        "missing",
+        "children",
+        "parent",
     ];
     let Some(o) = node.as_object() else { return false };
     o.values().any(|def| {
@@ -61,10 +68,8 @@ pub(crate) fn millis_in_keys(node: &mut Value) {
 pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
     let Some(reqs) = request.as_object() else { return };
     for (name, def) in reqs {
-        let asked: Option<Vec<(Option<f64>, Option<f64>)>> = def
-            .pointer("/range/ranges")
-            .and_then(|r| r.as_array())
-            .map(|a| {
+        let asked: Option<Vec<(Option<f64>, Option<f64>)>> =
+            def.pointer("/range/ranges").and_then(|r| r.as_array()).map(|a| {
                 a.iter()
                     .map(|r| {
                         (
@@ -119,22 +124,22 @@ pub(crate) fn name_date_metrics(
             .as_object()
             .and_then(|o| {
                 o.keys().map(|k| k.to_string()).find(|k| {
-                    matches!(k.as_str(), "avg" | "min" | "max" | "sum" | "median_absolute_deviation")
+                    matches!(
+                        k.as_str(),
+                        "avg" | "min" | "max" | "sum" | "median_absolute_deviation"
+                    )
                 })
             })
             .unwrap_or_default();
         if !kind.is_empty() {
-            let field = def
-                .pointer(&format!("/{kind}/field"))
-                .and_then(|f| f.as_str())
-                .unwrap_or("");
+            let field =
+                def.pointer(&format!("/{kind}/field")).and_then(|f| f.as_str()).unwrap_or("");
             let ty = targets
                 .iter()
                 .filter_map(|n| store.get(n))
                 .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
             if matches!(ty.as_deref(), Some("date") | Some("date_nanos")) {
-                if let Some(v) =
-                    answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
+                if let Some(v) = answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
                 {
                     let millis = if ty.as_deref() == Some("date_nanos") {
                         (v / 1e6) as i64
@@ -350,16 +355,13 @@ pub(crate) fn format_terms_keys(
                     buckets.retain(|b| {
                         let shown = (
                             b.get("key").cloned().unwrap_or(Value::Null),
-                            b.get("key_as_string")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string()),
+                            b.get("key_as_string").and_then(|s| s.as_str()).map(|s| s.to_string()),
                         );
                         let hit = |list: &Vec<String>| {
-                            list.iter()
-                                .any(|want| term_filter_matches(want, &shown, ty.as_deref()))
+                            list.iter().any(|want| term_filter_matches(want, &shown, ty.as_deref()))
                         };
-                        include.as_ref().map(|l| hit(l)).unwrap_or(true)
-                            && !exclude.as_ref().map(|l| hit(l)).unwrap_or(false)
+                        include.as_ref().map(hit).unwrap_or(true)
+                            && !exclude.as_ref().map(hit).unwrap_or(false)
                     });
                 }
             }
@@ -436,9 +438,10 @@ pub(crate) fn unmapped_field(store: &Store, targets: &[String], field: &str) -> 
 /// Is this field one of the range types, which store two endpoints per
 /// document rather than one value?
 pub(crate) fn range_field(store: &Store, targets: &[String], field: &str) -> bool {
-    targets.iter().filter_map(|n| store.get(n)).any(|st| {
-        st.read().mapping.type_of(field).map(|t| t.ends_with("_range")).unwrap_or(false)
-    })
+    targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .any(|st| st.read().mapping.type_of(field).map(|t| t.ends_with("_range")).unwrap_or(false))
 }
 
 /// One entry of an include/exclude list, as text.
@@ -456,14 +459,16 @@ pub(crate) fn term_filter_text(v: &Value) -> Option<String> {
 /// The caller writes a date or an address the way it was sent; the bucket
 /// carries the way it is read back. Both are put in one spelling before they
 /// are compared.
-pub(crate) fn term_filter_matches(want: &str, shown: &(Value, Option<String>), ty: Option<&str>) -> bool {
+pub(crate) fn term_filter_matches(
+    want: &str,
+    shown: &(Value, Option<String>),
+    ty: Option<&str>,
+) -> bool {
     let (key, as_string) = shown;
     match ty {
         Some("date") | Some("date_nanos") => {
             let a = crate::store::canonical_date(&Value::String(want.to_string()));
-            let b = as_string
-                .clone()
-                .and_then(|s| crate::store::canonical_date(&Value::String(s)));
+            let b = as_string.clone().and_then(|s| crate::store::canonical_date(&Value::String(s)));
             a.is_some() && a == b
         }
         Some("ip") => {
