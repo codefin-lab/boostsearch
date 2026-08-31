@@ -8,24 +8,38 @@ src/
   lib.rs           the same code as a library, so benchmarks drive what the server does
 
   api/             one module per thing an endpoint is about
-    doc            writing, reading and deleting documents, and bulk
+    doc/           writing and reading documents
+      mod          one document: index, get, delete, and the version checks
+      bulk  update  many  termvectors
     source         what of a document goes back, and in what shape
     search_api     _search and everything beside it: msearch, scroll, field_caps, analyze
-    indices        an index as a thing: made, opened, resized, rolled over
+    indices/       an index as a thing
+      mod          made, opened, closed, refreshed, deleted
+      resize       cloned, shrunk, split, rolled over
+      shards       what it is made of, and the state those parts are in
+    cat/           the same answers, as columns
+      mod          dispatch      render  columns into text     tables  per endpoint
     mapping        settings         alias         template
-    cat            cluster          nodes         stats
+    cluster        nodes            stats
     snapshot       ingest           datastream    tasks
     shared         errors, parameters, and the shapes of an answer
 
   search/          answering a search
-    mod            the pipeline: run, the shard search, the limits, the types
-    sort  page  nested  geo  highlight  suggest  extras  lookup  profile  routing
+    mod            the pipeline: run, and the types the rest of it passes around
+    shard          one index's share of a search
+    limits         what a request may ask for
+    candidates     rescoring and index boosts, once every shard has answered
+    page  sort  nested  geo  highlight  suggest  extras  lookup  profile  routing  calendar
     aggs/
-      plan         who answers which aggregation, and what is held back
-      bucket  composite  histogram  metric  pipeline  format
+      plan/        who answers which aggregation
+        mod        the plan itself      check  what may be asked      rewrite  reshaping
+      bucket/      the aggregations that make buckets
+        terms  ranges  filters
+      composite  histogram  metric  pipeline  format
 
   query/           the query DSL as BoostCore queries
-    mod            Ctx, the dispatcher, and what a field resolves to
+    mod            Ctx, and what a field name resolves to
+    dispatch       one query name to one BoostCore query
     text  range  terms  bool  pattern  analyze
 
   store/           what an index is, and what it holds
