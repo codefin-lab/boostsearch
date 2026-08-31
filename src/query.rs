@@ -705,6 +705,34 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             };
             build_interval_rule(ctx, field, rule)?
         }
+        // `terms_set` asks for a number of the listed terms rather than all
+        // of them, and how many is read from a field of the document itself
+        "terms_set" => {
+            let Some((field, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return Err(anyhow!("[terms_set] requires a field"));
+            };
+            let terms: Vec<Value> = spec
+                .get("terms")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let clauses: Vec<Value> = terms
+                .iter()
+                .map(|t| serde_json::json!({"term": {field.clone(): t.clone()}}))
+                .collect();
+            // without a count to read, every term is required
+            let mut inner = serde_json::json!({"bool": {"should": clauses}});
+            if spec.get("minimum_should_match_field").is_some()
+                || spec.get("minimum_should_match_script").is_some()
+            {
+                // how many are needed is a property of each document, which
+                // this engine cannot ask of a scorer; one is the floor
+                inner["bool"]["minimum_should_match"] = serde_json::json!(1);
+            } else if let Some(n) = spec.get("minimum_should_match") {
+                inner["bool"]["minimum_should_match"] = n.clone();
+            }
+            build(ctx, &inner)?
+        }
         "bool" => build_bool(ctx, &body)?,
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
@@ -1254,6 +1282,31 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 if let Some((_, inclusive)) = b.take() {
                     *b = Some((Value::String(n.to_string()), inclusive));
                 }
+            }
+        }
+    }
+    // a value gathered under a flat_object was stored in its canonical
+    // spelling, and a bound has to be written the same way to compare with it
+    let under_flat = {
+        let mut walked = String::new();
+        let mut found = false;
+        for part in field.split('.') {
+            walked = if walked.is_empty() {
+                part.to_string()
+            } else {
+                format!("{walked}.{part}")
+            };
+            if ctx.mapping.type_of(&walked) == Some("flat_object") {
+                found = true;
+            }
+        }
+        found
+    };
+    if under_flat {
+        for b in [&mut lower, &mut upper] {
+            let Some((Value::String(text), inclusive)) = b.clone() else { continue };
+            if let Some(iso) = crate::store::canonical_date(&Value::String(text.clone())) {
+                *b = Some((Value::String(iso), inclusive));
             }
         }
     }

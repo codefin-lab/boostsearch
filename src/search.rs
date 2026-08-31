@@ -7892,30 +7892,37 @@ fn strip_bucket_pipelines(
 }
 
 /// Add a running value to each bucket of the aggregation it was written under.
+///
+/// The aggregation may sit under others, and each of those has buckets of its
+/// own, so the walk down is a walk across every bucket at each step.
 fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str, def: &Value) {
-    let Some(parent) = at.last() else { return };
-    // walk down to the aggregation the pipeline was written inside
-    let mut node: &mut Value = aggs;
-    for step in &at[..at.len() - 1] {
-        node = match node.get_mut(step) {
-            Some(next) => next,
-            None => return,
-        };
-        if node.get("buckets").is_some() {
-            node = match node.get_mut("buckets") {
-                Some(b) => b,
-                None => return,
-            };
+    let Some((parent, above)) = at.split_last() else { return };
+    if !above.is_empty() {
+        let step = &above[0];
+        let Some(node) = aggs.get_mut(step) else { return };
+        let rest: Vec<String> = above[1..].iter().chain(std::iter::once(parent)).cloned().collect();
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => {
+                for b in list.iter_mut() {
+                    apply_bucket_pipeline(b, &rest, name, def);
+                }
+            }
+            Some(Value::Object(named)) => {
+                for (_, b) in named.iter_mut() {
+                    apply_bucket_pipeline(b, &rest, name, def);
+                }
+            }
+            _ => apply_bucket_pipeline(node, &rest, name, def),
         }
+        return;
     }
-    let target = match node.get_mut(parent) {
-        Some(t) => t,
-        None => return,
-    };
+    let Some(target) = aggs.get_mut(parent) else { return };
     let Some(buckets) = target.get_mut("buckets").and_then(|b| b.as_array_mut()) else { return };
     let kind = def
         .as_object()
-        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| BUCKET_PIPELINES.contains(&k.as_str())))
+        .and_then(|o| {
+            o.keys().map(|k| k.to_string()).find(|k| BUCKET_PIPELINES.contains(&k.as_str()))
+        })
         .unwrap_or_default();
     let path = def
         .pointer(&format!("/{kind}/buckets_path"))
