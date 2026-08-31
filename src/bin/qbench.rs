@@ -14,31 +14,61 @@ fn main() -> anyhow::Result<()> {
         ("match_all", json!({"query": {"match_all": {}}, "size": 10})),
         ("term_keyword", json!({"query": {"term": {"region": "eu-west-1"}}, "size": 10})),
         ("term_numeric", json!({"query": {"term": {"status": 404}}, "size": 10})),
-        ("range_numeric", json!({"query": {"range": {"size": {"gte": 5000, "lt": 50000}}}, "size": 10})),
+        (
+            "range_numeric",
+            json!({"query": {"range": {"size": {"gte": 5000, "lt": 50000}}}, "size": 10}),
+        ),
         ("match_text", json!({"query": {"match": {"request": "api orders"}}, "size": 10})),
-        ("bool_filter", json!({"query": {"bool": {
+        (
+            "bool_filter",
+            json!({"query": {"bool": {
             "must": [{"match": {"request": "api"}}],
-            "filter": [{"term": {"method": "GET"}}, {"range": {"response_ms": {"gte": 20}}}]}}, "size": 10})),
-        ("agg_terms", json!({"size": 0, "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}})),
-        ("agg_date_hist", json!({"size": 0, "aggs": {"over_time": {
-            "date_histogram": {"field": "@timestamp", "fixed_interval": "1d"}}}})),
-        ("agg_nested", json!({"size": 0, "aggs": {"by_region": {"terms": {"field": "region"},
-            "aggs": {"avg_ms": {"avg": {"field": "response_ms"}}, "p_size": {"stats": {"field": "size"}}}}}})),
-        ("sort_paged", json!({"query": {"match_all": {}}, "sort": [{"size": "desc"}], "size": 10, "from": 100})),
+            "filter": [{"term": {"method": "GET"}}, {"range": {"response_ms": {"gte": 20}}}]}}, "size": 10}),
+        ),
+        (
+            "agg_terms",
+            json!({"size": 0, "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}}),
+        ),
+        (
+            "agg_date_hist",
+            json!({"size": 0, "aggs": {"over_time": {
+            "date_histogram": {"field": "@timestamp", "fixed_interval": "1d"}}}}),
+        ),
+        (
+            "agg_nested",
+            json!({"size": 0, "aggs": {"by_region": {"terms": {"field": "region"},
+            "aggs": {"avg_ms": {"avg": {"field": "response_ms"}}, "p_size": {"stats": {"field": "size"}}}}}}),
+        ),
+        (
+            "sort_paged",
+            json!({"query": {"match_all": {}}, "sort": [{"size": "desc"}], "size": 10, "from": 100}),
+        ),
         ("count_only", json!({"query": {"match_all": {}}, "size": 0})),
         // same selectivity, but an explicit float bound narrows the range to a
         // single typed variant instead of the I64/U64/F64 union
         // the dominant filter in log analytics, and the one a clustered column
         // layout would help most: the corpus timestamps are monotonic
-        ("time_range_1pct", json!({"query": {"range": {"@timestamp": {
-            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-01T01:40:00Z"}}}, "size": 10})),
-        ("time_range_25pct", json!({"query": {"range": {"@timestamp": {
-            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}}, "size": 10})),
-        ("time_range_agg", json!({"size": 0,
+        (
+            "time_range_1pct",
+            json!({"query": {"range": {"@timestamp": {
+            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-01T01:40:00Z"}}}, "size": 10}),
+        ),
+        (
+            "time_range_25pct",
+            json!({"query": {"range": {"@timestamp": {
+            "gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}}, "size": 10}),
+        ),
+        (
+            "time_range_agg",
+            json!({"size": 0,
             "query": {"range": {"@timestamp": {"gte": "2026-01-01T00:00:00Z", "lt": "2026-01-02T17:40:00Z"}}},
-            "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}})),
+            "aggs": {"by_status": {"terms": {"field": "status", "size": 10}}}}),
+        ),
         ("range_int_bound", json!({"query": {"range": {"response_ms": {"gte": 20}}}, "size": 10})),
-        ("range_float_bound", json!({"query": {"range": {"response_ms": {"gte": 20.0001}}}, "size": 10})),
+        (
+            "range_float_bound",
+            json!({"query": {"range": {"response_ms": {"gte": 20.0001}}}, "size": 10}),
+        ),
     ];
 
     let params = std::collections::HashMap::new();

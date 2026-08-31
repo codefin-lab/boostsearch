@@ -1,7 +1,7 @@
 //! Histograms over dates, where a calendar unit or a zone is involved.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
 /// Write a date histogram's keys the way a date histogram writes them: the key
 /// is a whole number of milliseconds, and it is named beside it.
@@ -14,10 +14,9 @@ pub(crate) fn date_histogram_keys(
     for (name, def) in reqo {
         let Some(defo) = def.as_object() else { continue };
         let Some(node) = result.get_mut(name) else { continue };
-        if let (Some(spec), Some(sub)) = (
-            defo.get("date_histogram"),
-            defo.get("aggs").or_else(|| defo.get("aggregations")),
-        ) {
+        if let (Some(spec), Some(sub)) =
+            (defo.get("date_histogram"), defo.get("aggs").or_else(|| defo.get("aggregations")))
+        {
             let _ = spec;
             match node.get_mut("buckets") {
                 Some(Value::Array(buckets)) => {
@@ -76,6 +75,13 @@ pub(crate) fn date_histogram_keys(
     }
 }
 
+/// A date histogram stepped by calendar units.
+///
+/// A month is not a fixed number of milliseconds, so BoostCore's histogram --
+/// which steps by a constant -- cannot express one. Each bucket is instead a
+/// range filter run through the ordinary query path, which also means
+/// sub-aggregations come for free. The cost is one search per bucket, which
+/// suits the handful of buckets a calendar histogram usually spans.
 pub(crate) fn run_calendar_histogram(
     store: &Store,
     targets: &[String],
@@ -93,11 +99,8 @@ pub(crate) fn run_calendar_histogram(
         .and_then(|v| v.as_str())
         .and_then(parse_offset)
         .filter(|d| d.whole_nanoseconds() > 0);
-    let interval = spec
-        .get("calendar_interval")
-        .and_then(|v| v.as_str())
-        .unwrap_or("day")
-        .to_string();
+    let interval =
+        spec.get("calendar_interval").and_then(|v| v.as_str()).unwrap_or("day").to_string();
     let unit = match fixed {
         Some(_) => CalendarUnit::Second,
         None => match CalendarUnit::parse(&interval) {
@@ -115,22 +118,14 @@ pub(crate) fn run_calendar_histogram(
         },
     };
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
-    let min_doc_count =
-        spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
     // the span to cover comes from the extremes the query actually matches
     // a range-typed field has no single value per document, so it has no
     // extremes to read; its span has to come from the bounds the request gives
-    let ranged = targets
-        .iter()
-        .filter_map(|n| store.get(n))
-        .any(|st| {
-            st.read()
-                .mapping
-                .type_of(&field)
-                .map(|t| t.ends_with("_range"))
-                .unwrap_or(false)
-        });
+    let ranged = targets.iter().filter_map(|n| store.get(n)).any(|st| {
+        st.read().mapping.type_of(&field).map(|t| t.ends_with("_range")).unwrap_or(false)
+    });
     let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
     // A date is a number in the index: milliseconds, or nanoseconds for a
     // date_nanos. A date_range keeps its endpoints as text, which BoostCore
@@ -166,9 +161,8 @@ pub(crate) fn run_calendar_histogram(
                 })
                 .unwrap_or(per_ns);
             let (_, extremes) = filtered_count(store, one, &base, &Some(probe.clone()))?;
-            let read = |k: &str| -> Option<f64> {
-                extremes.as_ref()?.get(k)?.get("value")?.as_f64()
-            };
+            let read =
+                |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
             if let (Some(a), Some(b)) = (read("__min"), read("__max")) {
                 let (a, b) = (a * per, b * per);
                 span = Some(match span {
@@ -190,9 +184,7 @@ pub(crate) fn run_calendar_histogram(
             "__max": {"max": {"field": format!("{field}.lte")}},
         });
         let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
-        let read = |k: &str| -> Option<f64> {
-            extremes.as_ref()?.get(k)?.get("value")?.as_f64()
-        };
+        let read = |k: &str| -> Option<f64> { extremes.as_ref()?.get(k)?.get("value")?.as_f64() };
         match (read("__min"), read("__max")) {
             (Some(a), Some(b)) => (lo_ns, hi_ns) = (a * per_ns, b * per_ns),
             _ => return Ok(json!({"buckets": []})),
@@ -304,8 +296,9 @@ pub(crate) fn run_calendar_histogram(
             "_key" | "_time" => {
                 buckets.sort_by(by(|x| x.get("key").and_then(|v| v.as_i64()).unwrap_or(0)))
             }
-            "_count" => buckets
-                .sort_by(by(|x| x.get("doc_count").and_then(|v| v.as_i64()).unwrap_or(0))),
+            "_count" => {
+                buckets.sort_by(by(|x| x.get("doc_count").and_then(|v| v.as_i64()).unwrap_or(0)))
+            }
             _ => {}
         }
     }

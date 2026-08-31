@@ -3,13 +3,16 @@
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
 
+// see the note in lib.rs
+#![allow(clippy::result_large_err)]
+
 mod analysis;
 mod api;
 mod blockstats;
 mod hdr;
+mod query;
 mod search;
 mod snapshot;
-mod query;
 mod source;
 mod store;
 mod tz;
@@ -163,7 +166,10 @@ fn app(store: Store) -> Router {
         // the body is expected to name it instead
         .route("//_alias/{name}", put(api::put_alias_named).post(api::put_alias_named))
         .route("//_alias/", put(api::put_alias_body).post(api::put_alias_body))
-        .route("/{index}/_alias/{name}", put(api::put_alias).post(api::put_alias).delete(api::delete_alias))
+        .route(
+            "/{index}/_alias/{name}",
+            put(api::put_alias).post(api::put_alias).delete(api::delete_alias),
+        )
         .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
         .route("/{index}/_alias", put(api::put_alias_on_index))
         .route("/{index}/_aliases", put(api::put_alias_on_index))
@@ -171,25 +177,42 @@ fn app(store: Store) -> Router {
         // an alias left out of the path leaves the trailing slash behind
         .route("/_alias/", put(api::put_alias_body).post(api::put_alias_body))
         // --- templates ---
-        .route("/_template/{name}",
-               put(api::put_template).post(api::put_template)
-                   .get(api::get_template).head(api::exists_template)
-                   .delete(api::delete_template))
+        .route(
+            "/_template/{name}",
+            put(api::put_template)
+                .post(api::put_template)
+                .get(api::get_template)
+                .head(api::exists_template)
+                .delete(api::delete_template),
+        )
         .route("/_template", get(api::get_template))
-        .route("/_index_template/{name}",
-               put(api::put_index_template).post(api::put_index_template)
-                   .get(api::get_index_template).delete(api::delete_index_template))
+        .route(
+            "/_index_template/{name}",
+            put(api::put_index_template)
+                .post(api::put_index_template)
+                .get(api::get_index_template)
+                .delete(api::delete_index_template),
+        )
         .route("/_index_template", get(api::get_index_template))
-        .route("/_component_template/{name}",
-               put(api::put_component_template).get(api::get_component_template)
-                   .delete(api::delete_component_template))
+        .route(
+            "/_component_template/{name}",
+            put(api::put_component_template)
+                .get(api::get_component_template)
+                .delete(api::delete_component_template),
+        )
         .route("/_component_template", get(api::get_component_template))
-        .route("/_index_template/_simulate",
-               post(api::simulate_template).put(api::simulate_template))
-        .route("/_index_template/_simulate/{name}",
-               post(api::simulate_template).put(api::simulate_template))
-        .route("/_index_template/_simulate_index/{index}",
-               post(api::simulate_index_template).put(api::simulate_index_template))
+        .route(
+            "/_index_template/_simulate",
+            post(api::simulate_template).put(api::simulate_template),
+        )
+        .route(
+            "/_index_template/_simulate/{name}",
+            post(api::simulate_template).put(api::simulate_template),
+        )
+        .route(
+            "/_index_template/_simulate_index/{index}",
+            post(api::simulate_index_template).put(api::simulate_index_template),
+        )
         // --- nodes and cluster housekeeping ---
         .route("/_nodes/stats", get(api::nodes_stats))
         .route("/_nodes/stats/{*rest}", get(api::nodes_stats))
@@ -261,7 +284,10 @@ fn app(store: Store) -> Router {
         // --- documents ---
         .route(
             "/{index}/_doc/{id}",
-            put(api::index_doc).post(api::index_doc).get(api::get_doc).delete(api::delete_doc_route),
+            put(api::index_doc)
+                .post(api::index_doc)
+                .get(api::get_doc)
+                .delete(api::delete_doc_route),
         )
         .route("/{index}/_doc/{id}", head(api::head_doc))
         .route("/{index}/_doc", post(api::index_doc_auto))

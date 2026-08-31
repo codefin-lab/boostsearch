@@ -42,8 +42,7 @@ fn block_skip_scan(
             out.extend(start as u32..end as u32);
             continue;
         }
-        for i in start..end {
-            let v = vals[i];
+        for (i, &v) in vals.iter().enumerate().take(end).skip(start) {
             if v >= lo && v <= hi {
                 out.push(i as u32);
             }
@@ -60,8 +59,8 @@ fn chunked_scan(vals: &[u64], lo: u64, hi: u64, out: &mut Vec<u32>) {
         for (j, v) in chunk.iter().enumerate() {
             mask[j] = *v >= lo && *v <= hi;
         }
-        for j in 0..chunk.len() {
-            if mask[j] {
+        for (j, hit) in mask.iter().enumerate().take(chunk.len()) {
+            if *hit {
                 out.push((c * 8 + j) as u32);
             }
         }
@@ -183,7 +182,7 @@ fn main() -> anyhow::Result<()> {
                     let first = b;
                     while b < seg_stats.len() {
                         let (m, x) = seg_stats[b];
-                        let partial = !(x < lo || m > hi) && !(m >= lo && x <= hi);
+                        let partial = x >= lo && m <= hi && !(m >= lo && x <= hi);
                         if !partial {
                             break;
                         }

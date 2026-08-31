@@ -113,9 +113,9 @@ fn main() -> anyhow::Result<()> {
 // Variants of the document build, timed against each other.
 #[allow(dead_code)]
 fn variants(fields: &boostsearch::store::Fields, docs: &[Value]) {
-    use std::collections::BTreeMap;
-    use boostcore::schema::OwnedValue;
     use boostcore::TantivyDocument;
+    use boostcore::schema::OwnedValue;
+    use std::collections::BTreeMap;
     let n = docs.len() as f64;
 
     let t = Instant::now();

@@ -119,9 +119,7 @@ pub(crate) fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str,
 }
 
 pub(crate) fn is_pipeline_agg(def: &Value) -> bool {
-    def.as_object()
-        .map(|o| o.keys().any(|k| PIPELINES.contains(&k.as_str())))
-        .unwrap_or(false)
+    def.as_object().map(|o| o.keys().any(|k| PIPELINES.contains(&k.as_str()))).unwrap_or(false)
 }
 
 pub(crate) fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Response> {
@@ -185,7 +183,9 @@ pub(crate) fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
             if leaf {
                 // the last step is a bucketing aggregation, not a value
                 let kind = match buckets.as_array().and_then(|a| a.first()) {
-                    Some(b) if b.get("key").map(|k| k.is_string()).unwrap_or(false) => "StringTerms",
+                    Some(b) if b.get("key").map(|k| k.is_string()).unwrap_or(false) => {
+                        "StringTerms"
+                    }
                     Some(_) => "LongTerms",
                     None => "LongTerms",
                 };

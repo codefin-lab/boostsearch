@@ -11,12 +11,14 @@
 //! rather than persisted: a BoostCore segment id never refers to different data,
 //! which makes the cache key exact and merges self-invalidating.
 
+use boostcore::columnar::{Column, ColumnType};
+use boostcore::query::{
+    BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight,
+};
+use boostcore::{DocId, Score, SegmentReader, TantivyError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use boostcore::columnar::{Column, ColumnType};
-use boostcore::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
-use boostcore::{DocId, SegmentReader, Score, TantivyError};
 
 /// Documents per statistics block. Matches the columnar's own block size, so a
 /// surviving block maps onto work the column is already organised to do.
@@ -236,9 +238,8 @@ impl Weight for BlockRangeQuery {
 
     fn count(&self, reader: &SegmentReader) -> boostcore::Result<u32> {
         // still has to respect deletes, so fall through to the default when any
-        if reader.alive_bitset().is_some() {
+        if let Some(alive) = reader.alive_bitset() {
             let docs = self.docids(reader);
-            let alive = reader.alive_bitset().unwrap();
             return Ok(docs.into_iter().filter(|d| alive.is_alive(*d)).count() as u32);
         }
         Ok(self.docids(reader).len() as u32)

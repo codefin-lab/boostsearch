@@ -17,8 +17,8 @@ pub(crate) fn profiled_agg_search(
     ctx: &Ctx,
     request: Option<&Value>,
 ) -> (boostcore::Result<IntermediateAggregationResults>, Value) {
-    use std::time::Instant;
     use boostcore::collector::{Collector, SegmentCollector};
+    use std::time::Instant;
 
     let mut ns = std::collections::BTreeMap::new();
     let mut collected = 0u64;
@@ -86,13 +86,15 @@ pub(crate) fn profiled_agg_search(
                 .and_then(|a| a.as_object())
                 .map(|o| {
                     o.iter()
-                        .map(|(cname, cdef)| json!({
-                            "type": agg_profile_type(cdef),
-                            "description": cname,
-                            "time_in_nanos": 0,
-                            "breakdown": breakdown,
-                            "debug": {},
-                        }))
+                        .map(|(cname, cdef)| {
+                            json!({
+                                "type": agg_profile_type(cdef),
+                                "description": cname,
+                                "time_in_nanos": 0,
+                                "breakdown": breakdown,
+                                "debug": {},
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -179,11 +181,7 @@ pub(crate) fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
         let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
         // the strategy names what was bucketed: numbers are collected as
         // longs, everything else as terms
-        let strategy = if field.starts_with(crate::store::DYN) {
-            "long_terms"
-        } else {
-            "terms"
-        };
+        let strategy = if field.starts_with(crate::store::DYN) { "long_terms" } else { "terms" };
         let mut out = json!({
             "result_strategy": strategy,
             "collection_strategy": "dense",
@@ -207,15 +205,21 @@ pub(crate) fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
     }
     // the request has already been rewritten onto the internal JSON views
     let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
-    let field = field
-        .strip_prefix("_raw.")
-        .or_else(|| field.strip_prefix("_dyn."))
-        .unwrap_or(field);
+    let field =
+        field.strip_prefix("_raw.").or_else(|| field.strip_prefix("_dyn.")).unwrap_or(field);
     let numeric = matches!(
         ctx.mapping.type_of(field),
         Some(
-            "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
-                | "double" | "scaled_float" | "date"
+            "byte"
+                | "short"
+                | "integer"
+                | "long"
+                | "unsigned_long"
+                | "float"
+                | "half_float"
+                | "double"
+                | "scaled_float"
+                | "date"
         )
     );
     json!({
@@ -233,7 +237,7 @@ pub(crate) fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
 /// aggregation was asked for by: a terms aggregation is named after the kind
 /// of term it produced, and a percentile after the sketch behind it.
 pub(crate) fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -> Option<String> {
-    let Some(o) = def.as_object() else { return None };
+    let o = def.as_object()?;
     let kind: String = o
         .keys()
         .map(|k| k.to_string())
@@ -257,7 +261,11 @@ pub(crate) fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -
         "significant_terms" => format!("sig{}terms", field_kind()),
         "multi_terms" => "multiterms".into(),
         "percentiles" => {
-            if spec.get("hdr").is_some() { "hdr_percentiles".into() } else { "tdigest_percentiles".into() }
+            if spec.get("hdr").is_some() {
+                "hdr_percentiles".into()
+            } else {
+                "tdigest_percentiles".into()
+            }
         }
         "percentile_ranks" => {
             if spec.get("hdr").is_some() {
@@ -278,7 +286,12 @@ pub(crate) fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -
 }
 
 /// Rename every aggregation in an answer to `type#name`, all the way down.
-pub(crate) fn apply_typed_keys(store: &Store, targets: &[String], out: &mut Value, request: &Value) {
+pub(crate) fn apply_typed_keys(
+    store: &Store,
+    targets: &[String],
+    out: &mut Value,
+    request: &Value,
+) {
     let Some(reqs) = request.as_object().cloned() else { return };
     let Some(map) = out.as_object_mut() else { return };
     for (name, def) in reqs {
@@ -340,7 +353,6 @@ pub(crate) fn own_agg_profiles(
     query_json: &Option<Value>,
     shard_profiles: &mut Vec<Value>,
 ) {
-
     let mut own: Vec<Value> = Vec::new();
     for (name, def) in peeled {
         let found = results
@@ -389,8 +401,7 @@ pub(crate) fn own_agg_profiles(
     if !own.is_empty() {
         match shard_profiles.first_mut() {
             Some(shard) => {
-                if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut())
-                {
+                if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut()) {
                     list.extend(own);
                 } else {
                     shard["aggregations"] = Value::Array(own);
@@ -403,7 +414,6 @@ pub(crate) fn own_agg_profiles(
             })),
         }
     }
-    
 }
 
 /// What the fetch cost, for `profile`.
@@ -496,10 +506,8 @@ pub(crate) fn fetch_profiles(
         }
     }
     // so does every top_hits aggregation
-    if let Some(o) = body
-        .get("aggs")
-        .or_else(|| body.get("aggregations"))
-        .and_then(|a| a.as_object())
+    if let Some(o) =
+        body.get("aggs").or_else(|| body.get("aggregations")).and_then(|a| a.as_object())
     {
         for (name, def) in o {
             if def.get("top_hits").is_none() {
@@ -518,5 +526,4 @@ pub(crate) fn fetch_profiles(
     for shard in shard_profiles.iter_mut() {
         shard["fetch"] = Value::Array(entries.clone());
     }
-    
 }

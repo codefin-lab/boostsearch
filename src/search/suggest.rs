@@ -59,19 +59,13 @@ pub(crate) fn context_matches(
 ) -> bool {
     let Some(asked) = spec.get("contexts").and_then(|c| c.as_object()) else { return true };
     let path_of = match field.rsplit_once('.') {
-        Some((parent, leaf)) => format!(
-            "/properties/{}/fields/{leaf}/contexts",
-            parent.replace('.', "/properties/")
-        ),
+        Some((parent, leaf)) => {
+            format!("/properties/{}/fields/{leaf}/contexts", parent.replace('.', "/properties/"))
+        }
         None => format!("/properties/{field}/contexts"),
     };
-    let declared = g
-        .mapping
-        .raw
-        .pointer(&path_of)
-        .and_then(|c| c.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let declared =
+        g.mapping.raw.pointer(&path_of).and_then(|c| c.as_array()).cloned().unwrap_or_default();
     for (name, want) in asked {
         let kind = declared
             .iter()
@@ -86,9 +80,7 @@ pub(crate) fn context_matches(
         // completion, or read from the field the mapping names
         let held = raw
             .and_then(|r| r.pointer(&format!("/contexts/{name}")))
-            .or_else(|| {
-                path.and_then(|p| source.pointer(&format!("/{}", p.replace('.', "/"))))
-            });
+            .or_else(|| path.and_then(|p| source.pointer(&format!("/{}", p.replace('.', "/")))));
         let Some(held) = held else { return false };
         let ok = if kind == "geo" {
             let precision = declared
@@ -140,10 +132,7 @@ pub(crate) fn completion_suggest(
 ) -> std::result::Result<Value, Response> {
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-    let skip_duplicates = spec
-        .get("skip_duplicates")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let skip_duplicates = spec.get("skip_duplicates").and_then(|v| v.as_bool()).unwrap_or(false);
     let prefix = text.to_lowercase();
 
     // a field filed under contexts can only be asked about through them
@@ -193,11 +182,9 @@ pub(crate) fn completion_suggest(
         let g = st.read();
         let searcher = g.reader.searcher();
         let all = boostcore::query::AllQuery;
-        let addrs = searcher
-            .search(&all, &boostcore::collector::DocSetCollector)
-            .map_err(|e| {
-                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
-            })?;
+        let addrs = searcher.search(&all, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })?;
         for addr in addrs {
             let Some((id, source)) = source_of(&searcher, &g, addr) else { continue };
             // a completion field may hold one value or several
@@ -206,11 +193,9 @@ pub(crate) fn completion_suggest(
             // a completion may be declared as a sub-field of another, and
             // then the value it completes is the parent's
             let raw = source.pointer(&format!("/{}", field.replace('.', "/"))).or_else(|| {
-                field
-                    .rsplit_once('.')
-                    .and_then(|(parent, _)| {
-                        source.pointer(&format!("/{}", parent.replace('.', "/")))
-                    })
+                field.rsplit_once('.').and_then(|(parent, _)| {
+                    source.pointer(&format!("/{}", parent.replace('.', "/")))
+                })
             });
             let texts = |v: &Value| -> Vec<String> {
                 match v {
@@ -228,7 +213,7 @@ pub(crate) fn completion_suggest(
                 Some(Value::Object(o)) => {
                     let w = o.get("weight").and_then(|x| x.as_f64()).unwrap_or(1.0);
                     weighted.extend(
-                        o.get("input").map(&texts).unwrap_or_default().into_iter().map(|t| (t, w)),
+                        o.get("input").map(texts).unwrap_or_default().into_iter().map(|t| (t, w)),
                     );
                 }
                 Some(Value::Array(items)) if items.iter().any(|i| i.is_object()) => {
@@ -240,7 +225,7 @@ pub(crate) fn completion_suggest(
                         let w = o.get("weight").and_then(|x| x.as_f64()).unwrap_or(1.0);
                         weighted.extend(
                             o.get("input")
-                                .map(&texts)
+                                .map(texts)
                                 .unwrap_or_default()
                                 .into_iter()
                                 .map(|t| (t, w)),

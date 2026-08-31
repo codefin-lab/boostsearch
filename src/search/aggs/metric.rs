@@ -1,23 +1,22 @@
 //! The aggregations that answer with a number rather than with buckets.
 
-use crate::search::*;
 use super::*;
+use crate::search::*;
 
 /// The field an HDR percentiles aggregation reads, if the request has one.
 pub(crate) fn hdr_percentiles_field(node: &Value) -> Option<String> {
     let o = node.as_object()?;
     for (_, def) in o {
-        if let Some(spec) = def.get("percentiles") {
-            if spec.get("hdr").is_some() {
-                if let Some(f) = spec.get("field").and_then(|f| f.as_str()) {
-                    return Some(f.to_string());
-                }
-            }
+        if let Some(spec) = def.get("percentiles")
+            && spec.get("hdr").is_some()
+            && let Some(f) = spec.get("field").and_then(|f| f.as_str())
+        {
+            return Some(f.to_string());
         }
-        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) {
-            if let Some(f) = hdr_percentiles_field(subs) {
-                return Some(f);
-            }
+        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations"))
+            && let Some(f) = hdr_percentiles_field(subs)
+        {
+            return Some(f);
         }
     }
     None
@@ -54,9 +53,9 @@ pub(crate) fn collect_field_values(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let column = ctx.column_name(field, false);
         let searcher = g.reader.searcher();
-        let addrs = searcher
-            .search(&q, &boostcore::collector::DocSetCollector)
-            .map_err(|e| err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string()))?;
+        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })?;
         let cols: Vec<SortColumns> = searcher
             .segment_readers()
             .iter()
@@ -69,10 +68,8 @@ pub(crate) fn collect_field_values(
                 out.push(v);
                 any = true;
             }
-            if !any {
-                if let Some(m) = missing {
-                    out.push(m);
-                }
+            if !any && let Some(m) = missing {
+                out.push(m);
             }
         }
     }
@@ -135,15 +132,13 @@ pub(crate) fn run_hdr_percentiles(
     if keyed {
         let mut map = serde_json::Map::new();
         for p in &percents {
-            let key = format!("{:.1}", p);
+            let key = format!("{p:.1}");
             map.insert(key, value_at(*p).map(|v| json!(v)).unwrap_or(Value::Null));
         }
         Ok(json!({ "values": Value::Object(map) }))
     } else {
-        let arr: Vec<Value> = percents
-            .iter()
-            .map(|p| json!({"key": p, "value": value_at(*p)}))
-            .collect();
+        let arr: Vec<Value> =
+            percents.iter().map(|p| json!({"key": p, "value": value_at(*p)})).collect();
         Ok(json!({ "values": arr }))
     }
 }
@@ -206,11 +201,9 @@ pub(crate) fn collect_field_pairs(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
         let searcher = g.reader.searcher();
-        let addrs = searcher
-            .search(&q, &boostcore::collector::DocSetCollector)
-            .map_err(|e| {
-                err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
-            })?;
+        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
+        })?;
         let cols: Vec<(SortColumns, SortColumns)> = searcher
             .segment_readers()
             .iter()
@@ -259,15 +252,11 @@ pub(crate) fn run_percentile_ranks(
     if keyed {
         let mut map = serde_json::Map::new();
         for v in &wanted {
-            map.insert(
-                format!("{v:.1}"),
-                rank(*v).map(|r| json!(r)).unwrap_or(Value::Null),
-            );
+            map.insert(format!("{v:.1}"), rank(*v).map(|r| json!(r)).unwrap_or(Value::Null));
         }
         Ok(json!({"values": Value::Object(map)}))
     } else {
-        let arr: Vec<Value> =
-            wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
+        let arr: Vec<Value> = wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
         Ok(json!({"values": arr}))
     }
 }
@@ -283,8 +272,19 @@ pub(crate) fn run_top_hits(
     let spec = def.get("top_hits").cloned().unwrap_or(json!({}));
     let mut body = json!({"query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}}))});
     for key in [
-        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
-        "stored_fields", "highlight", "explain", "fields", "script_fields", "track_scores",
+        "size",
+        "from",
+        "sort",
+        "_source",
+        "version",
+        "seq_no_primary_term",
+        "docvalue_fields",
+        "stored_fields",
+        "highlight",
+        "explain",
+        "fields",
+        "script_fields",
+        "track_scores",
     ] {
         if let Some(v) = spec.get(key) {
             body[key] = v.clone();
@@ -308,14 +308,14 @@ pub(crate) fn run_mad_agg(
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("median_absolute_deviation").cloned().unwrap_or(json!({}));
-    if let Some(c) = spec.get("compression").and_then(|v| v.as_f64()) {
-        if c <= 0.0 {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
-            ));
-        }
+    if let Some(c) = spec.get("compression").and_then(|v| v.as_f64())
+        && c <= 0.0
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
+        ));
     }
     let (field, missing) = agg_field_and_missing(&spec);
     let query = combine(main_query, None);

@@ -2,7 +2,14 @@
 
 use super::*;
 
-pub(crate) fn source_of(searcher: &Searcher, st: &IdxState, addr: DocAddress) -> Option<(String, Value)> {
+mod collapse;
+pub(crate) use collapse::*;
+
+pub(crate) fn source_of(
+    searcher: &Searcher,
+    st: &IdxState,
+    addr: DocAddress,
+) -> Option<(String, Value)> {
     let doc: TantivyDocument = searcher.doc(addr).ok()?;
     let id = doc.get_first(st.fields.id)?.as_str()?.to_string();
     let raw = doc.get_first(st.fields.source)?.as_str()?.to_string();
@@ -10,6 +17,13 @@ pub(crate) fn source_of(searcher: &Searcher, st: &IdxState, addr: DocAddress) ->
     Some((id, src))
 }
 
+/// Write the page of hits the client reads.
+///
+/// Everything expensive has happened by now: these are the documents that made
+/// the page, and this is where each one is dressed -- source selection, the
+/// values `fields` asked for, inner hits, highlighting, the names of the
+/// clauses it matched.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_page(
     store: &Store,
     targets: &[String],
@@ -70,10 +84,7 @@ pub(crate) fn write_page(
             let want_source = kept
                 && (stored.is_none()
                     || explicit_source
-                    || stored
-                        .as_ref()
-                        .map(|s| s.iter().any(|n| n == "_source"))
-                        .unwrap_or(false));
+                    || stored.as_ref().map(|s| s.iter().any(|n| n == "_source")).unwrap_or(false));
             if want_source {
                 let src = match &sel {
                     Some(s) => apply_source_selector(&h.source, s),
@@ -122,9 +133,7 @@ pub(crate) fn write_page(
                 let names: Vec<String> = specs
                     .iter()
                     .map(|(n, _)| n.clone())
-                    .filter(|n| {
-                        g.mapping.field_option(n, "doc_values") != Some(json!(false))
-                    })
+                    .filter(|n| g.mapping.field_option(n, "doc_values") != Some(json!(false)))
                     .collect();
                 let raw = crate::source::extract_fields(&h.source, &names, &is_leaf);
                 // A field may be asked for more than once, each time with its
@@ -147,10 +156,10 @@ pub(crate) fn write_page(
                         for v in items.iter_mut() {
                             if let Some(text) = crate::source::format_date(v, fmt) {
                                 *v = text;
-                            } else if let Some(n) = v.as_f64() {
-                                if let Some(text) = decimal_format(fmt, n) {
-                                    *v = json!(text);
-                                }
+                            } else if let Some(n) = v.as_f64()
+                                && let Some(text) = decimal_format(fmt, n)
+                            {
+                                *v = json!(text);
                             }
                         }
                     }
@@ -201,17 +210,9 @@ pub(crate) fn write_page(
                 }
                 if !clauses.is_empty() {
                     let g = searchers[h.shard_idx].2.read();
-                    let kept =
-                        g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
+                    let kept = g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
                     let groups = nested_inner_hits(
-                        &h,
-                        &h.source,
-                        "",
-                        &clauses,
-                        kept,
-                        &query_json,
-                        &g.mapping,
-                        &g.index,
+                        &h, &h.source, "", &clauses, kept, query_json, &g.mapping, &g.index,
                     );
                     if !groups.is_empty() {
                         hit["inner_hits"] = Value::Object(groups);
@@ -264,7 +265,7 @@ pub(crate) fn write_page(
                     for inner in &asked {
                         let Some(group) = collapsed_group(
                             store,
-                            &targets,
+                            targets,
                             query_json.as_ref(),
                             field,
                             list.first().unwrap_or(&Value::Null),
@@ -284,8 +285,7 @@ pub(crate) fn write_page(
             }
             if let Some(spec) = body.get("highlight") {
                 let g = searchers[h.shard_idx].2.read();
-                if let Some(hl) =
-                    build_highlight(spec, &h.source, &query_json, &g.mapping, &g.index)
+                if let Some(hl) = build_highlight(spec, &h.source, query_json, &g.mapping, &g.index)
                 {
                     hit["highlight"] = hl;
                 }
@@ -331,10 +331,9 @@ pub(crate) fn output_specs(
                 ));
             }
             for spec in specs {
-                let (Some(f), Some(_)) = (
-                    spec.get("field").and_then(|v| v.as_str()),
-                    spec.get("format"),
-                ) else {
+                let (Some(f), Some(_)) =
+                    (spec.get("field").and_then(|v| v.as_str()), spec.get("format"))
+                else {
                     continue;
                 };
                 if !matches!(
@@ -368,9 +367,10 @@ pub(crate) fn output_specs(
         })
     };
     // `docvalue_fields` may also be named on the URL, as a comma-separated list
-    let param_docvalues: Option<Value> = p.get("docvalue_fields").filter(|v| !v.is_empty()).map(|v| {
-        Value::Array(v.split(',').map(|f| json!(f.trim())).collect())
-    });
+    let param_docvalues: Option<Value> = p
+        .get("docvalue_fields")
+        .filter(|v| !v.is_empty())
+        .map(|v| Value::Array(v.split(',').map(|f| json!(f.trim())).collect()));
     let body_docvalues = body.get("docvalue_fields").cloned().or(param_docvalues);
     let fields = match (spec_list(body.get("fields")), spec_list(body_docvalues.as_ref())) {
         (Some(mut a), Some(b)) => {
@@ -484,44 +484,6 @@ pub(crate) fn matched_names(
     out
 }
 
-/// The documents a collapsed hit was chosen from: the same query, narrowed to
-/// the one value, asked again with whatever the `inner_hits` clause says.
-pub(crate) fn collapsed_group(
-    store: &Store,
-    targets: &[String],
-    query: Option<&Value>,
-    field: &str,
-    value: &Value,
-    inner: &Value,
-    p: &Params,
-) -> Option<Value> {
-    // the value the group stands for narrows it; the query that found the
-    // group still scores it, which is what decides the order inside
-    let mut group = json!({"bool": {"filter": [{"term": {field: value.clone()}}]}});
-    if let Some(q) = query {
-        group["bool"]["must"] = json!([q.clone()]);
-    }
-    let mut body = json!({"query": group});
-    for key in [
-        "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
-        "stored_fields", "highlight", "explain", "fields",
-        // the group may be collapsed again, on a field of its own
-        "collapse",
-    ] {
-        if let Some(v) = inner.get(key) {
-            body[key] = v.clone();
-        }
-    }
-    let out = run(store, &targets.join(","), &body, &Params::new()).ok()?;
-    let total = if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
-        json!(out.total)
-    } else {
-        json!({"value": out.total, "relation": "eq"})
-    };
-    let max_score = out.max_score.map(|s| json!(s)).unwrap_or(Value::Null);
-    Some(json!({"hits": {"total": total, "max_score": max_score, "hits": out.hits}}))
-}
-
 /// Assemble the `hits` envelope, honouring track_total_hits and the
 /// `rest_total_hits_as_int` compatibility switch.
 pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
@@ -534,11 +496,8 @@ pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
         .and_then(|v| v.parse::<u64>().ok())
         .or_else(|| body.get("batched_reduce_size").and_then(|v| v.as_u64()))
         .unwrap_or(512);
-    let num_reduce_phases = if brs > 1 && out_shards > 1 {
-        out_shards.saturating_sub(1).div_ceil(brs - 1)
-    } else {
-        1
-    };
+    let num_reduce_phases =
+        if brs > 1 && out_shards > 1 { out_shards.saturating_sub(1).div_ceil(brs - 1) } else { 1 };
     let track = body.get("track_total_hits").cloned().or_else(|| {
         p.get("track_total_hits").map(|v| match v.as_str() {
             "true" => json!(true),
@@ -566,8 +525,7 @@ pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
             Some(Value::Number(n)) => n.as_u64().unwrap_or(DEFAULT_TRACK_TOTAL_HITS),
             _ => DEFAULT_TRACK_TOTAL_HITS,
         };
-        let (value, relation) =
-            if out.total > limit { (limit, "gte") } else { (out.total, "eq") };
+        let (value, relation) = if out.total > limit { (limit, "gte") } else { (out.total, "eq") };
         hits_obj["total"] =
             if as_int { json!(value) } else { json!({"value": value, "relation": relation}) };
     }
