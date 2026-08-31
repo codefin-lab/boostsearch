@@ -162,6 +162,13 @@ pub async fn create_index(
     Query(_p): Query<Params>,
     body: String,
 ) -> Response {
+    // An endpoint this server does not answer falls through to here, and a
+    // name beginning with an underscore is the API's own, never an index --
+    // so a request to `/_reindex` is a request that went unanswered, not a
+    // request to create an index called `_reindex`.
+    if let Some(r) = reserved_index_name(&index) {
+        return r;
+    }
     let body: Value = if body.trim().is_empty() {
         json!({})
     } else {
@@ -8368,6 +8375,13 @@ pub async fn create_snapshot(
     if let Some(meta) = body.get("metadata") {
         record["metadata"] = meta.clone();
     }
+    // Say plainly what this is: the snapshot APIs keep the bookkeeping a
+    // client expects to see, and copy nothing. A restore cannot bring data
+    // back that was never written anywhere.
+    tracing::warn!(
+        "snapshot [{name}] in repository [{repo}] records metadata only -- no data is copied, \
+         and a restore from it will not bring documents back. Copy the data directory instead."
+    );
     store.put_snapshot(&repo, &name, record.clone());
     // without `wait_for_completion` the caller is told it has begun; with it,
     // the finished snapshot comes back

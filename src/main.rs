@@ -280,7 +280,23 @@ fn app(store: Store) -> Router {
         // a path we route but with an unported method should read as "not ported",
         // not as a 405 the suite cannot interpret
         .method_not_allowed_fallback(api::not_ported)
+        // A bulk request is as big as the client wants to make it. Axum
+        // stops at 2 MB by default, which is smaller than any bulk helper's
+        // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
+        // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
+        .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
         .with_state(store)
+}
+
+/// How large a request body may be, in bytes.
+fn max_content_bytes() -> usize {
+    std::env::var("BOOSTSEARCH_MAX_CONTENT_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(100)
+        * 1024
+        * 1024
 }
 
 #[tokio::main]
