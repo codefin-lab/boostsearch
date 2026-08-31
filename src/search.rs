@@ -4765,10 +4765,10 @@ pub fn run(
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
-                    // a date is a number in the index, and BoostCore's date
-                    // histogram reads a date column, so every date histogram
-                    // is walked here
-                    || def.get("date_histogram").is_some()
+                    // calendar units are not fixed lengths, and a named zone is
+                    // a history of offsets; a fixed step over the numbers the
+                    // index holds is a plain histogram, which BoostCore runs
+                    || def.get("date_histogram").map(walked_here).unwrap_or(false)
                     // a range field holds no single value to bucket a document
                     // by, so BoostCore's histogram sees nothing there at all
                     || def
@@ -5025,6 +5025,9 @@ pub fn run(
             let _ = extract_partitions(&mut rewritten);
             lower_nested_filters(&mut rewritten, &ctx);
             strip_untranslatable_term_filters(&mut rewritten, &ctx);
+            // before the fields are renamed to the columns they live in, so
+            // the mapping still answers for the name the request used
+            fixed_date_histograms(&mut rewritten, &ctx);
             rewrite_agg_fields(&mut rewritten, &ctx);
             agg_request_json = Some(rewritten.clone());
             match serde_json::from_value::<Aggregations>(rewritten) {
@@ -6026,6 +6029,7 @@ pub fn run(
                             st.read().mapping.types.iter().map(|(k, t)| (k.clone(), t.clone())).collect::<Vec<_>>()
                         })
                         .collect();
+                    date_histogram_keys(&mut v, req, &types);
                     format_terms_keys(&mut v, req, &types);
                     // one index may hold a field as whole numbers and another
                     // as fractions; the answer is one field, so the keys are
@@ -7032,7 +7036,156 @@ fn peelable_here(def: &Value) -> bool {
         "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
         "geo_distance", "percentile_ranks", "sampler", "diversified_sampler",
     ];
-    OWN.iter().any(|k| def.get(k).is_some()) || def.get("date_histogram").is_some()
+    OWN.iter().any(|k| def.get(k).is_some())
+        || def.get("date_histogram").map(walked_here).unwrap_or(false)
+}
+
+/// A date histogram this engine has to walk itself, a bucket at a time: one
+/// stepping by a calendar unit, one reported in a zone that is not simply UTC,
+/// or one over a field whose numbers are not the milliseconds a key is in.
+fn walked_here(spec: &Value) -> bool {
+    if spec.get("calendar_interval").is_some() {
+        return true;
+    }
+    if fixed_step_ms(spec).is_none() {
+        return true;
+    }
+    // any zone but UTC has to be placed here: even one that is on UTC today
+    // may not have been at the instant a bucket falls in
+    match spec.get("time_zone").and_then(|v| v.as_str()).map(|z| z.trim()) {
+        None | Some("") => false,
+        Some(z) => !matches!(z, "Z" | "UTC" | "utc" | "+00:00" | "-00:00" | "+0000" | "-0000"),
+    }
+}
+
+/// The step a date histogram takes, in milliseconds, when it is a fixed length.
+fn fixed_step_ms(spec: &Value) -> Option<i64> {
+    spec.get("fixed_interval")
+        .or_else(|| spec.get("interval"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_offset)
+        .map(|d| d.whole_milliseconds() as i64)
+        .filter(|ms| *ms > 0)
+}
+
+/// Turn a fixed-step date histogram into the histogram it is.
+///
+/// A date is milliseconds in the index, so a step of so many milliseconds over
+/// that column is the same bucketing -- and BoostCore walks it in one pass
+/// instead of this engine counting each bucket with its own query.
+fn fixed_date_histograms(node: &mut Value, ctx: &Ctx) {
+    let Some(map) = node.as_object_mut() else { return };
+    for (_, def) in map.iter_mut() {
+        let Some(d) = def.as_object_mut() else { continue };
+        if let Some(sub) = d.get_mut("aggs") {
+            fixed_date_histograms(sub, ctx);
+        }
+        let Some(spec) = d.get("date_histogram").cloned() else { continue };
+        if walked_here(&spec) {
+            continue;
+        }
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+        // a date_nanos counts in nanoseconds, and a key is milliseconds
+        if ctx.mapping.type_of(&field) != Some("date") {
+            continue;
+        }
+        let Some(step) = fixed_step_ms(&spec) else { continue };
+        let offset = spec
+            .get("offset")
+            .and_then(|v| v.as_str())
+            .and_then(parse_offset)
+            .map(|o| o.whole_milliseconds() as i64)
+            .unwrap_or(0)
+            .rem_euclid(step);
+        let mut hist = json!({"field": field, "interval": step, "offset": offset});
+        if let Some(min) = spec.get("min_doc_count") {
+            hist["min_doc_count"] = min.clone();
+        }
+        for key in ["hard_bounds", "extended_bounds"] {
+            let Some(b) = spec.get(key) else { continue };
+            let edge = |name: &str| -> Option<i64> {
+                crate::store::date_number(b.get(name)?, None, false)
+            };
+            if let (Some(min), Some(max)) = (edge("min"), edge("max")) {
+                hist[key] = json!({"min": min, "max": max});
+            }
+        }
+        d.remove("date_histogram");
+        d.insert("histogram".into(), hist);
+    }
+}
+
+/// Write a date histogram's keys the way a date histogram writes them: the key
+/// is a whole number of milliseconds, and it is named beside it.
+fn date_histogram_keys(
+    result: &mut Value,
+    req: &Value,
+    types: &std::collections::HashMap<String, String>,
+) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+        if let (Some(spec), Some(sub)) = (
+            defo.get("date_histogram"),
+            defo.get("aggs").or_else(|| defo.get("aggregations")),
+        ) {
+            let _ = spec;
+            match node.get_mut("buckets") {
+                Some(Value::Array(buckets)) => {
+                    for b in buckets.iter_mut() {
+                        date_histogram_keys(b, sub, types);
+                    }
+                }
+                Some(Value::Object(keyed)) => {
+                    for (_, b) in keyed.iter_mut() {
+                        date_histogram_keys(b, sub, types);
+                    }
+                }
+                _ => date_histogram_keys(node, sub, types),
+            }
+        } else if let Some(sub) = defo.get("aggs").or_else(|| defo.get("aggregations")) {
+            match node.get_mut("buckets") {
+                Some(Value::Array(buckets)) => {
+                    for b in buckets.iter_mut() {
+                        date_histogram_keys(b, sub, types);
+                    }
+                }
+                Some(Value::Object(keyed)) => {
+                    for (_, b) in keyed.iter_mut() {
+                        date_histogram_keys(b, sub, types);
+                    }
+                }
+                _ => date_histogram_keys(node, sub, types),
+            }
+        }
+        let Some(spec) = defo.get("date_histogram") else { continue };
+        if walked_here(spec) {
+            continue;
+        }
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        if types.get(field).map(|t| t.as_str()) != Some("date") {
+            continue;
+        }
+        let format = spec
+            .get("format")
+            .and_then(|f| f.as_str())
+            .unwrap_or("strict_date_optional_time")
+            .to_string();
+        let name_one = |b: &mut Value| {
+            let Some(o) = b.as_object_mut() else { return };
+            let Some(ms) = o.get("key").and_then(|k| k.as_f64()) else { return };
+            o.insert("key".into(), json!(ms as i64));
+            if let Some(text) = crate::store::format_millis(ms as i64, &format) {
+                o.insert("key_as_string".into(), json!(text));
+            }
+        };
+        match node.get_mut("buckets") {
+            Some(Value::Array(buckets)) => buckets.iter_mut().for_each(name_one),
+            Some(Value::Object(keyed)) => keyed.iter_mut().for_each(|(_, b)| name_one(b)),
+            _ => {}
+        }
+    }
 }
 
 
