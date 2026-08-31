@@ -590,6 +590,23 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let col = ctx.column_name(field, false);
             Box::new(ExistsQuery::new(col, true))
         }
+        // a shape, a box or a radius all ask where a point is; the field has
+        // to be there and the answer is worked out once the candidates are
+        // known
+        "geo_shape" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => {
+            let field = body
+                .as_object()
+                .and_then(|o| {
+                    o.keys()
+                        .map(|k| k.to_string())
+                        .find(|k| !matches!(k.as_str(), "boost" | "_name" | "ignore_unmapped"
+                            | "validation_method" | "type" | "distance" | "distance_type"
+                            | "relation"))
+                })
+                .unwrap_or_default();
+            let col = ctx.column_name(&field, false);
+            Box::new(ExistsQuery::new(col, true))
+        }
         // `distance_feature` ranks by how near a value is to an origin; every
         // document that has the field takes part, and the ranking itself is
         // worked out once the candidates are known

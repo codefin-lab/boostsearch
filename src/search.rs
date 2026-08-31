@@ -689,6 +689,205 @@ fn replace_routing_exists(node: &mut Value, ids: &[String]) {
     }
 }
 
+/// The geo clause of a query: the field it reads and the shape it asks about.
+fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
+    match node {
+        Value::Object(o) => {
+            for kind in ["geo_shape", "geo_bounding_box", "geo_distance", "geo_polygon"] {
+                if let Some(spec) = o.get(kind).and_then(|v| v.as_object()) {
+                    let field = spec
+                        .keys()
+                        .map(|k| k.to_string())
+                        .find(|k| {
+                            !matches!(
+                                k.as_str(),
+                                "boost" | "_name" | "ignore_unmapped" | "validation_method"
+                                    | "type" | "distance" | "distance_type" | "relation"
+                            )
+                        })?;
+                    let mut shape = json!({"__kind": kind, "__spec": spec.get(&field)});
+                    // a distance query keeps the radius beside the field
+                    if let Some(d) = spec.get("distance") {
+                        shape["__distance"] = d.clone();
+                    }
+                    return Some((field, shape));
+                }
+            }
+            o.values().find_map(find_geo_clause)
+        }
+        Value::Array(a) => a.iter().find_map(find_geo_clause),
+        _ => None,
+    }
+}
+
+/// Is this point inside the shape the query named?
+fn point_within(shape: &Value, point: &Value) -> bool {
+    let Some((lat, lon)) = read_point(point) else { return false };
+    let kind = shape.get("__kind").and_then(|k| k.as_str()).unwrap_or("");
+    let spec = shape.get("__spec").cloned().unwrap_or(Value::Null);
+    match kind {
+        "geo_bounding_box" => {
+            let corner = |name: &str| spec.get(name).and_then(|v| read_point(v));
+            match (corner("top_left"), corner("bottom_right")) {
+                (Some((t, l)), Some((b, r))) => {
+                    lat <= t && lat >= b && lon >= l && lon <= r
+                }
+                _ => false,
+            }
+        }
+        "geo_distance" => {
+            let radius = shape
+                .get("__distance")
+                .and_then(|d| d.as_str())
+                .and_then(parse_distance)
+                .unwrap_or(0.0);
+            geo_distance_metres(&spec, point).map(|d| d <= radius).unwrap_or(false)
+        }
+        "geo_polygon" => {
+            let points: Vec<(f64, f64)> = spec
+                .get("points")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().filter_map(read_point).collect())
+                .unwrap_or_default();
+            inside_polygon(&points, lat, lon)
+        }
+        _ => {
+            // a shape: an envelope is two corners, a polygon a ring of points
+            let shape = spec.get("shape").or_else(|| spec.get("indexed_shape")).unwrap_or(&spec);
+            let coords = shape.get("coordinates");
+            match shape.get("type").and_then(|t| t.as_str()).map(|t| t.to_lowercase()) {
+                Some(ref t) if t == "envelope" => {
+                    let Some(a) = coords.and_then(|c| c.as_array()) else { return false };
+                    let corner = |i: usize| -> Option<(f64, f64)> {
+                        let p = a.get(i)?.as_array()?;
+                        Some((p.get(1)?.as_f64()?, p.first()?.as_f64()?))
+                    };
+                    match (corner(0), corner(1)) {
+                        (Some((t, l)), Some((b, r))) => {
+                            lat <= t && lat >= b && lon >= l && lon <= r
+                        }
+                        _ => false,
+                    }
+                }
+                Some(ref t) if t == "polygon" => {
+                    let ring: Vec<(f64, f64)> = coords
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|r| r.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|p| {
+                                    let p = p.as_array()?;
+                                    Some((p.get(1)?.as_f64()?, p.first()?.as_f64()?))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    inside_polygon(&ring, lat, lon)
+                }
+                Some(ref t) if t == "point" => {
+                    let p = coords.and_then(|c| c.as_array()).map(|a| {
+                        (
+                            a.get(1).and_then(|v| v.as_f64()).unwrap_or(f64::NAN),
+                            a.first().and_then(|v| v.as_f64()).unwrap_or(f64::NAN),
+                        )
+                    });
+                    p.map(|(la, lo)| (la - lat).abs() < 1e-9 && (lo - lon).abs() < 1e-9)
+                        .unwrap_or(false)
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// A point, however it was written: a pair, an object, or text.
+fn read_point(v: &Value) -> Option<(f64, f64)> {
+    match v {
+        // a pair is longitude first
+        Value::Array(a) if a.len() == 2 => Some((a[1].as_f64()?, a[0].as_f64()?)),
+        Value::Object(o) => {
+            if let (Some(lat), Some(lon)) = (
+                o.get("lat").and_then(|x| x.as_f64()),
+                o.get("lon").and_then(|x| x.as_f64()),
+            ) {
+                return Some((lat, lon));
+            }
+            // written the way GeoJSON writes it: longitude first
+            let c = o.get("coordinates")?.as_array()?;
+            Some((c.get(1)?.as_f64()?, c.first()?.as_f64()?))
+        }
+        Value::String(s) => {
+            let s = s.trim();
+            if let Some(rest) = s.strip_prefix("POINT") {
+                let inner = rest.trim().trim_start_matches('(').trim_end_matches(')');
+                let mut parts = inner.split_whitespace();
+                let lon: f64 = parts.next()?.parse().ok()?;
+                let lat: f64 = parts.next()?.parse().ok()?;
+                return Some((lat, lon));
+            }
+            if let Some((a, b)) = s.split_once(',') {
+                return Some((a.trim().parse().ok()?, b.trim().parse().ok()?));
+            }
+            decode_geohash(s)
+        }
+        _ => None,
+    }
+}
+
+/// A geohash is a box, narrowed a bit by each character; the point it stands
+/// for is the middle of the box it ends at.
+fn decode_geohash(hash: &str) -> Option<(f64, f64)> {
+    const DIGITS: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat_lo, mut lat_hi) = (-90.0f64, 90.0f64);
+    let (mut lon_lo, mut lon_hi) = (-180.0f64, 180.0f64);
+    let mut even = true;
+    for c in hash.bytes() {
+        let idx = DIGITS.iter().position(|d| *d == c.to_ascii_lowercase())? as u8;
+        for bit in (0..5).rev() {
+            let on = idx & (1 << bit) != 0;
+            if even {
+                let mid = (lon_lo + lon_hi) / 2.0;
+                if on {
+                    lon_lo = mid;
+                } else {
+                    lon_hi = mid;
+                }
+            } else {
+                let mid = (lat_lo + lat_hi) / 2.0;
+                if on {
+                    lat_lo = mid;
+                } else {
+                    lat_hi = mid;
+                }
+            }
+            even = !even;
+        }
+    }
+    Some(((lat_lo + lat_hi) / 2.0, (lon_lo + lon_hi) / 2.0))
+}
+
+/// The even-odd rule: a point is inside a ring when a ray from it crosses the
+/// ring an odd number of times.
+fn inside_polygon(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = ring.len() - 1;
+    for i in 0..ring.len() {
+        let (yi, xi) = ring[i];
+        let (yj, xj) = ring[j];
+        if (yi > lat) != (yj > lat)
+            && lon < (xj - xi) * (lat - yi) / (yj - yi + f64::EPSILON) + xi
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 /// The `intervals` clause of a query: the field it reads and the rule it asks.
 fn find_intervals(node: &Value) -> Option<(String, Value)> {
     match node {
@@ -4375,6 +4574,25 @@ pub fn run(
         }
     }
 
+    // A geo query asks where a point is. The query built for it only says the
+    // field is there, so each candidate's own position is read and placed.
+    if let Some((field, shape)) = body.get("query").and_then(find_geo_clause) {
+        let path = format!("/{}", field.replace('.', "/"));
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let Some(here) = src.pointer(&path) else { return false };
+            // a field may hold one point or several; a pair of numbers is one
+            let points: Vec<&Value> = match here {
+                Value::Array(a) if a.iter().all(|v| v.is_number()) => vec![here],
+                Value::Array(a) => a.iter().collect(),
+                other => vec![other],
+            };
+            points.iter().any(|p| point_within(&shape, p))
+        });
+        total = cands.len() as u64;
+    }
     // An `intervals` query asks where in a field the words are. The query
     // built for it matches wherever they merely occur, so the candidates are
     // read back and their text analysed again to see whether they really do.
