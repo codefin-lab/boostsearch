@@ -5,11 +5,11 @@
 use obsearch::store::Store;
 use serde_json::json;
 use std::time::Instant;
-use tantivy::aggregation::agg_req::Aggregations;
-use tantivy::aggregation::{
+use boostcore::aggregation::agg_req::Aggregations;
+use boostcore::aggregation::{
     AggContextParams, AggregationCollector, DistributedAggregationCollector,
 };
-use tantivy::query::AllQuery;
+use boostcore::query::AllQuery;
 
 fn main() -> anyhow::Result<()> {
     let data = std::env::var("OBSEARCH_DATA").unwrap_or("/tmp/blk".into());
@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         println!("\n  {name}");
         let parsed: Aggregations = serde_json::from_value(req.clone())?;
 
-        // 1. turning the request JSON into tantivy's aggregation model
+        // 1. turning the request JSON into BoostCore's aggregation model
         let mut b = || {
             let _: Aggregations = serde_json::from_value(req.clone()).unwrap();
         };

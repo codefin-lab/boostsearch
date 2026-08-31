@@ -1,6 +1,6 @@
 # ที่เหลือ และบทเรียนระหว่างทาง
 
-รันทั้ง suite (409 ไฟล์): **1,422 ผ่าน · 5 ตก · 77 skip = 99.6%**
+รันทั้ง suite (409 ไฟล์): **1,426 ผ่าน · 1 ตก · 77 skip = 99.9%**
 Phase 1 manifest: **398/398** · Phase 3 manifest: 1,098/1,100
 
 ## บทเรียนใหญ่ที่สุด: อ่านของจริงดีกว่าเดา
@@ -19,38 +19,79 @@ Phase 1 manifest: **398/398** · Phase 3 manifest: 1,098/1,100
 | date กับ date_nanos เทียบกันยังไง | `DateFieldMapper.Resolution`: `date` เก็บ **millisecond**, `date_nanos` เก็บ **nanosecond** · sort value คือเลขที่เก็บ จึงเทียบข้ามหน่วยกันตรง ๆ |
 | shard ล้มเพราะค่าติดลบ | `ExpandSearchPhase` / HDR: shard ที่ถือค่าที่ sketch ไม่รับ ล้มทั้ง shard และ search เดินต่อโดยไม่มีมัน |
 
-## 5 ตัวที่เหลือ — ทั้งหมดติดข้อจำกัดของชั้นล่าง
+## 3 ตัวที่ปิดไปด้วยการ fork — BoostCore
 
-### tantivy ไม่เก็บ field norm ให้ JSON field — 3 sections
+สามอันที่เคยเขียนไว้ว่า "แก้ได้ทางเดียวคือแก้ tantivy" ตอนนี้แก้ tantivy แล้ว
+(`vendor/boostcore`, ดู `docs/boostcore.md`)
 
-`index/100_partial_flat_object`, `index/105_partial_flat_object_nested`,
-`search/115_multiple_field_collapsing` ตกเพราะ **ลำดับ hit** ล้วน ๆ:
-เอกสารที่มีคำเดียวกันแต่ฟิลด์สั้นกว่า ต้องได้คะแนนมากกว่า (BM25 field length norm)
+### field norm ต่อ path ของ JSON field
 
-ที่นี่เอกสารทั้งก้อนอยู่ใน JSON field เดียว และ
-`SegmentWriter` ของ tantivy 0.26 ในสาขา `FieldType::JsonObject`
-**ไม่มีการเรียก `fieldnorms_writer.record` เลย** (ทุก type อื่นเรียกหมด) ⇒
-`set_fieldnorms(true)` ไม่มีผล และ BM25 คิดเหมือนทุกเอกสารยาวเท่ากัน
+tantivy ไม่ได้บันทึก field norm ให้ JSON field เลย · เติมให้แล้วยังไม่พอ
+เพราะเอกสารทั้งก้อนอยู่ใน JSON field เดียว ⇒ ความยาวของ path หนึ่ง
+กลายเป็นความยาวของทั้งเอกสาร · Lucene เก็บ norm **ต่อฟิลด์** และ path ใน
+JSON ก็คือฟิลด์ในสคีมาแบน ⇒ BoostCore เก็บ norm ต่อ path ด้วย
+(รวมทั้งตอน merge และตอนคำนวณ block max ที่ index time
+มิฉะนั้น block max ไม่ใช่ขอบบนอีกต่อไป และ pruning จะตัด hit ที่ควรได้)
 
-แก้ได้ทางเดียวคือแก้ tantivy หรือเลิกใช้ JSON field
+### bucket ที่เป็นเลขเดียวกันต้องเป็น bucket เดียว
 
-### date เกินช่วงที่ i64 nanosecond เก็บได้ — 1 section
+`IntermediateKey` แฮชและเทียบด้วย variant ⇒ `0` ที่มาจาก segment ที่เก็บเป็น
+`i64` กับ segment ที่เก็บเป็น `u64` (segment ตัดสินจากค่าใหญ่ตัวแรกที่เห็น)
+กลายเป็นคนละ bucket · เห็นทันทีที่ index เอกสารที่มีค่าเกิน `i64::MAX` เป็นตัวแรก
 
-`search.aggregation/40_range :: Date Range Missing` เขียน epoch **seconds**
-ระดับแสนล้าน = ปี 11970 · OpenSearch เก็บ `date` เป็น millisecond จึงรับได้สบาย
-ที่นี่ค่าไปอยู่ใน DateTime ของ tantivy ซึ่งเป็น i64 **nanosecond** หมดที่ปี 2262
+### terms query ให้คะแนนคงที่
 
-แก้ให้ตรงต้องเก็บ date เป็น millisecond ทั้งระบบ ซึ่งกระทบ range query,
-histogram, sort, format ทั้งหมด
+`MappedFieldType.termsQuery` เขียนไว้ตรง ๆ ว่า "build a constant-scoring query"
+⇒ แมตช์สองคำไม่ได้บอกอะไรมากกว่าแมตช์คำเดียว ลำดับจึงตกไปที่ doc id
 
-### refresh ถึงทีละ shard — 1 section
+## 1 ตัวที่เหลือ
+
+### refresh ถึงทีละ shard
 
 `delete/50_refresh` — index หนึ่งที่นี่คือ tantivy index เดียว มี writer เดียว
 `refresh` จึงทำให้ทุกอย่างเห็นพร้อมกัน ไม่มีทางให้ delete บน shard หนึ่ง
-ยังมองไม่เห็นขณะที่อีก shard เห็นแล้ว · ต้องมี store แยกต่อ shard จริง ๆ
+ยังมองไม่เห็นขณะที่อีก shard เห็นแล้ว · จะแก้ต้องกันเอกสารที่ยังไม่ refresh
+ไว้นอก writer ทีละ shard ซึ่งทำให้ realtime GET (ที่อ่านจาก writer) พังทั้งชุด
 
-(ส่วนอีกเคสที่เคยอยู่กลุ่มนี้ — HDR negative values — ปิดได้แล้ว เพราะ
-routing hash ตรงแล้ว จึงรู้ว่าเอกสารตัวปัญหาอยู่ shard ไหนและตัดทั้ง shard ทิ้งได้)
+## date เก็บเป็น millisecond ทั้งระบบแล้ว
+
+เคยเขียนไว้ว่า "แก้ให้ตรงต้องเก็บ date เป็น millisecond ทั้งระบบ ซึ่งกระทบ
+range query, histogram, sort, format ทั้งหมด" — ทำแล้ว
+
+เดิม date ถูกเขียนเป็น ISO text ในดัชนี แล้ว BoostCore อ่านกลับเป็น DateTime
+(i64 **nanosecond** หมดที่ปี 2262) · และ text เทียบด้วยการสะกด ปีเกิน 9999
+ก็เรียงผิด · OpenSearch เก็บเป็น long: `DateFieldMapper.Resolution`
+บอกว่า `date` = millisecond, `date_nanos` = nanosecond และ sort คืนเลขนั้นตรง ๆ
+
+ที่ขยับตามไป: bound ของ query, ปลายทั้งสองของ `date_range`, ช่วงที่
+date/auto date histogram เดิน, composite date source, key ของ
+terms/multi_terms กับ key_as_string, สำเนาที่ multi-field ของ date ถือ,
+และ sort value ที่ไม่ต้อง rescale อีกแล้ว · `_source` ไม่แตะ — ยังเป็นสิ่งที่
+client ส่งมา
+
+ผลพลอยได้:
+
+- `search.aggregation/40_range :: Date Range Missing` ผ่าน — epoch seconds
+  หลักแสนล้าน = ปี 11970 ไม่ overflow อีก
+- bucket ของ date_range เรียงตามจุดเริ่ม ตาม `AbstractRangeBuilder.sortRanges`
+- เอกสารที่ไม่มีค่าไปอยู่ bucket ที่ `missing` ชี้
+- range query อ่าน `format` ของตัวเองแทนของ mapping · `gte: 2019` บน date
+  คือ **ปี** ตามที่ default format อ่าน
+- ใต้ flat_object ไม่ถูกตีความเป็น date อีก — ค่าคงการสะกดที่ส่งมา
+
+เรื่อง perf: date_histogram แบบ fixed step ถูกเขียนใหม่เป็น `histogram`
+ก่อนส่งให้ BoostCore เดินรอบเดียว (ถ้าปล่อยให้ engine เดินเองทีละ bucket
+จะเหลือ 840 req/s จาก 11,500) · calendar unit, zone ที่ไม่ใช่ UTC และ
+date_nanos ยังเดินเองอยู่
+
+| aggregation | ก่อน (date เป็น text) | หลัง |
+| --- | --- | --- |
+| date_histogram 1h | 15,000/s | 10,700/s |
+| histogram บน long | 14,200/s | 15,300/s |
+| terms บน keyword | 15,100/s | 23,700/s |
+
+date histogram เสียไปบ้างเพราะอ่าน column ตัวเลขแทน column วันที่ ·
+ที่เหลือเร็วขึ้นเพราะ 200k วันที่ไม่ได้เป็น 200k สตริงใน term dictionary อีกแล้ว
 
 ## บทเรียนอื่นที่ยังใช้ได้
 
@@ -85,3 +126,10 @@ analyse ใหม่แล้วประเมินกฎบน token (OpenSea
 ## node ที่ชุดทดสอบคาดหวัง
 
     OBSEARCH_NODE_ATTRS=testattr=test ./target/release/obsearch
+
+## เทสช้าเพราะ client ไม่ใช่เพราะ server
+
+`yaml_runner.py` เปิด `requests.Session` ใหม่ทุก section (1,175 ครั้งต่อรอบ)
+และไม่เคยปิด · socket ค้างจนเปิดใหม่ไม่ได้ แล้วอ่านออกมาเหมือน server ตาย
+(`ConnectionError` เป็นสิบ ๆ section ติดกัน) · ใช้ pool เดียวทั้งรอบแล้ว
+phase 3 จาก **สิบนาที เหลือแปดวินาที**

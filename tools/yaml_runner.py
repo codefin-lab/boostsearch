@@ -83,6 +83,12 @@ def flatten_path(obj, path):
     return cur
 
 
+# One connection pool for the whole run. A session per section left thousands
+# of sockets behind, and the client eventually could not open another one --
+# which reads exactly like the server having died.
+SESSION = requests.Session()
+
+
 class Runner:
     def __init__(self, base_url, specs, verbose=False):
         self.base = base_url.rstrip("/")
@@ -91,7 +97,7 @@ class Runner:
         self.last = None
         self.last_req = None
         self.verbose = verbose
-        self.session = requests.Session()
+        self.session = SESSION
 
     # ---- stash -----------------------------------------------------------
     def unstash_path(self, path):
@@ -389,7 +395,7 @@ def reset(base):
     # suite has to start from nothing, not just from no indices.
     # a point in time outlives the indices it was opened over
     try:
-        requests.delete(base + "/_search/point_in_time/_all", timeout=10)
+        SESSION.delete(base + "/_search/point_in_time/_all", timeout=10)
     except Exception:
         pass
     # repositories, snapshots and pipelines outlive indices in the same way
@@ -404,21 +410,21 @@ def reset(base):
         "/_data_stream/*",
     ):
         try:
-            requests.delete(base + path, timeout=10)
+            SESSION.delete(base + path, timeout=10)
         except Exception:
             pass
     # Cluster settings outlive an index too, and one file's transient setting
     # changes what the next file sees. There is no wildcard delete for them,
     # so whatever is set is read back and cleared by name.
     try:
-        held = requests.get(base + "/_cluster/settings?flat_settings=true", timeout=10).json()
+        held = SESSION.get(base + "/_cluster/settings?flat_settings=true", timeout=10).json()
         clear = {
             scope: {k: None for k in held.get(scope, {})}
             for scope in ("persistent", "transient")
             if held.get(scope)
         }
         if clear:
-            requests.put(base + "/_cluster/settings", json=clear, timeout=10)
+            SESSION.put(base + "/_cluster/settings", json=clear, timeout=10)
     except Exception:
         pass
 
@@ -439,7 +445,7 @@ def main():
         files = [f for f in files if args.filter in f]
 
     try:
-        requests.get(args.url, timeout=5)
+        SESSION.get(args.url, timeout=5)
     except Exception as e:
         print(f"cannot reach server at {args.url}: {e}")
         sys.exit(2)

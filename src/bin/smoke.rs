@@ -1,11 +1,11 @@
-use tantivy::schema::*;
-use tantivy::{Index, TantivyDocument, collector::TopDocs};
-use tantivy::query::{TermQuery, RangeQuery};
-use tantivy::aggregation::agg_req::Aggregations;
-use tantivy::aggregation::AggregationCollector;
+use boostcore::schema::*;
+use boostcore::{Index, TantivyDocument, collector::TopDocs};
+use boostcore::query::{TermQuery, RangeQuery};
+use boostcore::aggregation::agg_req::Aggregations;
+use boostcore::aggregation::AggregationCollector;
 use std::ops::Bound;
 
-fn main() -> tantivy::Result<()> {
+fn main() -> boostcore::Result<()> {
     let mut sb = Schema::builder();
     let dyn_opts = JsonObjectOptions::default()
         .set_stored()
@@ -32,8 +32,8 @@ fn main() -> tantivy::Result<()> {
 
     for (i, (name, cnt)) in [("hello world", 1i64), ("goodbye world", 5), ("hello there", 10)].iter().enumerate() {
         let v = serde_json::json!({"title": name, "count": cnt, "tag": "a-b"});
-        let obj: std::collections::BTreeMap<String, tantivy::schema::OwnedValue> = v.as_object().unwrap()
-            .iter().map(|(k, x)| (k.clone(), tantivy::schema::OwnedValue::from(x.clone()))).collect();
+        let obj: std::collections::BTreeMap<String, boostcore::schema::OwnedValue> = v.as_object().unwrap()
+            .iter().map(|(k, x)| (k.clone(), boostcore::schema::OwnedValue::from(x.clone()))).collect();
         let mut d = TantivyDocument::default();
         d.add_object(f_dyn, obj.clone());
         d.add_object(f_raw, obj);
@@ -69,7 +69,7 @@ fn main() -> tantivy::Result<()> {
         "tags": {"terms": {"field": "_raw.tag"}},
         "avg_count": {"avg": {"field": "_dyn.count"}}
     })).unwrap();
-    let res = s.search(&tantivy::query::AllQuery, &AggregationCollector::from_aggs(agg, Default::default()))?;
+    let res = s.search(&boostcore::query::AllQuery, &AggregationCollector::from_aggs(agg, Default::default()))?;
     println!("aggs -> {}", serde_json::to_string(&res).unwrap());
     Ok(())
 }

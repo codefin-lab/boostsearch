@@ -1,6 +1,6 @@
 //! Per-block min/max for numeric fast fields, and a range query that uses them.
 //!
-//! tantivy's columnar keeps min/max for a whole column, so a range that overlaps
+//! BoostCore's columnar keeps min/max for a whole column, so a range that overlaps
 //! the column at all still walks every value. Recording min/max per block of
 //! 512 documents lets whole blocks be skipped, and lets blocks that sit entirely
 //! inside the range be emitted without a single comparison. On a clustered
@@ -8,15 +8,15 @@
 //! scanning the index and touching only the part that can match.
 //!
 //! Stats are derived, so they are built on first use and cached per segment
-//! rather than persisted: a tantivy segment id never refers to different data,
+//! rather than persisted: a BoostCore segment id never refers to different data,
 //! which makes the cache key exact and merges self-invalidating.
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tantivy::columnar::{Column, ColumnType};
-use tantivy::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
-use tantivy::{DocId, SegmentReader, Score, TantivyError};
+use boostcore::columnar::{Column, ColumnType};
+use boostcore::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
+use boostcore::{DocId, SegmentReader, Score, TantivyError};
 
 /// Documents per statistics block. Matches the columnar's own block size, so a
 /// surviving block maps onto work the column is already organised to do.
@@ -124,11 +124,11 @@ impl BlockStats {
     }
 }
 
-/// Segment-scoped cache. A tantivy segment id is stable and unique, so an entry
+/// Segment-scoped cache. A BoostCore segment id is stable and unique, so an entry
 /// can never go stale -- a merge produces new segments with new ids.
 #[derive(Default)]
 pub struct StatsCache {
-    inner: RwLock<HashMap<(tantivy::index::SegmentId, String), Arc<BlockStats>>>,
+    inner: RwLock<HashMap<(boostcore::index::SegmentId, String), Arc<BlockStats>>>,
 }
 
 impl StatsCache {
@@ -150,7 +150,7 @@ impl StatsCache {
 
 /// A range over a single-valued numeric fast field, driven by block statistics.
 /// Below this share of skippable blocks the block scan is not worth it: it has
-/// to materialise its whole result, while tantivy's own range query streams and
+/// to materialise its whole result, while BoostCore's own range query streams and
 /// lets an enclosing intersection skip ahead.
 const MIN_SKIP_RATIO: f32 = 0.25;
 
@@ -174,7 +174,7 @@ impl std::fmt::Debug for BlockRangeQuery {
 }
 
 impl Query for BlockRangeQuery {
-    fn weight(&self, scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
         // Ask the statistics whether this particular range is worth the block
         // scan, and hand the work to the general query when it is not.
         if let Some(searcher) = scoring.searcher() {
@@ -216,17 +216,17 @@ impl BlockRangeQuery {
 }
 
 impl Weight for BlockRangeQuery {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> boostcore::Result<Box<dyn Scorer>> {
         // a bit set keeps the memory bounded by segment size rather than by how
         // many documents happen to match
-        let mut bits = tantivy_common::BitSet::with_max_value(reader.max_doc());
+        let mut bits = boostcore_common::BitSet::with_max_value(reader.max_doc());
         for doc in self.docids(reader) {
             bits.insert(doc);
         }
         Ok(Box::new(ConstScorer::new(BitSetDocSet::from(bits), boost)))
     }
 
-    fn explain(&self, reader: &SegmentReader, doc: DocId) -> tantivy::Result<Explanation> {
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> boostcore::Result<Explanation> {
         if self.docids(reader).binary_search(&doc).is_ok() {
             Ok(Explanation::new("BlockRangeQuery", 1.0))
         } else {
@@ -234,7 +234,7 @@ impl Weight for BlockRangeQuery {
         }
     }
 
-    fn count(&self, reader: &SegmentReader) -> tantivy::Result<u32> {
+    fn count(&self, reader: &SegmentReader) -> boostcore::Result<u32> {
         // still has to respect deletes, so fall through to the default when any
         if reader.alive_bitset().is_some() {
             let docs = self.docids(reader);

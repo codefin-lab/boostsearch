@@ -1,4 +1,4 @@
-//! Index registry: one tantivy index per OpenSearch index, plus its mapping.
+//! Index registry: one BoostCore index per OpenSearch index, plus its mapping.
 
 use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
@@ -6,10 +6,10 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
-use tantivy::schema::*;
+use boostcore::schema::*;
 use std::path::{Path as FsPath, PathBuf};
-use tantivy::directory::MmapDirectory;
-use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
+use boostcore::directory::MmapDirectory;
+use boostcore::{Index, IndexReader, IndexWriter, TantivyDocument};
 
 /// Field roles in the fixed schema shared by every index.
 #[derive(Clone, Copy)]
@@ -35,7 +35,7 @@ pub const KIND_U64: u8 = 2;
 pub const KIND_F64: u8 = 4;
 pub const KIND_STR: u8 = 8;
 pub const KIND_BOOL: u8 = 16;
-/// A string that parses as a date: tantivy indexes it as a date, not as text,
+/// A string that parses as a date: BoostCore indexes it as a date, not as text,
 /// so a range over it must address the date column and not the string one.
 pub const KIND_DATE: u8 = 32;
 
@@ -124,7 +124,7 @@ pub fn build_schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         ),
     );
-    // `_raw` keeps its own fast fields: tantivy's RangeQuery over a JSON field
+    // `_raw` keeps its own fast fields: BoostCore's RangeQuery over a JSON field
     // only works on fast fields, so dropping them here breaks every range query
     // that resolves to the untokenised view. Measured: removing them buys ~5% of
     // the write path, which is not worth the semantics.
@@ -254,6 +254,11 @@ impl Mapping {
         known: &HashMap<String, String>,
         out: &mut Vec<String>,
     ) {
+        // nothing under a flat_object is a field of its own: its values keep
+        // the spelling they were sent with, whatever they look like
+        if known.get(path.as_str()).map(|t| t == "flat_object").unwrap_or(false) {
+            return;
+        }
         match node {
             Value::Object(o) => {
                 let base = path.len();
@@ -832,11 +837,11 @@ impl IdxState {
 
     fn lookup_id(&self, id: &str) -> bool {
         let searcher = self.realtime.searcher();
-        let q = tantivy::query::TermQuery::new(
+        let q = boostcore::query::TermQuery::new(
             Term::from_field_text(self.fields.id, id),
-            tantivy::schema::IndexRecordOption::Basic,
+            boostcore::schema::IndexRecordOption::Basic,
         );
-        searcher.search(&q, &tantivy::collector::Count).map(|c| c > 0).unwrap_or(false)
+        searcher.search(&q, &boostcore::collector::Count).map(|c| c > 0).unwrap_or(false)
     }
 
     /// Scan the committed index for live document ids. Runs off the write lock
@@ -1038,7 +1043,7 @@ impl IdxState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i128)
             .unwrap_or(0);
-        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
             .map(|d| {
                 format!(
                     "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -1063,7 +1068,7 @@ impl IdxState {
     /// The creation date as text, which is the other spelling `_cat` offers.
     pub fn created_string(&self) -> String {
         let ms = self.created_millis() as i128;
-        tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
             .map(|d| format!(
                 "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
                 d.year(), d.month() as u8, d.day(), d.hour(), d.minute(), d.second(),
@@ -1126,7 +1131,7 @@ pub struct Store {
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
-    executor: tantivy::Executor,
+    executor: boostcore::Executor,
     /// Indices holding a live writer, oldest first, capped so a load touching
     /// hundreds of indices cannot hold hundreds of sets of indexing threads.
     ///
@@ -1261,16 +1266,16 @@ pub fn release_freed_memory() {
     }
 }
 
-fn shared_executor() -> tantivy::Executor {
+fn shared_executor() -> boostcore::Executor {
     let threads = std::env::var("OBSEARCH_SEARCH_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     if threads <= 1 {
-        return tantivy::Executor::single_thread();
+        return boostcore::Executor::single_thread();
     }
-    tantivy::Executor::multi_thread(threads, "obsearch-search-")
-        .unwrap_or_else(|_| tantivy::Executor::single_thread())
+    boostcore::Executor::multi_thread(threads, "obsearch-search-")
+        .unwrap_or_else(|_| boostcore::Executor::single_thread())
 }
 
 /// Put an alias definition into the form it is read back in.
@@ -1469,7 +1474,13 @@ impl Store {
     }
 
     fn index_path(&self, name: &str) -> Option<PathBuf> {
-        self.data_dir.as_ref().map(|d| d.join(dir_name(name)))
+        // an empty name would join to the data directory itself, and deleting
+        // an index must never take the whole data directory with it
+        let dir = dir_name(name);
+        if dir.is_empty() {
+            return None;
+        }
+        self.data_dir.as_ref().map(|d| d.join(dir))
     }
 
     pub fn exists(&self, name: &str) -> bool {
@@ -1853,9 +1864,9 @@ impl Store {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
-        let reader = index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
+        let reader = index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
         let realtime =
-            index.reader_builder().reload_policy(tantivy::ReloadPolicy::Manual).try_into()?;
+            index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
         let mapping = body
             .get("mappings")
             .map(Mapping::from_body)
@@ -1927,11 +1938,18 @@ impl Store {
 
     pub fn delete(&self, name: &str) -> bool {
         let targets = self.resolve(name);
-        let mut guard = self.inner.write();
-        let mut any = false;
-        for t in targets {
-            any |= guard.remove(&t).is_some();
-            if let Some(path) = self.index_path(&t) {
+        // Dropping an index waits for its writer, and its writer waits for
+        // whatever it is merging. Held under the map lock that every other
+        // request needs, that wait is the whole server stopping -- long enough
+        // for the listen queue to fill and connections to be refused.
+        let dropped: Vec<_> = {
+            let mut guard = self.inner.write();
+            targets.iter().filter_map(|t| guard.remove(t)).collect()
+        };
+        let any = !dropped.is_empty();
+        drop(dropped);
+        for t in &targets {
+            if let Some(path) = self.index_path(t) {
                 let _ = std::fs::remove_dir_all(path);
             }
         }
@@ -1992,12 +2010,16 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
     regex::Regex::new(&s).unwrap_or_else(|_| regex::Regex::new("^$").unwrap())
 }
 
-/// Convert a JSON document into a tantivy document with both views plus `_source`.
-/// Build the tantivy document. Takes the source by value so the JSON tree is
+/// Convert a JSON document into a BoostCore document with both views plus `_source`.
+/// Build the BoostCore document. Takes the source by value so the JSON tree is
 /// moved into the first view instead of deep-copied for both.
 /// Apply a normalizer the way OpenSearch does at index time.
 pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
-    let s = value.as_str()?;
+    let Some(s) = value.as_str() else {
+        // a value that is not text -- a date is a number in the index -- has
+        // nothing to normalise, but the multi-field still needs its copy
+        return normalizer.is_empty().then(|| value.clone());
+    };
     match normalizer {
         "" => Some(Value::String(s.to_string())),
         "lowercase" => Some(Value::String(s.to_lowercase())),
@@ -2013,7 +2035,9 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 /// whatever it is given.
 fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool {
     match ty {
-        "date" | "date_nanos" => canonical_date_with(v, format).is_some() || v.is_number(),
+        "date" | "date_nanos" => {
+            date_number(v, format, ty == "date_nanos").is_some() || v.is_number()
+        }
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
@@ -2114,6 +2138,11 @@ pub fn remove_path(node: &mut Value, path: &str) {
 /// A client may send `"800.0"` for a field mapped as a float; OpenSearch stores
 /// a number there, and queries phrased with a number have to find it.
 fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
+    // whatever is under a flat_object keeps the spelling and the type it was
+    // sent with; nothing below the object is a field of its own
+    if mapping.type_of(path) == Some("flat_object") {
+        return;
+    }
     match node {
         Value::Object(obj) => {
             let base = path.len();
@@ -2136,8 +2165,10 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             if matches!(ty, Some("date") | Some("date_nanos")) {
                 let fmt = mapping.field_option(path, "format");
                 let fmt = fmt.as_ref().and_then(|v| v.as_str());
-                if let Some(c) = canonical_date_prec(leaf, fmt, ty == Some("date_nanos")) {
-                    *leaf = Value::String(c);
+                // a date is a number in the index, the way OpenSearch stores
+                // one; `_source` still says whatever the client sent
+                if let Some(n) = date_number(leaf, fmt, ty == Some("date_nanos")) {
+                    *leaf = Value::Number(n.into());
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
@@ -2161,8 +2192,8 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
 /// A bare `2024-08-12` is a date to OpenSearch but not to RFC 3339, and a
 /// field indexed as text rather than as a date has no column for a range or an
 /// aggregation to read.
-pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
-    use tantivy::time::{Date, Month, OffsetDateTime, Time};
+pub fn parse_date_lenient(s: &str) -> Option<boostcore::time::OffsetDateTime> {
+    use boostcore::time::{Date, Month, OffsetDateTime, Time};
     if let Some(dt) = crate::query::parse_datetime(s) {
         return Some(dt.into_utc());
     }
@@ -2228,8 +2259,10 @@ pub fn parse_date_lenient(s: &str) -> Option<tantivy::time::OffsetDateTime> {
 /// The window a date column can hold. Nanoseconds in an i64 reach about 292
 /// years either side of the epoch, so an open-ended range is filled to the
 /// edges of that rather than to a year the column could not represent.
-const DATE_FLOOR: &str = "1700-01-01T00:00:00.000Z";
-const DATE_CEIL: &str = "2250-01-01T00:00:00.000Z";
+/// The open side of a date range, as the number the index holds: a date is
+/// milliseconds here, so these are the ends of what a range can reach.
+const DATE_FLOOR: i64 = -8_520_336_000_000;
+const DATE_CEIL: i64 = 8_835_004_800_000;
 
 /// A range field written with only one end is open at the other, which a
 /// comparison against a missing sub-field cannot express. The open side is
@@ -2250,8 +2283,8 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         if dated {
             for key in ["gte", "gt", "lte", "lt"] {
                 if let Some(v) = node.get(key) {
-                    if let Some(c) = canonical_date(v) {
-                        node.insert(key.into(), Value::String(c));
+                    if let Some(n) = date_number(v, None, false) {
+                        node.insert(key.into(), Value::Number(n.into()));
                     }
                 }
             }
@@ -2260,13 +2293,10 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         // moved one step inward rather than left in a form nothing reads
         let step = |v: &Value, forward: bool| -> Option<Value> {
             if dated {
-                let dt = parse_date_lenient(v.as_str()?)?;
-                let shifted = if forward {
-                    dt + tantivy::time::Duration::milliseconds(1)
-                } else {
-                    dt - tantivy::time::Duration::milliseconds(1)
-                };
-                return Some(Value::String(format_utc_millis(shifted)));
+                // a date is milliseconds here, so the next value along is the
+                // next millisecond
+                let n = v.as_i64().or_else(|| date_number(v, None, false))?;
+                return Some(Value::from(if forward { n + 1 } else { n - 1 }));
             }
             // a whole-number range steps by one; a fractional one has no next
             // value to move to, so the bound is kept as written
@@ -2287,7 +2317,7 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
             node.insert(
                 "gte".into(),
                 if dated {
-                    Value::String(DATE_FLOOR.into())
+                    Value::from(DATE_FLOOR)
                 } else {
                     serde_json::json!(f64::MIN)
                 },
@@ -2297,7 +2327,7 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
             node.insert(
                 "lte".into(),
                 if dated {
-                    Value::String(DATE_CEIL.into())
+                    Value::from(DATE_CEIL)
                 } else {
                     serde_json::json!(f64::MAX)
                 },
@@ -2450,7 +2480,7 @@ pub fn format_millis(ms: i64, format: &str) -> Option<String> {
 /// The same, written in a zone rather than in UTC.
 pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
     if zone_ms != 0 {
-        let local = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+        let local = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
             (ms + zone_ms) as i128 * 1_000_000,
         )
         .ok()?;
@@ -2472,7 +2502,7 @@ pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
 }
 
 fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
-    let dt = tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+    let dt = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
         .ok()?;
     Some(match format {
         "epoch_millis" => ms.to_string(),
@@ -2492,7 +2522,7 @@ fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
     })
 }
 
-fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> String {
+fn format_with_pattern(d: boostcore::time::OffsetDateTime, pattern: &str) -> String {
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
@@ -2518,8 +2548,8 @@ fn format_with_pattern(d: tantivy::time::OffsetDateTime, pattern: &str) -> Strin
     out
 }
 
-fn parse_date_math(s: &str) -> Option<(tantivy::time::OffsetDateTime, Option<char>)> {
-    use tantivy::time::{Duration, OffsetDateTime};
+fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTime, Option<char>)> {
+    use boostcore::time::{Duration, OffsetDateTime};
     let (anchor, ops) = match s.split_once("||") {
         Some((a, o)) => (parse_date_lenient(a)?, o),
         None => (OffsetDateTime::now_utc(), s.strip_prefix("now")?),
@@ -2571,15 +2601,15 @@ pub fn canonical_date_bound(v: &Value, round_up: bool) -> Option<String> {
     let (dt, unit) = parse_date_math(s)?;
     let Some(unit) = unit else { return canonical_date(v) };
     // the last instant the unit covers
-    let end = advance_unit(dt, unit)? - tantivy::time::Duration::milliseconds(1);
+    let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
     canonical_date(&Value::String(format_utc_millis(end)))
 }
 
 fn advance_unit(
-    dt: tantivy::time::OffsetDateTime,
+    dt: boostcore::time::OffsetDateTime,
     unit: char,
-) -> Option<tantivy::time::OffsetDateTime> {
-    use tantivy::time::Duration;
+) -> Option<boostcore::time::OffsetDateTime> {
+    use boostcore::time::Duration;
     Some(match unit {
         'y' => shift_months(dt, 12)?,
         'M' => shift_months(dt, 1)?,
@@ -2592,7 +2622,7 @@ fn advance_unit(
     })
 }
 
-fn format_utc_millis(dt: tantivy::time::OffsetDateTime) -> String {
+fn format_utc_millis(dt: boostcore::time::OffsetDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         dt.year(),
@@ -2606,10 +2636,10 @@ fn format_utc_millis(dt: tantivy::time::OffsetDateTime) -> String {
 }
 
 fn round_down(
-    dt: tantivy::time::OffsetDateTime,
+    dt: boostcore::time::OffsetDateTime,
     unit: &str,
-) -> Option<tantivy::time::OffsetDateTime> {
-    use tantivy::time::{Date, Duration, Month, Time};
+) -> Option<boostcore::time::OffsetDateTime> {
+    use boostcore::time::{Date, Duration, Month, Time};
     let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
     Some(match unit {
         "y" => midnight(Date::from_calendar_date(dt.year(), Month::January, 1).ok()?),
@@ -2627,10 +2657,10 @@ fn round_down(
 }
 
 fn shift_months(
-    dt: tantivy::time::OffsetDateTime,
+    dt: boostcore::time::OffsetDateTime,
     n: i64,
-) -> Option<tantivy::time::OffsetDateTime> {
-    use tantivy::time::{Date, Month};
+) -> Option<boostcore::time::OffsetDateTime> {
+    use boostcore::time::{Date, Month};
     let total = dt.year() as i64 * 12 + (dt.month() as i64 - 1) + n;
     let (y, m) = (total.div_euclid(12) as i32, total.rem_euclid(12) as u8 + 1);
     let month = Month::try_from(m).ok()?;
@@ -2638,8 +2668,8 @@ fn shift_months(
     Some(Date::from_calendar_date(y, month, day).ok()?.with_time(dt.time()).assume_utc())
 }
 
-fn days_in_month(year: i32, month: tantivy::time::Month) -> u8 {
-    use tantivy::time::Month::*;
+fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
+    use boostcore::time::Month::*;
     match month {
         January | March | May | July | August | October | December => 31,
         April | June | September | November => 30,
@@ -2672,6 +2702,70 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
     canonical_date_prec(v, format, false)
 }
 
+/// A date bound as the number the index holds, rounding date math up where the
+/// bound is the end of the range it names.
+pub fn date_number_bound(
+    v: &Value,
+    round_up: bool,
+    format: Option<&str>,
+    nanos: bool,
+) -> Option<i64> {
+    // `gte: 2019` on a date field is the year, not two seconds past the epoch:
+    // the default format reads a bare four-digit number as a year, and nothing
+    // sane asks for a bound two seconds into 1970
+    if format.is_none() {
+        if let Some(year) = v.as_i64().filter(|n| (1000..=9999).contains(n)) {
+            return date_number_bound(&Value::String(year.to_string()), round_up, None, nanos);
+        }
+    }
+    let text = v.as_str().unwrap_or_default();
+    if round_up && (text.contains("||") || text.starts_with("now")) {
+        if let Some((dt, Some(unit))) = parse_date_math(text) {
+            let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
+            let per: i128 = if nanos { 1 } else { 1_000_000 };
+            return i64::try_from(end.unix_timestamp_nanos() / per).ok();
+        }
+    }
+    date_number(v, format, nanos)
+}
+
+/// A date as the number the index holds: milliseconds, or nanoseconds for a
+/// `date_nanos`.
+///
+/// This is `DateFieldMapper.Resolution` -- what OpenSearch stores, and what a
+/// sort on a date reports. It is also the only representation with the range
+/// dates need: text compares by spelling, so a year past 9999 stops ordering
+/// correctly, and a count of nanoseconds in an i64 runs out in 2262.
+pub fn date_number(v: &Value, format: Option<&str>, nanos: bool) -> Option<i64> {
+    // a number is a count already, in whatever unit the format names
+    let count = |n: f64| -> Option<i64> {
+        let millis = match format {
+            Some(f) if f.contains("epoch_second") => n * 1_000.0,
+            _ => n,
+        };
+        let out = if nanos { millis * 1_000_000.0 } else { millis };
+        (out.is_finite() && out.abs() < 9.2e18).then_some(out as i64)
+    };
+    let unit: i128 = if nanos { 1 } else { 1_000_000 };
+    let read = |s: &str| -> Option<i64> {
+        let dt = parse_date_lenient(s)?;
+        i64::try_from(dt.unix_timestamp_nanos() / unit).ok()
+    };
+    match v {
+        Value::Number(n) => count(n.as_f64()?),
+        Value::String(s) => match s.parse::<f64>() {
+            // a number written as text still means what the format says
+            Ok(n) if format.is_some() => count(n),
+            // `2019` is a year before it is a count of milliseconds, so the
+            // date reading is tried first and the epoch only where nothing
+            // else could be read from the digits
+            Ok(n) => read(s).or_else(|| count(n)),
+            _ => read(s),
+        },
+        _ => None,
+    }
+}
+
 /// As `canonical_date_with`, but able to keep the whole fraction.
 ///
 /// A `date` reports milliseconds and a `date_nanos` reports nanoseconds; the
@@ -2683,20 +2777,20 @@ pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Opti
         _ => 1_000_000,
     };
     let dt = match v {
-        Value::Number(n) => tantivy::time::OffsetDateTime::from_unix_timestamp_nanos(
+        Value::Number(n) => boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
             (n.as_f64()? as i128) * scale,
         )
         .ok()?,
         Value::String(s) => match s.parse::<f64>() {
             // a number written as text still means what the format says
             Ok(n) if format.is_some() => {
-                tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
+                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()?
             }
             // `2019` is a year before it is a count of milliseconds, so the
             // date reading is tried first and the epoch only where nothing
             // else could be read from the digits
             Ok(n) => parse_date_lenient(s).or_else(|| {
-                tantivy::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
+                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
             })?,
             _ => parse_date_lenient(s)?,
         },
@@ -2868,6 +2962,26 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
                 None => continue,
             },
         };
+        // a multi-field of a date counts in its own resolution: a date is
+        // milliseconds and a date_nanos is nanoseconds, and the copy carries
+        // the number the parent was coerced to
+        let mut normalized = normalized;
+        let step = match (mapping.type_of(&parent), mapping.type_of(&format!("{parent}.{sub}"))) {
+            (Some("date"), Some("date_nanos")) => 1_000_000i64,
+            (Some("date_nanos"), Some("date")) => -1_000_000,
+            _ => 0,
+        };
+        if step != 0 {
+            let rescale = |v: &mut Value| {
+                if let Some(n) = v.as_i64() {
+                    *v = Value::from(if step > 0 { n * step } else { n / -step });
+                }
+            };
+            match &mut normalized {
+                Value::Array(items) => items.iter_mut().for_each(rescale),
+                other => rescale(other),
+            }
+        }
         obj.insert(format!("{parent}.{sub}"), normalized);
     }
     out

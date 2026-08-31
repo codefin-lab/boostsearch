@@ -518,3 +518,17 @@ post-pass ของ aggregation, กฎของ collapse/rescore
 เคยเดินหาของตัวเอง) และไม่แตะ write lock ของ fielddata ถ้าไม่มีอะไรใหม่
 
 2% แลกกับ 203 sections ถือว่าคุ้ม และยังมีที่ให้บีบถ้าจำเป็น
+
+## field norm ต่อ path — วัดแล้วไม่เสีย
+
+A/B สลับกันสามรอบ (200k docs, 32 VUs, 12s ต่อรอบ) ระหว่าง `da675e9`
+(ก่อนมี norm ต่อ path) กับ HEAD:
+
+| workload | ก่อน (req/s) | หลัง (req/s) |
+|---|---|---|
+| match_all / term / terms agg | 42,630 · 42,264 · 37,594 | 42,655 · 42,094 · 42,239 |
+| match ล้วน (ให้คะแนนจริง) | 17,652 · 17,792 · 17,218 | 18,106 · 17,749 · 17,714 |
+| index 100k docs | 1.20s · 1.20s | 1.20s · 1.21s |
+
+อ่าน header ของ per-path norm ครั้งละ term ต่อ segment ยังถูกกว่าที่คิด
+(dataset นี้มี path ไม่มาก) · ถ้าวันหนึ่ง index กว้างจริง ๆ ค่อย cache header ไว้

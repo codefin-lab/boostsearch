@@ -12,7 +12,10 @@ name = "obsearch"
 path = "src/main.rs"
 
 [dependencies]
-tantivy = "0.26"
+# BoostCore is the search library this is built on: a fork of tantivy kept in
+# `vendor/boostcore`, so it can be patched where the engine needs it to behave
+# the way OpenSearch does. See docs/boostcore.md.
+boostcore = { path = "vendor/boostcore" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -26,8 +29,8 @@ rayon = "1"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
-tantivy-fst = "0.5"
-tantivy-common = "0.11"
+boostcore-fst = { package = "tantivy-fst", version = "0.5" }
+boostcore-common = { path = "vendor/boostcore/common" }
 
 [profile.release]
 opt-level = 3
