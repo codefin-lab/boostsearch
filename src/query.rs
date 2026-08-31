@@ -1402,8 +1402,8 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 
     // only build the typed variants this field has actually held; each extra
     // variant is a separate range scan unioned over the whole segment
-    // OBSEARCH_NO_KIND_NARROW=1 disables the narrowing, for A/B runs
-    let narrowing_on = ctx.kinds_complete && std::env::var("OBSEARCH_NO_KIND_NARROW").is_err();
+    // BOOSTSEARCH_NO_KIND_NARROW=1 disables the narrowing, for A/B runs
+    let narrowing_on = ctx.kinds_complete && std::env::var("BOOSTSEARCH_NO_KIND_NARROW").is_err();
     let types: Vec<Type> = match ctx.observed_kinds.get(&field).filter(|_| narrowing_on) {
         Some(&kinds) if kinds != 0 => {
             let narrowed: Vec<Type> = types
@@ -1467,7 +1467,7 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // two spellings of the value
     if types.len() == 1
         && flat_bounds.is_none()
-        && std::env::var("OBSEARCH_NO_BLOCK_RANGE").is_err()
+        && std::env::var("BOOSTSEARCH_NO_BLOCK_RANGE").is_err()
     {
         if let Some(q) =
             block_range_query(ctx, &field, types[0], lower.as_ref(), upper.as_ref(), &general)

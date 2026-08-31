@@ -109,7 +109,7 @@ aggregation ที่ตามมาก็ทำงานบนชุดที�
 
 ประเมิน ~400-600 LOC ไม่ใช่ fork — และวัดผลได้ด้วย harness ที่มีอยู่แล้ว
 
-**โค้ดทดลองอยู่ที่ `src/bin/colbench.rs` ทำซ้ำได้ด้วย `OBSEARCH_DATA=<dir> ./target/release/colbench`**
+**โค้ดทดลองอยู่ที่ `src/bin/colbench.rs` ทำซ้ำได้ด้วย `BOOSTSEARCH_DATA=<dir> ./target/release/colbench`**
 
 ---
 
@@ -169,7 +169,7 @@ regression หายหมด เหลือแค่ค่าที่อย�
 
 พอเพิ่ม time-filtered query เข้า benchmark mix (25% ของน้ำหนัก — ใกล้ log workload จริง):
 
-| | obsearch | OpenSearch |
+| | boostsearch | OpenSearch |
 |---|---:|---:|
 | time_range p50 | **1.45 ms** | 2.07 ms |
 | qps c=1 | **562** | 430 |

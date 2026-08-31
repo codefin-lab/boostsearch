@@ -2,11 +2,11 @@
 
 ## วิธีวัด
 
-| | obsearch | OpenSearch |
+| | boostsearch | OpenSearch |
 |---|---|---|
 | เวอร์ชัน | build ปัจจุบัน (tantivy 0.26.1) | **3.1.0** (Lucene 10.2.1) |
 | รันแบบ | container `debian:bookworm-slim` | container ทางการ `opensearchproject/opensearch` |
-| storage | `OBSEARCH_DATA` (mmap, docker volume) | ค่าเริ่มต้น |
+| storage | `BOOSTSEARCH_DATA` (mmap, docker volume) | ค่าเริ่มต้น |
 | heap / memory | ไม่มี heap (native) | `-Xms512m -Xmx512m` |
 | shard | 1 | 1 |
 
@@ -20,21 +20,21 @@
 เดียวกัน ซึ่งกดความต่างให้แคบลง รอบนี้เครื่องว่างจริง เหลือแค่สอง engine ที่เทียบกัน
 ฝั่งละ 5 รอบ มัธยฐาน `[min-max]`
 
-| | obsearch | OpenSearch 3.1.0 | |
+| | boostsearch | OpenSearch 3.1.0 | |
 |---|---:|---:|---|
-| index docs/s | **102,366** `[99.6k-105.8k]` | 72,704 `[60.5k-75.7k]` | obsearch **1.41x** |
-| **memory (MB)** | **257** `[215-274]` | 1,112 `[1052-1193]` | obsearch **4.3x** |
-| qps c=1 | **526** `[416-629]` | 381 `[301-537]` | obsearch **1.38x** |
-| p50 c=1 | **1.84 ms** `[1.39-2.33]` | 2.46 ms `[1.74-3.16]` | obsearch **1.34x** |
-| p99 c=1 | **3.44 ms** `[2.86-4.07]` | 4.00 ms `[2.90-4.94]` | obsearch 1.16x |
-| qps c=8 | **1,871** `[1787-1910]` | 1,622 `[1437-1627]` | obsearch **1.15x** |
-| p50 c=8 | **4.00 ms** `[3.90-4.19]` | 4.59 ms `[4.53-5.23]` | obsearch 1.15x |
-| p99 c=8 | **6.42 ms** `[6.19-6.94]` | 7.60 ms `[6.67-8.02]` | obsearch 1.18x |
-| cold start (200k docs) | **13-638 ms** | ~6.3 s | obsearch |
+| index docs/s | **102,366** `[99.6k-105.8k]` | 72,704 `[60.5k-75.7k]` | boostsearch **1.41x** |
+| **memory (MB)** | **257** `[215-274]` | 1,112 `[1052-1193]` | boostsearch **4.3x** |
+| qps c=1 | **526** `[416-629]` | 381 `[301-537]` | boostsearch **1.38x** |
+| p50 c=1 | **1.84 ms** `[1.39-2.33]` | 2.46 ms `[1.74-3.16]` | boostsearch **1.34x** |
+| p99 c=1 | **3.44 ms** `[2.86-4.07]` | 4.00 ms `[2.90-4.94]` | boostsearch 1.16x |
+| qps c=8 | **1,871** `[1787-1910]` | 1,622 `[1437-1627]` | boostsearch **1.15x** |
+| p50 c=8 | **4.00 ms** `[3.90-4.19]` | 4.59 ms `[4.53-5.23]` | boostsearch 1.15x |
+| p99 c=8 | **6.42 ms** `[6.19-6.94]` | 7.60 ms `[6.67-8.02]` | boostsearch 1.18x |
+| cold start (200k docs) | **13-638 ms** | ~6.3 s | boostsearch |
 
 **ชนะทุกตัวชี้วัด** และชนะทั้ง 12 query shape:
 
-| query p50 (ms) | obsearch | OpenSearch |
+| query p50 (ms) | boostsearch | OpenSearch |
 |---|---:|---:|
 | match_all | **1.85** | 2.15 |
 | term_keyword | **1.78** | 2.27 |
@@ -55,12 +55,12 @@
 
 รูปแบบที่ log/tenant deployment ใช้จริง และเป็นจุดที่ single-index benchmark ปิดบังไว้
 
-| | obsearch | OpenSearch 3.1.0 | |
+| | boostsearch | OpenSearch 3.1.0 | |
 |---|---:|---:|---|
-| **RSS รวมทั้งโปรเซส** | **356 MB** | 1,396 MB | obsearch **3.9x** |
+| **RSS รวมทั้งโปรเซส** | **356 MB** | 1,396 MB | boostsearch **3.9x** |
 | ต่อ index | 1.78 MB | 0.42 MB (ส่วนเพิ่ม) | OpenSearch |
 | threads | 44 | — | |
-| สร้าง 200 index + เขียน 1M docs | **12 s** | 23 s | obsearch **1.9x** |
+| สร้าง 200 index + เขียน 1M docs | **12 s** | 23 s | boostsearch **1.9x** |
 | fan-out match_all | 19.0 ms | 10.7 ms | OpenSearch 1.8x |
 | fan-out term | 16.6 ms | 9.1 ms | OpenSearch 1.8x |
 | fan-out aggregation | 37.5 ms | 10.0 ms | OpenSearch 3.8x |
@@ -143,13 +143,13 @@
    (k8s stack เต็ม ๆ: keycloak, istio, apollo-router, airflow scheduler/triggerer/dag-processor,
    customer-service) การแย่งทรัพยากรทำให้ช่วง min-max กว้างและกดความต่างให้แคบลง
    ตัวเลขชุดนี้ **ไม่ควรใช้อ้างอิงเป็นค่าสัมบูรณ์**
-2. **obsearch ยังไม่สมบูรณ์** — ผ่าน conformance 74.6% ของ Phase 1 suite
+2. **boostsearch ยังไม่สมบูรณ์** — ผ่าน conformance 74.6% ของ Phase 1 suite
    ขณะที่ OpenSearch ทำได้ครบ ระบบที่ทำงานน้อยกว่าต่อ request ย่อมได้เปรียบบางด้าน
    การเทียบนี้จึงเข้าข้างเราอยู่แล้วในเชิงโครงสร้าง
 3. **workload เดียว** — http-log analytics, 200k docs, shard เดียว, node เดียว
    ยังไม่ได้วัด: dataset ที่ใหญ่กว่า RAM, cold cache, หลาย shard, การ merge ระยะยาว,
    nested/geo/percolate (ที่เรายังไม่รองรับ)
-4. **Docker overhead สูงมาก** — obsearch แบบ native ทำได้ 71,458 docs/s และ qps c=1 805
+4. **Docker overhead สูงมาก** — boostsearch แบบ native ทำได้ 71,458 docs/s และ qps c=1 805
    พอเข้า container เหลือ 55,164 และ 368 ทั้งคู่จ่ายค่านี้เท่ากันจึงยุติธรรม
    แต่ตัวเลขสัมบูรณ์ถูกกดลงมาก
 
@@ -162,12 +162,12 @@ docker run -d --name os-bench -p 9201:9200 -e discovery.type=single-node \
 
 docker run --rm -v "$PWD":/src -w /src rust:1.88-slim \
   cargo build --release --target-dir /src/target-linux
-cp target-linux/release/obsearch bench/docker/ && docker build -t obsearch:bench bench/docker
-docker run -d --name obsearch-bench -p 9202:9200 -e OBSEARCH_DATA=/data \
-  -v obsearch-data:/data obsearch:bench
+cp target-linux/release/boostsearch bench/docker/ && docker build -t boostsearch:bench bench/docker
+docker run -d --name boostsearch-bench -p 9202:9200 -e BOOSTSEARCH_DATA=/data \
+  -v boostsearch-data:/data boostsearch:bench
 
 python3 tools/gen_dataset.py --docs 200000
-python3 tools/bench.py --url http://127.0.0.1:9202 --proc docker:obsearch-bench --label obsearch
+python3 tools/bench.py --url http://127.0.0.1:9202 --proc docker:boostsearch-bench --label boostsearch
 python3 tools/bench.py --url http://127.0.0.1:9201 --proc docker:os-bench --label opensearch
 ```
 
@@ -320,7 +320,7 @@ tantivy เรียก `collect_block(&[DocId])` เมื่อไม่ต้
 
 ## ผล (A/B ใน build เดียว ข้อมูลชุดเดียว)
 
-`OBSEARCH_NO_BLOCK_SORT=1` และ `OBSEARCH_NO_KIND_NARROW=1` ปิดทีละตัวได้
+`BOOSTSEARCH_NO_BLOCK_SORT=1` และ `BOOSTSEARCH_NO_KIND_NARROW=1` ปิดทีละตัวได้
 
 | query | ปิดทั้งคู่ | เปิดทั้งคู่ | เปลี่ยน |
 |---|---:|---:|---:|
@@ -419,7 +419,7 @@ qps c=8 **1,702 → 1,826**, p99 c=8 **7.43 → 6.70 ms** ส่วนที่ 
 รายงานก่อนหน้าบอกว่า "ชนะทุกตัวชี้วัด" — **ผิด** เพราะวัดฝั่งละ 5 รอบติดกัน
 บนเครื่องที่มี container อื่น 19 ตัวและโหลดเปลี่ยนตลอด ผลจึงเอนตามช่วงเวลาที่วัด
 
-รอบเดียวกันวัดสองครั้งห่างกันไม่กี่สิบนาที: obsearch qps c=1 ได้ 562 แล้ว 409
+รอบเดียวกันวัดสองครั้งห่างกันไม่กี่สิบนาที: boostsearch qps c=1 ได้ 562 แล้ว 409
 ทั้งที่โค้ดไม่ต่างกันเลย
 
 แก้ด้วยการ **สลับฝั่งวัดทีละรอบ** (obs, os, obs, os, ...) ซึ่งทำให้ drift

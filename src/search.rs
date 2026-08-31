@@ -417,8 +417,8 @@ impl boostcore::collector::Collector for SortCollector {
                 _ => None,
             })
             .collect();
-        // OBSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
-        let single_numeric = std::env::var("OBSEARCH_NO_BLOCK_SORT").is_err()
+        // BOOSTSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
+        let single_numeric = std::env::var("BOOSTSEARCH_NO_BLOCK_SORT").is_err()
             && self.sources.len() == 1
             && matches!(self.sources[0], SortSource::Column { ref mode, .. } if mode.is_none())
             && columns
@@ -2262,7 +2262,7 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // path is measurably cheaper on `_dyn` -- `_raw` also holds a
                 // string column for every path, which the lookup has to consider.
                 // Strings must stay on `_raw`, whose values are untokenised.
-                let numeric_only = std::env::var("OBSEARCH_NO_NUMERIC_DYN_AGG").is_err()
+                let numeric_only = std::env::var("BOOSTSEARCH_NO_NUMERIC_DYN_AGG").is_err()
                     && ctx
                     .observed_kinds
                     .get(base)
@@ -2953,7 +2953,7 @@ fn profiled_agg_search(
         })
         .collect();
     let profile = json!({
-        "id": "[obsearch][0]",
+        "id": "[boostsearch][0]",
         "searches": [],
         "aggregations": entries,
         "took": started.elapsed().as_nanos() as u64,
@@ -3079,8 +3079,8 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
 /// the sum of the field and how many documents carry it -- and the correction
 /// is `doc_count + sum - carried`: documents without the field still count
 /// once, documents with it count what it says.
-const DC_SUM: &str = "__obs_dc_sum";
-const DC_CNT: &str = "__obs_dc_count";
+const DC_SUM: &str = "__bs_dc_sum";
+const DC_CNT: &str = "__bs_dc_count";
 
 fn inject_doc_count_helpers(node: &mut Value) {
     let Some(o) = node.as_object_mut() else { return };
@@ -5138,7 +5138,7 @@ pub fn run(
                     // is what OpenSearch's resolveNested returning null means.
                     _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
                         SortSource::Column {
-                            name: "_obs_no_such_column".to_string(),
+                            name: "_bs_no_such_column".to_string(),
                             desc: k.desc,
                             mode: k.mode.clone(),
                         }
@@ -5193,7 +5193,7 @@ pub fn run(
         // search with no aggregations still has a shard to report on
         if profiling && this_agg.is_none() {
             shard_profile = Some(json!({
-                "id": "[obsearch][0]",
+                "id": "[boostsearch][0]",
                 "searches": [],
                 "aggregations": [],
             }));
@@ -6139,7 +6139,7 @@ pub fn run(
                     }
                 }
                 None => shard_profiles.push(json!({
-                    "id": "[node-0][obsearch][0]",
+                    "id": "[node-0][boostsearch][0]",
                     "searches": [],
                     "aggregations": own,
                 })),

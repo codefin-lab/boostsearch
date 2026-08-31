@@ -1,4 +1,4 @@
-//! obsearch -- an OpenSearch-compatible search server on BoostCore.
+//! boostsearch -- an OpenSearch-compatible search server on BoostCore.
 //!
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
@@ -27,11 +27,11 @@ use store::Store;
 
 async fn root() -> impl IntoResponse {
     axum::Json(json!({
-        "name": "obsearch",
-        "cluster_name": "obsearch",
+        "name": "boostsearch",
+        "cluster_name": "boostsearch",
         "cluster_uuid": "_na_",
         "version": {
-            "distribution": "obsearch",
+            "distribution": "boostsearch",
             "number": "3.9.0",
             "lucene_version": "BoostCore-0.26",
         },
@@ -59,7 +59,7 @@ fn app(store: Store) -> Router {
         .route("/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_update/{id}", post(api::update_doc))
-        .route("/_obsearch/memory", get(api::memory_report))
+        .route("/_boostsearch/memory", get(api::memory_report))
         // --- cluster ---
         .route("/_cluster/health", get(api::cluster_health))
         .route("/_cluster/health/{index}", get(api::cluster_health))
@@ -286,15 +286,15 @@ fn app(store: Store) -> Router {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
-    let addr = std::env::var("OBSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
-    // OBSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
+    let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
+    // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
-    let store = match std::env::var("OBSEARCH_DATA") {
+    let store = match std::env::var("BOOSTSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
     };
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("obsearch listening on {addr}");
+    eprintln!("boostsearch listening on {addr}");
     axum::serve(listener, app(store)).await?;
     Ok(())
 }

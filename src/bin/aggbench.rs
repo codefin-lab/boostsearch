@@ -2,7 +2,7 @@
 //!
 //! Splits one aggregation request into the stages our code actually performs,
 //! so the expensive one can be found rather than guessed at.
-use obsearch::store::Store;
+use boostsearch::store::Store;
 use serde_json::json;
 use std::time::Instant;
 use boostcore::aggregation::agg_req::Aggregations;
@@ -12,7 +12,7 @@ use boostcore::aggregation::{
 use boostcore::query::AllQuery;
 
 fn main() -> anyhow::Result<()> {
-    let data = std::env::var("OBSEARCH_DATA").unwrap_or("/tmp/blk".into());
+    let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/blk".into());
     let n: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
     let store = Store::on_disk(&data)?;
     let st = store.get("bench_logs").expect("bench_logs");

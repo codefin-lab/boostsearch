@@ -4,7 +4,7 @@
 //! scan four ways: BoostCore's current path, a plain scalar scan, a scan with
 //! per-block min/max skipping, and a chunked scan the compiler can vectorise.
 //! The point is to size the opportunity before building anything.
-use obsearch::store::Store;
+use boostsearch::store::Store;
 use std::time::Instant;
 
 const BLOCK: usize = 512;
@@ -99,7 +99,7 @@ fn time_it(name: &str, n: usize, mut f: impl FnMut() -> usize) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let data = std::env::var("OBSEARCH_DATA").unwrap_or("/tmp/kinds-data".into());
+    let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/kinds-data".into());
     let store = Store::on_disk(&data)?;
     let st = store.get("bench_logs").expect("index bench_logs");
     let g = st.read();

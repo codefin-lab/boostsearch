@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let docs: Vec<Value> = lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
     let parse = t.elapsed();
 
-    let store = obsearch::store::Store::new();
+    let store = boostsearch::store::Store::new();
     store.create("bench", &serde_json::json!({}))?;
     let st = store.get("bench").unwrap();
 
@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         t_serialize += t.elapsed();
 
         let t = Instant::now();
-        let d = obsearch::store::make_doc(&g.fields, &id, doc.clone(), &raw, i as u64);
+        let d = boostsearch::store::make_doc(&g.fields, &id, doc.clone(), &raw, i as u64);
         t_makedoc += t.elapsed();
 
         let t = Instant::now();
@@ -112,7 +112,7 @@ fn main() -> anyhow::Result<()> {
 
 // Variants of the document build, timed against each other.
 #[allow(dead_code)]
-fn variants(fields: &obsearch::store::Fields, docs: &[Value]) {
+fn variants(fields: &boostsearch::store::Fields, docs: &[Value]) {
     use std::collections::BTreeMap;
     use boostcore::schema::OwnedValue;
     use boostcore::TantivyDocument;

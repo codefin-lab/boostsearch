@@ -2,7 +2,7 @@
 """Benchmark an OpenSearch-compatible endpoint: indexing throughput, query
 latency, and process RSS.
 
-Engine-agnostic on purpose -- the same run drives obsearch or a real OpenSearch
+Engine-agnostic on purpose -- the same run drives boostsearch or a real OpenSearch
 node, so the numbers are comparable rather than self-reported.
 
 The qps figures here are NOT a throughput ceiling. This driver is Python, and
@@ -200,8 +200,8 @@ def main():
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--concurrency", type=int, nargs="*", default=[1, 8])
-    ap.add_argument("--proc", default="obsearch", help="process name to sample RSS for")
-    ap.add_argument("--label", default="obsearch")
+    ap.add_argument("--proc", default="boostsearch", help="process name to sample RSS for")
+    ap.add_argument("--label", default="boostsearch")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 

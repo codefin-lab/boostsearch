@@ -34,15 +34,15 @@ See `docs/opensearch-comparison.md` for how that was measured.
 
 ```bash
 cargo build --release
-./target/release/obsearch
+./target/release/boostsearch
 ```
 
 It listens on `127.0.0.1:9200`. Two environment variables matter:
 
 | | |
 |---|---|
-| `OBSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
-| `OBSEARCH_DATA` | a directory to keep indices in, mmapped and surviving a restart; unset keeps everything in RAM |
+| `BOOSTSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
+| `BOOSTSEARCH_DATA` | a directory to keep indices in, mmapped and surviving a restart; unset keeps everything in RAM |
 
 ## Running the conformance suite
 
@@ -55,11 +55,11 @@ git clone --depth 1 https://github.com/opensearch-project/OpenSearch study/OpenS
 Then, with the server running:
 
 ```bash
-OBSEARCH_NODE_ATTRS=testattr=test ./target/release/obsearch &
+BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &
 python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json
 ```
 
-`OBSEARCH_NODE_ATTRS` stands in for the `node.attr.testattr=test` the suite's
+`BOOSTSEARCH_NODE_ATTRS` stands in for the `node.attr.testattr=test` the suite's
 own cluster is started with. A full run takes about ten seconds.
 
 ## How it is built

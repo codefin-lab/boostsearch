@@ -1182,7 +1182,7 @@ impl Store {
     /// had written by now, so a later search can be held to that.
     pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
         let n = self.pit_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("obsearch-pit-{n:016x}");
+        let id = format!("boostsearch-pit-{n:016x}");
         let mut ceiling = HashMap::new();
         for name in self.resolve(expr) {
             if let Some(st) = self.get(&name) {
@@ -1267,14 +1267,14 @@ pub fn release_freed_memory() {
 }
 
 fn shared_executor() -> boostcore::Executor {
-    let threads = std::env::var("OBSEARCH_SEARCH_THREADS")
+    let threads = std::env::var("BOOSTSEARCH_SEARCH_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     if threads <= 1 {
         return boostcore::Executor::single_thread();
     }
-    boostcore::Executor::multi_thread(threads, "obsearch-search-")
+    boostcore::Executor::multi_thread(threads, "boostsearch-search-")
         .unwrap_or_else(|_| boostcore::Executor::single_thread())
 }
 
@@ -1321,7 +1321,7 @@ impl Store {
     /// quiet. With one index this is invisible; with hundreds it is the
     /// difference between 13 MB per index and nothing.
     fn start_writer_reaper(&self) {
-        let idle_secs: u64 = std::env::var("OBSEARCH_WRITER_IDLE_SECS")
+        let idle_secs: u64 = std::env::var("BOOSTSEARCH_WRITER_IDLE_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
@@ -1445,7 +1445,7 @@ impl Store {
 
     /// How many indices may hold a writer at once.
     pub fn writer_limit() -> usize {
-        std::env::var("OBSEARCH_MAX_LIVE_WRITERS")
+        std::env::var("BOOSTSEARCH_MAX_LIVE_WRITERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8)
@@ -1611,7 +1611,7 @@ impl Store {
     /// after the batch the opening search already delivered.
     pub fn open_scroll(&self, expr: &str, body: &Value, size: usize) -> String {
         let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("obsearch-scroll-{n:016x}");
+        let id = format!("boostsearch-scroll-{n:016x}");
         self.scrolls.write().insert(
             id.clone(),
             ScrollState {
@@ -1854,13 +1854,13 @@ impl Store {
         index.set_executor(self.executor.clone());
         // one arena per indexing thread; a bigger budget means fewer segment
         // flushes and less merging, at the cost of resident memory
-        let writer_budget: usize = std::env::var("OBSEARCH_WRITER_BUDGET_MB")
+        let writer_budget: usize = std::env::var("BOOSTSEARCH_WRITER_BUDGET_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64)
             * 1024
             * 1024;
-        let writer_threads: usize = std::env::var("OBSEARCH_WRITER_THREADS")
+        let writer_threads: usize = std::env::var("BOOSTSEARCH_WRITER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
@@ -2430,7 +2430,7 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 
 /// Where a flat_object field's values are gathered so the field itself can be
 /// queried without naming a path inside it.
-pub const FLAT_VALUES: &str = "_obs_values";
+pub const FLAT_VALUES: &str = "_bs_values";
 
 /// How many tokens a standard analyser would find.
 pub fn token_count(text: &str) -> u64 {

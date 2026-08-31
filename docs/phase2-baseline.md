@@ -62,7 +62,7 @@ refresh จริงใช้สำหรับ search ตรงกับที�
 ⇒ RSS หลัง index 867 → 309 MB
 
 ### 4. mmap / persistence
-`OBSEARCH_DATA=<dir>` เปลี่ยนไปใช้ `MmapDirectory` — index อยู่ใน page cache ของ OS
+`BOOSTSEARCH_DATA=<dir>` เปลี่ยนไปใช้ `MmapDirectory` — index อยู่ใน page cache ของ OS
 ไม่ใช่ RSS ของ process และ **รอดจากการ restart** (metadata ของ index เก็บเป็น
 `_meta.json` ต่อ index, reopen ตอนบูต) ไม่ตั้ง env var = อยู่ใน RAM เหมือนเดิม
 
@@ -136,7 +136,7 @@ tantivy ตั้งต้นที่ 8 เธรด แบ่ง budget กั
 | 8 | 256 MB | 68,966 | 547 MB |
 
 ตั้งค่าเริ่มต้นที่ **2 เธรด / 64 MB** และเปิดให้ปรับผ่าน
-`OBSEARCH_WRITER_THREADS` / `OBSEARCH_WRITER_BUDGET_MB` — เป็นการแลกกันตรง ๆ
+`BOOSTSEARCH_WRITER_THREADS` / `BOOSTSEARCH_WRITER_BUDGET_MB` — เป็นการแลกกันตรง ๆ
 ระหว่าง indexing throughput กับ RSS
 
 ### 9. Persistence ใช้ได้จริง
@@ -201,7 +201,7 @@ request ไม่มี agg)
 
 ### ผลที่ 200 index × 2,000 docs (ทั้งคู่รันใน Docker)
 
-| query | obsearch ก่อน | obsearch หลัง | OpenSearch 3.1 |
+| query | boostsearch ก่อน | boostsearch หลัง | OpenSearch 3.1 |
 |---|---:|---:|---:|
 | match_all | 2.14 | 2.11 | 5.20 |
 | term | 2.15 | 2.15 | 4.44 |
@@ -286,7 +286,7 @@ native:
 
 ทั้งคู่ใน Docker เทียบ OpenSearch 3.1:
 
-| query | obsearch | OpenSearch | |
+| query | boostsearch | OpenSearch | |
 |---|---:|---:|---|
 | match_all | 1.85 | 4.25 | 2.30× |
 | term | 1.61 | 4.61 | 2.86× |
@@ -317,8 +317,8 @@ hypervisor แต่เป็นบั๊กของเราเอง** — sh
 
 | | GET / p50 |
 |---|---:|
-| obsearch native | 0.162 ms |
-| obsearch docker | 0.435 ms |
+| boostsearch native | 0.162 ms |
+| boostsearch docker | 0.435 ms |
 | opensearch docker | 0.476 ms |
 
 Docker เพิ่มค่า round-trip ~0.27 ms เท่ากันทั้งสองฝั่ง (HTTP path ของสองเครื่องยนต์
@@ -375,7 +375,7 @@ mix เต็ม native ที่ vus=64: 23,245 → **35,845 qps (+54%)**
 
 | | ก่อน | หลัง |
 |---|---:|---:|
-| obsearch | 18,000 | **22,500** |
+| boostsearch | 18,000 | **22,500** |
 | OpenSearch | 26,500 | 26,400 |
 | | 0.68× | **0.85×** |
 

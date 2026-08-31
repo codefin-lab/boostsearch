@@ -125,7 +125,7 @@ analyse ใหม่แล้วประเมินกฎบน token (OpenSea
 
 ## node ที่ชุดทดสอบคาดหวัง
 
-    OBSEARCH_NODE_ATTRS=testattr=test ./target/release/obsearch
+    BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch
 
 ## เทสช้าเพราะ client ไม่ใช่เพราะ server
 

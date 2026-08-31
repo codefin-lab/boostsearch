@@ -2,7 +2,7 @@
 /target-linux
 /study
 /bench/data
-/bench/docker/obsearch
+/bench/docker/boostsearch
 /data
 
 # Intermediate conformance snapshots. The runner writes one per invocation with

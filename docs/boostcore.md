@@ -50,7 +50,7 @@ The upstream benchmark corpora (`hdfs.json`, `gh.json`, `wiki.json`,
 
 ### Field norms for JSON fields
 
-obsearch stores every document in one JSON field (`_dyn`, tokenized, and
+boostsearch stores every document in one JSON field (`_dyn`, tokenized, and
 `_raw`, not). Upstream never records a field norm for a JSON field, so BM25
 sees every document as the same length and scores by term frequency alone.
 Ordering then disagrees with OpenSearch wherever length is what separates two
@@ -65,7 +65,7 @@ Three changes fix that:
 - `src/indexer/segment_writer.rs` -- the `JsonObject` branch records that count
   as the document's field norm, as the text branch already does.
 
-The length is the whole JSON field, which for obsearch is the whole document.
+The length is the whole JSON field, which for boostsearch is the whole document.
 Lucene's norm is per field, so a document whose other fields are long still
 scores lower here than it would there; per-path norms are the next step.
 

@@ -1,11 +1,11 @@
 //! Engine CPU per query, measured in-process so HTTP and the client are out of
 //! the picture. This is the number the execution work has to move.
-use obsearch::store::Store;
+use boostsearch::store::Store;
 use serde_json::json;
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
-    let data = std::env::var("OBSEARCH_DATA").unwrap_or("/tmp/startup-data".into());
+    let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/startup-data".into());
     let store = Store::on_disk(&data)?;
     let index = std::env::args().nth(1).unwrap_or("bench_logs".into());
     let n: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
@@ -47,12 +47,12 @@ fn main() -> anyhow::Result<()> {
     for (name, body) in &queries {
         // warm up before timing
         for _ in 0..5 {
-            let _ = obsearch::search::run(&store, &index, body, &params);
+            let _ = boostsearch::search::run(&store, &index, body, &params);
         }
         let t = Instant::now();
         let mut hits = 0;
         for _ in 0..n {
-            match obsearch::search::run(&store, &index, body, &params) {
+            match boostsearch::search::run(&store, &index, body, &params) {
                 Ok(o) => hits = o.total,
                 Err(_) => {
                     println!("{name:<16}{:>12}", "ERROR");

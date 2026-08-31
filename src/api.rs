@@ -36,7 +36,7 @@ pub fn stack_trace_for(kind: &str, reason: &str, at: &str) -> String {
         .collect();
     // the reason names the resource, and the class name follows it, which is
     // the order the older Java form put them in
-    format!("{reason} -- {class} at obsearch::api::{at} (src/api.rs)")
+    format!("{reason} -- {class} at boostsearch::api::{at} (src/api.rs)")
 }
 
 /// Attach a trace to an error a caller asked to see the inside of.
@@ -566,7 +566,7 @@ pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Respon
     // the id carries what the task was, after the node that ran it
     let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
     // a task named after a node that is not here is a task nobody has heard of
-    if !node.is_empty() && node != "node-0" && node != "obsearch" {
+    if !node.is_empty() && node != "node-0" && node != "boostsearch" {
         return err(
             StatusCode::NOT_FOUND,
             "resource_not_found_exception",
@@ -629,7 +629,7 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     }
     respond(&p, json!({
         "nodes": {"node-0": {
-            "name": "obsearch", "transport_address": "127.0.0.1:9300",
+            "name": "boostsearch", "transport_address": "127.0.0.1:9300",
             "host": "127.0.0.1", "ip": "127.0.0.1",
             "roles": ["cluster_manager", "data", "ingest"],
             "tasks": {"node-0:1": task},
@@ -790,7 +790,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
     });
     respond(&p, json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "obsearch",
+        "cluster_name": "boostsearch",
         "cluster_uuid": "_na_",
         "timestamp": 1_577_836_800_000u64,
         "status": if replicated { "yellow" } else { "green" },
@@ -899,7 +899,7 @@ pub async fn shard_stores(
             for i in 0..shards {
                 per.insert(i.to_string(), json!({"stores": [{
                     "node-0": {
-                        "name": "obsearch", "ephemeral_id": "_na_",
+                        "name": "boostsearch", "ephemeral_id": "_na_",
                         "transport_address": "127.0.0.1:9300", "attributes": {},
                     },
                     "allocation_id": "_na_",
@@ -1251,7 +1251,7 @@ pub async fn reroute(
             }));
         }
         let mut state = json!({
-            "cluster_name": "obsearch", "cluster_uuid": "_na_",
+            "cluster_name": "boostsearch", "cluster_uuid": "_na_",
             "version": 1, "state_uuid": "_na_",
         });
         if want("master_node") {
@@ -1262,7 +1262,7 @@ pub async fn reroute(
         }
         if want("nodes") {
             state["nodes"] = json!({"node-0": {
-                "name": "obsearch", "ephemeral_id": "_na_",
+                "name": "boostsearch", "ephemeral_id": "_na_",
                 "transport_address": "127.0.0.1:9300", "attributes": {}}});
         }
         if want("metadata") {
@@ -1429,9 +1429,9 @@ pub async fn nodes_stats(
     let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
     let mut out = json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "obsearch",
+        "cluster_name": "boostsearch",
         "nodes": {"node-0": {
-            "timestamp": 0, "name": "obsearch",
+            "timestamp": 0, "name": "boostsearch",
             "transport_address": "127.0.0.1:9300", "host": "127.0.0.1", "ip": "127.0.0.1",
             "roles": ["cluster_manager", "data", "ingest"], "attributes": {},
             "indices": {
@@ -2792,7 +2792,7 @@ pub async fn bulk(
         })
     };
     let prepared: Vec<Option<std::result::Result<(Value, String), String>>> =
-        if std::env::var("OBSEARCH_SERIAL_BULK").is_ok() {
+        if std::env::var("BOOSTSEARCH_SERIAL_BULK").is_ok() {
             ops.iter().map(prepare).collect()
         } else {
         use rayon::prelude::*;
@@ -3108,7 +3108,7 @@ pub async fn bulk(
                             if p.get("error_trace").map(|v| v != "false").unwrap_or(false) {
                                 error["stack_trace"] = json!(format!(
                                     "[[{idx}][0]] DocumentMissingException[{reason}] \
-                                     at obsearch::api::bulk (src/api.rs)"
+                                     at boostsearch::api::bulk (src/api.rs)"
                                 ));
                             }
                             json!({"update": {
@@ -4530,7 +4530,7 @@ pub async fn segments(
         indices.insert(
             n.clone(),
             json!({"shards": {"0": [{
-                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "routing": {"state": "STARTED", "primary": true, "node": "boostsearch"},
                 "num_committed_segments": segs.len(),
                 "num_search_segments": segs.len(),
                 "segments": Value::Object(segs),
@@ -4914,7 +4914,7 @@ fn stats_value(store: &Store, expr: &str, p: &Params) -> std::result::Result<Val
         });
         if level == "shards" {
             entry["shards"] = json!({"0": [{
-                "routing": {"state": "STARTED", "primary": true, "node": "obsearch"},
+                "routing": {"state": "STARTED", "primary": true, "node": "boostsearch"},
                 "docs": s.get("docs").cloned().unwrap_or(json!({})),
                 "commit": {
                     "id": st.read().commit_id(),
@@ -5346,7 +5346,7 @@ pub async fn cluster_health(
     };
     let n: usize = names.iter().map(|name| shards_of(name)).sum();
     let mut out = json!({
-        "cluster_name": "obsearch", "status": status, "timed_out": !satisfied,
+        "cluster_name": "boostsearch", "status": status, "timed_out": !satisfied,
         "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
         "discovered_cluster_manager": true,
         "active_primary_shards": n, "active_shards": n,
@@ -5437,7 +5437,7 @@ pub async fn indices_recovery(
             "source": {},
             "target": {
                 "id": "node-0", "host": "127.0.0.1", "transport_address": "127.0.0.1:9300",
-                "ip": "127.0.0.1", "name": "obsearch",
+                "ip": "127.0.0.1", "name": "boostsearch",
             },
             "index": {
                 "size": {
@@ -5555,7 +5555,7 @@ pub async fn allocation_explain(
     } else {
         out["current_state"] = json!("started");
         out["current_node"] = json!({
-            "id": "node-0", "name": "obsearch",
+            "id": "node-0", "name": "boostsearch",
             "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
         });
         out["can_remain_on_current_node"] = json!("yes");
@@ -5572,7 +5572,7 @@ pub async fn allocation_explain(
         out["cluster_info"] = json!({
             "nodes": {
                 "node-0": {
-                    "node_name": "obsearch",
+                    "node_name": "boostsearch",
                     "least_available": {
                         "path": "/", "total_bytes": 2_147_483_648u64,
                         "used_bytes": 1_073_741_824u64,
@@ -5718,7 +5718,7 @@ fn cluster_state_inner(
     }
 
     let mut out = serde_json::Map::new();
-    out.insert("cluster_name".into(), json!("obsearch"));
+    out.insert("cluster_name".into(), json!("boostsearch"));
     out.insert("cluster_uuid".into(), json!("_na_"));
     if want("version") || all {
         out.insert("version".into(), json!(1));
@@ -5734,7 +5734,7 @@ fn cluster_state_inner(
     }
     if want("nodes") {
         out.insert("nodes".into(), json!({"node-0": {
-            "name": "obsearch", "ephemeral_id": "_na_",
+            "name": "boostsearch", "ephemeral_id": "_na_",
             "transport_address": "127.0.0.1:9300", "attributes": {}}}));
     }
     if want("metadata") {
@@ -7140,7 +7140,7 @@ pub async fn cat_allocation(
         // request arrived at
         if !matches!(
             want.as_str(),
-            "obsearch"
+            "boostsearch"
                 | "node-0"
                 | "node"
                 | "_all"
@@ -7168,7 +7168,7 @@ pub async fn cat_allocation(
         ("disk.percent", "50".to_string()),
         ("host", "127.0.0.1".to_string()),
         ("ip", "127.0.0.1".to_string()),
-        ("node", "obsearch".to_string()),
+        ("node", "boostsearch".to_string()),
     ]];
     cat_render_cols(CAT_ALLOCATION_COLS, rows, &p)
 }
@@ -7176,10 +7176,10 @@ pub async fn cat_allocation(
 pub const CAT_NODEATTRS_COLS: &[&str] = &["node", "id", "pid", "host", "ip", "port", "attr", "value"];
 
 /// The attributes this node was started with: the built-in one, and whatever
-/// `OBSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
+/// `BOOSTSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
 pub fn node_attrs() -> Vec<(String, String)> {
     let mut out = vec![("shard_indexing_pressure_enabled".to_string(), "true".to_string())];
-    if let Ok(spec) = std::env::var("OBSEARCH_NODE_ATTRS") {
+    if let Ok(spec) = std::env::var("BOOSTSEARCH_NODE_ATTRS") {
         for pair in spec.split(',') {
             if let Some((k, v)) = pair.split_once('=') {
                 let (k, v) = (k.trim(), v.trim());
@@ -7198,7 +7198,7 @@ pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
         .into_iter()
         .map(|(attr, value)| {
             vec![
-                ("node", "obsearch".to_string()),
+                ("node", "boostsearch".to_string()),
                 ("id", "node-0".to_string()),
                 ("pid", std::process::id().to_string()),
                 ("host", "127.0.0.1".to_string()),
@@ -7273,7 +7273,7 @@ pub async fn cat_thread_pool(
             }
         }
         rows.push(vec![
-            ("node_name", "obsearch".to_string()),
+            ("node_name", "boostsearch".to_string()),
             ("node_id", "node-0".to_string()),
             ("id", "node-0".to_string()),
             ("pid", std::process::id().to_string()),
@@ -7328,7 +7328,7 @@ pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) 
         ("timestamp", "00:00:00".to_string()),
         ("running_time", "0s".to_string()),
         ("ip", "127.0.0.1".to_string()),
-        ("node", "obsearch".to_string()),
+        ("node", "boostsearch".to_string()),
     ];
     row.push(("description", "-".to_string()));
     // the header a caller tags its request with comes back on the task, which
@@ -7430,7 +7430,7 @@ pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> 
     let n = store.names().len().to_string();
     let mut row: Vec<(&str, String)> = vec![
         ("epoch", "0".into()), ("timestamp", "00:00:00".into()),
-        ("cluster", "obsearch".into()), ("status", "green".into()),
+        ("cluster", "boostsearch".into()), ("status", "green".into()),
         ("node.total", "1".into()), ("node.data", "1".into()),
         ("discovered_cluster_manager", "true".into()),
         ("shards", n.clone()), ("pri", n), ("relo", "0".into()), ("init", "0".into()),
@@ -7473,7 +7473,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "health" => cat_health(State(store), Query(p)).await,
         "master" | "cluster_manager" => cat_render(
             vec![vec![("id", "node-0".into()), ("host", "127.0.0.1".into()),
-                      ("ip", "127.0.0.1".into()), ("node", "obsearch".into())]], &p),
+                      ("ip", "127.0.0.1".into()), ("node", "boostsearch".into())]], &p),
         "nodes" => {
             let row: Vec<(&str, String)> = vec![
                 // `full_id` asks for the whole node identifier rather than
@@ -7494,7 +7494,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 ("load_1m", "0.00".into()), ("load_5m", "0.00".into()),
                 ("load_15m", "0.00".into()),
                 ("node.role", "dimr".into()), ("node.roles", "data,ingest".into()),
-                ("cluster_manager", "*".into()), ("name", "obsearch".into()),
+                ("cluster_manager", "*".into()), ("name", "boostsearch".into()),
                 ("diskAvail", "1gb".into()), ("diskTotal", "2gb".into()),
                 ("diskUsed", "1gb".into()), ("diskUsedPercent", "50.00".into()),
             ];
@@ -7595,7 +7595,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         ("store", "0b".into()),
                         ("ip", "127.0.0.1".into()),
                         ("id", "node-0".into()),
-                        ("node", "obsearch".into()),
+                        ("node", "boostsearch".into()),
                     ]);
                     // a replica has nowhere else to live on a single node, so
                     // it is listed and unassigned
@@ -7669,7 +7669,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         ("id", "node-0".to_string()),
                         ("host", "127.0.0.1".to_string()),
                         ("ip", "127.0.0.1".to_string()),
-                        ("node", "obsearch".to_string()),
+                        ("node", "boostsearch".to_string()),
                         ("field", field),
                         ("size", readable_bytes(bytes)),
                     ]);
@@ -7723,7 +7723,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                         ("source_host", "n/a".into()),
                         ("source_node", "n/a".into()),
                         ("target_host", "127.0.0.1".into()),
-                        ("target_node", "obsearch".into()),
+                        ("target_node", "boostsearch".into()),
                         ("repository", "n/a".into()),
                         ("snapshot", "n/a".into()),
                         ("files", "0".into()),
@@ -7799,7 +7799,7 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
                 .into_iter()
                 .map(|(attr, value)| {
                     vec![
-                        ("node", "obsearch".to_string()),
+                        ("node", "boostsearch".to_string()),
                         ("host", "127.0.0.1".to_string()),
                         ("ip", "127.0.0.1".to_string()),
                         ("attr", attr),
@@ -8279,7 +8279,7 @@ pub async fn verify_repository(
             format!("[{name}] missing"),
         );
     }
-    respond(&p, json!({"nodes": {"node-0": {"name": "obsearch"}}}))
+    respond(&p, json!({"nodes": {"node-0": {"name": "boostsearch"}}}))
 }
 
 /// `POST /_snapshot/{repo}/_cleanup` -- nothing is left behind here, so there
@@ -8878,11 +8878,11 @@ pub async fn delete_index_template(
 pub async fn nodes_info(Query(p): Query<Params>) -> Response {
     respond(&p, json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "obsearch",
+        "cluster_name": "boostsearch",
         "nodes": {"node-0": {
-            "name": "obsearch", "transport_address": "127.0.0.1:9300",
+            "name": "boostsearch", "transport_address": "127.0.0.1:9300",
             "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
-            "build_type": "tar", "build_hash": "obsearch", "roles": ["data", "ingest"],
+            "build_type": "tar", "build_hash": "boostsearch", "roles": ["data", "ingest"],
             "attributes": {},
             "os": {"refresh_interval_in_millis": 1000,
                    "available_processors": num_cpus(),
@@ -9017,7 +9017,7 @@ pub async fn search_shards(
         }]))
         .collect();
     respond(&p, json!({
-        "nodes": {"node-0": {"name": "obsearch", "ephemeral_id": "_na_",
+        "nodes": {"node-0": {"name": "boostsearch", "ephemeral_id": "_na_",
                              "transport_address": "127.0.0.1:9300", "attributes": {}}},
         "indices": names
             .iter()
