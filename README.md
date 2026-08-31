@@ -1,5 +1,7 @@
 # BoostSearch
 
+[![ci](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml)
+
 An OpenSearch-compatible search server written in Rust, on top of
 [BoostCore](https://github.com/codefin-lab/boostcore) (a fork of tantivy).
 
@@ -9,7 +11,9 @@ description of it.
 
 ## Where it stands
 
-Run against the YAML tests in OpenSearch's `rest-api-spec`, all 409 files:
+Run against the YAML tests in OpenSearch's `rest-api-spec`, all 409 files --
+on every push, in both storage modes, on GitHub's runners rather than only
+here:
 
 | | |
 |---|---|
