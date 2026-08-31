@@ -6,10 +6,10 @@ authors = ["Paul Masurel <paul.masurel@gmail.com>"]
 license = "MIT"
 categories = []
 description = """Tantivy-sub crate: bitpacking"""
-repository = "https://github.com/quickwit-oss/tantivy"
+repository = "https://github.com/codefin-lab/boostcore"
 keywords = []
 documentation = "https://docs.rs/boostcore-bitpacker/latest/boostcore_bitpacker"
-homepage = "https://github.com/quickwit-oss/tantivy"
+homepage = "https://github.com/codefin-lab/boostcore"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

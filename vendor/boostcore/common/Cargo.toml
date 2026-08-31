@@ -6,8 +6,8 @@ license = "MIT"
 edition = "2024"
 description = "common traits and utility functions used by multiple tantivy subcrates"
 documentation = "https://docs.rs/boostcore_common/"
-homepage = "https://github.com/quickwit-oss/tantivy"
-repository = "https://github.com/quickwit-oss/tantivy"
+homepage = "https://github.com/codefin-lab/boostcore"
+repository = "https://github.com/codefin-lab/boostcore"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

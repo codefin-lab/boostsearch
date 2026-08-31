@@ -1,143 +1,53 @@
-[![Docs](https://docs.rs/tantivy/badge.svg)](https://docs.rs/crate/tantivy/)
-[![Build Status](https://github.com/quickwit-oss/tantivy/actions/workflows/test.yml/badge.svg)](https://github.com/quickwit-oss/tantivy/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/quickwit-oss/tantivy/branch/main/graph/badge.svg)](https://codecov.io/gh/quickwit-oss/tantivy)
-[![Join the chat at https://discord.gg/MT27AG5EVE](https://shields.io/discord/908281611840282624?label=chat%20on%20discord)](https://discord.gg/MT27AG5EVE)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Crates.io](https://img.shields.io/crates/v/tantivy.svg)](https://crates.io/crates/tantivy)
+# BoostCore
 
-<img src="https://tantivy-search.github.io/logo/tantivy-logo.png" alt="Tantivy, the fastest full-text search engine library written in Rust" height="250">
+BoostCore is the search engine library [BoostSearch](https://github.com/codefin-lab/boostsearch)
+is built on. It is a fork of [tantivy](https://github.com/quickwit-oss/tantivy)
+**0.26.1**, kept as a fork so the parts of the engine an OpenSearch-compatible
+server leans on can be fixed rather than worked around.
 
-## Fast full-text search engine library written in Rust
+Everything tantivy does, BoostCore does. What follows is only what differs.
 
-**If you are looking for an alternative to Elasticsearch or Apache Solr, check out [Quickwit](https://github.com/quickwit-oss/quickwit), our distributed search engine built on top of Tantivy.**
+## What the fork changes
 
-Tantivy is closer to [Apache Lucene](https://lucene.apache.org/) than to [Elasticsearch](https://www.elastic.co/products/elasticsearch) or [Apache Solr](https://lucene.apache.org/solr/) in the sense it is not
-an off-the-shelf search engine server, but rather a crate that can be used to build such a search engine.
+### Field norms for JSON fields, per path
 
-Tantivy is, in fact, strongly inspired by Lucene's design.
+A server that accepts arbitrary documents stores them in one JSON field.
+Upstream records no field norm for a JSON field at all, so BM25 sees every
+document as the same length and scores by term frequency alone — a long
+address that repeats a word beats a short one that says it once, which is the
+opposite of what Lucene does.
 
-## Benchmark
+BoostCore records a norm per JSON **path**, which is what a field would be in a
+flat schema:
 
-The following [benchmark](https://tantivy-search.github.io/bench/) breaks down the
-performance for different types of queries/collections.
+- `src/schema/field_type.rs` — `has_fieldnorms()` answers what the JSON field's
+  text options say, instead of `false`
+- `src/core/json_utils.rs` — `IndexingPositionsPerPath::total_tokens()`
+- `src/indexer/segment_writer.rs` — the `JsonObject` branch records the whole
+  field's length and each path's own
+- `src/fieldnorm/` — per-path norms are written beside the field's, at index 1
+  of the same composite file, and read back by path
+- `src/indexer/merger.rs` — they survive a merge
+- `src/postings/serializer.rs` — the block maxima written at index time are
+  computed against the same path's norms, so they stay an upper bound and
+  pruning cannot drop a match
 
-Your mileage WILL vary depending on the nature of queries and their load.
+### The same number is one bucket
 
-Details about the benchmark can be found at this [repository](https://github.com/quickwit-oss/search-benchmark-game).
+`IntermediateKey` hashed and compared by variant, so a `0` that one segment
+stored as `i64` and another as `u64` — the first big value a segment sees
+decides it — merged into two buckets of one instead of one bucket of two.
+Numeric keys now compare, order and hash as numbers.
 
-## Features
+## Licence and attribution
 
-- Full-text search
-- Configurable tokenizer (stemming available for 17 Latin languages) with third party support for Chinese ([tantivy-jieba](https://crates.io/crates/tantivy-jieba) and [cang-jie](https://crates.io/crates/cang-jie)), Japanese ([lindera](https://github.com/lindera-morphology/lindera-tantivy), [Vaporetto](https://crates.io/crates/vaporetto_tantivy), and [tantivy-tokenizer-tiny-segmenter](https://crates.io/crates/tantivy-tokenizer-tiny-segmenter)) and Korean ([lindera](https://github.com/lindera-morphology/lindera-tantivy) + [lindera-ko-dic-builder](https://github.com/lindera-morphology/lindera-ko-dic-builder))
-- Fast (check out the :racehorse: :sparkles: [benchmark](https://tantivy-search.github.io/bench/) :sparkles: :racehorse:)
-- Tiny startup time (<10ms), perfect for command-line tools
-- BM25 scoring (the same as Lucene)
-- Natural query language (e.g. `(michael AND jackson) OR "king of pop"`)
-- Phrase queries search (e.g. `"michael jackson"`)
-- Incremental indexing
-- Multithreaded indexing (indexing English Wikipedia takes < 3 minutes on my desktop)
-- Mmap directory
-- SIMD integer compression when the platform/CPU includes the SSE2 instruction set
-- Single valued and multivalued u64, i64, and f64 fast fields (equivalent of doc values in Lucene)
-- `&[u8]` fast fields
-- Text, i64, u64, f64, dates, ip, bool, and hierarchical facet fields
-- Compressed document store (LZ4, Zstd, None)
-- Range queries
-- Faceted search
-- Configurable indexing (optional term frequency and position indexing)
-- JSON Field
-- Aggregation Collector: histogram, range buckets, average, and stats metrics
-- LogMergePolicy with deletes
-- Searcher Warmer API
-- Cheesy logo with a horse
+MIT, as tantivy is. The copyright of the original work stays with the tantivy
+authors listed in `AUTHORS`; see `LICENSE`. This fork carries their code with
+the changes above.
 
-### Non-features
+## Upgrading
 
-Distributed search is out of the scope of Tantivy, but if you are looking for this feature, check out [Quickwit](https://github.com/quickwit-oss/quickwit/).
-
-## Getting started
-
-Tantivy works on stable Rust and supports Linux, macOS, and Windows.
-
-- [Tantivy's simple search example](https://tantivy-search.github.io/examples/basic_search.html)
-- [tantivy-cli and its tutorial](https://github.com/quickwit-oss/tantivy-cli) - `tantivy-cli` is an actual command-line interface that makes it easy for you to create a search engine,
-index documents, and search via the CLI or a small server with a REST API.
-It walks you through getting a Wikipedia search engine up and running in a few minutes.
-- [Reference doc for the last released version](https://docs.rs/tantivy/)
-
-## How can I support this project?
-
-There are many ways to support this project.
-
-- Use Tantivy and tell us about your experience on [Discord](https://discord.gg/MT27AG5EVE) or by email (paul.masurel@gmail.com)
-- Report bugs
-- Write a blog post
-- Help with documentation by asking questions or submitting PRs
-- Contribute code (you can join [our Discord server](https://discord.gg/MT27AG5EVE))
-- Talk about Tantivy around you
-
-## Contributing code
-
-We use the GitHub Pull Request workflow: reference a GitHub ticket and/or include a comprehensive commit message when opening a PR.
-Feel free to update CHANGELOG.md with your contribution.
-
-### Tokenizer
-
-When implementing a tokenizer for tantivy depend on the `boostcore-tokenizer-api` crate.
-
-### Clone and build locally
-
-Tantivy compiles on stable Rust.
-To check out and run tests, you can simply run:
-
-```bash
-git clone https://github.com/quickwit-oss/tantivy.git
-cd tantivy
-cargo test
-```
-
-## Companies Using Tantivy
-
-<p align="left">
-<img align="center" src="doc/assets/images/etsy.png" alt="Etsy" height="25" width="auto" /> &nbsp;
-<img align="center" src="doc/assets/images/paradedb.png" alt="ParadeDB" height="25" width="auto" /> &nbsp;
-<img align="center" src="doc/assets/images/Nuclia.png#gh-light-mode-only" alt="Nuclia" height="25" width="auto" /> &nbsp;
-<img align="center" src="doc/assets/images/humanfirst.png#gh-light-mode-only" alt="Humanfirst.ai" height="30" width="auto" />
-<img align="center" src="doc/assets/images/element.io.svg#gh-light-mode-only" alt="Element.io" height="25" width="auto" />
-<img align="center" src="doc/assets/images/nuclia-dark-theme.png#gh-dark-mode-only" alt="Nuclia" height="35" width="auto" /> &nbsp;
-<img align="center" src="doc/assets/images/humanfirst.ai-dark-theme.png#gh-dark-mode-only" alt="Humanfirst.ai" height="25" width="auto" />&nbsp; &nbsp;
-<img align="center" src="doc/assets/images/element-dark-theme.png#gh-dark-mode-only" alt="Element.io" height="25" width="auto" />
-</p>
-
-## FAQ
-
-### Can I use Tantivy in other languages?
-
-- Python → [tantivy-py](https://github.com/quickwit-oss/tantivy-py)
-- Ruby → [tantiny](https://github.com/baygeldin/tantiny)
-
-You can also find other bindings on [GitHub](https://github.com/search?q=tantivy) but they may be less maintained.
-
-### What are some examples of Tantivy use?
-
-- [seshat](https://github.com/matrix-org/seshat/): A matrix message database/indexer
-- [tantiny](https://github.com/baygeldin/tantiny): Tiny full-text search for Ruby
-- [lnx](https://github.com/lnx-search/lnx): adaptable, typo tolerant search engine with a REST API
-- [Bichon](https://github.com/rustmailer/bichon): A lightweight, high-performance Rust email archiver with WebUI
-- and [more](https://github.com/search?q=tantivy)!
-
-### On average, how much faster is Tantivy compared to Lucene?
-
-- According to our [search latency benchmark](https://tantivy-search.github.io/bench/), Tantivy is approximately 2x faster than Lucene.
-
-### Does tantivy support incremental indexing?
-
-- Yes.
-
-### How can I edit documents?
-
-- Data in tantivy is immutable. To edit a document, the document needs to be deleted and reindexed.
-
-### When will my documents be searchable during indexing?
-
-- Documents will be searchable after a `commit` is called on an `IndexWriter`. Existing `IndexReader`s will also need to be reloaded in order to reflect the changes. Finally, changes are only visible to newly acquired `Searcher`.
+There is no upstream remote: the fork is a snapshot of tag `0.26.1`. To move to
+a newer tantivy, clone it at the new tag, redo the rename (`tantivy` →
+`boostcore` and each workspace member), and re-apply the changes above — each
+is a few lines and carries a comment saying why it is there.

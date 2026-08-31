@@ -3,8 +3,8 @@ name = "boostcore-columnar"
 version = "0.7.0"
 edition = "2024"
 license = "MIT"
-homepage = "https://github.com/quickwit-oss/tantivy"
-repository = "https://github.com/quickwit-oss/tantivy"
+homepage = "https://github.com/codefin-lab/boostcore"
+repository = "https://github.com/codefin-lab/boostcore"
 description = "column oriented storage for tantivy"
 categories = ["database-implementations", "data-structures", "compression"]
 
