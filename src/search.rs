@@ -4638,6 +4638,80 @@ pub fn run(
             }
         }
     }
+    // `rescore` runs a second query over the top of the page and mixes its
+    // score into the one already there
+    let mut rescored = false;
+    let rescores = match body.get("rescore") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for spec in &rescores {
+        let window = spec
+            .get("window_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .max(1) as usize;
+        let inner = spec.get("query").cloned().unwrap_or(Value::Null);
+        let Some(rq) = inner.get("rescore_query").cloned() else { continue };
+        let qw = inner.get("query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let rw = inner.get("rescore_query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let mode = inner.get("score_mode").and_then(|v| v.as_str()).unwrap_or("total");
+        cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
+        let ids: Vec<String> = cands
+            .iter()
+            .take(window)
+            .filter_map(|c| {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                source_of(searcher, &g, c.addr).map(|(id, _)| id)
+            })
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let probe = json!({
+            "query": {"bool": {"must": [rq], "filter": [{"terms": {"_id": ids.clone()}}]}},
+            "size": ids.len(),
+        });
+        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
+        let mut scored: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for hit in &answer.hits {
+            if let (Some(id), Some(score)) = (
+                hit.get("_id").and_then(|v| v.as_str()),
+                hit.get("_score").and_then(|v| v.as_f64()),
+            ) {
+                scored.insert(id.to_string(), score as f32);
+            }
+        }
+        // the weight on the original query counts for every hit; only the
+        // ones inside the window are also asked the second query
+        for (at, c) in cands.iter_mut().enumerate() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let extra = if at < window {
+                source_of(searcher, &g, c.addr)
+                    .and_then(|(id, _)| scored.get(&id).copied())
+            } else {
+                None
+            };
+            match extra {
+                Some(extra) => {
+                    rescored = true;
+                    c.score = match mode {
+                        "multiply" => c.score * extra,
+                        "max" => (c.score * qw).max(extra * rw),
+                        "min" => (c.score * qw).min(extra * rw),
+                        "avg" => (c.score * qw + extra * rw) / 2.0,
+                        _ => c.score * qw + extra * rw,
+                    };
+                }
+                None if mode != "multiply" => c.score *= qw,
+                None => {}
+            }
+        }
+    }
     fill_seq(&mut cands, &searchers);
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
@@ -4846,6 +4920,22 @@ pub fn run(
             }
             if let Some(ig) = &h.ignored {
                 hit["_ignored"] = ig.clone();
+            }
+            // `explain` asks where the score came from. What can be said here
+            // is the score itself and what it was arrived at by.
+            if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let description = if rescored {
+                    "sum of the query score and the rescoring query score"
+                } else if sort_keys.is_empty() {
+                    "score of the query"
+                } else {
+                    "the query matched; the order comes from the sort"
+                };
+                hit["_explanation"] = json!({
+                    "value": h.score,
+                    "description": description,
+                    "details": [],
+                });
             }
             if !h.sort.is_empty() {
                 // a date column counts in nanoseconds; a sort value is

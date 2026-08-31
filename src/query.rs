@@ -418,7 +418,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     let inner: Box<dyn Query> = match kind.as_str() {
         "match_all" => {
             let boost = body.get("boost").and_then(|b| b.as_f64());
-            let base: Box<dyn Query> = Box::new(AllQuery);
+            // every document matches, and each one equally: a score of one
+            let base: Box<dyn Query> = Box::new(ConstScore::new(Box::new(AllQuery), 1.0));
             match boost {
                 Some(b) => Box::new(BoostQuery::new(base, b as f32)),
                 None => base,
