@@ -1,4 +1,5 @@
 //! Library surface so benchmarks can drive the same code the server does.
+pub mod analysis;
 pub mod api;
 pub mod blockstats;
 pub mod hdr;
