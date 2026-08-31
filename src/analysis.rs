@@ -7,6 +7,10 @@
 //!
 //! Everything here is built from what the index settings say, and handed to
 //! BoostCore as a `TextAnalyzer` under the name the mapping uses.
+//!
+//! Nothing calls into this yet: the chain is built and tested here, and the
+//! next step is the write path, the query path and `_analyze`.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
