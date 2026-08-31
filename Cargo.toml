@@ -2,6 +2,12 @@
 name = "boostsearch"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "An OpenSearch-compatible search server, on BoostCore"
+repository = "https://github.com/codefin-lab/boostsearch"
+readme = "README.md"
+keywords = ["search", "opensearch", "elasticsearch", "server"]
+categories = ["database-implementations"]
 
 [lib]
 name = "boostsearch"

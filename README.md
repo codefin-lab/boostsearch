@@ -78,7 +78,18 @@ own cluster is started with. A full run takes about ten seconds.
 
 ## Licence
 
-BoostCore is MIT, as tantivy is. This repository has no licence of its own yet.
+Dual licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you say otherwise, any contribution you send in is
+licensed the same way, with no further conditions.
+
+BoostCore, the engine underneath, is MIT, as the tantivy it forked is.
+
+This is not an OpenSearch product and is not endorsed by the OpenSearch
+project; it implements the same HTTP API, and says so.
 
 ## BoostCore
 
