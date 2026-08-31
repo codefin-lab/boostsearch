@@ -1,19 +1,19 @@
-use tantivy::schema::*;
-use tantivy::{Index, TantivyDocument, collector::Count};
-use tantivy::query::{AutomatonWeight, EnableScoring, Query, Weight};
-use tantivy_fst::Regex;
+use boostcore::schema::*;
+use boostcore::{Index, TantivyDocument, collector::Count};
+use boostcore::query::{AutomatonWeight, EnableScoring, Query, Weight};
+use boostcore_fst::Regex;
 use std::sync::Arc;
 
 #[derive(Clone)]
 struct JQ { field: Field, re: Arc<Regex>, path: Vec<u8> }
 impl std::fmt::Debug for JQ { fn fmt(&self, f:&mut std::fmt::Formatter)->std::fmt::Result{write!(f,"JQ")} }
 impl Query for JQ {
-    fn weight(&self, _s: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, _s: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
         Ok(Box::new(AutomatonWeight::<Regex>::new_for_json_path(self.field, self.re.clone(), &self.path)))
     }
 }
 
-fn main() -> tantivy::Result<()> {
+fn main() -> boostcore::Result<()> {
     let mut sb = Schema::builder();
     let f = sb.add_json_field("_dyn", JsonObjectOptions::default().set_expand_dots_enabled()
         .set_indexing_options(TextFieldIndexing::default().set_tokenizer("default")

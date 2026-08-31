@@ -1,6 +1,6 @@
 //! HDR histogram percentiles, and the aggregations that need the raw values.
 //!
-//! tantivy computes percentiles with a t-digest, which answers a different
+//! BoostCore computes percentiles with a t-digest, which answers a different
 //! question from OpenSearch's HDR option: HDR reports the *highest equivalent
 //! value* of the bucket a value falls in, so its answers are reproducible and
 //! slightly above the input. Matching it means implementing the bucketing.

@@ -10,10 +10,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tantivy::collector::TopDocs;
-use tantivy::query::TermQuery;
-use tantivy::schema::{IndexRecordOption, Term, Value as _};
-use tantivy::TantivyDocument;
+use boostcore::collector::TopDocs;
+use boostcore::query::TermQuery;
+use boostcore::schema::{IndexRecordOption, Term, Value as _};
+use boostcore::TantivyDocument;
 
 pub type Params = HashMap<String, String>;
 
@@ -1110,7 +1110,7 @@ fn term_vectors_of(
                 };
                 let freq = crate::query::build(&ctx, &json!({"match": {name.clone(): term}}))
                     .ok()
-                    .and_then(|q| searcher.search(&q, &tantivy::collector::Count).ok())
+                    .and_then(|q| searcher.search(&q, &boostcore::collector::Count).ok())
                     .unwrap_or(1) as u64;
                 entry["doc_freq"] = json!(freq);
                 entry["ttf"] = json!(spots.len());
@@ -2120,9 +2120,9 @@ pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, Stri
             // read the text as written: the usual path folds a date through
             // the resolution the index keeps, which is the very thing being
             // checked for
-            let Some(dt) = tantivy::time::OffsetDateTime::parse(
+            let Some(dt) = boostcore::time::OffsetDateTime::parse(
                 &text,
-                &tantivy::time::format_description::well_known::Rfc3339,
+                &boostcore::time::format_description::well_known::Rfc3339,
             )
             .ok()
             .or_else(|| crate::store::parse_date_lenient(&text)) else {
@@ -2730,7 +2730,7 @@ pub async fn bulk(
     let mut touched: Vec<String> = Vec::new();
 
     // Split the ndjson into operations first, so the expensive part -- parsing
-    // each document and building its tantivy form -- can run across cores.
+    // each document and building its BoostCore form -- can run across cores.
     struct Op<'a> {
         op: String,
         meta: Value,
@@ -4326,7 +4326,7 @@ pub async fn force_merge(
             continue;
         }
         loop {
-            let ids: Vec<tantivy::index::SegmentId> = g
+            let ids: Vec<boostcore::index::SegmentId> = g
                 .index
                 .searchable_segment_metas()
                 .unwrap_or_default()
@@ -4336,7 +4336,7 @@ pub async fn force_merge(
             if ids.len() <= max_segments {
                 break;
             }
-            // merge the whole set down in one step; tantivy handles the rest
+            // merge the whole set down in one step; BoostCore handles the rest
             let take = ids.len() - max_segments + 1;
             let batch: Vec<_> = ids.into_iter().take(take).collect();
             let merged = match g.writer() {
@@ -4471,7 +4471,7 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
 
 /// `_segments` -- what each shard is made of.
 ///
-/// One shard per index here, and tantivy names its segments by ordinal, so
+/// One shard per index here, and BoostCore names its segments by ordinal, so
 /// they are reported as `_0`, `_1` and so on to match the shape the API has.
 pub async fn segments(
     State(store): State<Store>,

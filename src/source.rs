@@ -200,9 +200,9 @@ pub fn format_date(value: &Value, pattern: &str) -> Option<Value> {
     let text = value.as_str()?;
     // read the text as written; folding it through the index's resolution
     // would lose the part a nanosecond format is asking for
-    let odt = tantivy::time::OffsetDateTime::parse(
+    let odt = boostcore::time::OffsetDateTime::parse(
         text,
-        &tantivy::time::format_description::well_known::Rfc3339,
+        &boostcore::time::format_description::well_known::Rfc3339,
     )
     .ok()
     .or_else(|| crate::query::parse_datetime(text).map(|d| d.into_utc()))?;

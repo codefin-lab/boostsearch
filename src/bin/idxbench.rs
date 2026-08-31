@@ -114,8 +114,8 @@ fn main() -> anyhow::Result<()> {
 #[allow(dead_code)]
 fn variants(fields: &obsearch::store::Fields, docs: &[Value]) {
     use std::collections::BTreeMap;
-    use tantivy::schema::OwnedValue;
-    use tantivy::TantivyDocument;
+    use boostcore::schema::OwnedValue;
+    use boostcore::TantivyDocument;
     let n = docs.len() as f64;
 
     let t = Instant::now();

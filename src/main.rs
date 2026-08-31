@@ -1,4 +1,4 @@
-//! obsearch -- an OpenSearch-compatible search server on tantivy.
+//! obsearch -- an OpenSearch-compatible search server on BoostCore.
 //!
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
@@ -33,7 +33,7 @@ async fn root() -> impl IntoResponse {
         "version": {
             "distribution": "obsearch",
             "number": "3.9.0",
-            "lucene_version": "tantivy-0.26",
+            "lucene_version": "BoostCore-0.26",
         },
         "tagline": "You Know, for Search"
     }))
