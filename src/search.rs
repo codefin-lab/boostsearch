@@ -1418,6 +1418,21 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 /// so strip that order and reapply it to the finished buckets ourselves.
 /// Lucene's `StringHelper.murmurhash3_x86_32`, which is what OpenSearch hashes
 /// a string term with when a terms aggregation is split into partitions.
+/// Which shard a document is routed to.
+///
+/// OpenSearch hashes the routing value as UTF-16 -- each character as two
+/// bytes, low byte first -- with seed zero, and folds the result by the shard
+/// count the way a floor-mod does, so a negative hash still names a shard.
+fn routing_shard(routing: &str, shards: u64) -> u64 {
+    let mut bytes = Vec::with_capacity(routing.len() * 2);
+    for c in routing.encode_utf16() {
+        bytes.push((c & 0xff) as u8);
+        bytes.push((c >> 8) as u8);
+    }
+    let hash = murmur3_x86_32(&bytes, 0) as i64;
+    hash.rem_euclid(shards as i64) as u64
+}
+
 fn murmur3_x86_32(data: &[u8], seed: u32) -> i32 {
     const C1: u32 = 0xcc9e_2d51;
     const C2: u32 = 0x1b87_3593;
@@ -4747,7 +4762,7 @@ pub fn run(
             let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
             match source_of(searcher, &g, c.addr) {
                 Some((doc_id, _)) => {
-                    let routed = murmur3_x86_32(doc_id.as_bytes(), 0) as u32 as u64 % shards;
+                    let routed = routing_shard(&doc_id, shards);
                     routed % max == id
                 }
                 None => false,
