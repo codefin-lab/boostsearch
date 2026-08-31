@@ -6264,6 +6264,73 @@ pub fn run(
         keep_asked_ranges(req, a);
     }
 
+    // a metric over a date reads instants, and says what the instant it
+    // arrived at is as well as the number behind it
+    fn name_date_metrics(
+        store: &Store,
+        targets: &[String],
+        request: &Value,
+        answer: &mut Value,
+    ) {
+        let Some(reqs) = request.as_object() else { return };
+        for (name, def) in reqs {
+            let kind = def
+                .as_object()
+                .and_then(|o| {
+                    o.keys().map(|k| k.to_string()).find(|k| {
+                        matches!(k.as_str(), "avg" | "min" | "max" | "sum" | "median_absolute_deviation")
+                    })
+                })
+                .unwrap_or_default();
+            if !kind.is_empty() {
+                let field = def
+                    .pointer(&format!("/{kind}/field"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("");
+                let ty = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+                if matches!(ty.as_deref(), Some("date") | Some("date_nanos")) {
+                    if let Some(v) =
+                        answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
+                    {
+                        let millis = if ty.as_deref() == Some("date_nanos") {
+                            (v / 1e6) as i64
+                        } else {
+                            v as i64
+                        };
+                        if let Some(text) = crate::store::format_millis(millis, "iso8601") {
+                            answer[name.clone()]["value_as_string"] = json!(text);
+                        }
+                    }
+                }
+            }
+            let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+            let Some(subs) = subs else { continue };
+            let Some(node) = answer.get_mut(name) else { continue };
+            match node.get_mut("buckets") {
+                Some(Value::Array(list)) => {
+                    for b in list.iter_mut() {
+                        name_date_metrics(store, targets, subs, b);
+                    }
+                }
+                Some(Value::Object(named)) => {
+                    for (_, b) in named.iter_mut() {
+                        name_date_metrics(store, targets, subs, b);
+                    }
+                }
+                _ => name_date_metrics(store, targets, subs, node),
+            }
+        }
+    }
+    if let (Some(a), Some(req)) = (
+        aggs.as_mut(),
+        body.get("aggs").or_else(|| body.get("aggregations")),
+    ) {
+        name_date_metrics(store, &targets, req, a);
+    }
+
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
     // what makes a nested terms aggregation the expensive one.
