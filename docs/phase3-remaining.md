@@ -1,93 +1,87 @@
-# Phase 3 — ที่เหลือ และบทเรียนระหว่างทาง
+# ที่เหลือ และบทเรียนระหว่างทาง
 
-Phase 3 อยู่ที่ **1,095 / 1,100** · Phase 1 อยู่ที่ **397 / 398**
-รายชื่อที่ตกจริง ๆ ให้ดูจาก runner เสมอ ไฟล์นี้เก็บเฉพาะ *เหตุผล* ที่ห้าตัวสุดท้าย
-ไปต่อไม่ได้ กับบทเรียนที่ไม่อยากให้หายไปกับ commit
+รันทั้ง suite (409 ไฟล์): **1,422 ผ่าน · 5 ตก · 77 skip = 99.6%**
+Phase 1 manifest: **398/398** · Phase 3 manifest: 1,098/1,100
 
-## ห้าตัวที่เหลือ
+## บทเรียนใหญ่ที่สุด: อ่านของจริงดีกว่าเดา
 
-### shard ที่นี่เป็นเรื่องของ routing ไม่ใช่ที่เก็บ — 4 sections
+หลายเรื่องเคยถูกบันทึกว่า "ไปต่อไม่ได้" เพราะเดาจากพฤติกรรมที่เห็นในเทส แล้ว
+ปิดได้ทันทีเมื่อไปอ่าน source ของ OpenSearch ใน `study/OpenSearch`:
 
-index หนึ่งใน obsearch คือ tantivy index เดียว `number_of_shards` มีผลกับการ
-routing และถูกรายงานกลับไปตามที่ตั้ง แต่ไม่มี store แยกต่อ shard สี่ตัวนี้ต่างกัน
-ตรงนั้น และต้องมี per-shard store จริง ๆ ถึงจะแก้ได้ ไม่ใช่แก้ตรงจุด:
+| เคยเดา | ของจริง |
+|---|---|
+| routing hash — ลอง 14 seed แล้วสรุปว่า "เลือกอันไหนก็เป็นการเดาเลข" | `Murmur3HashFunction.hash(String)` แฮช **UTF-16** (ตัวอักษรละ 2 ไบต์ low byte ก่อน) seed 0 |
+| HDR scale เป็นค่าคงที่ที่ fit กับเทส | `DoubleHistogram` เปิดที่ 2^800 แล้วให้ค่าแรกดึงลงมา |
+| `sum_other_doc_count` "single shard เลยได้คนละเลข" | `BucketSelectionStrategy`: shard นับ = ทั้งหมดบน shard ลบ top ที่ส่งกลับ แล้ว reduce บวกที่ตัดทิ้ง |
+| alias ใน template merge กันยังไง | `resolveAliases` reverse list แล้วชื่อที่เจอก่อนชนะ = แทนที่ทั้งก้อน |
+| sort บนฟิลด์ nested ควรทำยังไง | `SortBuilder.resolveNested` คืน null → อ่าน doc values บน parent ซึ่งไม่มีค่า |
+| ลำดับ bucket ที่เสมอกัน | `BucketOrder.compound(count(false))` — คอมเมนต์บอกเอง "automatically adds tie-breaker key asc" |
+| date กับ date_nanos เทียบกันยังไง | `DateFieldMapper.Resolution`: `date` เก็บ **millisecond**, `date_nanos` เก็บ **nanosecond** · sort value คือเลขที่เก็บ จึงเทียบข้ามหน่วยกันตรง ๆ |
+| shard ล้มเพราะค่าติดลบ | `ExpandSearchPhase` / HDR: shard ที่ถือค่าที่ sketch ไม่รับ ล้มทั้ง shard และ search เดินต่อโดยไม่มีมัน |
 
-- `delete/50_refresh` — refresh ลงที่ shard เดียว ของที่ลบบน shard อื่นจึงยัง
-  มองเห็นอยู่ · ที่นี่ refresh ถึงทุกอย่างพร้อมกัน
-- `search.aggregation/190_percentiles_hdr_metric :: Negative values test` —
-  ค่าติดลบทำให้ shard ที่ถือมันพัง search จึงตอบ 4 hits จาก 5 พร้อม shard
-  failure · ที่นี่ไม่มี shard ให้พัง
-- `search.aggregation/370_multi_terms :: sum_other_doc_count` — `shard_size`
-  ตัดคำตอบของแต่ละ shard *ก่อน* merge ตัวเลขที่ได้จึงน้อยกว่าความจริงโดยตั้งใจ ·
-  ที่นี่ aggregation เห็นทั้ง index พร้อมกัน
-- `scroll/12_slices :: Sliced scroll` — เอกสารตกอยู่ slice ไหน มาจาก shard ที่มันอยู่
+## 5 ตัวที่เหลือ — ทั้งหมดติดข้อจำกัดของชั้นล่าง
 
-เรื่อง routing hash ของ slice มีบันทึกแยกไว้ข้างล่าง
+### tantivy ไม่เก็บ field norm ให้ JSON field — 3 sections
 
-### วันที่ที่เกินกว่าที่ date เก็บได้ — 1 section
+`index/100_partial_flat_object`, `index/105_partial_flat_object_nested`,
+`search/115_multiple_field_collapsing` ตกเพราะ **ลำดับ hit** ล้วน ๆ:
+เอกสารที่มีคำเดียวกันแต่ฟิลด์สั้นกว่า ต้องได้คะแนนมากกว่า (BM25 field length norm)
+
+ที่นี่เอกสารทั้งก้อนอยู่ใน JSON field เดียว และ
+`SegmentWriter` ของ tantivy 0.26 ในสาขา `FieldType::JsonObject`
+**ไม่มีการเรียก `fieldnorms_writer.record` เลย** (ทุก type อื่นเรียกหมด) ⇒
+`set_fieldnorms(true)` ไม่มีผล และ BM25 คิดเหมือนทุกเอกสารยาวเท่ากัน
+
+แก้ได้ทางเดียวคือแก้ tantivy หรือเลิกใช้ JSON field
+
+### date เกินช่วงที่ i64 nanosecond เก็บได้ — 1 section
 
 `search.aggregation/40_range :: Date Range Missing` เขียน epoch **seconds**
-ระดับหลักแสนล้าน = ปี 11970 · tantivy เก็บ date เป็น i64 nanosecond ซึ่งหมดที่
-ปี 2262 ⇒ เก็บไม่ได้เลย ไม่ใช่แค่ปัดทิ้งความละเอียด และถ้า clamp ก็เสียลำดับ
-ซึ่งเป็นสิ่งเดียวที่ aggregation นี้ถาม
+ระดับแสนล้าน = ปี 11970 · OpenSearch เก็บ `date` เป็น millisecond จึงรับได้สบาย
+ที่นี่ค่าไปอยู่ใน DateTime ของ tantivy ซึ่งเป็น i64 **nanosecond** หมดที่ปี 2262
 
-## Sliced search: การแบ่งถูก แต่ hash ไม่ตรง
+แก้ให้ตรงต้องเก็บ date เป็น millisecond ทั้งระบบ ซึ่งกระทบ range query,
+histogram, sort, format ทั้งหมด
 
-slice แบ่ง index ให้ผู้อ่านหลายคน ถ้ามี shard ไม่น้อยกว่าจำนวน slice แต่ละ slice
-รับ shard ที่เลขตกถึงมัน (`shard % max == id`) และเอกสารอยู่ shard ไหนก็มาจาก id
-ของมัน โครงนี้ทำแล้วและให้จำนวนถูก
+### refresh ถึงทีละ shard — 1 section
 
-ที่ไม่ตรงคือเอกสารไหนไปอยู่ shard ไหน · hash ของเราเป็น murmurhash3_x86_32 ของ id
-seed 0 พับด้วยจำนวน shard ของเขาแบ่งคนละแบบ · **14 seed ที่ต่างกันให้ผลตรงกับ
-ตัวอย่าง 4 เอกสารในชุดทดสอบ** ซึ่งเป็นสัญญาณว่าการเลือกสักอันคือการ *เดาเลข*
-ไม่ใช่การ *ทำตามกฎ*
+`delete/50_refresh` — index หนึ่งที่นี่คือ tantivy index เดียว มี writer เดียว
+`refresh` จึงทำให้ทุกอย่างเห็นพร้อมกัน ไม่มีทางให้ delete บน shard หนึ่ง
+ยังมองไม่เห็นขณะที่อีก shard เห็นแล้ว · ต้องมี store แยกต่อ shard จริง ๆ
 
-## บทเรียนที่ยังใช้ได้
+(ส่วนอีกเคสที่เคยอยู่กลุ่มนี้ — HDR negative values — ปิดได้แล้ว เพราะ
+routing hash ตรงแล้ว จึงรู้ว่าเอกสารตัวปัญหาอยู่ shard ไหนและตัดทั้ง shard ทิ้งได้)
+
+## บทเรียนอื่นที่ยังใช้ได้
 
 ### closed index — ค่าเริ่มต้นของ `expand_wildcards` ต่างกันตาม API
 
-`_close`/`_open` ตั้ง flag ถูกมาตลอด แต่ตอนแรกการ resolve ไม่เคยสนใจ flag นั้น ·
-ครั้งแรกที่แก้โดยทำให้ทุก wildcard เป็น open-only → **พัง 229 sections** เพราะ
-`DELETE /*` ของ runner ไม่ลบ closed index อีกต่อไป แล้วมันค้างข้ามไฟล์
+`open` สำหรับอ่านเอกสารและ `_resolve/index` · `open,closed` สำหรับ
+delete/cat/stats · **`all` สำหรับ cluster health** ⇒ ทำเป็น opt-in ต่อ endpoint
 
-ค่าเริ่มต้นต่างกันจริง ๆ: `open` สำหรับการอ่านเอกสารและ `_resolve/index` ·
-`open,closed` สำหรับ delete/cat/stats · **`all` สำหรับ cluster health** ⇒ ทำเป็น
-opt-in ต่อ endpoint ไม่ใช่เปลี่ยนค่าเริ่มต้นรวม
+### aggregation ที่ต้องรันเองลากตัวแม่ออกมาด้วย
 
-### aggregation ที่ peel ออกมา ซ้อนกันไม่ได้
+`peelable()` เช็คลูกหลานทั้งต้น ถ้าลูกต้องรันเองตัวแม่ก็ต้องออกจาก tantivy ด้วย
+แล้ว `run_field_terms_agg` รับหน้าที่หา bucket ให้ ส่วน `order` ที่ชี้ไป sub-agg
+ที่ peel ไปแล้วต้องเรียงเองหลังได้คำตอบ
 
-`multi_terms`, `composite`, `date_histogram` แบบ calendar หรือแบบมี time zone,
-`rare_terms`, percentiles — ถูก peel ออกจาก request ก่อนส่งให้ tantivy · sub-agg
-ของมันวิ่งผ่าน `filtered_count` ซึ่งส่งต่อให้ tantivy parser ⇒ ถ้า sub-agg เป็น
-ตัวที่ถูก peel เหมือนกันจะพัง · `run_peeled_agg` แก้กรณีที่พบแล้ว แต่การรื้อให้ครบ
-ควรทำทีเดียวทั้งชุด ไม่ใช่ไล่ทีละอัน
+### nested = object ไม่ใช่ document
 
-### `_cat` — ช่องว่างท้ายบรรทัดไม่ใช่ padding แต่เป็นคอลัมน์ที่หายไป
+nested aggregation นับ object ที่ path นั้น · filter คัด object,
+terms/composite group object, metric อ่านค่าของ object, reverse_nested
+กลับออกมาเป็น document · inner_hits list เฉพาะ object ที่ query แมตช์
+และ highlight จาก object ตัวเอง · sort ต้องบอกว่าอ่านใน object ไหน
 
-เคยสรุปไว้ว่า `_cat` ของ OpenSearch เติมช่องว่างท้ายทุก cell แล้วลองทำสองครั้ง
-ครั้งละ **−20 sections** · ที่จริง regex ที่ดูเหมือนต้องการช่องว่างท้ายบรรทัด
-กำลังบอกว่ามี **คอลัมน์ว่างต่อท้าย** ที่เรายังไม่มี (`composed_of` ของ template,
-replica ที่ยัง unassigned ของ shards) · เติมคอลัมน์ให้ครบแล้วผ่านหมดโดยไม่ต้อง
-แตะ padding เลย
+### `_cat` — ช่องว่างท้ายบรรทัดคือคอลัมน์ที่หายไป
 
-การจัดชิดขวาเป็นสมบัติของ *คอลัมน์* ไม่ใช่ของค่าที่บังเอิญเป็นตัวเลข
+เคยสรุปว่า `_cat` เติมช่องว่างท้ายทุก cell แล้วลองสองครั้ง ครั้งละ −20 sections ·
+ที่จริง regex กำลังบอกว่ามีคอลัมน์ว่างต่อท้ายที่ยังไม่มี
 
-### HDR — scale มาจากข้อมูล ไม่ใช่ค่าคงที่
+### positions ไม่ได้อยู่ใน column
 
-`DoubleHistogram` เปิดด้วยช่วงที่สูงเกินจริง (2^800) แล้วให้ค่าแรกที่บันทึกดึงมันลงมา
-scale ที่ได้จึงมาจากข้อมูล · ค่าที่สูงกว่าช่วงจะเลื่อน scale **ก็ต่อเมื่อ** จำนวนเต็ม
-ที่บันทึกไว้แล้วหารสองได้โดยไม่ตกลงไปครึ่งล่างของ bucket แรก มิฉะนั้นช่วงจะโตทางบน
-โดย scale เท่าเดิม · ก่อนหน้านี้ใช้ค่าคงที่ที่ fit กับชุดทดสอบ อ่านกฎจริงจาก
-HdrHistogram แล้วจึงได้ทั้งกลุ่ม
-
-### t-digest ที่มีค่าไม่กี่ตัว เก็บครบทุกตัว
-
-OpenSearch เก็บทุกค่าเมื่อจำนวนน้อย แล้วรายงานค่าที่อันดับตรงกับ percentile
-(`ceil(p/100 * n)`) · sketch แบบประมาณตอบคนละคำถามเล็กน้อย (1.0 กลายเป็น 1.01)
+`intervals` กับ `significant_text` ต้องรู้ว่าคำอยู่ตรงไหน ⇒ อ่าน text กลับมา
+analyse ใหม่แล้วประเมินกฎบน token (OpenSearch ก็ทำแบบเดียวกันกับ significant_text)
 
 ## node ที่ชุดทดสอบคาดหวัง
-
-test cluster ของ OpenSearch เปิดด้วย `node.attr.testattr: test` และมีเทสอ่านมันกลับ
-ผ่าน `_cat/nodeattrs` กับ `_cluster/settings` ⇒ เปิดเซิร์ฟเวอร์แบบเดียวกัน:
 
     OBSEARCH_NODE_ATTRS=testattr=test ./target/release/obsearch

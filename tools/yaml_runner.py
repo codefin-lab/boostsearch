@@ -323,7 +323,14 @@ class Runner:
         for path, expected in spec.items():
             actual = flatten_path(self.last, self.unstash_path(path))
             expected = self.unstash(expected)
-            if not isinstance(actual, list) or expected not in actual:
+            # an entry "contains" what was asked for when it carries at least
+            # those keys with those values, not only when it is exactly them
+            def holds(item, want):
+                if isinstance(want, dict) and isinstance(item, dict):
+                    return all(k in item and item[k] == v for k, v in want.items())
+                return item == want
+
+            if not isinstance(actual, list) or not any(holds(i, expected) for i in actual):
                 raise Failure(f"contains {path}: {expected!r} not in {actual!r}")
 
     # ---- driving ---------------------------------------------------------
@@ -385,7 +392,17 @@ def reset(base):
         requests.delete(base + "/_search/point_in_time/_all", timeout=10)
     except Exception:
         pass
-    for path in ("/*", "/_index_template/*", "/_template/*", "/_component_template/*"):
+    # repositories, snapshots and pipelines outlive indices in the same way
+    for path in (
+        "/*",
+        "/_index_template/*",
+        "/_template/*",
+        "/_component_template/*",
+        "/_snapshot/*",
+        "/_ingest/pipeline/*",
+        "/_search/pipeline/*",
+        "/_data_stream/*",
+    ):
         try:
             requests.delete(base + path, timeout=10)
         except Exception:

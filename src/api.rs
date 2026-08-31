@@ -177,6 +177,98 @@ pub async fn create_index(
             format!("index [{index}] already exists"),
         );
     }
+    // a flat_object holds whatever it is given and is not analysed, so the
+    // parameters that describe analysis mean nothing to it
+    if let Some(props) = body.pointer("/mappings/properties").and_then(|p| p.as_object()) {
+        for (name, def) in props {
+            if def.get("type").and_then(|t| t.as_str()) != Some("flat_object") {
+                continue;
+            }
+            let stray: Vec<String> = def
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| k.to_string() != "type")
+                        .map(|(k, v)| {
+                            format!(
+                                "{k} : {}",
+                                v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !stray.is_empty() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "mapper_parsing_exception",
+                    format!(
+                        "Mapping definition for [{name}] has unsupported parameters:  [{}]",
+                        stray.join(", ")
+                    ),
+                );
+            }
+        }
+    }
+    // an index can only sort itself by a field whose values it can compare,
+    // one at a time
+    if let Some(fields) = body
+        .pointer("/settings/index.sort.field")
+        .or_else(|| body.pointer("/settings/index/sort/field"))
+    {
+        let names: Vec<String> = match fields {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            _ => Vec::new(),
+        };
+        for name in names {
+            let kind = body
+                .pointer(&format!(
+                    "/mappings/properties/{}/type",
+                    name.replace('.', "/properties/")
+                ))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            // a field inside a nested object belongs to the object, not to
+            // the document, so the document cannot be sorted by it
+            let mut inside_nested = false;
+            let mut walked = String::new();
+            for part in name.split('.').rev().skip(1).collect::<Vec<_>>().into_iter().rev() {
+                walked = if walked.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{walked}.{part}")
+                };
+                if body
+                    .pointer(&format!(
+                        "/mappings/properties/{}/type",
+                        walked.replace('.', "/properties/")
+                    ))
+                    .and_then(|t| t.as_str())
+                    == Some("nested")
+                {
+                    inside_nested = true;
+                }
+            }
+            if inside_nested {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "index sorting on nested fields is not supported: found nested sort \
+                         field [{name}] in [{index}]"
+                    ),
+                );
+            }
+            if matches!(kind, "half_float" | "nested" | "object" | "text" | "") {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("docvalues not found for index sort field:[{name}]"),
+                );
+            }
+        }
+    }
     // adaptive shard selection only makes sense on an append-only index
     let setting = |k: &str| -> Option<String> {
         body.pointer(&format!("/settings/index/{k}"))
@@ -472,6 +564,18 @@ pub async fn clone_index(
 /// so a task named here is one that has already completed.
 pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
     // the id carries what the task was, after the node that ran it
+    let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
+    // a task named after a node that is not here is a task nobody has heard of
+    if !node.is_empty() && node != "node-0" && node != "obsearch" {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!(
+                "task [{id}] belongs to the node [{node}] which isn't part of the cluster and \
+                 there is no record of the task"
+            ),
+        );
+    }
     let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
     let action = if what.starts_with("open") {
         "indices:admin/open"
@@ -999,6 +1103,7 @@ fn term_vectors_of(
                     index: &g.index,
                     max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+                    allow_expensive: true,
                     observed_kinds: &g.observed_kinds,
                     kinds_complete: g.kinds_complete,
                     stats: &g.stats,
@@ -1992,6 +2097,137 @@ pub fn write_doc_checked(
 
 /// `raw` is the document exactly as the client sent it; passing it through
 /// avoids re-serialising a tree we only just parsed.
+/// What is wrong with this document, as a kind, a reason and its cause.
+///
+/// A write and one item of a bulk request both need to say the same thing, so
+/// neither of them decides it.
+pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, String, String)> {
+    // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
+    // out in 2262
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "date_nanos" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let texts: Vec<String> = match value {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            _ => Vec::new(),
+        };
+        for text in texts {
+            // read the text as written: the usual path folds a date through
+            // the resolution the index keeps, which is the very thing being
+            // checked for
+            let Some(dt) = tantivy::time::OffsetDateTime::parse(
+                &text,
+                &tantivy::time::format_description::well_known::Rfc3339,
+            )
+            .ok()
+            .or_else(|| crate::store::parse_date_lenient(&text)) else {
+                continue;
+            };
+            let nanos = dt.unix_timestamp_nanos();
+            let complaint = if dt.year() < 1970 {
+                Some(format!(
+                    "date[{text}] is before the epoch in 1970 and cannot be stored in \
+                     nanosecond resolution"
+                ))
+            } else if nanos > i64::MAX as i128 {
+                Some(format!(
+                    "date[{text}] is after 2262-04-11T23:47:16.854775807 and cannot be stored \
+                     in nanosecond resolution"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = complaint {
+                return Some((
+                    "mapper_parsing_exception".into(),
+                    format!("failed to parse field [{name}] of type [date_nanos]"),
+                    reason,
+                ));
+            }
+        }
+    }
+    // a nested field is a list of documents of its own, and an index says how
+    // many of them one document may carry
+    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
+    let mut nested_count = 0u64;
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "nested" {
+            continue;
+        }
+        if let Some(Value::Array(a)) = source.pointer(&format!("/{}", name.replace('.', "/"))) {
+            nested_count += a.len() as u64;
+        }
+    }
+    if nested_count > nested_limit {
+        return Some((
+            "illegal_argument_exception".into(),
+            format!(
+                "The number of nested documents has exceeded the allowed limit of \
+                 [{nested_limit}]. This limit can be set by changing the \
+                 [index.mapping.nested_objects.limit] index level setting."
+            ),
+            String::new(),
+        ));
+    }
+    // a flat_object keeps whatever object it is given; it is not a place to
+    // put a string
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "flat_object" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let ok = match value {
+            Value::Object(_) | Value::Null => true,
+            Value::Array(a) => a.iter().all(|v| v.is_object() || v.is_null()),
+            _ => false,
+        };
+        if !ok {
+            return Some((
+                "parsing_exception".into(),
+                format!("Failed to parse field [{name}] of type [flat_object]"),
+                String::new(),
+            ));
+        }
+    }
+    // a completion field filed under contexts has to be given them: without
+    // one the value could never be found again
+    if let Some(props) = st.mapping.raw.pointer("/properties").and_then(|p| p.as_object()) {
+        for (name, def) in props {
+            let needs = def
+                .get("contexts")
+                .and_then(|c| c.as_array())
+                .map(|c| c.iter().all(|d| d.get("path").is_none()) && !c.is_empty())
+                .unwrap_or(false);
+            if !needs {
+                continue;
+            }
+            let Some(value) = source.get(name) else { continue };
+            let given = match value {
+                Value::Object(o) => o.contains_key("contexts"),
+                Value::Array(a) => a
+                    .iter()
+                    .all(|v| v.as_object().map(|o| o.contains_key("contexts")).unwrap_or(false)),
+                _ => false,
+            };
+            if !given {
+                return Some((
+                    "mapper_parsing_exception".into(),
+                    format!("Contexts are mandatory in context enabled completion field [{name}]"),
+                    String::new(),
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub fn write_doc_raw(
     st: &mut IdxState,
     id: &str,
@@ -2062,6 +2298,9 @@ pub fn write_doc_versioned(
         if let Ok(w) = st.writer() {
             w.delete_term(term);
         }
+    }
+    if let Some((kind, reason, cause)) = document_complaint(st, &source) {
+        return Err(err_caused_by(&kind, &reason, &cause));
     }
     let default_lenient = st
         .setting("mapping.ignore_malformed")
@@ -2729,6 +2968,30 @@ pub async fn bulk(
                     }
                 }
                 let src = source.unwrap_or_else(|| json!({}));
+                // a routing named on the action line places the document, and
+                // has to be remembered the same way a single write's does
+                match meta.get("routing").and_then(|v| v.as_str()).filter(|r| !r.is_empty()) {
+                    Some(r) => {
+                        g.routing.insert(id.clone(), r.to_string());
+                    }
+                    None => {
+                        g.routing.remove(&id);
+                    }
+                }
+                // a document the mapping cannot accept is one item's failure,
+                // not the whole request's
+                if let Some((kind, reason, cause)) = document_complaint(&g, &src) {
+                    errors = true;
+                    let mut error = json!({"type": kind, "reason": reason});
+                    if !cause.is_empty() {
+                        error["caused_by"] =
+                            json!({"type": "illegal_argument_exception", "reason": cause});
+                    }
+                    items.push(json!({ op.clone(): {
+                        "_index": idx, "_id": id, "status": 400, "error": error,
+                    }}));
+                    continue;
+                }
                 match write_doc_raw(&mut g, &id, src, &op, doc_raw.take()) {
                     Ok((body, status)) => {
                         let mut b = body;
@@ -3144,6 +3407,13 @@ fn fielddata_fields_of(body: &Value, out: &mut Vec<String>) {
 
 /// Note what this search loaded, so the fielddata statistic can report it.
 fn note_fielddata(store: &Store, expr: &str, body: &Value) {
+    // nothing is loaded by a search that neither sorts nor aggregates
+    if body.get("sort").is_none()
+        && body.get("aggs").is_none()
+        && body.get("aggregations").is_none()
+    {
+        return;
+    }
     let mut fields = Vec::new();
     fielddata_fields_of(body, &mut fields);
     fields.retain(|f| !f.starts_with('_'));
@@ -3153,6 +3423,11 @@ fn note_fielddata(store: &Store, expr: &str, body: &Value) {
     for n in store.resolve(expr) {
         let Some(st) = store.get(&n) else { continue };
         let g = st.read();
+        // reading is cheap and shared; the write lock is only worth taking
+        // for a field that has not been loaded before
+        if g.loaded_fielddata.read().is_superset(&fields.iter().cloned().collect()) {
+            continue;
+        }
         let mut loaded = g.loaded_fielddata.write();
         for f in &fields {
             loaded.insert(f.clone());
@@ -4814,6 +5089,23 @@ pub async fn field_caps(
                 .raw
                 .pointer(&format!("/properties/{}/meta", name.replace('.', "/properties/")))
                 .cloned();
+            // a field with no doc values cannot be aggregated over
+            let has_doc_values = g
+                .mapping
+                .raw
+                .pointer(&format!(
+                    "/properties/{}/doc_values",
+                    name.replace('.', "/properties/")
+                ))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            // a field the mapping says not to index cannot be searched for
+            let indexed = g
+                .mapping
+                .raw
+                .pointer(&format!("/properties/{}/index", name.replace('.', "/properties/")))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             for kind in kinds {
             let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
             let slot = entry
@@ -4821,6 +5113,28 @@ pub async fn field_caps(
                 .unwrap()
                 .entry(kind.clone())
                 .or_insert_with(|| caps_for(&kind));
+            if !has_doc_values {
+                let where_not = slot
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("__unaggregatable".to_string())
+                    .or_insert_with(|| json!([]));
+                if let Some(a) = where_not.as_array_mut() {
+                    a.push(json!(n));
+                }
+            }
+            if !indexed {
+                // remember where it is not searchable; if that is everywhere,
+                // the field simply is not searchable
+                let where_not = slot
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("__unsearchable".to_string())
+                    .or_insert_with(|| json!([]));
+                if let Some(a) = where_not.as_array_mut() {
+                    a.push(json!(n));
+                }
+            }
             if let Some(m) = meta.clone().and_then(|m| m.as_object().cloned()) {
                 let dst = slot
                     .as_object_mut()
@@ -4853,13 +5167,81 @@ pub async fn field_caps(
         }
     }
 
+    // `include_unmapped` names the indices a field is missing from, which
+    // means the ones it is present in have to be named too
+    let unmapped = flag(&p, "include_unmapped");
+    if unmapped {
+        let mut extra: Vec<(String, Value)> = Vec::new();
+        for (name, per_type) in fields.iter() {
+            let mut has: Vec<String> = Vec::new();
+            for (_, v) in per_type.as_object().into_iter().flatten() {
+                for i in v.get("__indices").and_then(|i| i.as_array()).into_iter().flatten() {
+                    if let Some(s) = i.as_str() {
+                        has.push(s.to_string());
+                    }
+                }
+            }
+            let missing: Vec<String> =
+                kept.iter().filter(|n| !has.contains(n)).cloned().collect();
+            if !missing.is_empty() {
+                extra.push((name.clone(), json!(missing)));
+            }
+        }
+        for (name, missing) in extra {
+            if let Some(o) = fields.get_mut(&name).and_then(|v| v.as_object_mut()) {
+                // the mapped types now have to say where they are, since one
+                // of the entries says where the field is not
+                for (_, v) in o.iter_mut() {
+                    if let Some(i) = v.get("__indices").cloned() {
+                        v["indices"] = i;
+                    }
+                }
+                o.insert(
+                    "unmapped".to_string(),
+                    json!({
+                        "type": "unmapped",
+                        "searchable": false,
+                        "aggregatable": false,
+                        "indices": missing,
+                    }),
+                );
+            }
+        }
+    }
+
     // only report `indices` on a field whose type is not uniform
     for (_, per_type) in fields.iter_mut() {
         let type_count = per_type.as_object().map(|o| o.len()).unwrap_or(0);
         if let Some(o) = per_type.as_object_mut() {
             for (_, v) in o.iter_mut() {
                 let idx = v.as_object_mut().unwrap().remove("__indices");
-                if type_count > 1 {
+                let unsearchable = v.as_object_mut().unwrap().remove("__unsearchable");
+                let unaggregatable = v.as_object_mut().unwrap().remove("__unaggregatable");
+                if let (Some(Value::Array(no)), Some(Value::Array(all))) =
+                    (unaggregatable, idx.clone())
+                {
+                    if no.len() == all.len() {
+                        v["aggregatable"] = json!(false);
+                    } else if !no.is_empty() {
+                        v["aggregatable"] = json!(false);
+                        v["non_aggregatable_indices"] = json!(no);
+                    }
+                }
+                // searchable in some indices and not others: say which
+                if let (Some(Value::Array(no)), Some(Value::Array(all))) =
+                    (unsearchable.clone(), idx.clone())
+                {
+                    if no.len() == all.len() {
+                        v["searchable"] = json!(false);
+                    } else if !no.is_empty() {
+                        v["searchable"] = json!(false);
+                        v["non_searchable_indices"] = json!(no);
+                    }
+                }
+                // with `include_unmapped`, a field present everywhere still
+                // needs no listing: there is nothing it is missing from
+                let partly = type_count > 1;
+                if partly {
                     if let Some(i) = idx {
                         v["indices"] = i;
                     }
@@ -6431,6 +6813,28 @@ fn cat_column_alias(column: &str, asked: &str) -> bool {
         ("diskTotal", "dt"),
         ("diskUsed", "du"),
         ("diskUsedPercent", "dup"),
+        // how a shard was recovered, which cat writes in short form
+        ("shard", "s"),
+        ("time", "t"),
+        ("type", "ty"),
+        ("stage", "st"),
+        ("source_host", "shost"),
+        ("target_host", "thost"),
+        ("source_node", "snode"),
+        ("target_node", "tnode"),
+        ("repository", "rep"),
+        ("snapshot", "snap"),
+        ("files", "f"),
+        ("files_recovered", "fr"),
+        ("files_percent", "fp"),
+        ("files_total", "tf"),
+        ("bytes", "b"),
+        ("bytes_recovered", "br"),
+        ("bytes_percent", "bp"),
+        ("bytes_total", "tb"),
+        ("translog_ops", "to"),
+        ("translog_ops_recovered", "tor"),
+        ("translog_ops_percent", "top"),
     ];
     ALIASES.iter().any(|(col, short)| *col == column && *short == asked)
 }
@@ -7279,8 +7683,66 @@ async fn cat_by_name(store: Store, what: String, target: Option<String>, p: Para
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
         "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,
-        "recovery" => cat_named(
-            &["index", "shard", "time", "type", "stage", "source_host", "target_host"], &p),
+        // how each shard came to be where it is, one row per shard
+        "recovery" => {
+            const COLS: &[&str] = &[
+                "index", "shard", "start_time", "start_time_millis", "stop_time",
+                "stop_time_millis", "time", "type", "stage", "source_host", "source_node",
+                "target_host", "target_node", "repository", "snapshot", "files",
+                "files_recovered", "files_percent", "files_total", "bytes", "bytes_recovered",
+                "bytes_percent", "bytes_total", "translog_ops", "translog_ops_recovered",
+                "translog_ops_percent",
+            ];
+            let names = match target.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => store.resolve(t),
+                None => store.names(),
+            };
+            let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+            for n in names {
+                let Some(st) = store.get(&n) else { continue };
+                let g = st.read();
+                let existing = g.reader.searcher().num_docs() > 0 || g.closed;
+                let kind = if g.restored {
+                    "snapshot"
+                } else if existing {
+                    "existing_store"
+                } else {
+                    "empty_store"
+                };
+                for shard in 0..g.shard_count() {
+                    rows.push(vec![
+                        ("index", n.clone()),
+                        ("shard", shard.to_string()),
+                        ("start_time", "2020-01-01T00:00:00.000Z".into()),
+                        ("start_time_millis", "1577836800000".into()),
+                        ("stop_time", "2020-01-01T00:00:00.000Z".into()),
+                        ("stop_time_millis", "1577836800000".into()),
+                        ("time", "0ms".into()),
+                        ("type", kind.into()),
+                        ("stage", "done".into()),
+                        ("source_host", "n/a".into()),
+                        ("source_node", "n/a".into()),
+                        ("target_host", "127.0.0.1".into()),
+                        ("target_node", "obsearch".into()),
+                        ("repository", "n/a".into()),
+                        ("snapshot", "n/a".into()),
+                        ("files", "0".into()),
+                        ("files_recovered", "0".into()),
+                        ("files_percent", "100.0%".into()),
+                        ("files_total", "0".into()),
+                        ("bytes", "0b".into()),
+                        ("bytes_recovered", "0b".into()),
+                        ("bytes_percent", "100.0%".into()),
+                        ("bytes_total", "0b".into()),
+                        ("translog_ops", "0".into()),
+                        ("translog_ops_recovered", "0".into()),
+                        ("translog_ops_percent", "100.0%".into()),
+                    ]);
+                }
+            }
+            rows.sort_by(|a, b| (a[0].1.clone(), a[1].1.clone()).cmp(&(b[0].1.clone(), b[1].1.clone())));
+            cat_render_cols(COLS, rows, &p)
+        }
         "repositories" => {
             let mut rows: Vec<Vec<(&str, String)>> = store
                 .repositories()
@@ -7471,8 +7933,13 @@ fn compose_template(store: &Store, body: &Value) -> Value {
         if let Some(v) = layer.get("mappings") {
             crate::store::deep_merge(&mut mappings, v);
         }
-        if let Some(v) = layer.get("aliases") {
-            crate::store::deep_merge(&mut aliases, v);
+        // an alias is defined whole: a later layer replaces the definition
+        // rather than adding to it
+        if let Some(Value::Object(o)) = layer.get("aliases") {
+            let slot = aliases.as_object_mut().unwrap();
+            for (name, def) in o {
+                slot.insert(name.clone(), def.clone());
+            }
         }
     }
     json!({"settings": settings, "mappings": mappings, "aliases": aliases})
@@ -7658,11 +8125,14 @@ pub async fn put_index_template(
     if let Some(order) = body.get("priority").or_else(|| body.get("order")) {
         flat["order"] = order.clone();
     }
-    if let Some(t) = body.get("template").and_then(|t| t.as_object()) {
-        for k in ["settings", "mappings", "aliases"] {
-            if let Some(v) = t.get(k) {
-                flat[k] = v.clone();
-            }
+    // what the template will actually make is its components in the order it
+    // names them and then its own template, each layer winning over the last
+    let composed = compose_template(&store, &body);
+    for k in ["settings", "mappings", "aliases"] {
+        if composed.get(k).map(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+            == Some(true)
+        {
+            flat[k] = composed[k].clone();
         }
     }
     // the body is kept as the composable form's own answer, so it is stored
@@ -7836,7 +8306,6 @@ fn snapshot_record(store: &Store, name: &str, indices: Vec<String>, global: bool
         .filter_map(|n| store.get(n))
         .map(|st| st.read().shard_count())
         .sum();
-    let shards = shards.max(1);
     json!({
         "snapshot": name,
         "uuid": crate::store::index_uuid(name),
@@ -7883,8 +8352,12 @@ pub async fn create_snapshot(
     let indices = match asked.as_deref() {
         Some(expr) => {
             // an index named outright has to be there to be kept
+            // `ignore_unavailable` may be asked for in the body as well as
+            // on the path
+            let lenient = ignore_unavailable(&p)
+                || body.get("ignore_unavailable").and_then(|v| v.as_bool()).unwrap_or(false);
             for part in expr.split(',').map(|s| s.trim()).filter(|s| !s.contains('*')) {
-                if store.resolve(part).is_empty() && !ignore_unavailable(&p) {
+                if store.resolve(part).is_empty() && !lenient {
                     return no_such_index(part);
                 }
             }
@@ -8644,6 +9117,7 @@ pub async fn validate_query(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(&store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,

@@ -19,6 +19,8 @@ pub struct Ctx<'a> {
     pub index: &'a Index,
     pub max_terms_count: usize,
     pub max_regex_length: usize,
+    /// whether the cluster still allows the queries that cost the most to run
+    pub allow_expensive: bool,
     /// value kinds seen per field path, used to narrow typed range variants
     pub observed_kinds: &'a std::collections::HashMap<String, u8>,
     pub kinds_complete: bool,
@@ -416,7 +418,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     let inner: Box<dyn Query> = match kind.as_str() {
         "match_all" => {
             let boost = body.get("boost").and_then(|b| b.as_f64());
-            let base: Box<dyn Query> = Box::new(AllQuery);
+            // every document matches, and each one equally: a score of one
+            let base: Box<dyn Query> = Box::new(ConstScore::new(Box::new(AllQuery), 1.0));
             match boost {
                 Some(b) => Box::new(BoostQuery::new(base, b as f32)),
                 None => base,
@@ -443,6 +446,49 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
                 }
             }
+            // the values gathered under a flat_object keep the spelling and
+            // the type they were stored with, whether the query names the
+            // object itself or a path inside it
+            let under_flat = {
+                let mut walked = String::new();
+                let mut found = false;
+                for part in field.split('.') {
+                    walked = if walked.is_empty() {
+                        part.to_string()
+                    } else {
+                        format!("{walked}.{part}")
+                    };
+                    if ctx.mapping.type_of(&walked) == Some("flat_object") {
+                        found = true;
+                    }
+                }
+                found
+            };
+            if under_flat {
+                if let Some(text) = val.as_str() {
+                    let mut terms = term_for(f, &path, &val);
+                    let normal = normalized(ctx, &field, text);
+                    if normal != text {
+                        terms.extend(term_for(f, &path, &Value::String(normal)));
+                    }
+                    if let Some(iso) =
+                        crate::store::canonical_date(&Value::String(text.to_string()))
+                    {
+                        if iso != text {
+                            terms.extend(term_for(f, &path, &Value::String(iso)));
+                        }
+                    }
+                    // a number gathered under a flat_object is still a number
+                    if let Ok(n) = text.parse::<f64>() {
+                        if let Some(num) = serde_json::Number::from_f64(n) {
+                            terms.extend(term_for(f, &path, &Value::Number(num)));
+                        }
+                    }
+                    // the values are text like any other, and score like it
+                    return Ok(any_of(terms));
+                }
+            }
+
             let val = ip_value(ctx, &field, &val);
             if let Some(s) = val.as_str() {
                 let n = normalized(ctx, &field, s);
@@ -529,6 +575,44 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
+            // every document has an id and belongs to an index, so asking
+            // whether one exists is asking for all of them
+            // `_source` is not a field to ask after: it is the document
+            if field == "_source" {
+                return Err(anyhow!(
+                    "query_shard_exception: Cannot search on field [_source] since it is not \
+                     indexed."
+                ));
+            }
+            // every document has an id, an index and a sequence number
+            if field == "_id" || field == "_index" || field == "_seq_no" || field == "_version" {
+                return Ok(Box::new(AllQuery));
+            }
+            let col = ctx.column_name(field, false);
+            Box::new(ExistsQuery::new(col, true))
+        }
+        // a shape, a box or a radius all ask where a point is; the field has
+        // to be there and the answer is worked out once the candidates are
+        // known
+        "geo_shape" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => {
+            let field = body
+                .as_object()
+                .and_then(|o| {
+                    o.keys()
+                        .map(|k| k.to_string())
+                        .find(|k| !matches!(k.as_str(), "boost" | "_name" | "ignore_unmapped"
+                            | "validation_method" | "type" | "distance" | "distance_type"
+                            | "relation"))
+                })
+                .unwrap_or_default();
+            let col = ctx.column_name(&field, false);
+            Box::new(ExistsQuery::new(col, true))
+        }
+        // `distance_feature` ranks by how near a value is to an origin; every
+        // document that has the field takes part, and the ranking itself is
+        // worked out once the candidates are known
+        "distance_feature" => {
+            let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
             let col = ctx.column_name(field, false);
             Box::new(ExistsQuery::new(col, true))
         }
@@ -603,6 +687,52 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             b["type"] = serde_json::json!("cross_fields");
             build_multi_match(ctx, &b)?
         }
+        // documents here are stored whole rather than split into a parent and
+        // its nested children, so a nested query is its inner query asked
+        // against the same document
+        "nested" => {
+            let inner = body
+                .get("query")
+                .ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
+            build(ctx, inner)?
+        }
+        // an `intervals` query is a little language of rules over one field.
+        // Positions are not compared here; each rule is built as the query it
+        // most nearly is, and the shape of the rule tree is kept.
+        "intervals" => {
+            let Some((field, rule)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return Err(anyhow!("[intervals] requires a field"));
+            };
+            build_interval_rule(ctx, field, rule)?
+        }
+        // `terms_set` asks for a number of the listed terms rather than all
+        // of them, and how many is read from a field of the document itself
+        "terms_set" => {
+            let Some((field, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return Err(anyhow!("[terms_set] requires a field"));
+            };
+            let terms: Vec<Value> = spec
+                .get("terms")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let clauses: Vec<Value> = terms
+                .iter()
+                .map(|t| serde_json::json!({"term": {field.clone(): t.clone()}}))
+                .collect();
+            // without a count to read, every term is required
+            let mut inner = serde_json::json!({"bool": {"should": clauses}});
+            if spec.get("minimum_should_match_field").is_some()
+                || spec.get("minimum_should_match_script").is_some()
+            {
+                // how many are needed is a property of each document, which
+                // this engine cannot ask of a scorer; one is the floor
+                inner["bool"]["minimum_should_match"] = serde_json::json!(1);
+            } else if let Some(n) = spec.get("minimum_should_match") {
+                inner["bool"]["minimum_should_match"] = n.clone();
+            }
+            build(ctx, &inner)?
+        }
         "bool" => build_bool(ctx, &body)?,
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
@@ -645,6 +775,46 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
     // a boost sits beside the clause, or -- where a clause names one field --
     // beside that field's own options
     let clause = q.get(&kind);
+    // some queries walk the whole term dictionary, and a cluster may say it
+    // would rather not
+    if !ctx.allow_expensive {
+        let tail = match kind.as_str() {
+            "prefix" => Some(" For optimised prefix queries on text fields please enable \
+                              [index_prefixes]."),
+            "fuzzy" | "regexp" | "wildcard" => Some(""),
+            _ => None,
+        };
+        if let Some(tail) = tail {
+            return Err(anyhow!(
+                "[{kind}] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false.{tail}"
+            ));
+        }
+        // a range over text is a walk of the dictionary too; over a number it
+        // is not
+        if kind == "range" {
+            let field = q
+                .get(&kind)
+                .and_then(|b| b.as_object())
+                .and_then(|o| o.keys().next().cloned())
+                .unwrap_or_default();
+            if matches!(
+                ctx.mapping.type_of(&field),
+                Some("text") | Some("keyword") | Some("match_only_text")
+            ) {
+                return Err(anyhow!(
+                    "[range] queries on [text] or [keyword] fields cannot be executed when \
+                     'search.allow_expensive_queries' is set to false."
+                ));
+            }
+        }
+        if kind == "nested" || kind == "has_child" || kind == "has_parent" {
+            return Err(anyhow!(
+                "[joining] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false."
+            ));
+        }
+    }
     let boost = clause
         .and_then(|b| b.get("boost"))
         .or_else(|| {
@@ -660,6 +830,102 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         Some(b) => Box::new(BoostQuery::new(inner, b as f32)),
         None => inner,
     })
+}
+
+/// One rule of an `intervals` query, as the query it most nearly is.
+fn build_interval_rule(ctx: &Ctx, field: &str, rule: &Value) -> Result<Box<dyn Query>> {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
+        return Err(anyhow!("[intervals] requires a rule"));
+    };
+    // a rule may name a different field to read
+    let field = spec
+        .get("use_field")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| field.to_string());
+    let insensitive = is_true(spec.get("case_insensitive"));
+    let clause = match kind.as_str() {
+        "match" => {
+            let text = spec.get("query").cloned().unwrap_or(Value::Null);
+            let ordered = is_true(spec.get("ordered"));
+            let gaps = spec.get("max_gaps").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let words = text.as_str().unwrap_or_default().split_whitespace().count();
+            let inner = if ordered && gaps == 0 {
+                serde_json::json!({"match_phrase": {field.clone(): {"query": text}}})
+            } else if ordered && words > 1 {
+                // the words have to turn up in the order they were written,
+                // with as much between them as the rule allows
+                let clauses: Vec<Value> = text
+                    .as_str()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(|w| serde_json::json!({"span_term": {field.clone(): w}}))
+                    .collect();
+                let slop = if gaps < 0 { 1_000 } else { gaps as u64 };
+                serde_json::json!({
+                    "span_near": {"clauses": clauses, "slop": slop, "in_order": true}
+                })
+            } else {
+                serde_json::json!({"match": {field.clone(): {"query": text, "operator": "and"}}})
+            };
+            build(ctx, &inner)?
+        }
+        "prefix" => {
+            let text = spec.get("prefix").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"prefix": {field.clone(): text}}))?
+        }
+        "wildcard" => {
+            let text = spec.get("pattern").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"wildcard": {field.clone(): text}}))?
+        }
+        "fuzzy" => {
+            let text = spec.get("term").cloned().unwrap_or(Value::Null);
+            build(ctx, &serde_json::json!({"fuzzy": {field.clone(): {"value": text}}}))?
+        }
+        "regexp" => {
+            let text = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let mut inner = serde_json::json!({"regexp": {field.clone(): {"value": text}}});
+            if insensitive {
+                inner["regexp"][field.clone()]["case_insensitive"] = serde_json::json!(true);
+            }
+            build(ctx, &inner)?
+        }
+        "all_of" | "any_of" => {
+            let occur = if kind == "all_of" { Occur::Must } else { Occur::Should };
+            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for sub in spec.get("intervals").and_then(|v| v.as_array()).into_iter().flatten() {
+                clauses.push((occur, build_interval_rule(ctx, &field, sub)?));
+            }
+            if clauses.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            Box::new(BooleanQuery::new(clauses))
+        }
+        other => return Err(anyhow!("Unknown interval rule [{other}]")),
+    };
+    // `filter` narrows what the rule matched; the parts of it this engine can
+    // answer are the ones that name a query
+    let filtered = spec.get("filter").and_then(|f| f.as_object()).map(|f| {
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for (name, inner) in f {
+            let occur = match name.as_str() {
+                "not_contained_by" | "not_containing" | "not_overlapping" => Occur::MustNot,
+                "filter" => Occur::Must,
+                _ => Occur::Must,
+            };
+            if let Ok(q) = build_interval_rule(ctx, &field, inner) {
+                clauses.push((occur, q));
+            }
+        }
+        clauses
+    });
+    match filtered {
+        Some(mut clauses) if !clauses.is_empty() => {
+            clauses.insert(0, (Occur::Must, clause));
+            Ok(Box::new(BooleanQuery::new(clauses)))
+        }
+        _ => Ok(clause),
+    }
 }
 
 fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
@@ -1016,6 +1282,31 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 if let Some((_, inclusive)) = b.take() {
                     *b = Some((Value::String(n.to_string()), inclusive));
                 }
+            }
+        }
+    }
+    // a value gathered under a flat_object was stored in its canonical
+    // spelling, and a bound has to be written the same way to compare with it
+    let under_flat = {
+        let mut walked = String::new();
+        let mut found = false;
+        for part in field.split('.') {
+            walked = if walked.is_empty() {
+                part.to_string()
+            } else {
+                format!("{walked}.{part}")
+            };
+            if ctx.mapping.type_of(&walked) == Some("flat_object") {
+                found = true;
+            }
+        }
+        found
+    };
+    if under_flat {
+        for b in [&mut lower, &mut upper] {
+            let Some((Value::String(text), inclusive)) = b.clone() else { continue };
+            if let Some(iso) = crate::store::canonical_date(&Value::String(text.clone())) {
+                *b = Some((Value::String(iso), inclusive));
             }
         }
     }
@@ -1822,4 +2113,256 @@ impl Weight for ConstWeight {
         }
         Ok(())
     }
+}
+
+// ------------------------------------------------------- intervals, exactly
+//
+// The `intervals` query asks where in a field the words are, not only whether
+// they are there. Positions are not kept in a column, so the text is read back
+// and analysed again -- the same trade `significant_text` makes -- and the
+// rules are then evaluated over the tokens.
+
+/// One stretch of a field, given by the first and last token it covers.
+type Span = (usize, usize);
+
+/// Every stretch of the token list that satisfies a rule, one per starting
+/// point, shortest first.
+pub fn interval_spans(
+    tokens: &[String],
+    rule: &Value,
+    analyse: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<Span> {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
+        return Vec::new();
+    };
+    let ordered = match spec.get("mode").and_then(|m| m.as_str()) {
+        Some(m) => m.starts_with("ordered"),
+        None => is_true(spec.get("ordered")),
+    };
+    let no_overlap = spec.get("mode").and_then(|m| m.as_str()) == Some("unordered_no_overlap");
+    let max_gaps = spec.get("max_gaps").and_then(|v| v.as_i64());
+    let mut spans = match kind.as_str() {
+        "match" => {
+            let text = spec.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+            let words = analyse(text);
+            let places: Vec<Vec<usize>> = words
+                .iter()
+                .map(|w| {
+                    tokens
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| *t == w)
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .collect();
+            combine_spans(&places.iter().map(|p| p.iter().map(|i| (*i, *i)).collect()).collect::<Vec<Vec<Span>>>(), ordered, no_overlap)
+        }
+        "prefix" => {
+            let want = spec.get("prefix").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            single_spans(tokens, &|t| t.starts_with(&want))
+        }
+        "wildcard" => {
+            let pat = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or_default();
+            let re = regex::Regex::new(&format!("(?i)^{}$", wildcard_to_regex_source(pat)));
+            match re {
+                Ok(re) => single_spans(tokens, &|t| re.is_match(t)),
+                Err(_) => Vec::new(),
+            }
+        }
+        "regexp" => {
+            let pat = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or_default();
+            let insensitive = is_true(spec.get("case_insensitive"));
+            let head = if insensitive { "(?i)" } else { "" };
+            match regex::Regex::new(&format!("{head}^{pat}$")) {
+                Ok(re) => single_spans(tokens, &|t| re.is_match(t)),
+                Err(_) => Vec::new(),
+            }
+        }
+        "fuzzy" => {
+            let want =
+                spec.get("term").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+            let edits = spec.get("fuzziness").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+            single_spans(tokens, &|t| levenshtein_within(t, &want, edits))
+        }
+        "all_of" | "any_of" => {
+            let children: Vec<Vec<Span>> = spec
+                .get("intervals")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(|r| interval_spans(tokens, r, analyse)).collect())
+                .unwrap_or_default();
+            if kind == "any_of" {
+                let mut all: Vec<Span> = children.into_iter().flatten().collect();
+                all.sort();
+                all.dedup();
+                all
+            } else {
+                combine_spans(&children, ordered, no_overlap)
+            }
+        }
+        _ => Vec::new(),
+    };
+    // `max_gaps` limits how much of the stretch is not the rule itself
+    if let Some(gaps) = max_gaps.filter(|g| *g >= 0) {
+        let width = |s: &Span| (s.1 - s.0 + 1) as i64;
+        let terms = rule_width(rule, analyse);
+        spans.retain(|s| width(s) - terms <= gaps);
+    }
+    if let Some(filter) = spec.get("filter").and_then(|f| f.as_object()) {
+        for (name, inner) in filter {
+            let other = interval_spans(tokens, inner, analyse);
+            spans.retain(|s| match name.as_str() {
+                "containing" => other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
+                "not_containing" => !other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
+                "contained_by" => other.iter().any(|o| o.0 <= s.0 && s.1 <= o.1),
+                "not_contained_by" => !other.iter().any(|o| o.0 <= s.0 && s.1 <= o.1),
+                "overlapping" => other.iter().any(|o| s.0 <= o.1 && o.0 <= s.1),
+                "not_overlapping" => !other.iter().any(|o| s.0 <= o.1 && o.0 <= s.1),
+                "before" => other.iter().any(|o| s.1 < o.0),
+                "after" => other.iter().any(|o| o.1 < s.0),
+                _ => true,
+            });
+        }
+    }
+    spans
+}
+
+/// How many tokens a rule is made of, which is what `max_gaps` counts against.
+fn rule_width(rule: &Value, analyse: &dyn Fn(&str) -> Vec<String>) -> i64 {
+    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else { return 1 };
+    match kind.as_str() {
+        "match" => {
+            analyse(spec.get("query").and_then(|v| v.as_str()).unwrap_or_default()).len() as i64
+        }
+        "all_of" => spec
+            .get("intervals")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|r| rule_width(r, analyse)).sum())
+            .unwrap_or(1),
+        "any_of" => spec
+            .get("intervals")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.iter().map(|r| rule_width(r, analyse)).min())
+            .unwrap_or(1),
+        _ => 1,
+    }
+}
+
+fn single_spans(tokens: &[String], hit: &dyn Fn(&str) -> bool) -> Vec<Span> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| hit(t))
+        .map(|(i, _)| (i, i))
+        .collect()
+}
+
+/// The shortest stretch covering one span from each part, in order or not.
+fn combine_spans(parts: &[Vec<Span>], ordered: bool, no_overlap: bool) -> Vec<Span> {
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Vec::new();
+    }
+    if parts.len() == 1 {
+        return parts[0].clone();
+    }
+    // where overlap is forbidden the parts are folded together two at a time,
+    // so a stretch already built is what the next part must keep clear of
+    if no_overlap && parts.len() > 2 {
+        let mut acc = combine_spans(&parts[..2], ordered, no_overlap);
+        for part in &parts[2..] {
+            acc = combine_spans(&[acc, part.clone()], ordered, no_overlap);
+        }
+        return acc;
+    }
+    let mut out: Vec<Span> = Vec::new();
+    if ordered {
+        for first in &parts[0] {
+            let mut at = *first;
+            let mut ok = true;
+            for part in &parts[1..] {
+                match part.iter().filter(|s| s.0 > at.1).min_by_key(|s| s.1) {
+                    Some(next) => at = *next,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                out.push((first.0, at.1));
+            }
+        }
+    } else {
+        // every part has to be somewhere; the stretch runs from the earliest
+        // of the chosen spans to the latest, and where overlap is forbidden no
+        // two parts may claim the same tokens
+        let mut chosen: Vec<Span> = Vec::with_capacity(parts.len());
+        fn walk(
+            parts: &[Vec<Span>],
+            at: usize,
+            chosen: &mut Vec<Span>,
+            no_overlap: bool,
+            out: &mut Vec<Span>,
+        ) {
+            if at == parts.len() {
+                let lo = chosen.iter().map(|s| s.0).min().unwrap_or(0);
+                let hi = chosen.iter().map(|s| s.1).max().unwrap_or(0);
+                out.push((lo, hi));
+                return;
+            }
+            for span in &parts[at] {
+                if no_overlap && chosen.iter().any(|t| span.0 <= t.1 && t.0 <= span.1) {
+                    continue;
+                }
+                chosen.push(*span);
+                walk(parts, at + 1, chosen, no_overlap, out);
+                chosen.pop();
+            }
+        }
+        // the search is over every way of choosing one span per part, which is
+        // small for the rules a query is written by hand with
+        let combinations: usize = parts.iter().map(|p| p.len().max(1)).product();
+        if combinations <= 100_000 {
+            walk(parts, 0, &mut chosen, no_overlap, &mut out);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Is one word within so many edits of another?
+fn levenshtein_within(a: &str, b: &str, edits: usize) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > edits {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()] <= edits
+}
+
+/// The regex source a wildcard pattern stands for.
+fn wildcard_to_regex_source(pat: &str) -> String {
+    let mut out = String::new();
+    for c in pat.chars() {
+        match c {
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            c if "\\.+()|[]{}^$#&-~".contains(c) => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }

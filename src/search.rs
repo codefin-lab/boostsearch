@@ -98,6 +98,10 @@ struct SortKey {
     /// where a document with no value for this field goes. `_last` means last
     /// in the order the caller sees, whichever direction that is.
     missing_last: bool,
+    /// the nested object this key reads inside, where the caller named one
+    nested: Option<String>,
+    /// only the objects matching this take part in the sort
+    nested_filter: Option<Value>,
 }
 
 fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
@@ -114,6 +118,8 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 desc: false,
                 mode: None,
                 missing_last: true,
+                nested: None,
+                nested_filter: None,
             }),
             Value::Object(o) => {
                 for (field, opts) in o {
@@ -135,7 +141,28 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .and_then(|v| v.as_str())
                         .map(|m| m == "_last")
                         .unwrap_or(true);
-                    out.push(SortKey { field, desc, mode, missing_last });
+                    // a sort may say which nested object it reads inside;
+                    // without one it reads the document itself
+                    let nested = opts
+                        .pointer("/nested/path")
+                        .or_else(|| opts.get("nested_path"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    // a nested sort may take only the objects that match a
+                    // filter, and a document whose objects all fail it has no
+                    // value to sort by at all
+                    let nested_filter = opts
+                        .pointer("/nested/filter")
+                        .or_else(|| opts.get("nested_filter"))
+                        .cloned();
+                    out.push(SortKey {
+                        field,
+                        desc,
+                        mode,
+                        missing_last,
+                        nested,
+                        nested_filter,
+                    });
                 }
             }
             _ => {}
@@ -331,7 +358,15 @@ struct Hit {
 enum SortSource {
     Score,
     Doc,
-    Column { name: String, desc: bool, mode: Option<String> },
+    Column {
+        name: String,
+        desc: bool,
+        mode: Option<String>,
+        /// what to divide a raw value by before it counts as the sort value.
+        /// A `date` is kept in nanoseconds here but reported and compared in
+        /// milliseconds, which is the number OpenSearch holds for it.
+        scale: i64,
+    },
 }
 
 /// Top-K collector that evaluates the sort keys while collecting, so a query
@@ -442,14 +477,27 @@ impl tantivy::collector::Collector for SortCollector {
     }
 }
 
+/// A raw column value as the sort value it stands for.
+fn scaled(v: SortValue, scale: i64) -> SortValue {
+    if scale <= 1 {
+        return v;
+    }
+    match v {
+        SortValue::I64(n) => SortValue::I64(n.div_euclid(scale)),
+        SortValue::U64(n) => SortValue::U64(n / scale as u64),
+        SortValue::F64(n) => SortValue::F64(n / scale as f64),
+        other => other,
+    }
+}
+
 impl SortSegmentCollector {
     fn read_key(&self, i: usize, doc: tantivy::DocId, score: tantivy::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
             SortSource::Doc => SortValue::I64(doc as i64),
-            SortSource::Column { desc, mode, .. } => self.columns[i]
+            SortSource::Column { desc, mode, scale, .. } => self.columns[i]
                 .as_ref()
-                .map(|c| c.read(doc, *desc, mode.as_deref()))
+                .map(|c| scaled(c.read(doc, *desc, mode.as_deref()), *scale))
                 .unwrap_or(SortValue::Missing),
         }
     }
@@ -488,9 +536,13 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
         let mut block = self.block.take().unwrap();
         block.fetch_block(docs, &col);
         let desc = self.desc[0];
+        let scale = match &self.sources[0] {
+            SortSource::Column { scale, .. } => *scale,
+            _ => 1,
+        };
         let after = self.after.as_ref().and_then(|a| a.first().cloned());
         for (doc, raw) in block.iter_docid_vals(docs, &col) {
-            let Some(v) = decode_col_value(raw, ty) else { continue };
+            let Some(v) = decode_col_value(raw, ty).map(|v| scaled(v, scale)) else { continue };
             // the vectorized path has to honour the page boundary too
             if let Some(marker) = &after {
                 let ord = v.cmp_asc(marker);
@@ -545,6 +597,8 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
                     desc: *want_desc,
                     mode: None,
                     missing_last: self.missing_last.get(i).copied().unwrap_or(true),
+                    nested: None,
+                    nested_filter: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {
@@ -622,22 +676,1052 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
         // a marker for a date is written in the unit that field reports in,
         // and the column counts nanoseconds either way
         Value::Number(n) => match date {
-            // nanoseconds do not survive a trip through an f64, and a marker
-            // that has lost its last digits cannot tell two pages apart
-            Some(true) => SortValue::I64(n.as_i64().unwrap_or(0)),
-            Some(false) => SortValue::I64(n.as_i64().unwrap_or(0).saturating_mul(1_000_000)),
+            // a marker is written in the unit the field reports in, which is
+            // the unit the values are compared in
+            Some(_) => SortValue::I64(n.as_i64().unwrap_or(0)),
             None => SortValue::F64(n.as_f64().unwrap_or(0.0)),
         },
         // a marker for a date field may be written as a date rather than as
         // the number the column holds
         Value::String(s) if date.is_some() => crate::store::canonical_date(v)
             .and_then(|d| crate::store::parse_date_lenient(&d))
-            .map(|d| SortValue::I64(d.unix_timestamp_nanos() as i64))
+            .map(|d| {
+                let nanos = d.unix_timestamp_nanos() as i64;
+                SortValue::I64(if date == Some(true) { nanos } else { nanos / 1_000_000 })
+            })
             .unwrap_or_else(|| SortValue::Str(s.clone())),
         Value::String(s) => SortValue::Str(s.clone()),
         Value::Null => SortValue::Missing,
         other => SortValue::Str(other.to_string()),
     }
+}
+
+/// Does this cluster still allow the queries that cost the most to run?
+pub fn expensive_allowed(store: &Store) -> bool {
+    store
+        .cluster_setting("search.allow_expensive_queries")
+        .map(|v| v != json!("false") && v != json!(false))
+        .unwrap_or(true)
+}
+
+/// Does this query ask whether a document has a routing value?
+fn mentions_routing_exists(node: Option<&Value>) -> bool {
+    let Some(node) = node else { return false };
+    match node {
+        Value::Object(o) => {
+            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
+                == Some("_routing")
+            {
+                return true;
+            }
+            o.values().any(|v| mentions_routing_exists(Some(v)))
+        }
+        Value::Array(a) => a.iter().any(|v| mentions_routing_exists(Some(v))),
+        _ => false,
+    }
+}
+
+/// Turn that question into the list of documents it is really about.
+fn replace_routing_exists(node: &mut Value, ids: &[String]) {
+    match node {
+        Value::Object(o) => {
+            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
+                == Some("_routing")
+            {
+                o.remove("exists");
+                o.insert("ids".into(), json!({"values": ids}));
+                return;
+            }
+            for (_, v) in o.iter_mut() {
+                replace_routing_exists(v, ids);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                replace_routing_exists(v, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A nested aggregation counts the objects at a path, not the documents that
+/// hold them, and everything under it works on those objects: a filter picks
+/// objects, a terms aggregation groups them, a metric reads their fields.
+///
+/// The objects are read back from the documents the query matched, which is
+/// the only place they are kept whole here.
+fn run_nested_over_objects(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    path: &str,
+    sub_aggs: &Option<Value>,
+) -> std::result::Result<Value, Response> {
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut objects: Vec<(String, Value)> = Vec::new();
+    for hit in &answer.hits {
+        let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let Some(source) = hit.get("_source") else { continue };
+        gather_objects(source, path, &id, &mut objects);
+    }
+    Ok(objects_agg(store, targets, &objects, path, sub_aggs))
+}
+
+/// Every object at a path inside one document, however deeply the lists nest.
+fn gather_objects(source: &Value, path: &str, id: &str, out: &mut Vec<(String, Value)>) {
+    let mut here: Vec<&Value> = vec![source];
+    for step in path.split('.') {
+        let mut next = Vec::new();
+        for node in here {
+            match node.get(step) {
+                Some(Value::Array(a)) => next.extend(a.iter()),
+                Some(other) => next.push(other),
+                None => {}
+            }
+        }
+        here = next;
+    }
+    for object in here {
+        out.push((id.to_string(), object.clone()));
+    }
+}
+
+/// Run the aggregations written under a nested one over its objects.
+fn objects_agg(
+    store: &Store,
+    targets: &[String],
+    objects: &[(String, Value)],
+    path: &str,
+    sub_aggs: &Option<Value>,
+) -> Value {
+    let mut out = json!({"doc_count": objects.len()});
+    let Some(reqs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else { return out };
+    for (name, def) in reqs {
+        let subs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+        let field_of = |spec: &Value| -> String {
+            let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+            field.strip_prefix(&format!("{path}.")).unwrap_or(field).to_string()
+        };
+        let values = |spec: &Value| -> Vec<(String, Value)> {
+            let leaf = field_of(spec);
+            objects
+                .iter()
+                .filter_map(|(id, o)| {
+                    o.pointer(&format!("/{}", leaf.replace('.', "/")))
+                        .map(|v| (id.clone(), v.clone()))
+                })
+                .collect()
+        };
+        if let Some(spec) = def.get("filter") {
+            let kept: Vec<(String, Value)> = objects
+                .iter()
+                .filter(|(_, o)| object_matches(spec, o, path))
+                .cloned()
+                .collect();
+            out[name.clone()] = objects_agg(store, targets, &kept, path, &subs);
+        } else if let Some(spec) = def.get("nested") {
+            let deeper = spec.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let leaf = deeper.strip_prefix(&format!("{path}.")).unwrap_or(deeper);
+            let mut inner = Vec::new();
+            for (id, o) in objects {
+                gather_objects(o, leaf, id, &mut inner);
+            }
+            out[name.clone()] = objects_agg(store, targets, &inner, deeper, &subs);
+        } else if def.get("reverse_nested").is_some() {
+            // back out to the documents the objects came from
+            let mut seen: Vec<String> = Vec::new();
+            for (id, _) in objects {
+                if !seen.contains(id) {
+                    seen.push(id.clone());
+                }
+            }
+            let mut answer = json!({"doc_count": seen.len()});
+            // above the objects the documents are documents again, and what is
+            // asked of them is asked the ordinary way
+            if let Some(subs) = subs.as_ref() {
+                let narrowed = json!({"bool": {"filter": [{"terms": {"_id": seen}}]}});
+                if let Ok((_, Some(Value::Object(inner)))) =
+                    count_with_sub_aggs(store, targets, &narrowed, &Some(subs.clone()), false)
+                {
+                    for (k, v) in inner {
+                        answer[k] = v;
+                    }
+                }
+            }
+            out[name.clone()] = answer;
+        } else if let Some(spec) = def.get("terms") {
+            let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let min = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
+            let mut groups: Vec<(Value, Vec<(String, Value)>)> = Vec::new();
+            for ((id, object), (_, value)) in objects.iter().zip(values(spec).into_iter()) {
+                match groups.iter_mut().find(|(k, _)| *k == value) {
+                    Some((_, list)) => list.push((id.clone(), object.clone())),
+                    None => groups.push((value, vec![(id.clone(), object.clone())])),
+                }
+            }
+            groups.sort_by(|a, b| {
+                b.1.len().cmp(&a.1.len()).then_with(|| key_order(&a.0, &b.0))
+            });
+            let buckets: Vec<Value> = groups
+                .into_iter()
+                .filter(|(_, list)| list.len() as u64 >= min)
+                .take(size)
+                .map(|(key, list)| {
+                    let mut b = json!({"key": key, "doc_count": list.len()});
+                    if let Some(Value::Object(inner)) = subs
+                        .as_ref()
+                        .map(|_| objects_agg(store, targets, &list, path, &subs))
+                    {
+                        for (k, v) in inner {
+                            if k != "doc_count" {
+                                b[k] = v;
+                            }
+                        }
+                    }
+                    b
+                })
+                .collect();
+            out[name.clone()] = json!({
+                "doc_count_error_upper_bound": 0,
+                "sum_other_doc_count": 0,
+                "buckets": buckets,
+            });
+        } else if let Some(spec) = def.get("composite") {
+            let sources: Vec<(String, Value)> = spec
+                .get("sources")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let (n, body) = e.as_object()?.iter().next()?;
+                            Some((n.clone(), body.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            // a marker says which page was already seen
+            let after: Option<Vec<Value>> = spec.get("after").and_then(|a| a.as_object()).map(
+                |o| sources.iter().map(|(n, _)| o.get(n).cloned().unwrap_or(Value::Null)).collect(),
+            );
+            let mut groups: Vec<(Vec<Value>, usize)> = Vec::new();
+            for (_, object) in objects {
+                let mut key = Vec::new();
+                let mut whole = true;
+                for (_, body) in &sources {
+                    let inner = body.get("terms").unwrap_or(body);
+                    let leaf = field_of(inner);
+                    match object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
+                        Some(v) => key.push(v.clone()),
+                        None => {
+                            whole = false;
+                            break;
+                        }
+                    }
+                }
+                if !whole {
+                    continue;
+                }
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => *n += 1,
+                    None => groups.push((key, 1)),
+                }
+            }
+            groups.sort_by(|a, b| keys_order(&a.0, &b.0));
+            if let Some(after) = after {
+                groups.retain(|(key, _)| keys_order(key, &after) == Ordering::Greater);
+            }
+            let buckets: Vec<Value> = groups
+                .into_iter()
+                .take(size)
+                .map(|(key, n)| {
+                    let named: serde_json::Map<String, Value> = sources
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .zip(key.into_iter())
+                        .collect();
+                    json!({"key": Value::Object(named), "doc_count": n})
+                })
+                .collect();
+            let mut answer = json!({"buckets": buckets});
+            if let Some(last) = answer["buckets"].as_array().and_then(|a| a.last()) {
+                answer["after_key"] = last["key"].clone();
+            }
+            out[name.clone()] = answer;
+        } else {
+            // a metric reads the objects' own values
+            let kind = def
+                .as_object()
+                .and_then(|o| o.keys().map(|k| k.to_string()).next())
+                .unwrap_or_default();
+            let spec = def.get(&kind).cloned().unwrap_or(json!({}));
+            let numbers: Vec<f64> =
+                values(&spec).iter().filter_map(|(_, v)| number_of(v)).collect();
+            let value = match kind.as_str() {
+                "max" => numbers.iter().cloned().reduce(f64::max),
+                "min" => numbers.iter().cloned().reduce(f64::min),
+                "sum" => Some(numbers.iter().sum()),
+                "avg" => (!numbers.is_empty())
+                    .then(|| numbers.iter().sum::<f64>() / numbers.len() as f64),
+                "value_count" => Some(numbers.len() as f64),
+                _ => None,
+            };
+            if let Some(v) = value {
+                out[name.clone()] = json!({"value": v});
+            }
+        }
+    }
+    out
+}
+
+/// A bucket key as text, for the cases that only need a name for it.
+fn key_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Two bucket keys in order: numbers as numbers, everything else as text.
+fn key_order(a: &Value, b: &Value) -> Ordering {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&y.as_f64().unwrap_or(0.0))
+            .unwrap_or(Ordering::Equal),
+        _ => key_text(a).cmp(&key_text(b)),
+    }
+}
+
+/// A list of keys in order, compared one after another.
+fn keys_order(a: &[Value], b: &[Value]) -> Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = key_order(x, y);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Say which nested object a sort reads inside, wherever one is written under
+/// an aggregation that has already entered that object.
+fn scope_sorts_to(node: &mut Value, path: &str) {
+    match node {
+        Value::Object(o) => {
+            if let Some(sort) = o.get_mut("sort") {
+                let mut items = match sort.take() {
+                    Value::Array(a) => a,
+                    other => vec![other],
+                };
+                for item in items.iter_mut() {
+                    match item {
+                        Value::String(field) => {
+                            let field = field.clone();
+                            *item = json!({field: {"order": "asc", "nested": {"path": path}}});
+                        }
+                        Value::Object(keys) => {
+                            for (_, opts) in keys.iter_mut() {
+                                match opts {
+                                    Value::String(order) => {
+                                        let order = order.clone();
+                                        *opts =
+                                            json!({"order": order, "nested": {"path": path}});
+                                    }
+                                    Value::Object(oo) => {
+                                        oo.insert("nested".into(), json!({"path": path}));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                *sort = Value::Array(items);
+            }
+            for (_, v) in o.iter_mut() {
+                scope_sorts_to(v, path);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                scope_sorts_to(v, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A value as the number it stands for: a date is its instant.
+fn number_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        // read the text as written: folding it through the resolution the
+        // index keeps would wrap a date far enough out
+        Value::String(s) => tantivy::time::OffsetDateTime::parse(
+            s,
+            &tantivy::time::format_description::well_known::Rfc3339,
+        )
+        .ok()
+        .map(|d| d.unix_timestamp_nanos() as f64)
+        .or_else(|| {
+            crate::store::parse_date_lenient(s).map(|d| d.unix_timestamp_nanos() as f64)
+        })
+        .or_else(|| s.parse().ok()),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// Does one nested object match the filter a sort put on them?
+///
+/// Only the shapes a sort filter is written in are answered here: the boolean
+/// wrappers, and the clauses that compare one of the object's own fields.
+fn object_matches(filter: &Value, object: &Value, path: &str) -> bool {
+    let Some((kind, body)) = filter.as_object().and_then(|o| o.iter().next()) else {
+        return true;
+    };
+    let field_value = |name: &str| -> Option<Value> {
+        let leaf = name.strip_prefix(&format!("{path}.")).unwrap_or(name);
+        object.pointer(&format!("/{}", leaf.replace('.', "/"))).cloned()
+    };
+    match kind.as_str() {
+        "bool" => {
+            let all = |key: &str| -> bool {
+                match body.get(key) {
+                    None => true,
+                    Some(Value::Array(a)) => a.iter().all(|c| object_matches(c, object, path)),
+                    Some(one) => object_matches(one, object, path),
+                }
+            };
+            let none = match body.get("must_not") {
+                None => true,
+                Some(Value::Array(a)) => !a.iter().any(|c| object_matches(c, object, path)),
+                Some(one) => !object_matches(one, object, path),
+            };
+            all("filter") && all("must") && none
+        }
+        "match_all" => true,
+        "exists" => body
+            .get("field")
+            .and_then(|f| f.as_str())
+            .map(|f| field_value(f).is_some())
+            .unwrap_or(false),
+        "term" => {
+            let Some((name, want)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let want = want.get("value").unwrap_or(want);
+            field_value(name).map(|v| &v == want).unwrap_or(false)
+        }
+        // a match asks after the words in a value rather than the whole of it
+        "match" | "match_phrase" => {
+            let Some((name, want)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let want = want.get("query").unwrap_or(want);
+            let Some(text) = field_value(name) else { return false };
+            let text = match text {
+                Value::String(s) => s.to_lowercase(),
+                other => other.to_string().to_lowercase(),
+            };
+            let wanted = match want {
+                Value::String(s) => s.to_lowercase(),
+                other => other.to_string().to_lowercase(),
+            };
+            let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
+            wanted
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .all(|w| words.contains(&w))
+        }
+        "range" => {
+            let Some((name, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let Some(here) = field_value(name).as_ref().and_then(number_of) else {
+                return false;
+            };
+            let bound = |key: &str| -> Option<f64> {
+                spec.get(key).and_then(|v| match v {
+                    Value::String(s) => crate::store::canonical_date(&json!(s))
+                        .and_then(|d| crate::store::parse_date_lenient(&d))
+                        .map(|d| d.unix_timestamp_nanos() as f64)
+                        .or_else(|| s.parse().ok()),
+                    other => other.as_f64(),
+                })
+            };
+            bound("gte").map(|b| here >= b).unwrap_or(true)
+                && bound("gt").map(|b| here > b).unwrap_or(true)
+                && bound("lte").map(|b| here <= b).unwrap_or(true)
+                && bound("lt").map(|b| here < b).unwrap_or(true)
+        }
+        _ => true,
+    }
+}
+
+/// The field an HDR percentiles aggregation reads, if the request has one.
+fn hdr_percentiles_field(node: &Value) -> Option<String> {
+    let o = node.as_object()?;
+    for (_, def) in o {
+        if let Some(spec) = def.get("percentiles") {
+            if spec.get("hdr").is_some() {
+                if let Some(f) = spec.get("field").and_then(|f| f.as_str()) {
+                    return Some(f.to_string());
+                }
+            }
+        }
+        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) {
+            if let Some(f) = hdr_percentiles_field(subs) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// Does this field live inside a nested object?
+fn under_nested(mapping: &crate::store::Mapping, field: &str) -> bool {
+    let mut walked = String::new();
+    for part in field.split('.') {
+        walked = if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
+        if walked != field && mapping.type_of(&walked) == Some("nested") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Which of the clauses that need work after the search are in this query.
+///
+/// Each of them used to be looked for on its own, which is several walks of
+/// the query for a search that has none of them; this is one walk.
+#[derive(Default)]
+struct Extras {
+    geo: bool,
+    intervals: bool,
+    distance_feature: bool,
+    routing_exists: bool,
+    nested_inner_hits: bool,
+    named: bool,
+}
+
+fn scan_extras(node: &Value, out: &mut Extras) {
+    match node {
+        Value::Object(o) => {
+            for (k, v) in o {
+                match k.as_str() {
+                    "geo_shape" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => {
+                        out.geo = true
+                    }
+                    "intervals" => out.intervals = true,
+                    "distance_feature" => out.distance_feature = true,
+                    "_name" => out.named = true,
+                    "exists" => {
+                        if v.get("field").and_then(|f| f.as_str()) == Some("_routing") {
+                            out.routing_exists = true;
+                        }
+                    }
+                    "nested" => {
+                        if v.get("inner_hits").is_some() {
+                            out.nested_inner_hits = true;
+                        }
+                    }
+                    _ => {}
+                }
+                scan_extras(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                scan_extras(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The geo clause of a query: the field it reads and the shape it asks about.
+fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
+    match node {
+        Value::Object(o) => {
+            for kind in ["geo_shape", "geo_bounding_box", "geo_distance", "geo_polygon"] {
+                if let Some(spec) = o.get(kind).and_then(|v| v.as_object()) {
+                    let field = spec
+                        .keys()
+                        .map(|k| k.to_string())
+                        .find(|k| {
+                            !matches!(
+                                k.as_str(),
+                                "boost" | "_name" | "ignore_unmapped" | "validation_method"
+                                    | "type" | "distance" | "distance_type" | "relation"
+                            )
+                        })?;
+                    let mut shape = json!({"__kind": kind, "__spec": spec.get(&field)});
+                    // a distance query keeps the radius beside the field
+                    if let Some(d) = spec.get("distance") {
+                        shape["__distance"] = d.clone();
+                    }
+                    return Some((field, shape));
+                }
+            }
+            o.values().find_map(find_geo_clause)
+        }
+        Value::Array(a) => a.iter().find_map(find_geo_clause),
+        _ => None,
+    }
+}
+
+/// Is this point inside the shape the query named?
+fn point_within(shape: &Value, point: &Value) -> bool {
+    let Some((lat, lon)) = read_point(point) else { return false };
+    let kind = shape.get("__kind").and_then(|k| k.as_str()).unwrap_or("");
+    let spec = shape.get("__spec").cloned().unwrap_or(Value::Null);
+    match kind {
+        "geo_bounding_box" => {
+            let corner = |name: &str| spec.get(name).and_then(|v| read_point(v));
+            match (corner("top_left"), corner("bottom_right")) {
+                (Some((t, l)), Some((b, r))) => {
+                    lat <= t && lat >= b && lon >= l && lon <= r
+                }
+                _ => false,
+            }
+        }
+        "geo_distance" => {
+            let radius = shape
+                .get("__distance")
+                .and_then(|d| d.as_str())
+                .and_then(parse_distance)
+                .unwrap_or(0.0);
+            geo_distance_metres(&spec, point).map(|d| d <= radius).unwrap_or(false)
+        }
+        "geo_polygon" => {
+            let points: Vec<(f64, f64)> = spec
+                .get("points")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().filter_map(read_point).collect())
+                .unwrap_or_default();
+            inside_polygon(&points, lat, lon)
+        }
+        _ => {
+            // a shape: an envelope is two corners, a polygon a ring of points
+            let shape = spec.get("shape").or_else(|| spec.get("indexed_shape")).unwrap_or(&spec);
+            let coords = shape.get("coordinates");
+            match shape.get("type").and_then(|t| t.as_str()).map(|t| t.to_lowercase()) {
+                Some(ref t) if t == "envelope" => {
+                    let Some(a) = coords.and_then(|c| c.as_array()) else { return false };
+                    let corner = |i: usize| -> Option<(f64, f64)> {
+                        let p = a.get(i)?.as_array()?;
+                        Some((p.get(1)?.as_f64()?, p.first()?.as_f64()?))
+                    };
+                    match (corner(0), corner(1)) {
+                        (Some((t, l)), Some((b, r))) => {
+                            lat <= t && lat >= b && lon >= l && lon <= r
+                        }
+                        _ => false,
+                    }
+                }
+                Some(ref t) if t == "polygon" => {
+                    let ring: Vec<(f64, f64)> = coords
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|r| r.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|p| {
+                                    let p = p.as_array()?;
+                                    Some((p.get(1)?.as_f64()?, p.first()?.as_f64()?))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    inside_polygon(&ring, lat, lon)
+                }
+                Some(ref t) if t == "point" => {
+                    let p = coords.and_then(|c| c.as_array()).map(|a| {
+                        (
+                            a.get(1).and_then(|v| v.as_f64()).unwrap_or(f64::NAN),
+                            a.first().and_then(|v| v.as_f64()).unwrap_or(f64::NAN),
+                        )
+                    });
+                    p.map(|(la, lo)| (la - lat).abs() < 1e-9 && (lo - lon).abs() < 1e-9)
+                        .unwrap_or(false)
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// A point, however it was written: a pair, an object, or text.
+fn read_point(v: &Value) -> Option<(f64, f64)> {
+    match v {
+        // a pair is longitude first
+        Value::Array(a) if a.len() == 2 => Some((a[1].as_f64()?, a[0].as_f64()?)),
+        Value::Object(o) => {
+            if let (Some(lat), Some(lon)) = (
+                o.get("lat").and_then(|x| x.as_f64()),
+                o.get("lon").and_then(|x| x.as_f64()),
+            ) {
+                return Some((lat, lon));
+            }
+            // written the way GeoJSON writes it: longitude first
+            let c = o.get("coordinates")?.as_array()?;
+            Some((c.get(1)?.as_f64()?, c.first()?.as_f64()?))
+        }
+        Value::String(s) => {
+            let s = s.trim();
+            if let Some(rest) = s.strip_prefix("POINT") {
+                let inner = rest.trim().trim_start_matches('(').trim_end_matches(')');
+                let mut parts = inner.split_whitespace();
+                let lon: f64 = parts.next()?.parse().ok()?;
+                let lat: f64 = parts.next()?.parse().ok()?;
+                return Some((lat, lon));
+            }
+            if let Some((a, b)) = s.split_once(',') {
+                return Some((a.trim().parse().ok()?, b.trim().parse().ok()?));
+            }
+            decode_geohash(s)
+        }
+        _ => None,
+    }
+}
+
+/// A geohash is a box, narrowed a bit by each character; the point it stands
+/// for is the middle of the box it ends at.
+fn decode_geohash(hash: &str) -> Option<(f64, f64)> {
+    const DIGITS: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat_lo, mut lat_hi) = (-90.0f64, 90.0f64);
+    let (mut lon_lo, mut lon_hi) = (-180.0f64, 180.0f64);
+    let mut even = true;
+    for c in hash.bytes() {
+        let idx = DIGITS.iter().position(|d| *d == c.to_ascii_lowercase())? as u8;
+        for bit in (0..5).rev() {
+            let on = idx & (1 << bit) != 0;
+            if even {
+                let mid = (lon_lo + lon_hi) / 2.0;
+                if on {
+                    lon_lo = mid;
+                } else {
+                    lon_hi = mid;
+                }
+            } else {
+                let mid = (lat_lo + lat_hi) / 2.0;
+                if on {
+                    lat_lo = mid;
+                } else {
+                    lat_hi = mid;
+                }
+            }
+            even = !even;
+        }
+    }
+    Some(((lat_lo + lat_hi) / 2.0, (lon_lo + lon_hi) / 2.0))
+}
+
+/// The even-odd rule: a point is inside a ring when a ray from it crosses the
+/// ring an odd number of times.
+fn inside_polygon(ring: &[(f64, f64)], lat: f64, lon: f64) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = ring.len() - 1;
+    for i in 0..ring.len() {
+        let (yi, xi) = ring[i];
+        let (yj, xj) = ring[j];
+        if (yi > lat) != (yj > lat)
+            && lon < (xj - xi) * (lat - yi) / (yj - yi + f64::EPSILON) + xi
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// The `intervals` clause of a query: the field it reads and the rule it asks.
+fn find_intervals(node: &Value) -> Option<(String, Value)> {
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("intervals").and_then(|v| v.as_object()) {
+                let (field, rule) = spec.iter().next()?;
+                return Some((field.clone(), rule.clone()));
+            }
+            o.values().find_map(find_intervals)
+        }
+        Value::Array(a) => a.iter().find_map(find_intervals),
+        _ => None,
+    }
+}
+
+/// Every `nested` clause that asked for the objects it matched to be listed.
+fn collect_nested_inner_hits(node: &Value, out: &mut Vec<(String, Value, Value)>) {
+    match node {
+        Value::Object(o) => {
+            if let Some(nested) = o.get("nested") {
+                if let Some(inner) = nested.get("inner_hits") {
+                    let path =
+                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    let query = nested.get("query").cloned().unwrap_or(json!({}));
+                    out.push((path, inner.clone(), query));
+                }
+            }
+            for (_, v) in o {
+                collect_nested_inner_hits(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                collect_nested_inner_hits(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The inner-hits groups that belong directly under one object: those whose
+/// path is the object's own path plus one step, each carrying the groups that
+/// belong under *its* objects in turn.
+#[allow(clippy::too_many_arguments)]
+fn nested_inner_hits(
+    h: &Hit,
+    source: &Value,
+    under: &str,
+    clauses: &[(String, Value, Value)],
+    kept: bool,
+    query: &Option<Value>,
+    mapping: &crate::store::Mapping,
+    index: &tantivy::Index,
+) -> serde_json::Map<String, Value> {
+    let mut groups = serde_json::Map::new();
+    for (path, inner, inner_query) in clauses {
+        // a clause belongs here when what is left of its path after the object
+        // it sits in names a field of that object
+        let leaf = if under.is_empty() {
+            path.clone()
+        } else {
+            match path.strip_prefix(&format!("{under}.")) {
+                Some(rest) => rest.to_string(),
+                None => continue,
+            }
+        };
+        if leaf.is_empty() {
+            continue;
+        }
+        let at = source.pointer(&format!("/{}", leaf.replace('.', "/")));
+        let objects: Vec<Value> = match at {
+            Some(Value::Array(a)) => a.clone(),
+            Some(other) => vec![other.clone()],
+            None => Vec::new(),
+        };
+        let size = inner.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+        let objects: Vec<(usize, Value)> = objects
+            .into_iter()
+            .enumerate()
+            .filter(|(_, o)| object_matches(inner_query, o, path))
+            .collect();
+        let mut list = Vec::new();
+        for (offset, object) in objects.iter().cloned().take(size) {
+            let mut one = json!({
+                "_index": h.index.clone(),
+                "_id": h.id.clone(),
+                "_nested": {"field": path.clone(), "offset": offset},
+                "_score": h.score,
+            });
+            if kept {
+                one["_source"] = object.clone();
+            }
+            if inner.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+                one["_version"] = json!(h.version);
+            }
+            let asked: Vec<String> = match inner.get("docvalue_fields") {
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| {
+                        v.as_str().map(|s| s.to_string()).or_else(|| {
+                            v.get("field").and_then(|f| f.as_str()).map(|s| s.to_string())
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !asked.is_empty() {
+                let mut fields = serde_json::Map::new();
+                for name in asked {
+                    if name == "_seq_no" {
+                        fields.insert(name.clone(), json!([h.seq]));
+                    } else if let Some(v) =
+                        object.pointer(&format!("/{}", name.replace('.', "/")))
+                    {
+                        fields.insert(
+                            name.clone(),
+                            match v {
+                                Value::Array(a) => Value::Array(a.clone()),
+                                other => json!([other.clone()]),
+                            },
+                        );
+                    }
+                }
+                one["fields"] = Value::Object(fields);
+            }
+            if let Some(spec) = inner.get("highlight") {
+                // an inner hit is highlighted from its own object, under the
+                // name the field is known by
+                let mut here = json!({});
+                let mut node = &mut here;
+                let steps: Vec<&str> = path.split('.').collect();
+                for step in &steps[..steps.len() - 1] {
+                    node[*step] = json!({});
+                    node = node.get_mut(*step).unwrap();
+                }
+                node[steps[steps.len() - 1]] = object.clone();
+                if let Some(hl) = build_highlight(spec, &here, query, mapping, index) {
+                    one["highlight"] = hl;
+                }
+            }
+            // whatever was asked of the objects under this one
+            let deeper =
+                nested_inner_hits(h, &object, path, clauses, kept, query, mapping, index);
+            if !deeper.is_empty() {
+                one["inner_hits"] = Value::Object(deeper);
+            }
+            list.push(one);
+        }
+        let name = inner.get("name").and_then(|n| n.as_str()).unwrap_or(path).to_string();
+        groups.insert(
+            name,
+            json!({"hits": {
+                "total": {"value": objects.len(), "relation": "eq"},
+                "max_score": h.score,
+                "hits": list,
+            }}),
+        );
+    }
+    groups
+}
+
+/// A `nested` clause that asked for the objects it matched to be listed: the
+/// path, the inner-hits clause, and the query the objects have to match.
+fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
+    find_nested_inner_hits_full(node).map(|(p, i, _)| (p, i))
+}
+
+fn find_nested_inner_hits_full(node: &Value) -> Option<(String, Value, Value)> {
+    match node {
+        Value::Object(o) => {
+            if let Some(nested) = o.get("nested") {
+                if let Some(inner) = nested.get("inner_hits") {
+                    let path =
+                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    let inner_query = nested.get("query").cloned().unwrap_or(json!({}));
+                    return Some((path, inner.clone(), inner_query));
+                }
+            }
+            o.values().find_map(find_nested_inner_hits_full)
+        }
+        Value::Array(a) => a.iter().find_map(find_nested_inner_hits_full),
+        _ => None,
+    }
+}
+
+/// The `distance_feature` clause of a query, wherever it sits.
+fn find_distance_feature(node: &Value) -> Option<&Value> {
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("distance_feature") {
+                return Some(spec);
+            }
+            o.values().find_map(find_distance_feature)
+        }
+        Value::Array(a) => a.iter().find_map(find_distance_feature),
+        _ => None,
+    }
+}
+
+/// How far apart two moments are, in whatever unit the values are counted in.
+fn date_distance(origin: &Value, value: &Value) -> Option<f64> {
+    let read = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => crate::store::canonical_date(&json!(s))
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+                .map(|d| d.unix_timestamp_nanos() as f64),
+            _ => None,
+        }
+    };
+    Some((read(origin)? - read(value)?).abs())
+}
+
+/// A length of time, written the way a pivot is: a count and a unit.
+fn parse_time_amount(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    Some(n * match unit {
+        "nanos" => 1.0,
+        "micros" => 1e3,
+        "ms" => 1e6,
+        "s" => 1e9,
+        "m" => 60e9,
+        "h" | "H" => 3_600e9,
+        "d" => 86_400e9,
+        _ => return None,
+    })
+}
+
+/// A distance, written the way a pivot is.
+fn parse_distance(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (n, unit) = s.split_at(split);
+    let n: f64 = n.parse().ok()?;
+    Some(n * match unit.trim() {
+        "m" => 1.0,
+        "km" => 1000.0,
+        "cm" => 0.01,
+        "mm" => 0.001,
+        "mi" => 1609.344,
+        "ft" => 0.3048,
+        _ => return None,
+    })
+}
+
+/// Metres between two points on the earth, by the haversine formula.
+fn geo_distance_metres(origin: &Value, value: &Value) -> Option<f64> {
+    let point = |v: &Value| -> Option<(f64, f64)> {
+        match v {
+            // a point written as a pair is longitude first
+            Value::Array(a) if a.len() == 2 => {
+                Some((a[1].as_f64()?, a[0].as_f64()?))
+            }
+            Value::Object(o) => Some((
+                o.get("lat").and_then(|x| x.as_f64())?,
+                o.get("lon").and_then(|x| x.as_f64())?,
+            )),
+            Value::String(s) => {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            }
+            _ => None,
+        }
+    };
+    let (lat1, lon1) = point(origin)?;
+    let (lat2, lon2) = point(value)?;
+    let r = 6_371_008.8f64;
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = (lat2 - lat1).to_radians();
+    let dl = (lon2 - lon1).to_radians();
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    Some(2.0 * r * a.sqrt().asin())
 }
 
 /// Read each candidate's arrival order out of the index.
@@ -837,6 +1921,28 @@ fn check_agg_node(node: &Value, ctx: &Ctx, owner: &str) -> std::result::Result<(
     let Some(o) = node.as_object() else { return Ok(()) };
     for (name, def) in o {
         check_agg_params(name, def, owner)?;
+        // a flat_object holds whatever it was given, so there is nothing of a
+        // known type under it to aggregate over
+        if let Some(field) = def.get("field").and_then(|f| f.as_str()) {
+            let mut walked = String::new();
+            for part in field.split('.') {
+                walked = if walked.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{walked}.{part}")
+                };
+                if ctx.mapping.type_of(&walked) == Some("flat_object") && walked != field {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "Field [{field}] of type [flat_object] is not supported for \
+                             aggregation [{name}]"
+                        ),
+                    ));
+                }
+            }
+        }
         // `terms` is also the name of a query, which appears inside filter
         // aggregations and inside multi_terms; only an object made entirely of
         // terms-aggregation options is one of those
@@ -1023,6 +2129,21 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 /// so strip that order and reapply it to the finished buckets ourselves.
 /// Lucene's `StringHelper.murmurhash3_x86_32`, which is what OpenSearch hashes
 /// a string term with when a terms aggregation is split into partitions.
+/// Which shard a document is routed to.
+///
+/// OpenSearch hashes the routing value as UTF-16 -- each character as two
+/// bytes, low byte first -- with seed zero, and folds the result by the shard
+/// count the way a floor-mod does, so a negative hash still names a shard.
+fn routing_shard(routing: &str, shards: u64) -> u64 {
+    let mut bytes = Vec::with_capacity(routing.len() * 2);
+    for c in routing.encode_utf16() {
+        bytes.push((c & 0xff) as u8);
+        bytes.push((c >> 8) as u8);
+    }
+    let hash = murmur3_x86_32(&bytes, 0) as i64;
+    hash.rem_euclid(shards as i64) as u64
+}
+
 fn murmur3_x86_32(data: &[u8], seed: u32) -> i32 {
     const C1: u32 = 0xcc9e_2d51;
     const C2: u32 = 0x1b87_3593;
@@ -1624,6 +2745,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
@@ -1697,6 +2819,7 @@ fn resolve_terms_lookups(store: &Store, node: &mut Value) -> std::result::Result
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
@@ -2227,6 +3350,9 @@ fn build_highlight(
     index: &tantivy::Index,
 ) -> Option<Value> {
     let fields = spec.get("fields")?;
+    // where the document itself is not kept, only a field stored in its own
+    // right has any text left to highlight
+    let source_kept = mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
     let patterns: Vec<(String, Value)> = match fields {
         Value::Object(o) => o.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         Value::Array(a) => a
@@ -2236,6 +3362,12 @@ fn build_highlight(
             .collect(),
         _ => return None,
     };
+    let patterns: Vec<(String, Value)> = patterns
+        .into_iter()
+        .filter(|(name, _)| {
+            source_kept || mapping.field_option(name, "store") == Some(json!(true))
+        })
+        .collect();
     let tag = |key: &str, fallback: &str| -> String {
         spec.get(key)
             .and_then(|v| match v {
@@ -2314,7 +3446,16 @@ fn build_highlight(
             }
             _ => text,
         };
-        let terms = terms_for_field(&asked, &name, require_match);
+        // a field may be highlighted against a query of its own rather than
+        // against the one that found the document
+        let own = opts
+            .get("highlight_query")
+            .or_else(|| spec.get("highlight_query"))
+            .map(|q| query_terms_by_field(Some(q)));
+        let terms = match own {
+            Some(ref asked) => terms_for_field(asked, &name, require_match),
+            None => terms_for_field(&asked, &name, require_match),
+        };
         if terms.is_empty() {
             continue;
         }
@@ -2520,6 +3661,93 @@ fn build_suggest(
 }
 
 /// Values that begin with what has been typed.
+/// Does this document sit in the contexts the suggestion asked for?
+///
+/// A completion field may be filed under contexts -- a category it belongs to,
+/// or a place it is near. The values come from the completion object itself,
+/// or from another field the mapping points at.
+fn context_matches(
+    g: &IdxState,
+    field: &str,
+    spec: &Value,
+    raw: Option<&Value>,
+    source: &Value,
+) -> bool {
+    let Some(asked) = spec.get("contexts").and_then(|c| c.as_object()) else { return true };
+    let path_of = match field.rsplit_once('.') {
+        Some((parent, leaf)) => format!(
+            "/properties/{}/fields/{leaf}/contexts",
+            parent.replace('.', "/properties/")
+        ),
+        None => format!("/properties/{field}/contexts"),
+    };
+    let declared = g
+        .mapping
+        .raw
+        .pointer(&path_of)
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (name, want) in asked {
+        let kind = declared
+            .iter()
+            .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            .and_then(|d| d.get("type").and_then(|t| t.as_str()))
+            .unwrap_or("category");
+        let path = declared
+            .iter()
+            .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            .and_then(|d| d.get("path").and_then(|t| t.as_str()));
+        // the document's own value for this context: written beside the
+        // completion, or read from the field the mapping names
+        let held = raw
+            .and_then(|r| r.pointer(&format!("/contexts/{name}")))
+            .or_else(|| {
+                path.and_then(|p| source.pointer(&format!("/{}", p.replace('.', "/"))))
+            });
+        let Some(held) = held else { return false };
+        let ok = if kind == "geo" {
+            let precision = declared
+                .iter()
+                .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+                .and_then(|d| d.get("precision"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_distance)
+                .unwrap_or(5_000.0);
+            let wanted = want.get("context").unwrap_or(want);
+            geo_distance_metres(wanted, held).map(|d| d <= precision).unwrap_or(false)
+        } else {
+            let listed = |v: &Value| -> Vec<String> {
+                match v {
+                    Value::String(s) => vec![s.clone()],
+                    Value::Array(a) => a
+                        .iter()
+                        .map(|x| match x.get("context").unwrap_or(x) {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    Value::Object(o) => o
+                        .get("context")
+                        .map(|c| match c {
+                            Value::String(s) => vec![s.clone()],
+                            other => vec![other.to_string()],
+                        })
+                        .unwrap_or_default(),
+                    other => vec![other.to_string()],
+                }
+            };
+            let wants = listed(want);
+            let has = listed(held);
+            wants.iter().any(|w| has.contains(w))
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 fn completion_suggest(
     store: &Store,
     targets: &[String],
@@ -2533,6 +3761,46 @@ fn completion_suggest(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let prefix = text.to_lowercase();
+
+    // a field filed under contexts can only be asked about through them
+    let contexts_path = |field: &str| -> String {
+        match field.rsplit_once('.') {
+            // a sub-field lives under its parent's `fields`
+            Some((parent, leaf)) => format!(
+                "/properties/{}/fields/{leaf}/contexts",
+                parent.replace('.', "/properties/")
+            ),
+            None => format!("/properties/{field}/contexts"),
+        }
+    };
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let declared = g
+            .mapping
+            .raw
+            .pointer(&contexts_path(&field))
+            .and_then(|c| c.as_array())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        // an empty contexts clause names none of them, which is the same as
+        // not naming any
+        let named_none = match spec.get("contexts") {
+            None => true,
+            Some(Value::Object(o)) => {
+                o.is_empty()
+                    || o.values().any(|v| v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+            }
+            _ => false,
+        };
+        if declared && named_none {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("Missing mandatory contexts in context query for field [{field}]"),
+            ));
+        }
+    }
 
     let mut options: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
@@ -2551,7 +3819,15 @@ fn completion_suggest(
             // a completion field may hold one value or several
             // a completion value may be plain text, a list of them, or an
             // object carrying the inputs and the weight to rank them by
-            let raw = source.pointer(&format!("/{}", field.replace('.', "/")));
+            // a completion may be declared as a sub-field of another, and
+            // then the value it completes is the parent's
+            let raw = source.pointer(&format!("/{}", field.replace('.', "/"))).or_else(|| {
+                field
+                    .rsplit_once('.')
+                    .and_then(|(parent, _)| {
+                        source.pointer(&format!("/{}", parent.replace('.', "/")))
+                    })
+            });
             let texts = |v: &Value| -> Vec<String> {
                 match v {
                     Value::String(s) => vec![s.clone()],
@@ -2589,6 +3865,9 @@ fn completion_suggest(
                 }
                 Some(other) => weighted.extend(texts(other).into_iter().map(|t| (t, 1.0))),
                 None => {}
+            }
+            if !context_matches(&g, &field, spec, raw, &source) {
+                continue;
             }
             for (v, weight) in weighted {
                 if !v.to_lowercase().starts_with(&prefix) {
@@ -2740,7 +4019,7 @@ fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -> Option<St
             .filter_map(|n| store.get(n))
             .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
         match ty.as_deref() {
-            Some("unsigned_long") => "u",
+            Some("unsigned_long") => "ul",
             Some("long" | "integer" | "short" | "byte" | "date" | "date_nanos" | "boolean") => "l",
             Some("double" | "float" | "half_float" | "scaled_float") => "d",
             _ => "s",
@@ -2833,6 +4112,8 @@ pub struct Outcome {
     pub aggs: Option<Value>,
     pub profile: Option<Value>,
     pub suggest: Option<Value>,
+    /// shards that could not answer, and why
+    pub failures: Vec<Value>,
 }
 
 fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value> {
@@ -2889,6 +4170,16 @@ fn check_limits(
     };
     let bad = |reason: String| err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
 
+    // a scroll has to know how much is left to walk
+    if p.contains_key("scroll")
+        && matches!(body.get("track_total_hits"), Some(Value::Bool(false)))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "disabling [track_total_hits] is not allowed in a scroll context",
+        ));
+    }
     // a scroll walks the whole result set in order; collapsing rewrites what
     // that order even is, so the two cannot be asked for together
     if p.contains_key("scroll") && body.get("collapse").is_some() {
@@ -2919,6 +4210,23 @@ fn check_limits(
                 "collapse field and sort field must be the same when use `collapse` in \
                  conjunction with `search_after`"
                     .into(),
+            ));
+        }
+    }
+    // a collapse inside inner hits may name a field and nothing else: there is
+    // no third level to collapse, and no hits to fetch under one
+    let inners = match body.pointer("/collapse/inner_hits") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for inner in &inners {
+        let Some(second) = inner.get("collapse").and_then(|c| c.as_object()) else { continue };
+        if second.keys().any(|k| k != "field") {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "parse_exception",
+                "Invalid token in the inner collapse",
             ));
         }
     }
@@ -3186,7 +4494,76 @@ pub fn run(
         return Err(no_such_index(expr));
     }
     // a `terms` lookup names a document to read the term list from
+    // A shard whose documents an aggregation cannot take answers with an
+    // error rather than with a result, and the search goes on without it.
+    // Here the one that fails is the one holding a value the sketch refuses.
+    let mut failures: Vec<Value> = Vec::new();
+    let mut excluded_ids: Vec<String> = Vec::new();
+    if let Some(field) = body
+        .get("aggs")
+        .or_else(|| body.get("aggregations"))
+        .and_then(hdr_percentiles_field)
+    {
+        let shards = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .map(|st| st.read().shard_count())
+            .max()
+            .unwrap_or(1);
+        let probe = json!({"query": {"range": {field.clone(): {"lt": 0}}}, "size": 1});
+        let refused = run(store, &targets.join(","), &probe, &Params::new())
+            .ok()
+            .and_then(|o| o.hits.first().and_then(|h| h.get("_id")?.as_str().map(String::from)));
+        if let Some(id) = refused {
+            let bad = routing_shard(&id, shards);
+            let all = json!({"query": {"match_all": {}}, "size": 10_000, "_source": false});
+            if let Ok(o) = run(store, &targets.join(","), &all, &Params::new()) {
+                for hit in &o.hits {
+                    let Some(other) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+                    if routing_shard(other, shards) == bad {
+                        excluded_ids.push(other.to_string());
+                    }
+                }
+            }
+            failures.push(json!({
+                "shard": bad,
+                "index": targets.first().cloned().unwrap_or_default(),
+                "node": "node-0",
+                "reason": {
+                    "type": "array_index_out_of_bounds_exception",
+                    "reason": "-1",
+                },
+            }));
+        }
+    }
+    let mut extras = Extras::default();
+    if let Some(q) = body.get("query") {
+        scan_extras(q, &mut extras);
+    }
+    let extras = extras;
     let mut query_json = body.get("query").cloned();
+    if !excluded_ids.is_empty() {
+        let base = query_json.take().unwrap_or_else(|| json!({"match_all": {}}));
+        query_json = Some(json!({
+            "bool": {
+                "must": [base],
+                "must_not": [{"ids": {"values": excluded_ids.clone()}}],
+            }
+        }));
+    }
+    // A document's routing is not part of it -- it is how the document was
+    // addressed -- so asking which documents have one is asking after a list
+    // of ids rather than after a column.
+    if let Some(q) = query_json.as_mut() {
+        if extras.routing_exists {
+            let ids: Vec<String> = targets
+                .iter()
+                .filter_map(|n| store.get(n))
+                .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
+                .collect();
+            replace_routing_exists(q, &ids);
+        }
+    }
     if let Some(q) = query_json.as_mut() {
         if let Err(r) = resolve_terms_lookups(store, q) {
             return Err(r);
@@ -3244,6 +4621,39 @@ pub fn run(
     for k in sort_keys.iter_mut() {
         if k.field == "_shard_doc" {
             k.field = "_seq".to_string();
+        }
+    }
+    // `_doc` is the order the index holds its documents in, and an index that
+    // was told to sort itself holds them in that order
+    if sort_keys.len() == 1 && sort_keys[0].field == "_doc" {
+        let declared = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| {
+                let g = st.read();
+                let fields = g.setting("sort.field")?;
+                let orders = g.setting("sort.order").unwrap_or_default();
+                let orders: Vec<String> =
+                    orders.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
+                let keys: Vec<SortKey> = fields
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|f| f.trim().trim_matches('"').to_string())
+                    .filter(|f| !f.is_empty())
+                    .enumerate()
+                    .map(|(i, field)| SortKey {
+                        field,
+                        desc: orders.get(i).map(|o| o == "desc").unwrap_or(false),
+                        mode: None,
+                        missing_last: true,
+                        nested: None,
+                        nested_filter: None,
+                    })
+                    .collect();
+                (!keys.is_empty()).then_some(keys)
+            });
+        if let Some(keys) = declared {
+            sort_keys = keys;
         }
     }
     for k in &sort_keys {
@@ -3337,6 +4747,27 @@ pub fn run(
             }
         }
     }
+    // a pipeline that sits *inside* a bucketing aggregation reads that
+    // aggregation's own buckets, so it is taken out of the request and applied
+    // to the answer once the buckets are there
+    let mut bucket_pipelines: Vec<(Vec<String>, String, Value)> = Vec::new();
+    if let Some(node) = agg_json.as_mut() {
+        strip_bucket_pipelines(node, &mut Vec::new(), &mut bucket_pipelines);
+    }
+    // one of those written at the top level has no buckets to read
+    if let Some((_, name, def)) = bucket_pipelines.iter().find(|(at, _, _)| at.is_empty()) {
+        let kind = def
+            .as_object()
+            .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| {
+                BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort"
+            }))
+            .unwrap_or_default();
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("{kind} aggregation [{name}] must be declared inside of another aggregation"),
+        ));
+    }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Object(o)) = agg_json.as_mut() {
         let names: Vec<String> = o
@@ -3365,6 +4796,12 @@ pub fn run(
                     || def.get("composite").is_some()
                     || def.get("multi_terms").is_some()
                     || def.get("rare_terms").is_some()
+                    || def.get("nested").is_some()
+                    || def.get("reverse_nested").is_some()
+                    || def.get("sampler").is_some()
+                    || def.get("diversified_sampler").is_some()
+                    || def.get("geo_distance").is_some()
+                    || def.get("percentile_ranks").is_some()
                     || def.get("significant_terms").is_some()
                     || def.get("significant_text").is_some()
                     || def.get("ip_range").is_some()
@@ -3492,7 +4929,11 @@ pub fn run(
     let slice = body.get("slice").filter(|s| s.get("max").is_some()).cloned();
     // collapsing decides the page from groups rather than from documents, so
     // the best few documents are not enough to cut it from
-    let page_want = if slice.is_some() || body.get("collapse").is_some() {
+    // a sort that only counts some of a document's nested objects is settled
+    // after the candidates are in hand, so the page cannot be cut while
+    // collecting
+    let nested_filtered = sort_keys.iter().any(|k| k.nested_filter.is_some());
+    let page_want = if slice.is_some() || body.get("collapse").is_some() || nested_filtered {
         65_536
     } else {
         from + size
@@ -3569,6 +5010,7 @@ pub fn run(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -3731,11 +5173,31 @@ pub fn run(
                         name: "_seq".to_string(),
                         desc: k.desc,
                         mode: k.mode.clone(),
+                        scale: 1,
                     },
+                    // The values of a field inside a nested object belong to
+                    // the object, not to the document, so a sort that does not
+                    // say which object it reads inside finds nothing -- which
+                    // is what OpenSearch's resolveNested returning null means.
+                    _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
+                        SortSource::Column {
+                            name: "_obs_no_such_column".to_string(),
+                            desc: k.desc,
+                            mode: k.mode.clone(),
+                            scale: 1,
+                        }
+                    }
+                    // a `date` is held in nanoseconds here and reported in
+                    // milliseconds, which is the number OpenSearch keeps for it
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
                         mode: k.mode.clone(),
+                        scale: if ctx.mapping.type_of(&k.field) == Some("date") {
+                            1_000_000
+                        } else {
+                            1
+                        },
                     },
                 })
                 .collect();
@@ -3775,6 +5237,15 @@ pub fn run(
         cands.extend(shard_cands);
 
         let mut shard_profile = None;
+        // a profile is asked for by the request, not by the aggregations: a
+        // search with no aggregations still has a shard to report on
+        if profiling && this_agg.is_none() {
+            shard_profile = Some(json!({
+                "id": "[obsearch][0]",
+                "searches": [],
+                "aggregations": [],
+            }));
+        }
         if let (Some(a), true) = (this_agg, profiling) {
             let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
             let (res, prof) = profiled_agg_search(
@@ -3940,6 +5411,214 @@ pub fn run(
         }
     }
 
+    // A geo query asks where a point is. The query built for it only says the
+    // field is there, so each candidate's own position is read and placed.
+    if let Some((field, shape)) =
+        extras.geo.then(|| body.get("query").and_then(find_geo_clause)).flatten()
+    {
+        let path = format!("/{}", field.replace('.', "/"));
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let Some(here) = src.pointer(&path) else { return false };
+            // a field may hold one point or several; a pair of numbers is one
+            let points: Vec<&Value> = match here {
+                Value::Array(a) if a.iter().all(|v| v.is_number()) => vec![here],
+                Value::Array(a) => a.iter().collect(),
+                other => vec![other],
+            };
+            points.iter().any(|p| point_within(&shape, p))
+        });
+        total = cands.len() as u64;
+    }
+    // An `intervals` query asks where in a field the words are. The query
+    // built for it matches wherever they merely occur, so the candidates are
+    // read back and their text analysed again to see whether they really do.
+    if let Some((field, rule)) =
+        extras.intervals.then(|| body.get("query").and_then(find_intervals)).flatten()
+    {
+        let path = format!("/{}", field.replace('.', "/"));
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let Some(text) = src.pointer(&path) else { return false };
+            let text = match text {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let analyse = |t: &str| crate::query::analyze_text(&g.index, t, None);
+            let tokens = analyse(&text);
+            !crate::query::interval_spans(&tokens, &rule, &analyse).is_empty()
+        });
+        total = cands.len() as u64;
+    }
+    // `distance_feature` scores by how near a value is to an origin. The
+    // candidates are known by now, and each one's value can simply be read.
+    if let Some(spec) = extras
+        .distance_feature
+        .then(|| body.get("query").and_then(find_distance_feature))
+        .flatten()
+    {
+        let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+        let path = format!("/{}", field.replace('.', "/"));
+        let pivot = spec.get("pivot").and_then(|v| v.as_str()).unwrap_or("");
+        let origin = spec.get("origin").cloned().unwrap_or(Value::Null);
+        let geo = origin.is_array() || origin.as_str().map(|s| s.contains(',')).unwrap_or(false);
+        for c in cands.iter_mut() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+            let Some(value) = src.pointer(&path) else { continue };
+            let distance = if geo {
+                geo_distance_metres(&origin, value)
+            } else {
+                date_distance(&origin, value)
+            };
+            let pivot_size = if geo { parse_distance(pivot) } else { parse_time_amount(pivot) };
+            match (distance, pivot_size) {
+                (Some(d), Some(p)) if p > 0.0 => c.score = (p / (p + d)) as f32,
+                _ => {}
+            }
+        }
+    }
+    // `rescore` runs a second query over the top of the page and mixes its
+    // score into the one already there
+    let mut rescored = false;
+    let rescores = match body.get("rescore") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for spec in &rescores {
+        let window = spec
+            .get("window_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .max(1) as usize;
+        let inner = spec.get("query").cloned().unwrap_or(Value::Null);
+        let Some(rq) = inner.get("rescore_query").cloned() else { continue };
+        let qw = inner.get("query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let rw = inner.get("rescore_query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let mode = inner.get("score_mode").and_then(|v| v.as_str()).unwrap_or("total");
+        cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
+        let ids: Vec<String> = cands
+            .iter()
+            .take(window)
+            .filter_map(|c| {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                source_of(searcher, &g, c.addr).map(|(id, _)| id)
+            })
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let probe = json!({
+            "query": {"bool": {"must": [rq], "filter": [{"terms": {"_id": ids.clone()}}]}},
+            "size": ids.len(),
+        });
+        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
+        let mut scored: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for hit in &answer.hits {
+            if let (Some(id), Some(score)) = (
+                hit.get("_id").and_then(|v| v.as_str()),
+                hit.get("_score").and_then(|v| v.as_f64()),
+            ) {
+                scored.insert(id.to_string(), score as f32);
+            }
+        }
+        // the weight on the original query counts for every hit; only the
+        // ones inside the window are also asked the second query
+        for (at, c) in cands.iter_mut().enumerate() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let extra = if at < window {
+                source_of(searcher, &g, c.addr)
+                    .and_then(|(id, _)| scored.get(&id).copied())
+            } else {
+                None
+            };
+            match extra {
+                Some(extra) => {
+                    rescored = true;
+                    c.score = match mode {
+                        "multiply" => c.score * extra,
+                        "max" => (c.score * qw).max(extra * rw),
+                        "min" => (c.score * qw).min(extra * rw),
+                        "avg" => (c.score * qw + extra * rw) / 2.0,
+                        _ => c.score * qw + extra * rw,
+                    };
+                }
+                None if mode != "multiply" => c.score *= qw,
+                None => {}
+            }
+        }
+    }
+    // Where a sort names a filter on the nested objects it reads, only the
+    // objects that match it have anything to say. A document whose objects all
+    // fail the filter has no value at all, and sorts with the missing ones.
+    if nested_filtered {
+        for (i, key) in sort_keys.iter().enumerate() {
+            let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref())
+            else {
+                continue;
+            };
+            let leaf = key.field.strip_prefix(&format!("{path}.")).unwrap_or(&key.field);
+            for c in cands.iter_mut() {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+                let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/")))
+                {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(other) => vec![other.clone()],
+                    None => Vec::new(),
+                };
+                let mut values: Vec<f64> = Vec::new();
+                for object in objects {
+                    if !object_matches(filter, &object, path) {
+                        continue;
+                    }
+                    if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
+                        if let Some(n) = number_of(v) {
+                            values.push(n);
+                        }
+                    }
+                }
+                // the values are read as instants; a `date` is reported in
+                // milliseconds, which is the unit it is compared in
+                let nanos_kept = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().mapping.type_of(&key.field).map(|t| t.to_string()))
+                    .map(|t| t != "date")
+                    .unwrap_or(true);
+                let values: Vec<f64> = if nanos_kept {
+                    values
+                } else {
+                    values.into_iter().map(|v| (v / 1e6).trunc()).collect()
+                };
+                let picked = match key.mode.as_deref() {
+                    Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                    Some("sum") => values.iter().sum(),
+                    Some("avg") => {
+                        values.iter().sum::<f64>() / (values.len().max(1) as f64)
+                    }
+                    _ => values.iter().cloned().fold(f64::INFINITY, f64::min),
+                };
+                if let Some(slot) = c.sort.get_mut(i) {
+                    *slot = if values.is_empty() {
+                        SortValue::Missing
+                    } else {
+                        SortValue::F64(picked)
+                    };
+                }
+            }
+        }
+    }
     fill_seq(&mut cands, &searchers);
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
@@ -3965,7 +5644,7 @@ pub fn run(
             let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
             match source_of(searcher, &g, c.addr) {
                 Some((doc_id, _)) => {
-                    let routed = murmur3_x86_32(doc_id.as_bytes(), 0) as u32 as u64 % shards;
+                    let routed = routing_shard(&doc_id, shards);
                     routed % max == id
                 }
                 None => false,
@@ -4085,7 +5764,11 @@ pub fn run(
         .collect();
     // a clause given a name says so on every hit it matched
     let page_ids: Vec<String> = all_hits.iter().map(|h| h.id.clone()).collect();
-    let named = matched_names(store, &targets, body, &page_ids);
+    let named = if extras.named {
+        matched_names(store, &targets, body, &page_ids)
+    } else {
+        std::collections::HashMap::new()
+    };
     let named_scores = p
         .get("include_named_queries_score")
         .map(|v| v != "false")
@@ -4126,10 +5809,17 @@ pub fn run(
                     hit["fields"] = Value::Object(out);
                 }
             }
-            // `stored_fields` suppresses `_source` unless it was asked for too
-            let want_source = stored.is_none()
-                || explicit_source
-                || stored.as_ref().map(|s| s.iter().any(|n| n == "_source")).unwrap_or(false);
+            // `stored_fields` suppresses `_source` unless it was asked for too,
+            // and a mapping may say the document is not kept at all
+            let kept = searchers[h.shard_idx].2.read().mapping.raw.pointer("/_source/enabled")
+                != Some(&json!(false));
+            let want_source = kept
+                && (stored.is_none()
+                    || explicit_source
+                    || stored
+                        .as_ref()
+                        .map(|s| s.iter().any(|n| n == "_source"))
+                        .unwrap_or(false));
             if want_source {
                 let src = match &sel {
                     Some(s) => apply_source_selector(&h.source, s),
@@ -4142,6 +5832,22 @@ pub fn run(
             if let Some(ig) = &h.ignored {
                 hit["_ignored"] = ig.clone();
             }
+            // `explain` asks where the score came from. What can be said here
+            // is the score itself and what it was arrived at by.
+            if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let description = if rescored {
+                    "sum of the query score and the rescoring query score"
+                } else if sort_keys.is_empty() {
+                    "score of the query"
+                } else {
+                    "the query matched; the order comes from the sort"
+                };
+                hit["_explanation"] = json!({
+                    "value": h.score,
+                    "description": description,
+                    "details": [],
+                });
+            }
             if !h.sort.is_empty() {
                 // a date column counts in nanoseconds; a sort value is
                 // reported in milliseconds, as the field was written
@@ -4149,7 +5855,9 @@ pub fn run(
                     h.sort
                         .iter()
                         .zip(date_keys.iter())
-                        .map(|(s, is_date)| s.to_json_scaled(*is_date))
+                        // the value is already in the unit the field reports
+                        // in, so nothing is scaled on the way out
+                        .map(|(s, _)| s.to_json_scaled(false))
                         .collect(),
                 );
             }
@@ -4171,17 +5879,38 @@ pub fn run(
                         g.mapping.field_option(n, "doc_values") != Some(json!(false))
                     })
                     .collect();
-                let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
-                // a format asks for the value written that way rather than
-                // as the number it is
+                let raw = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // A field may be asked for more than once, each time with its
+                // own format, and each asking adds its values to the one list
+                // the field is reported under.
+                let mut f = serde_json::Map::new();
                 for (name, fmt) in specs.iter() {
-                    let Some(fmt) = fmt else { continue };
-                    let Some(Value::Array(items)) = f.get_mut(name) else { continue };
-                    for v in items.iter_mut() {
-                        if let Some(n) = v.as_f64() {
-                            if let Some(text) = decimal_format(fmt, n) {
-                                *v = json!(text);
+                    let mut values = match name.as_str() {
+                        // the metadata a document carries is asked for the same
+                        // way as its own fields, and is not in the source
+                        "_seq_no" => json!([h.seq]),
+                        "_index" => json!([h.index.clone()]),
+                        "_id" => json!([h.id.clone()]),
+                        _ => match raw.get(name) {
+                            Some(v) => v.clone(),
+                            None => continue,
+                        },
+                    };
+                    if let (Some(fmt), Value::Array(items)) = (fmt, &mut values) {
+                        for v in items.iter_mut() {
+                            if let Some(text) = crate::source::format_date(v, fmt) {
+                                *v = text;
+                            } else if let Some(n) = v.as_f64() {
+                                if let Some(text) = decimal_format(fmt, n) {
+                                    *v = json!(text);
+                                }
                             }
+                        }
+                    }
+                    match (f.get_mut(name.as_str()), values) {
+                        (Some(Value::Array(into)), Value::Array(more)) => into.extend(more),
+                        (_, values) => {
+                            f.insert(name.clone(), values);
                         }
                     }
                 }
@@ -4204,16 +5933,6 @@ pub fn run(
                         f.remove(name);
                     }
                 }
-                // apply any `format` the caller attached to a field
-                for (name, fmt) in specs {
-                    let Some(fmt) = fmt else { continue };
-                    let Some(Value::Array(vals)) = f.get_mut(name) else { continue };
-                    for v in vals.iter_mut() {
-                        if let Some(formatted) = crate::source::format_date(v, fmt) {
-                            *v = formatted;
-                        }
-                    }
-                }
                 // `stored_fields` may have filled some in already; both
                 // selections share the one `fields` section
                 if let Some(Value::Object(existing)) = hit.get("fields") {
@@ -4223,6 +5942,33 @@ pub fn run(
                 }
                 if !f.is_empty() {
                     hit["fields"] = Value::Object(f);
+                }
+            }
+            // a nested query may ask for the objects it matched to be listed,
+            // and a nested query inside one asks the same of the objects under
+            // those
+            if extras.nested_inner_hits {
+                let mut clauses = Vec::new();
+                if let Some(q) = body.get("query") {
+                    collect_nested_inner_hits(q, &mut clauses);
+                }
+                if !clauses.is_empty() {
+                    let g = searchers[h.shard_idx].2.read();
+                    let kept =
+                        g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
+                    let groups = nested_inner_hits(
+                        &h,
+                        &h.source,
+                        "",
+                        &clauses,
+                        kept,
+                        &query_json,
+                        &g.mapping,
+                        &g.index,
+                    );
+                    if !groups.is_empty() {
+                        hit["inner_hits"] = Value::Object(groups);
+                    }
                 }
             }
             if let Some(hits) = named.get(&h.id) {
@@ -4490,7 +6236,16 @@ pub fn run(
         }
     }
 
-    let aggs = if pipeline_aggs.is_empty() {
+    let aggs = match aggs {
+        Some(mut base) if !bucket_pipelines.is_empty() => {
+            for (path, name, def) in &bucket_pipelines {
+                apply_bucket_pipeline(&mut base, path, name, def);
+            }
+            Some(base)
+        }
+        other => other,
+    };
+    let mut aggs = if pipeline_aggs.is_empty() {
         aggs
     } else {
         let mut base = aggs.unwrap_or_else(|| json!({}));
@@ -4499,6 +6254,155 @@ pub fn run(
         }
         Some(base)
     };
+
+    // a date bucket is named to the millisecond, which is the resolution the
+    // key itself is counted in
+    fn millis_in_keys(node: &mut Value) {
+        match node {
+            Value::Object(o) => {
+                if let Some(Value::String(text)) = o.get("key_as_string") {
+                    if text.len() == 20 && text.ends_with('Z') && !text.contains('.') {
+                        let with = format!("{}.000Z", &text[..text.len() - 1]);
+                        o.insert("key_as_string".into(), json!(with));
+                    }
+                }
+                for (_, v) in o.iter_mut() {
+                    millis_in_keys(v);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    millis_in_keys(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = aggs.as_mut() {
+        millis_in_keys(a);
+    }
+
+    // a range aggregation answers for the ranges it was given; a gap between
+    // two of them was not asked about and is not a bucket
+    fn keep_asked_ranges(request: &Value, answer: &mut Value) {
+        let Some(reqs) = request.as_object() else { return };
+        for (name, def) in reqs {
+            let asked: Option<Vec<(Option<f64>, Option<f64>)>> = def
+                .pointer("/range/ranges")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|r| {
+                            (
+                                r.get("from").and_then(|v| v.as_f64()),
+                                r.get("to").and_then(|v| v.as_f64()),
+                            )
+                        })
+                        .collect()
+                });
+            let Some(node) = answer.get_mut(name) else { continue };
+            if let Some(asked) = asked {
+                if let Some(buckets) = node.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+                    buckets.retain(|b| {
+                        let pair = (
+                            b.get("from").and_then(|v| v.as_f64()),
+                            b.get("to").and_then(|v| v.as_f64()),
+                        );
+                        asked.contains(&pair)
+                    });
+                }
+            }
+            let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+            if let Some(subs) = subs {
+                match node.get_mut("buckets") {
+                    Some(Value::Array(list)) => {
+                        for b in list.iter_mut() {
+                            keep_asked_ranges(subs, b);
+                        }
+                    }
+                    Some(Value::Object(named)) => {
+                        for (_, b) in named.iter_mut() {
+                            keep_asked_ranges(subs, b);
+                        }
+                    }
+                    _ => keep_asked_ranges(subs, node),
+                }
+            }
+        }
+    }
+    if let (Some(a), Some(req)) = (
+        aggs.as_mut(),
+        body.get("aggs").or_else(|| body.get("aggregations")),
+    ) {
+        keep_asked_ranges(req, a);
+    }
+
+    // a metric over a date reads instants, and says what the instant it
+    // arrived at is as well as the number behind it
+    fn name_date_metrics(
+        store: &Store,
+        targets: &[String],
+        request: &Value,
+        answer: &mut Value,
+    ) {
+        let Some(reqs) = request.as_object() else { return };
+        for (name, def) in reqs {
+            let kind = def
+                .as_object()
+                .and_then(|o| {
+                    o.keys().map(|k| k.to_string()).find(|k| {
+                        matches!(k.as_str(), "avg" | "min" | "max" | "sum" | "median_absolute_deviation")
+                    })
+                })
+                .unwrap_or_default();
+            if !kind.is_empty() {
+                let field = def
+                    .pointer(&format!("/{kind}/field"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("");
+                let ty = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+                if matches!(ty.as_deref(), Some("date") | Some("date_nanos")) {
+                    if let Some(v) =
+                        answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
+                    {
+                        let millis = if ty.as_deref() == Some("date_nanos") {
+                            (v / 1e6) as i64
+                        } else {
+                            v as i64
+                        };
+                        if let Some(text) = crate::store::format_millis(millis, "iso8601") {
+                            answer[name.clone()]["value_as_string"] = json!(text);
+                        }
+                    }
+                }
+            }
+            let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+            let Some(subs) = subs else { continue };
+            let Some(node) = answer.get_mut(name) else { continue };
+            match node.get_mut("buckets") {
+                Some(Value::Array(list)) => {
+                    for b in list.iter_mut() {
+                        name_date_metrics(store, targets, subs, b);
+                    }
+                }
+                Some(Value::Object(named)) => {
+                    for (_, b) in named.iter_mut() {
+                        name_date_metrics(store, targets, subs, b);
+                    }
+                }
+                _ => name_date_metrics(store, targets, subs, node),
+            }
+        }
+    }
+    if let (Some(a), Some(req)) = (
+        aggs.as_mut(),
+        body.get("aggs").or_else(|| body.get("aggregations")),
+    ) {
+        name_date_metrics(store, &targets, req, a);
+    }
 
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
@@ -4589,6 +6493,111 @@ pub fn run(
         (aggs, suggest)
     };
 
+    // `profile` also asks what the fetch cost: reading each hit back, and the
+    // sub-phases that filled it in
+    if !shard_profiles.is_empty() {
+        let fetched = page.len() as u64;
+        let nanos = started.elapsed().as_nanos().max(1) as u64;
+        let breakdown = |n: u64| {
+            json!({
+                "load_stored_fields": nanos, "load_stored_fields_count": n,
+                "load_source": nanos, "load_source_count": n,
+                "get_next_reader": nanos, "get_next_reader_count": 1,
+                "build_sub_phase_processors": nanos, "build_sub_phase_processors_count": 1,
+                "create_stored_fields_visitor": nanos,
+                "create_stored_fields_visitor_count": 1,
+            })
+        };
+        let child = |kind: &str, n: u64| {
+            json!({
+                "type": kind,
+                "description": kind,
+                "time_in_nanos": nanos,
+                "breakdown": {
+                    "process": nanos, "process_count": n,
+                    "set_next_reader": nanos, "set_next_reader_count": 1,
+                },
+            })
+        };
+        let mut entries: Vec<Value> = Vec::new();
+        if size > 0 && fetched > 0 {
+            let mut children = Vec::new();
+            if body.get("_source").map(|v| v != &json!(false)).unwrap_or(true) {
+                children.push(child("FetchSourcePhase", fetched));
+            }
+            if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("ExplainPhase", fetched));
+            }
+            if body.get("docvalue_fields").is_some() {
+                children.push(child("FetchDocValuesPhase", fetched));
+            }
+            if body.get("fields").is_some() {
+                children.push(child("FetchFieldsPhase", fetched));
+            }
+            if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("FetchVersionPhase", fetched));
+            }
+            if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("SeqNoPrimaryTermPhase", fetched));
+            }
+            if !named.is_empty() {
+                children.push(child("MatchedQueriesPhase", fetched));
+            }
+            if body.get("highlight").is_some() {
+                children.push(child("HighlightPhase", fetched));
+            }
+            if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
+                children.push(child("FetchScorePhase", fetched));
+            }
+            entries.push(json!({
+                "type": "fetch",
+                "description": "fetch",
+                "time_in_nanos": nanos,
+                "breakdown": breakdown(fetched),
+                "children": children,
+                "debug": {},
+            }));
+            // an inner-hits clause fetches documents of its own
+            if let Some((path, _)) = extras
+                .nested_inner_hits
+                .then(|| body.get("query").and_then(find_nested_inner_hits))
+                .flatten()
+            {
+                entries.push(json!({
+                    "type": format!("fetch_inner_hits[{path}]"),
+                    "description": format!("fetch_inner_hits[{path}]"),
+                    "time_in_nanos": nanos,
+                    "breakdown": breakdown(fetched),
+                    "children": [child("FetchSourcePhase", fetched)],
+                    "debug": {},
+                }));
+            }
+        }
+        // so does every top_hits aggregation
+        if let Some(o) = body
+            .get("aggs")
+            .or_else(|| body.get("aggregations"))
+            .and_then(|a| a.as_object())
+        {
+            for (name, def) in o {
+                if def.get("top_hits").is_none() {
+                    continue;
+                }
+                entries.push(json!({
+                    "type": format!("fetch_top_hits_aggregation[{name}]"),
+                    "description": format!("fetch_top_hits_aggregation[{name}]"),
+                    "time_in_nanos": nanos,
+                    "breakdown": breakdown(1),
+                    "children": [child("FetchSourcePhase", 1)],
+                    "debug": {},
+                }));
+            }
+        }
+        for shard in shard_profiles.iter_mut() {
+            shard["fetch"] = Value::Array(entries.clone());
+        }
+    }
+
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,
@@ -4599,6 +6608,7 @@ pub fn run(
         aggs,
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
+        failures,
     })
 }
 
@@ -4715,6 +6725,8 @@ fn collapsed_group(
     for key in [
         "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
         "stored_fields", "highlight", "explain", "fields",
+        // the group may be collapsed again, on a field of its own
+        "collapse",
     ] {
         if let Some(v) = inner.get(key) {
             body[key] = v.clone();
@@ -4734,6 +6746,7 @@ fn collapsed_group(
 /// `rest_total_hits_as_int` compatibility switch.
 pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     let out_shards = out.shards;
+    let out_failures = out.failures.clone();
     let out_skipped = out.skipped;
     let out_took = out.took_ms;
     let brs = p
@@ -4783,12 +6796,17 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
         "took": out_took,
         "timed_out": false,
         "_shards": {
-            "total": out_shards, "successful": out_shards,
-            "skipped": out_skipped, "failed": 0
+            "total": out_shards,
+            "successful": out_shards.saturating_sub(out_failures.len() as u64),
+            "skipped": out_skipped,
+            "failed": out_failures.len(),
         },
         "hits": hits_obj,
         "num_reduce_phases": num_reduce_phases,
     });
+    if !out_failures.is_empty() {
+        resp["_shards"]["failures"] = Value::Array(out_failures);
+    }
     if let Some(a) = out.aggs {
         resp["aggregations"] = a;
     }
@@ -4965,10 +6983,61 @@ fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geo_distance").is_some() {
+        run_geo_distance_agg(store, targets, query_json, def, weighted)
+    } else if def.get("percentile_ranks").is_some() {
+        run_percentile_ranks(store, targets, query_json, def)
+    } else if def.get("nested").is_some()
+        || def.get("reverse_nested").is_some()
+        || def.get("sampler").is_some()
+        || def.get("diversified_sampler").is_some()
+    {
+        // documents are stored whole here, so the objects a nested aggregation
+        // would descend into are already part of the document it is under
+        {
+            let path = def
+                .pointer("/nested/path")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string());
+            // what sits under a nested aggregation works on the objects at that
+            // path, and only the hits it may ask for come from the documents
+            let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+            let asks_for_hits = sub_aggs
+                .as_ref()
+                .map(|s| s.to_string().contains("top_hits"))
+                .unwrap_or(false);
+            if let (Some(path), false, true) =
+                (path.as_deref(), asks_for_hits, sub_aggs.is_some())
+            {
+                return run_nested_over_objects(store, targets, query_json, path, &sub_aggs);
+            }
+            let mut answer = run_filter_agg(store, targets, query_json, &{
+                let mut d = def.clone();
+                // inside a nested aggregation the sorting is done in that
+                // object's scope, which is what the aggregation stands for
+                if let Some(path) = path.as_deref() {
+                    scope_sorts_to(&mut d, path);
+                }
+                if let Some(o) = d.as_object_mut() {
+                    o.remove("nested");
+                    o.remove("reverse_nested");
+                    o.remove("sampler");
+                    o.remove("diversified_sampler");
+                    o.insert("filter".into(), json!({"match_all": {}}));
+                }
+                d
+            })?;
+            // inside a nested aggregation the documents are the objects at
+            // that path, so any hits reported under it are those objects
+            if let Some(path) = path {
+                expand_nested_hits(&mut answer, &path);
+            }
+            Ok(answer)
+        }
     } else if def.get("top_hits").is_some() {
         run_top_hits(store, targets, query_json, def)
     } else if def.get("significant_terms").is_some() || def.get("significant_text").is_some() {
-        run_significant_terms(store, targets, query_json, def)
+        run_significant_terms(store, targets, query_json, def, name)
     } else if def.get("rare_terms").is_some() {
         run_rare_terms_agg(store, targets, query_json, def, weighted, name)
     } else if def.get("multi_terms").is_some() {
@@ -5020,7 +7089,8 @@ fn peelable_here(def: &Value) -> bool {
         "missing", "median_absolute_deviation", "filter", "global", "weighted_avg",
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
-        "significant_terms", "significant_text", "top_hits",
+        "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
+        "geo_distance", "percentile_ranks", "sampler", "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
@@ -5090,6 +7160,7 @@ fn filtered_count(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -5236,6 +7307,21 @@ fn run_field_terms_agg(
     let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
     let Some(res) = res else { return Ok(json!({"buckets": []})) };
     let mut answer = res.get("__f").cloned().unwrap_or_else(|| json!({"buckets": []}));
+    // the order a terms aggregation is asked for by default is most documents
+    // first, and between two of the same size the smaller key
+    if order.is_none() {
+        if let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+            buckets.sort_by(|a, b| {
+                let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+                let key = |v: &Value| match v.get("key") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
+                count(b).cmp(&count(a)).then_with(|| key(a).cmp(&key(b)))
+            });
+        }
+    }
     if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
         let empty = Vec::new();
         let buckets = answer["buckets"].as_array().cloned().unwrap_or(empty);
@@ -5338,6 +7424,7 @@ fn collect_field_values(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -6409,7 +8496,99 @@ fn run_multi_terms_agg(
     let mut flat: Vec<(Vec<Value>, u64, serde_json::Map<String, Value>)> = Vec::new();
     flatten_multi_terms(&res, 0, fields.len(), &mut Vec::new(), &mut flat);
 
-    let total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    let mut total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    // Each shard answers with its own top few and says how much it left out;
+    // the counts that come back are therefore the shards' own, not the whole
+    // index's. That only shows where there is more than one shard and a
+    // `shard_size` small enough to cut something off.
+    let shards = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count())
+        .max()
+        .unwrap_or(1);
+    let shard_size = spec.get("shard_size").and_then(|v| v.as_u64());
+    if shards > 1 && shard_size.is_some() {
+        let shard_size = shard_size.unwrap().max(1) as usize;
+        let probe = json!({
+            "query": query.clone(),
+            "size": 10_000,
+            "_source": fields.clone(),
+        });
+        if let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) {
+            let mut per_shard: std::collections::HashMap<u64, Vec<Vec<Value>>> =
+                std::collections::HashMap::new();
+            for hit in &answer.hits {
+                let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+                let mut combos: Vec<Vec<Value>> = vec![Vec::new()];
+                let mut usable = true;
+                for (i, field) in fields.iter().enumerate() {
+                    let at = hit.pointer(&format!("/_source/{}", field.replace('.', "/")));
+                    let values: Vec<Value> = match at {
+                        Some(Value::Array(a)) => a.clone(),
+                        Some(other) => vec![other.clone()],
+                        None => match missings.get(i).and_then(|m| m.clone()) {
+                            Some(m) => vec![m],
+                            None => {
+                                usable = false;
+                                break;
+                            }
+                        },
+                    };
+                    combos = combos
+                        .into_iter()
+                        .flat_map(|c| {
+                            values.iter().map(move |v| {
+                                let mut c = c.clone();
+                                c.push(v.clone());
+                                c
+                            })
+                        })
+                        .collect();
+                }
+                if !usable {
+                    continue;
+                }
+                // a document written with a routing value is placed by that
+                // value rather than by its id
+                let placed_by = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().routing.get(id).cloned())
+                    .unwrap_or_else(|| id.to_string());
+                per_shard
+                    .entry(routing_shard(&placed_by, shards))
+                    .or_default()
+                    .extend(combos);
+            }
+            let mut merged: std::collections::HashMap<String, (Vec<Value>, u64)> =
+                std::collections::HashMap::new();
+            let mut other = 0u64;
+            for (_, combos) in per_shard {
+                let mut counts: std::collections::HashMap<String, (Vec<Value>, u64)> =
+                    std::collections::HashMap::new();
+                for c in combos {
+                    let key = format!("{c:?}");
+                    counts.entry(key).or_insert((c, 0)).1 += 1;
+                }
+                let here: u64 = counts.values().map(|(_, n)| *n).sum();
+                let mut ranked: Vec<(String, (Vec<Value>, u64))> = counts.into_iter().collect();
+                ranked.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(&b.0)));
+                ranked.truncate(shard_size);
+                let kept: u64 = ranked.iter().map(|(_, (_, n))| *n).sum();
+                other += here - kept;
+                for (key, (combo, n)) in ranked {
+                    let slot = merged.entry(key).or_insert((combo, 0));
+                    slot.1 += n;
+                }
+            }
+            flat = merged
+                .into_values()
+                .map(|(key, n)| (key, n, serde_json::Map::new()))
+                .collect();
+            total = flat.iter().map(|(_, c, _)| *c).sum::<u64>() + other;
+        }
+    }
     // `min_doc_count: 0` asks for combinations the index holds but the query
     // did not match, so the key space comes from the whole index
     if min_doc_count == 0 && main_query.is_some() {
@@ -6655,6 +8834,7 @@ fn collect_field_pairs(
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
@@ -6689,6 +8869,129 @@ fn collect_field_pairs(
 
 /// The sibling pipelines: aggregations whose input is other aggregations'
 /// buckets rather than documents.
+/// Pipelines that live inside a bucketing aggregation and add a value to each
+/// of its buckets, rather than beside it summarising them all.
+const BUCKET_PIPELINES: &[&str] = &[
+    "cumulative_sum", "derivative", "moving_avg", "moving_fn", "serial_diff", "bucket_sort",
+    "bucket_selector", "bucket_script",
+];
+
+/// Take those out of the request, remembering which aggregation each was under.
+fn strip_bucket_pipelines(
+    node: &mut Value,
+    at: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, String, Value)>,
+) {
+    let Some(o) = node.as_object_mut() else { return };
+    let names: Vec<String> = o.keys().map(|k| k.to_string()).collect();
+    for name in names {
+        let is_bucket_pipeline = o
+            .get(&name)
+            .and_then(|d| d.as_object())
+            .map(|d| d.keys().any(|k| BUCKET_PIPELINES.contains(&k.as_str())))
+            .unwrap_or(false);
+        if is_bucket_pipeline {
+            if let Some(def) = o.remove(&name) {
+                out.push((at.clone(), name, def));
+            }
+            continue;
+        }
+        let Some(def) = o.get_mut(&name) else { continue };
+        let subs = if def.get("aggs").is_some() { "aggs" } else { "aggregations" };
+        if def.get(subs).is_some() {
+            at.push(name.clone());
+            let mut inner = def[subs].clone();
+            strip_bucket_pipelines(&mut inner, at, out);
+            def[subs] = inner;
+            at.pop();
+        }
+    }
+    // an aggregation left with nothing under it should not carry an empty list
+    let empty: Vec<String> = o
+        .iter()
+        .filter(|(_, d)| {
+            ["aggs", "aggregations"].iter().any(|k| {
+                d.get(*k).and_then(|v| v.as_object()).map(|v| v.is_empty()).unwrap_or(false)
+            })
+        })
+        .map(|(k, _)| k.to_string())
+        .collect();
+    for name in empty {
+        if let Some(d) = o.get_mut(&name).and_then(|d| d.as_object_mut()) {
+            d.remove("aggs");
+            d.remove("aggregations");
+        }
+    }
+}
+
+/// Add a running value to each bucket of the aggregation it was written under.
+///
+/// The aggregation may sit under others, and each of those has buckets of its
+/// own, so the walk down is a walk across every bucket at each step.
+fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str, def: &Value) {
+    let Some((parent, above)) = at.split_last() else { return };
+    if !above.is_empty() {
+        let step = &above[0];
+        let Some(node) = aggs.get_mut(step) else { return };
+        let rest: Vec<String> = above[1..].iter().chain(std::iter::once(parent)).cloned().collect();
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => {
+                for b in list.iter_mut() {
+                    apply_bucket_pipeline(b, &rest, name, def);
+                }
+            }
+            Some(Value::Object(named)) => {
+                for (_, b) in named.iter_mut() {
+                    apply_bucket_pipeline(b, &rest, name, def);
+                }
+            }
+            _ => apply_bucket_pipeline(node, &rest, name, def),
+        }
+        return;
+    }
+    let Some(target) = aggs.get_mut(parent) else { return };
+    let Some(buckets) = target.get_mut("buckets").and_then(|b| b.as_array_mut()) else { return };
+    let kind = def
+        .as_object()
+        .and_then(|o| {
+            o.keys().map(|k| k.to_string()).find(|k| BUCKET_PIPELINES.contains(&k.as_str()))
+        })
+        .unwrap_or_default();
+    let path = def
+        .pointer(&format!("/{kind}/buckets_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("_count")
+        .to_string();
+    let read = |b: &Value| -> Option<f64> {
+        if path == "_count" {
+            return b.get("doc_count").and_then(|v| v.as_f64());
+        }
+        let mut node = b;
+        for step in path.split(['.', '>']) {
+            node = node.get(step)?;
+        }
+        node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
+    };
+    let mut running = 0.0f64;
+    let mut previous: Option<f64> = None;
+    for b in buckets.iter_mut() {
+        let Some(v) = read(b) else { continue };
+        match kind.as_str() {
+            "cumulative_sum" => {
+                running += v;
+                b[name] = json!({"value": running});
+            }
+            "derivative" => {
+                if let Some(prev) = previous {
+                    b[name] = json!({"value": v - prev});
+                }
+                previous = Some(v);
+            }
+            _ => {}
+        }
+    }
+}
+
 const PIPELINES: &[&str] =
     &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
 
@@ -6712,6 +9015,9 @@ fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Res
     }
     let spec = o.get(&kind).cloned().unwrap_or(Value::Null);
     let path = spec.get("buckets_path").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(complaint) = buckets_path_problem(aggs, path) {
+        return Err(err(StatusCode::BAD_REQUEST, "illegal_argument_exception", complaint));
+    }
     let values = resolve_buckets_path(aggs, path);
     if values.is_empty() {
         return Ok(json!({"value": Value::Null}));
@@ -6738,6 +9044,71 @@ fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result<Value, Res
 }
 
 /// `histo.v` means: the metric `v` of every bucket of `histo`.
+/// What a `buckets_path` ends at, if it is not a single number.
+///
+/// A pipeline sums, averages or picks from a list of numbers. A path that
+/// stops at a bucketing aggregation, or at a metric with several values,
+/// names no such number, and saying which is more useful than a zero.
+fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('>').flat_map(|s| s.split('.')).collect();
+    let mut node = aggs;
+    let mut last = "";
+    let mut crossed = false;
+    for (i, seg) in segs.iter().enumerate() {
+        last = seg;
+        node = node.get(seg)?;
+        let leaf = i + 1 == segs.len();
+        if let Some(buckets) = node.get("buckets") {
+            if leaf {
+                // the last step is a bucketing aggregation, not a value
+                let kind = match buckets.as_array().and_then(|a| a.first()) {
+                    Some(b) if b.get("key").map(|k| k.is_string()).unwrap_or(false) => "StringTerms",
+                    Some(_) => "LongTerms",
+                    None => "LongTerms",
+                };
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, got: [{kind}] at aggregation [{seg}]"
+                ));
+            }
+            // a path may step through one bucketing aggregation, reading the
+            // rest inside each bucket; a second one is a list of lists, which
+            // is no single number
+            if crossed {
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, got: [Object[]] at aggregation [{seg}]"
+                ));
+            }
+            crossed = true;
+            node = buckets.as_array().and_then(|a| a.first())?;
+        }
+    }
+    // a metric holding several values names none of them
+    if node.get("value").is_none() {
+        if let Some(values) = node.get("values") {
+            let many = match values {
+                Value::Object(o) => o.len() > 1,
+                Value::Array(a) => a.len() > 1,
+                _ => false,
+            };
+            if many {
+                return Some(format!(
+                    "buckets_path must reference either a number value or a single value \
+                     numeric metric aggregation, but [{last}] contains multiple values. Please \
+                     specify which to use."
+                ));
+            }
+        } else if node.is_object() && node.get("doc_count").is_none() {
+            return Some(format!(
+                "buckets_path must reference either a number value or a single value numeric \
+                 metric aggregation, got: [Object[]] at aggregation [{last}]"
+            ));
+        }
+    }
+    None
+}
+
 fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
     let mut segs = path.split('>').flat_map(|s| s.split('.'));
     let Some(first) = segs.next() else { return Vec::new() };
@@ -6872,6 +9243,189 @@ fn run_auto_date_histogram(
     Ok(out)
 }
 
+/// `geo_distance`: buckets of how far each document is from a point.
+///
+/// The distance is not a column, so it is worked out from each document's own
+/// position, and the documents in a bucket are then named to whatever
+/// aggregations sit under it.
+fn run_geo_distance_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("geo_distance").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let origin = spec.get("origin").cloned().unwrap_or(Value::Null);
+    let unit = spec.get("unit").and_then(|v| v.as_str()).unwrap_or("m");
+    let scale = parse_distance(&format!("1{unit}")).unwrap_or(1.0);
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": [field.clone()],
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let path = format!("/_source/{}", field.replace('.', "/"));
+    let placed: Vec<(String, f64)> = answer
+        .hits
+        .iter()
+        .filter_map(|h| {
+            let id = h.get("_id")?.as_str()?.to_string();
+            let here = h.pointer(&path)?;
+            let d = geo_distance_metres(&origin, here)? / scale;
+            Some((id, d))
+        })
+        .collect();
+
+    let mut buckets: Vec<Value> = Vec::new();
+    let mut named = serde_json::Map::new();
+    for range in spec.get("ranges").and_then(|v| v.as_array()).into_iter().flatten() {
+        let from = range.get("from").and_then(|v| v.as_f64());
+        let to = range.get("to").and_then(|v| v.as_f64());
+        let ids: Vec<String> = placed
+            .iter()
+            .filter(|(_, d)| from.map(|f| *d >= f).unwrap_or(true))
+            .filter(|(_, d)| to.map(|t| *d < t).unwrap_or(true))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let key = range.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()).unwrap_or_else(
+            || match (from, to) {
+                (None, Some(t)) => format!("*-{t:?}"),
+                (Some(f), None) => format!("{f:?}-*"),
+                (Some(f), Some(t)) => format!("{f:?}-{t:?}"),
+                (None, None) => "*-*".to_string(),
+            },
+        );
+        let mut b = json!({"key": key.clone(), "doc_count": ids.len()});
+        if let Some(f) = from {
+            b["from"] = json!(f);
+        }
+        if let Some(t) = to {
+            b["to"] = json!(t);
+        }
+        if let Some(subs) = sub_aggs.as_ref() {
+            // the documents in this bucket are named outright, which is the
+            // only handle a distance leaves behind
+            let narrowed = Some(json!({"bool": {"filter": [{"terms": {"_id": ids}}]}}));
+            let (_, sub) = count_with_sub_aggs(
+                store,
+                targets,
+                &narrowed.clone().unwrap(),
+                &Some(subs.clone()),
+                weighted,
+            )?;
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    b[k] = v;
+                }
+            }
+        }
+        if keyed {
+            named.insert(key, b);
+        } else {
+            buckets.push(b);
+        }
+    }
+    if keyed {
+        Ok(json!({"buckets": Value::Object(named)}))
+    } else {
+        Ok(json!({"buckets": buckets}))
+    }
+}
+
+/// `percentile_ranks`: for each value given, how much of the data falls at or
+/// below it.
+fn run_percentile_ranks(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("percentile_ranks").cloned().unwrap_or(json!({}));
+    let (field, missing) = agg_field_and_missing(&spec);
+    let wanted: Vec<f64> = spec
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+        .unwrap_or_default();
+    let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
+    let query = combine(main_query, None);
+    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let rank = |v: f64| -> Option<f64> {
+        if values.is_empty() {
+            return None;
+        }
+        let below = values.iter().filter(|x| **x <= v).count();
+        Some(below as f64 * 100.0 / values.len() as f64)
+    };
+    if keyed {
+        let mut map = serde_json::Map::new();
+        for v in &wanted {
+            map.insert(
+                format!("{v:.1}"),
+                rank(*v).map(|r| json!(r)).unwrap_or(Value::Null),
+            );
+        }
+        Ok(json!({"values": Value::Object(map)}))
+    } else {
+        let arr: Vec<Value> =
+            wanted.iter().map(|v| json!({"key": v, "value": rank(*v)})).collect();
+        Ok(json!({"values": arr}))
+    }
+}
+
+/// Turn each hit into the nested objects it carries at a path.
+fn expand_nested_hits(node: &mut Value, path: &str) {
+    match node {
+        Value::Object(o) => {
+            if let Some(hits) = o.get_mut("hits").and_then(|h| h.get_mut("hits")) {
+                if let Some(list) = hits.as_array().cloned() {
+                    let mut out = Vec::new();
+                    for hit in list {
+                        let at = hit.pointer(&format!("/_source/{}", path.replace('.', "/")));
+                        let objects: Vec<Value> = match at {
+                            Some(Value::Array(a)) => a.clone(),
+                            Some(other) => vec![other.clone()],
+                            // with no source to read, the objects cannot be
+                            // listed, but the hit still stands for one of them
+                            None => {
+                                let mut one = hit.clone();
+                                one["_nested"] = json!({"field": path, "offset": 0});
+                                out.push(one);
+                                continue;
+                            }
+                        };
+                        for (offset, object) in objects.into_iter().enumerate() {
+                            let mut one = hit.clone();
+                            one["_nested"] = json!({"field": path, "offset": offset});
+                            if one.get("_source").is_some() {
+                                one["_source"] = object;
+                            }
+                            out.push(one);
+                        }
+                    }
+                    *hits = Value::Array(out);
+                }
+                return;
+            }
+            for (_, v) in o.iter_mut() {
+                expand_nested_hits(v, path);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                expand_nested_hits(v, path);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `top_hits`: the documents themselves, from inside whatever bucket the
 /// aggregation sits in. It is the ordinary search, narrowed and asked again.
 fn run_top_hits(
@@ -6913,6 +9467,7 @@ fn run_significant_terms(
     targets: &[String],
     main_query: &Option<Value>,
     def: &Value,
+    asked_as: &str,
 ) -> std::result::Result<Value, Response> {
     let kind = if def.get("significant_text").is_some() {
         "significant_text"
@@ -6924,6 +9479,28 @@ fn run_significant_terms(
         .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| k == kind))
         .unwrap_or_else(|| kind.to_string());
     let spec = def.get(&name).cloned().unwrap_or(json!({}));
+    // the measures this aggregation can score by, and the options it takes
+    const KNOWN: &[&str] = &[
+        "field", "script", "size", "shard_size", "min_doc_count", "shard_min_doc_count",
+        "include", "exclude", "execution_hint", "background_filter", "filter_duplicate_text",
+        "source_fields", "jlh", "mutual_information", "chi_square", "gnd",
+        "percentage", "script_heuristic",
+    ];
+    if let Some(stray) = spec
+        .as_object()
+        .and_then(|o| o.keys().map(|k| k.to_string()).find(|k| !KNOWN.contains(&k.as_str())))
+    {
+        let near = KNOWN
+            .iter()
+            .find(|k| edit_distance(k, &stray) <= 2)
+            .copied()
+            .unwrap_or("jlh");
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "parsing_exception",
+            format!("[{name}] unknown field [{stray}] did you mean [{near}]?"),
+        ));
+    }
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     // a term seen once or twice is noise, so the floor is higher here than it
@@ -6942,7 +9519,7 @@ fn run_significant_terms(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
                 format!(
-                    "Aggregation [{name}] cannot support regular expression style \
+                    "Aggregation [{asked_as}] cannot support regular expression style \
                      include/exclude settings as they can only be applied to string fields. Use \
                      an array of values for include/exclude clauses"
                 ),
