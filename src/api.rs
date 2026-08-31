@@ -5259,23 +5259,6 @@ pub async fn field_caps(
 
 // -------------------------------------------------------------------- alias
 
-pub async fn get_alias(
-    State(store): State<Store>,
-    Query(p): Query<Params>,
-) -> Response {
-    let mut out = serde_json::Map::new();
-    for n in store.names() {
-        let Some(st) = store.get(&n) else { continue };
-        let g = st.read();
-        let mut aliases = serde_json::Map::new();
-        for (a, def) in &g.aliases {
-            aliases.insert(a.clone(), def.clone());
-        }
-        out.insert(n.clone(), json!({"aliases": Value::Object(aliases)}));
-    }
-    respond(&p, Value::Object(out))
-}
-
 // -------------------------------------------------------------- cluster info
 
 /// A single-node cluster is always green once it is up; the suite mostly uses
@@ -6050,19 +6033,6 @@ fn alias_name_wanted(expr: Option<&str>, alias: &str) -> bool {
         }
     }
     wanted
-}
-
-/// The names in the expression that must exist for the request to succeed.
-///
-/// A pattern that matches nothing is simply an empty result, but a plain name
-/// that matches nothing is a request for something that is not there.
-fn alias_names_required(expr: Option<&str>) -> Vec<String> {
-    let Some(expr) = expr.filter(|e| !e.is_empty()) else { return Vec::new() };
-    expr.split(',')
-        .map(|p| p.trim())
-        .filter(|p| !p.starts_with('-') && !p.contains('*') && *p != "_all" && !p.is_empty())
-        .map(|p| p.to_string())
-        .collect()
 }
 
 /// The 404 this endpoint answers with carries the reason as a bare string
@@ -8787,7 +8757,7 @@ pub async fn create_data_stream(
     respond(&p, json!({"acknowledged": true}))
 }
 
-fn data_stream_entry(store: &Store, name: &str, template: &str) -> Value {
+fn data_stream_entry(_store: &Store, name: &str, template: &str) -> Value {
     json!({
         "name": name,
         "timestamp_field": {"name": "@timestamp"},
@@ -8908,10 +8878,6 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
 
 fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
-
-pub async fn acknowledged(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({"acknowledged": true}))
 }
 
 pub async fn shards_ok(Query(p): Query<Params>) -> Response {

@@ -21,7 +21,7 @@ use axum::Router;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use axum::response::IntoResponse;
-use axum::routing::{any, delete, get, head, post, put};
+use axum::routing::{any, get, head, post, put};
 use serde_json::json;
 use store::Store;
 

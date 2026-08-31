@@ -2717,21 +2717,6 @@ fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTime, Option<c
     Some((dt, rounded))
 }
 
-/// A rounded date math expression names a whole unit, not an instant. Which
-/// end of it a bound means depends on the bound: `gt: .../d` excludes the whole
-/// day, `gte: .../d` includes it from the start.
-pub fn canonical_date_bound(v: &Value, round_up: bool) -> Option<String> {
-    let Some(s) = v.as_str() else { return canonical_date(v) };
-    if !round_up || !(s.contains("||") || s.starts_with("now")) {
-        return canonical_date(v);
-    }
-    let (dt, unit) = parse_date_math(s)?;
-    let Some(unit) = unit else { return canonical_date(v) };
-    // the last instant the unit covers
-    let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
-    canonical_date(&Value::String(format_utc_millis(end)))
-}
-
 fn advance_unit(
     dt: boostcore::time::OffsetDateTime,
     unit: char,
@@ -2747,19 +2732,6 @@ fn advance_unit(
         's' => dt + Duration::seconds(1),
         _ => return None,
     })
-}
-
-fn format_utc_millis(dt: boostcore::time::OffsetDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        dt.year(),
-        dt.month() as u8,
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second(),
-        dt.millisecond(),
-    )
 }
 
 fn round_down(
@@ -2808,12 +2780,6 @@ fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
             }
         }
     }
-}
-
-/// Re-format a stored date string with milliseconds, which is how a key is
-/// written back out.
-pub fn canonical_date_str(s: &str) -> Option<String> {
-    canonical_date(&Value::String(s.to_string()))
 }
 
 /// A date in the one spelling the index holds.

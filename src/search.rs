@@ -16,7 +16,7 @@ use boostcore::aggregation::agg_req::Aggregations;
 use boostcore::aggregation::DistributedAggregationCollector;
 use boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use boostcore::collector::{Count, TopDocs};
-use boostcore::schema::{OwnedValue, Value as _};
+use boostcore::schema::Value as _;
 use boostcore::{DocAddress, Searcher, TantivyDocument};
 
 const DEFAULT_TRACK_TOTAL_HITS: u64 = 10_000;
@@ -657,23 +657,6 @@ pub fn expensive_allowed(store: &Store) -> bool {
         .cluster_setting("search.allow_expensive_queries")
         .map(|v| v != json!("false") && v != json!(false))
         .unwrap_or(true)
-}
-
-/// Does this query ask whether a document has a routing value?
-fn mentions_routing_exists(node: Option<&Value>) -> bool {
-    let Some(node) = node else { return false };
-    match node {
-        Value::Object(o) => {
-            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
-                == Some("_routing")
-            {
-                return true;
-            }
-            o.values().any(|v| mentions_routing_exists(Some(v)))
-        }
-        Value::Array(a) => a.iter().any(|v| mentions_routing_exists(Some(v))),
-        _ => false,
-    }
 }
 
 /// Turn that question into the list of documents it is really about.
@@ -2647,7 +2630,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
     };
 
     // words a document contributes, by field
-    let mut collect = |items: &[Value], out: &mut std::collections::BTreeMap<String, Vec<String>>,
+    let collect = |items: &[Value], out: &mut std::collections::BTreeMap<String, Vec<String>>,
                        ids: &mut Vec<String>| {
         for item in items {
             let Some((id, src)) = source_of_item(item) else { continue };
@@ -4899,7 +4882,7 @@ pub fn run(
     let mut total: u64 = 0;
     let mut shards: u64 = 0;
     let mut empty_shards: u64 = 0;
-    let mut agg_acc: Option<IntermediateAggregationResults> = None;
+    let agg_acc: Option<IntermediateAggregationResults>;
     let mut agg_req: Option<Aggregations> = None;
     let mut fruits: Vec<IntermediateAggregationResults> = Vec::new();
     let mut shard_profiles: Vec<Value> = Vec::new();
@@ -6763,10 +6746,6 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     resp
 }
 
-pub fn owned_to_json(v: &OwnedValue) -> Value {
-    serde_json::to_value(v).unwrap_or(Value::Null)
-}
-
 
 /// Run one `filters` aggregation: a separate filtered search per bucket, with
 /// the bucket's sub-aggregations evaluated inside it.
@@ -8296,7 +8275,7 @@ fn run_adjacency_matrix_agg(
         filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     let mut buckets = Vec::new();
-    let mut push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
+    let push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
         let combined = combine(main_query, Some(filter));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count == 0 {
