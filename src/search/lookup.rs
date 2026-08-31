@@ -134,27 +134,25 @@ pub(crate) fn expand_bitmap_terms(node: &mut Value) {
     let Some(o) = node.as_object_mut() else { return };
     let is_bitmap =
         o.get("terms").and_then(|t| t.get("value_type")).and_then(|v| v.as_str()) == Some("bitmap");
-    if is_bitmap {
-        if let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
-            terms.remove("value_type");
-            let fields: Vec<String> = terms.keys().cloned().collect();
-            for f in fields {
-                let encoded = match terms.get(&f) {
-                    Some(Value::String(b)) => Some(b.clone()),
-                    Some(Value::Array(a)) if a.len() == 1 => a[0].as_str().map(|s| s.to_string()),
-                    _ => None,
-                };
-                let Some(encoded) = encoded else { continue };
-                // the 32-bit form starts with its cookie; the 64-bit form
-                // starts with a count of the high words it groups by
-                let Some(values) = base64_decode(&encoded)
-                    .as_deref()
-                    .and_then(|b| decode_roaring(b).or_else(|| decode_roaring64(b)))
-                else {
-                    continue;
-                };
-                terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
-            }
+    if is_bitmap && let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
+        terms.remove("value_type");
+        let fields: Vec<String> = terms.keys().cloned().collect();
+        for f in fields {
+            let encoded = match terms.get(&f) {
+                Some(Value::String(b)) => Some(b.clone()),
+                Some(Value::Array(a)) if a.len() == 1 => a[0].as_str().map(|s| s.to_string()),
+                _ => None,
+            };
+            let Some(encoded) = encoded else { continue };
+            // the 32-bit form starts with its cookie; the 64-bit form
+            // starts with a count of the high words it groups by
+            let Some(values) = base64_decode(&encoded)
+                .as_deref()
+                .and_then(|b| decode_roaring(b).or_else(|| decode_roaring64(b)))
+            else {
+                continue;
+            };
+            terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
         }
     }
     for (_, v) in o.iter_mut() {

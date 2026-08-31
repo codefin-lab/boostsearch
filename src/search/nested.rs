@@ -112,7 +112,7 @@ pub(crate) fn objects_agg(
             let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let min = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut groups: Vec<(Value, Vec<(String, Value)>)> = Vec::new();
-            for ((id, object), (_, value)) in objects.iter().zip(values(spec).into_iter()) {
+            for ((id, object), (_, value)) in objects.iter().zip(values(spec)) {
                 match groups.iter_mut().find(|(k, _)| *k == value) {
                     Some((_, list)) => list.push((id.clone(), object.clone())),
                     None => groups.push((value, vec![(id.clone(), object.clone())])),
@@ -193,7 +193,7 @@ pub(crate) fn objects_agg(
                 .take(size)
                 .map(|(key, n)| {
                     let named: serde_json::Map<String, Value> =
-                        sources.iter().map(|(name, _)| name.clone()).zip(key.into_iter()).collect();
+                        sources.iter().map(|(name, _)| name.clone()).zip(key).collect();
                     json!({"key": Value::Object(named), "doc_count": n})
                 })
                 .collect();
@@ -429,13 +429,12 @@ pub(crate) fn under_nested(mapping: &crate::store::Mapping, field: &str) -> bool
 pub(crate) fn collect_nested_inner_hits(node: &Value, out: &mut Vec<(String, Value, Value)>) {
     match node {
         Value::Object(o) => {
-            if let Some(nested) = o.get("nested") {
-                if let Some(inner) = nested.get("inner_hits") {
-                    let path =
-                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                    let query = nested.get("query").cloned().unwrap_or(json!({}));
-                    out.push((path, inner.clone(), query));
-                }
+            if let Some(nested) = o.get("nested")
+                && let Some(inner) = nested.get("inner_hits")
+            {
+                let path = nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let query = nested.get("query").cloned().unwrap_or(json!({}));
+                out.push((path, inner.clone(), query));
             }
             for (_, v) in o {
                 collect_nested_inner_hits(v, out);
@@ -578,13 +577,12 @@ pub(crate) fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
 pub(crate) fn find_nested_inner_hits_full(node: &Value) -> Option<(String, Value, Value)> {
     match node {
         Value::Object(o) => {
-            if let Some(nested) = o.get("nested") {
-                if let Some(inner) = nested.get("inner_hits") {
-                    let path =
-                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                    let inner_query = nested.get("query").cloned().unwrap_or(json!({}));
-                    return Some((path, inner.clone(), inner_query));
-                }
+            if let Some(nested) = o.get("nested")
+                && let Some(inner) = nested.get("inner_hits")
+            {
+                let path = nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let inner_query = nested.get("query").cloned().unwrap_or(json!({}));
+                return Some((path, inner.clone(), inner_query));
             }
             o.values().find_map(find_nested_inner_hits_full)
         }

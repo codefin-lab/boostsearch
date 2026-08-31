@@ -64,6 +64,10 @@ python3 tools/yaml_runner.py --manifest tools/modules_manifest.json   # the work
 
 CI runs all of it, twice: once with indices in memory, once on disk.
 
+The toolchain is pinned in `rust-toolchain.toml`. Bumping it is a change like
+any other: a newer clippy finds new things, and they get fixed in the commit
+that moves the pin, not in whichever commit happens to be pushed afterwards.
+
 ## The tools
 
 | | |

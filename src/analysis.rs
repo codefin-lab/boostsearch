@@ -422,17 +422,16 @@ impl Registry {
 /// An analyzer the index defined, out of the parts it named.
 fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
     // `{"type": "english"}` names a built-in rather than describing a chain
-    if let Some(kind) = spec.get("type").and_then(|t| t.as_str()) {
-        if kind != "custom" {
-            if let Some(mut chain) = builtin(kind) {
-                if let Some(list) = spec.get("stopwords") {
-                    let words = word_list(list);
-                    chain.steps.retain(|s| !matches!(s, Step::Stop(_)));
-                    chain.steps.push(Step::Stop(words));
-                }
-                return Some(chain);
-            }
+    if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
+        && kind != "custom"
+        && let Some(mut chain) = builtin(kind)
+    {
+        if let Some(list) = spec.get("stopwords") {
+            let words = word_list(list);
+            chain.steps.retain(|s| !matches!(s, Step::Stop(_)));
+            chain.steps.push(Step::Stop(words));
         }
+        return Some(chain);
     }
     let named = spec.get("tokenizer").and_then(|t| t.as_str()).unwrap_or("standard");
     let source = tokenizer_source(named, tokenizers);

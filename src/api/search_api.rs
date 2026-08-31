@@ -111,22 +111,22 @@ pub(crate) fn check_scroll(
     let limit = store
         .cluster_setting("search.max_keep_alive")
         .and_then(|v| v.as_str().and_then(parse_keep_alive));
-    if let (Some(limit), Some(want)) = (limit, parse_keep_alive(keep)) {
-        if want > limit {
-            return Some(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!(
-                    "Keep alive for request ({keep}) is too large. It must be less than ({}). \
+    if let (Some(limit), Some(want)) = (limit, parse_keep_alive(keep))
+        && want > limit
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Keep alive for request ({keep}) is too large. It must be less than ({}). \
                      This limit can be set by changing the [search.max_keep_alive] cluster level \
                      setting.",
-                    store
-                        .cluster_setting("search.max_keep_alive")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_default()
-                ),
-            ));
-        }
+                store
+                    .cluster_setting("search.max_keep_alive")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default()
+            ),
+        ));
     }
     None
 }
@@ -220,20 +220,18 @@ pub async fn scroll(
         store
             .cluster_setting("search.max_keep_alive")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
-    ) {
-        if let (Some(want), Some(cap)) = (parse_keep_alive(keep), parse_keep_alive(&limit)) {
-            if want > cap {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "illegal_argument_exception",
-                    format!(
-                        "Keep alive for request ({keep}) is too large. It must be less than \
+    ) && let (Some(want), Some(cap)) = (parse_keep_alive(keep), parse_keep_alive(&limit))
+        && want > cap
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Keep alive for request ({keep}) is too large. It must be less than \
                          ({limit}). This limit can be set by changing the \
                          [search.max_keep_alive] cluster level setting."
-                    ),
-                );
-            }
-        }
+            ),
+        );
     }
     let Some(state) = store.read_scroll(&id) else {
         return err(
@@ -473,10 +471,10 @@ pub async fn field_caps(
                     let dst = entry_of(slot, "meta", || json!({}));
                     for (mk, mv) in m {
                         let list = entry_of(dst, &mk, || json!([]));
-                        if let Some(a) = list.as_array_mut() {
-                            if !a.contains(&mv) {
-                                a.push(mv);
-                            }
+                        if let Some(a) = list.as_array_mut()
+                            && !a.contains(&mv)
+                        {
+                            a.push(mv);
                         }
                     }
                 }
@@ -563,10 +561,8 @@ pub async fn field_caps(
                 // with `include_unmapped`, a field present everywhere still
                 // needs no listing: there is nothing it is missing from
                 let partly = type_count > 1;
-                if partly {
-                    if let Some(i) = idx {
-                        v["indices"] = i;
-                    }
+                if partly && let Some(i) = idx {
+                    v["indices"] = i;
                 }
             }
         }
@@ -765,10 +761,10 @@ pub async fn validate_query(
         let mut out = json!({"_shards": shards, "valid": false});
         // whatever the body holds, it is not where a query goes -- said only
         // when the caller asked to be told why
-        if p.get("explain").map(|v| v != "false").unwrap_or(false) {
-            if let Some(first) = body.as_object().and_then(|o| o.keys().next()) {
-                out["error"] = json!(format!("request does not support [{first}]"));
-            }
+        if p.get("explain").map(|v| v != "false").unwrap_or(false)
+            && let Some(first) = body.as_object().and_then(|o| o.keys().next())
+        {
+            out["error"] = json!(format!("request does not support [{first}]"));
         }
         return respond(&p, out);
     };

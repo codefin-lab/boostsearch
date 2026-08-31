@@ -33,28 +33,28 @@ pub(crate) fn check_agg_params(
     let num = |k: &str| def.get(k).and_then(|v| v.as_f64());
     match name {
         "extended_stats" => {
-            if let Some(v) = num("sigma") {
-                if v < 0.0 {
-                    return Err(bad("sigma", v, "or equal to 0"));
-                }
+            if let Some(v) = num("sigma")
+                && v < 0.0
+            {
+                return Err(bad("sigma", v, "or equal to 0"));
             }
         }
         "cardinality" => {
-            if let Some(v) = num("precision_threshold") {
-                if v < 0.0 {
-                    return Err(bad("precisionThreshold", v, "or equal to 0"));
-                }
+            if let Some(v) = num("precision_threshold")
+                && v < 0.0
+            {
+                return Err(bad("precisionThreshold", v, "or equal to 0"));
             }
         }
         "percentiles" | "median_absolute_deviation" => {
-            if let Some(d) = def.pointer("/hdr/number_of_significant_value_digits") {
-                if !matches!(d.as_i64(), Some(0..=5)) {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        "[numberOfSignificantValueDigits] must be between 0 and 5",
-                    ));
-                }
+            if let Some(d) = def.pointer("/hdr/number_of_significant_value_digits")
+                && !matches!(d.as_i64(), Some(0..=5))
+            {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "[numberOfSignificantValueDigits] must be between 0 and 5",
+                ));
             }
             // `percents` names which percentiles to report, so an empty or
             // unreadable list leaves nothing to compute
@@ -71,28 +71,28 @@ pub(crate) fn check_agg_params(
                     ));
                 }
             }
-            if let Some(v) = num("compression") {
-                if v <= 0.0 {
-                    return Err(bad("compression", v, "0"));
-                }
+            if let Some(v) = num("compression")
+                && v <= 0.0
+            {
+                return Err(bad("compression", v, "0"));
             }
             // the tdigest sketch takes its own compression, and admits 0
-            if let Some(v) = def.pointer("/tdigest/compression").and_then(|v| v.as_f64()) {
-                if v < 0.0 {
-                    return Err(bad("compression", v, "or equal to 0"));
-                }
+            if let Some(v) = def.pointer("/tdigest/compression").and_then(|v| v.as_f64())
+                && v < 0.0
+            {
+                return Err(bad("compression", v, "or equal to 0"));
             }
         }
         "moving_fn" | "moving_avg" => {
             // a window of zero or fewer has nothing to average over
-            if let Some(v) = num("window") {
-                if v < 1.0 {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        "[window] must be a positive, non-zero integer.",
-                    ));
-                }
+            if let Some(v) = num("window")
+                && v < 1.0
+            {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "[window] must be a positive, non-zero integer.",
+                ));
             }
         }
         _ => {}
@@ -194,28 +194,23 @@ pub(crate) fn check_agg_node(
                 }
             }
         }
-        if NUMERIC_AGGS.contains(&name.as_str()) {
-            if let Some(f) = def.get("field").and_then(|v| v.as_str()) {
-                // a field the mapping never named is still a text field if
-                // text is all it has ever held
-                let dynamic_text = ctx.mapping.type_of(f).is_none()
-                    && ctx.kinds_complete
-                    && ctx
-                        .observed_kinds
-                        .get(f)
-                        .map(|k| *k == crate::store::KIND_STR)
-                        .unwrap_or(false);
-                if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) || dynamic_text
-                {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        format!(
-                            "Field [{f}] of type [{}] is not supported for aggregation [{name}]",
-                            ctx.mapping.type_of(f).unwrap_or("text")
-                        ),
-                    ));
-                }
+        if NUMERIC_AGGS.contains(&name.as_str())
+            && let Some(f) = def.get("field").and_then(|v| v.as_str())
+        {
+            // a field the mapping never named is still a text field if
+            // text is all it has ever held
+            let dynamic_text = ctx.mapping.type_of(f).is_none()
+                && ctx.kinds_complete
+                && ctx.observed_kinds.get(f).map(|k| *k == crate::store::KIND_STR).unwrap_or(false);
+            if matches!(ctx.mapping.type_of(f), Some("text") | Some("keyword")) || dynamic_text {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "Field [{f}] of type [{}] is not supported for aggregation [{name}]",
+                        ctx.mapping.type_of(f).unwrap_or("text")
+                    ),
+                ));
             }
         }
         // at the top level the key is the user's name for the aggregation
@@ -230,13 +225,13 @@ pub(crate) fn normalize_agg_dates(node: &mut Value) {
     match node {
         Value::Object(o) => {
             for (k, v) in o.iter_mut() {
-                if matches!(k.as_str(), "min" | "max" | "from" | "to") {
-                    if let Value::String(s) = v {
-                        if s.len() == 10 && s.matches('-').count() == 2 {
-                            *v = json!(format!("{s}T00:00:00Z"));
-                            continue;
-                        }
-                    }
+                if matches!(k.as_str(), "min" | "max" | "from" | "to")
+                    && let Value::String(s) = v
+                    && s.len() == 10
+                    && s.matches('-').count() == 2
+                {
+                    *v = json!(format!("{s}T00:00:00Z"));
+                    continue;
                 }
                 normalize_agg_dates(v);
             }
@@ -312,21 +307,19 @@ pub(crate) fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> 
 pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
     let Some(o) = node.as_object_mut() else { return };
     for (_, def) in o.iter_mut() {
-        if let Some(sub) = def.get_mut("aggs") {
-            if let Some(subo) = sub.as_object_mut() {
-                for (_, sdef) in subo.iter_mut() {
-                    if let Some(f) = sdef.get("filter").cloned() {
-                        if !f.is_string() {
-                            if let Some(qs) = as_boostcore_query_string(&f, ctx) {
-                                if let Some(o) = sdef.as_object_mut() {
-                                    o.insert("filter".into(), json!(qs));
-                                }
-                            }
-                        }
-                    }
+        if let Some(sub) = def.get_mut("aggs")
+            && let Some(subo) = sub.as_object_mut()
+        {
+            for (_, sdef) in subo.iter_mut() {
+                if let Some(f) = sdef.get("filter").cloned()
+                    && !f.is_string()
+                    && let Some(qs) = as_boostcore_query_string(&f, ctx)
+                    && let Some(o) = sdef.as_object_mut()
+                {
+                    o.insert("filter".into(), json!(qs));
                 }
-                lower_nested_filters(sub, ctx);
             }
+            lower_nested_filters(sub, ctx);
         }
     }
 }
@@ -482,10 +475,10 @@ pub(crate) fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>,
         if let Some(sub) = d.remove("aggregations") {
             d.insert("aggs".into(), sub);
         }
-        if let Some(meta) = d.remove("meta") {
-            if top {
-                metas.push((name.clone(), meta));
-            }
+        if let Some(meta) = d.remove("meta")
+            && top
+        {
+            metas.push((name.clone(), meta));
         }
         // `_term` and `_time` are the old spellings of `_key`, kept working
         // for the aggregations that were named before it was renamed
@@ -570,10 +563,10 @@ pub(crate) fn recompute_extended_stats(v: &mut Value) {
 
 pub(crate) fn reattach_meta(result: &mut Value, metas: &[(String, Value)]) {
     for (name, meta) in metas {
-        if let Some(slot) = result.get_mut(name) {
-            if let Some(o) = slot.as_object_mut() {
-                o.insert("meta".into(), meta.clone());
-            }
+        if let Some(slot) = result.get_mut(name)
+            && let Some(o) = slot.as_object_mut()
+        {
+            o.insert("meta".into(), meta.clone());
         }
     }
 }
@@ -853,10 +846,8 @@ pub(crate) fn plan_aggs(
     }
     // buckets have to be weighted only where a document stands for several
     let weighted = targets.iter().filter_map(|n| store.get(n)).any(|st| st.read().has_doc_count);
-    if weighted {
-        if let Some(a) = agg_json.as_mut() {
-            inject_doc_count_helpers(a);
-        }
+    if weighted && let Some(a) = agg_json.as_mut() {
+        inject_doc_count_helpers(a);
     }
     if let Some(a) = agg_json.as_mut() {
         // a filter aggregation can carry a terms lookup too

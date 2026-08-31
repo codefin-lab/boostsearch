@@ -13,13 +13,13 @@ pub async fn put_template(
         Err(r) => return r,
     };
     // `template` is the older spelling of `index_patterns`
-    if body.get("index_patterns").is_none() {
-        if let Some(t) = body.get("template").cloned() {
-            body["index_patterns"] = match t {
-                Value::String(s) => json!([s]),
-                other => other,
-            };
-        }
+    if body.get("index_patterns").is_none()
+        && let Some(t) = body.get("template").cloned()
+    {
+        body["index_patterns"] = match t {
+            Value::String(s) => json!([s]),
+            other => other,
+        };
     }
     if body.get("index_patterns").is_none() {
         return err(
@@ -97,16 +97,16 @@ pub async fn get_template(
             out.insert(k, v);
         }
     }
-    if out.is_empty() {
-        if let Some(n) = &want {
-            if !n.contains('*') && n != "_all" {
-                return err(
-                    StatusCode::NOT_FOUND,
-                    "resource_not_found_exception",
-                    format!("index_template [{n}] missing"),
-                );
-            }
-        }
+    if out.is_empty()
+        && let Some(n) = &want
+        && !n.contains('*')
+        && n != "_all"
+    {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("index_template [{n}] missing"),
+        );
     }
     respond(&p, Value::Object(out))
 }
@@ -195,14 +195,14 @@ pub async fn get_component_template(
             out.push(json!({"name": n, "component_template": body}));
         }
     }
-    if out.is_empty() {
-        if let Some(w) = wanted.as_deref().filter(|w| !w.contains('*')) {
-            return err(
-                StatusCode::NOT_FOUND,
-                "resource_not_found_exception",
-                format!("component template matching [{w}] not found"),
-            );
-        }
+    if out.is_empty()
+        && let Some(w) = wanted.as_deref().filter(|w| !w.contains('*'))
+    {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("component template matching [{w}] not found"),
+        );
     }
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     respond(&p, json!({"component_templates": out}))
@@ -478,16 +478,16 @@ pub async fn get_index_template(
         let body = v.get("__composable").cloned().unwrap_or_else(|| v.clone());
         list.push(json!({"name": k, "index_template": body}));
     }
-    if list.is_empty() {
-        if let Some(n) = &want {
-            if !n.contains('*') && n != "_all" {
-                return err(
-                    StatusCode::NOT_FOUND,
-                    "resource_not_found_exception",
-                    format!("index template matching [{n}] not found"),
-                );
-            }
-        }
+    if list.is_empty()
+        && let Some(n) = &want
+        && !n.contains('*')
+        && n != "_all"
+    {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("index template matching [{n}] not found"),
+        );
     }
     respond(&p, json!({"index_templates": list}))
 }

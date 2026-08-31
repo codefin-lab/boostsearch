@@ -177,14 +177,14 @@ impl SortColumns {
                 return reduce_sort_values(&mut vals, mode);
             }
         }
-        if let Some(sc) = str_col {
-            if let Some(ord) = sc.term_ords(addr.doc_id).next() {
-                let mut buf = Vec::new();
-                if sc.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
-                    if let Ok(s) = String::from_utf8(buf) {
-                        return SortValue::Str(s);
-                    }
-                }
+        if let Some(sc) = str_col
+            && let Some(ord) = sc.term_ords(addr.doc_id).next()
+        {
+            let mut buf = Vec::new();
+            if sc.ord_to_bytes(ord, &mut buf).unwrap_or(false)
+                && let Ok(s) = String::from_utf8(buf)
+            {
+                return SortValue::Str(s);
             }
         }
         SortValue::Missing
@@ -1395,55 +1395,54 @@ pub fn run(
         }
     }
     for key in ["from", "size"] {
-        if let Some(n) = as_i64(body_or_param(body, p, key)) {
-            if n < 0 {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "illegal_argument_exception",
-                    format!("[{key}] parameter cannot be negative, found [{n}]"),
-                ));
-            }
-        }
-    }
-    if let Some(n) = as_i64(p.get("batched_reduce_size").map(|v| json!(v))) {
-        if n < 2 {
+        if let Some(n) = as_i64(body_or_param(body, p, key))
+            && n < 0
+        {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
-                format!("batchedReduceSize must be >= 2, got {n}"),
+                format!("[{key}] parameter cannot be negative, found [{n}]"),
             ));
         }
     }
-    if let Some(n) = as_i64(p.get("pre_filter_shard_size").map(|v| json!(v))) {
-        if n < 1 {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("preFilterShardSize must be >= 1, got {n}"),
-            ));
-        }
+    if let Some(n) = as_i64(p.get("batched_reduce_size").map(|v| json!(v)))
+        && n < 2
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("batchedReduceSize must be >= 2, got {n}"),
+        ));
+    }
+    if let Some(n) = as_i64(p.get("pre_filter_shard_size").map(|v| json!(v)))
+        && n < 1
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("preFilterShardSize must be >= 1, got {n}"),
+        ));
     }
     if let Some(n) = as_i64(
         body.get("track_total_hits")
             .cloned()
             .or_else(|| p.get("track_total_hits").map(|v| json!(v))),
-    ) {
-        if n < -1 {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("[track_total_hits] parameter must be positive or equals to -1, got {n}"),
-            ));
-        }
+    ) && n < -1
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[track_total_hits] parameter must be positive or equals to -1, got {n}"),
+        ));
     }
-    if let Some(st) = p.get("search_type") {
-        if st == "query_and_fetch" || st == "dfs_query_and_fetch" {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("Unsupported search type [{st}]"),
-            ));
-        }
+    if let Some(st) = p.get("search_type")
+        && (st == "query_and_fetch" || st == "dfs_query_and_fetch")
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("Unsupported search type [{st}]"),
+        ));
     }
     validate_params(body, p)?;
     let from = as_usize(body_or_param(body, p, "from")).unwrap_or(0);
@@ -1568,15 +1567,15 @@ pub fn run(
     // A document's routing is not part of it -- it is how the document was
     // addressed -- so asking which documents have one is asking after a list
     // of ids rather than after a column.
-    if let Some(q) = query_json.as_mut() {
-        if extras.routing_exists {
-            let ids: Vec<String> = targets
-                .iter()
-                .filter_map(|n| store.get(n))
-                .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
-                .collect();
-            replace_routing_exists(q, &ids);
-        }
+    if let Some(q) = query_json.as_mut()
+        && extras.routing_exists
+    {
+        let ids: Vec<String> = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
+            .collect();
+        replace_routing_exists(q, &ids);
     }
     if let Some(q) = query_json.as_mut() {
         resolve_terms_lookups(store, q)?;
@@ -1589,14 +1588,13 @@ pub fn run(
     if let (Some(inc), Some(exc)) = (
         body.pointer("/_source/includes").and_then(|v| v.as_array()),
         body.pointer("/_source/excludes").and_then(|v| v.as_array()),
-    ) {
-        if let Some(both) = inc.iter().find(|i| exc.contains(i)).and_then(|v| v.as_str()) {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("The same entry [{both}] cannot be both included and excluded in _source."),
-            ));
-        }
+    ) && let Some(both) = inc.iter().find(|i| exc.contains(i)).and_then(|v| v.as_str())
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("The same entry [{both}] cannot be both included and excluded in _source."),
+        ));
     }
 
     // `_shard_doc` orders by where a document sits within a shard, which only
@@ -1666,12 +1664,11 @@ pub fn run(
     for k in &sort_keys {
         let mut kinds: Vec<String> = Vec::new();
         for n in &targets {
-            if let Some(st) = store.get(n) {
-                if let Some(t) = st.read().mapping.type_of(&k.field) {
-                    if !kinds.contains(&t.to_string()) {
-                        kinds.push(t.to_string());
-                    }
-                }
+            if let Some(st) = store.get(n)
+                && let Some(t) = st.read().mapping.type_of(&k.field)
+                && !kinds.contains(&t.to_string())
+            {
+                kinds.push(t.to_string());
             }
         }
         if kinds.len() > 1 && kinds.iter().any(|t| t == "unsigned_long") {

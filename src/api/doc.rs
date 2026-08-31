@@ -877,18 +877,19 @@ pub async fn get_doc(
     };
     let g = st.read();
     // a version named on a read is a condition: the document must be at it
-    if let Some(want) = p.get("version").and_then(|v| v.parse::<u64>().ok()) {
-        if exists_doc(&g, &id) && g.version_of(&id) != want {
-            return err(
-                StatusCode::CONFLICT,
-                "version_conflict_engine_exception",
-                format!(
-                    "[{id}]: version conflict, current version [{}] is different than the one \
+    if let Some(want) = p.get("version").and_then(|v| v.parse::<u64>().ok())
+        && exists_doc(&g, &id)
+        && g.version_of(&id) != want
+    {
+        return err(
+            StatusCode::CONFLICT,
+            "version_conflict_engine_exception",
+            format!(
+                "[{id}]: version conflict, current version [{}] is different than the one \
                      provided [{want}]",
-                    g.version_of(&id)
-                ),
-            );
-        }
+                g.version_of(&id)
+            ),
+        );
     }
     match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
         Some(src) => {
@@ -1077,7 +1078,7 @@ pub async fn bulk(
         };
 
     // consume the prepared documents rather than cloning them back out
-    for (o, prep) in ops.into_iter().zip(prepared.into_iter()) {
+    for (o, prep) in ops.into_iter().zip(prepared) {
         // an index action may carry `op_type: create` in its metadata, which
         // makes it a create -- in what it refuses, and in what it is called
         // in the answer

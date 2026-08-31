@@ -327,10 +327,10 @@ pub(crate) fn sort_by_filtered_nested(
                 if !object_matches(filter, &object, path) {
                     continue;
                 }
-                if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
-                    if let Some(n) = number_of(v) {
-                        values.push(n);
-                    }
+                if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/")))
+                    && let Some(n) = number_of(v)
+                {
+                    values.push(n);
                 }
             }
             // the values are read as instants; a `date` is reported in

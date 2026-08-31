@@ -51,10 +51,8 @@ pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
                             out.routing_exists = true;
                         }
                     }
-                    "nested" => {
-                        if v.get("inner_hits").is_some() {
-                            out.nested_inner_hits = true;
-                        }
+                    "nested" if v.get("inner_hits").is_some() => {
+                        out.nested_inner_hits = true;
                     }
                     _ => {}
                 }

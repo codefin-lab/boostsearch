@@ -15,10 +15,8 @@ pub(crate) fn fielddata_fields_of(body: &Value, out: &mut Vec<String>) {
                     .and_then(|h| h.as_str())
                     .map(|h| h == "map")
                     .unwrap_or(false);
-                if !mapped {
-                    if let Some(f) = t.get("field").and_then(|f| f.as_str()) {
-                        out.push(f.to_string());
-                    }
+                if !mapped && let Some(f) = t.get("field").and_then(|f| f.as_str()) {
+                    out.push(f.to_string());
                 }
             }
             for (k, v) in o {

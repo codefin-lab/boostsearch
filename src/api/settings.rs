@@ -60,12 +60,13 @@ pub(crate) fn add_human_settings(view: &mut Value, st: &IdxState) {
 pub(crate) fn settings_view(raw: &Value, name: Option<&str>, flat: bool) -> Value {
     let mut flat_map = serde_json::Map::new();
     flatten_settings(raw, "", &mut flat_map);
-    if let Some(name) = name {
-        if name != "_all" && name != "*" {
-            let pats: Vec<regex::Regex> =
-                name.split(',').map(|p| crate::store::wildcard_to_regex(p.trim())).collect();
-            flat_map.retain(|k, _| pats.iter().any(|re| re.is_match(k)));
-        }
+    if let Some(name) = name
+        && name != "_all"
+        && name != "*"
+    {
+        let pats: Vec<regex::Regex> =
+            name.split(',').map(|p| crate::store::wildcard_to_regex(p.trim())).collect();
+        flat_map.retain(|k, _| pats.iter().any(|re| re.is_match(k)));
     }
     if flat {
         return Value::Object(flat_map);
@@ -165,12 +166,10 @@ pub async fn put_settings(
             settings = json!({});
         }
         let mut patch = patch.clone();
-        if preserve {
-            if let Some(o) = patch.as_object_mut() {
-                // a key may be written with the `index.` prefix the setting
-                // lookup adds for itself
-                o.retain(|k, _| g.setting(k.strip_prefix("index.").unwrap_or(k)).is_none());
-            }
+        if preserve && let Some(o) = patch.as_object_mut() {
+            // a key may be written with the `index.` prefix the setting
+            // lookup adds for itself
+            o.retain(|k, _| g.setting(k.strip_prefix("index.").unwrap_or(k)).is_none());
         }
         let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &patch);

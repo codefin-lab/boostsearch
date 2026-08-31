@@ -293,14 +293,14 @@ pub async fn cat_indices(
 ) -> Response {
     // one node holding every shard it was given is green, so any other health
     // asked for selects nothing rather than being an error
-    if let Some(h) = p.get("health") {
-        if !matches!(h.as_str(), "green" | "yellow" | "red") {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("Invalid health value [{h}], allowed values are [green, yellow, red]"),
-            );
-        }
+    if let Some(h) = p.get("health")
+        && !matches!(h.as_str(), "green" | "yellow" | "red")
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("Invalid health value [{h}], allowed values are [green, yellow, red]"),
+        );
     }
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };

@@ -96,10 +96,10 @@ impl IdxState {
                 }
                 let Some(ord) = col.term_ords(doc).next() else { continue };
                 buf.clear();
-                if col.ord_to_bytes(ord, &mut buf).unwrap_or(false) {
-                    if let Ok(id) = std::str::from_utf8(&buf) {
-                        out.push(id_fingerprint(id));
-                    }
+                if col.ord_to_bytes(ord, &mut buf).unwrap_or(false)
+                    && let Ok(id) = std::str::from_utf8(&buf)
+                {
+                    out.push(id_fingerprint(id));
                 }
             }
         }

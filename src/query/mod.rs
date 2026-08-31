@@ -98,10 +98,10 @@ impl<'a> Ctx<'a> {
         }
         // `.keyword` is how a text field's untouched view is addressed, and a
         // mapping that does not declare the sub-field does not change that
-        if self.mapping.type_of(field).is_none() {
-            if let Some(base) = field.strip_suffix(".keyword") {
-                return (self.fields.raw, base.to_string(), View::Raw);
-            }
+        if self.mapping.type_of(field).is_none()
+            && let Some(base) = field.strip_suffix(".keyword")
+        {
+            return (self.fields.raw, base.to_string(), View::Raw);
         }
         let v = self.view(field, analyzed);
         (self.field_of(v), field.to_string(), v)
@@ -166,23 +166,23 @@ fn is_true(v: Option<&Value>) -> bool {
 
 fn field_and_value(v: &Value) -> Result<(String, Value, Value)> {
     let (field, body) = single_key(v)?;
-    if let Some(o) = body.as_object() {
-        if let Some(val) = o.get("value").or_else(|| o.get("query")) {
-            return Ok((field, val.clone(), body.clone()));
-        }
+    if let Some(o) = body.as_object()
+        && let Some(val) = o.get("value").or_else(|| o.get("query"))
+    {
+        return Ok((field, val.clone(), body.clone()));
     }
     Ok((field, body.clone(), Value::Null))
 }
 
 pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
-    if let Some(o) = q.as_object() {
-        if o.len() > 1 {
-            let extra: Vec<&str> = o.keys().skip(1).map(|s| s.as_str()).collect();
-            return Err(anyhow!(
-                "[query] malformed query, expected [END_OBJECT] but found [{}]",
-                extra.join(", ")
-            ));
-        }
+    if let Some(o) = q.as_object()
+        && o.len() > 1
+    {
+        let extra: Vec<&str> = o.keys().skip(1).map(|s| s.as_str()).collect();
+        return Err(anyhow!(
+            "[query] malformed query, expected [END_OBJECT] but found [{}]",
+            extra.join(", ")
+        ));
     }
     let (kind, body) = single_key(q)?;
     let inner: Box<dyn Query> = match kind.as_str() {
@@ -211,10 +211,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 )));
             }
             let (f, path, view) = ctx.resolve(&field, false);
-            if is_true(opts.get("case_insensitive")) {
-                if let Some(s) = val.as_str() {
-                    return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
-                }
+            if is_true(opts.get("case_insensitive"))
+                && let Some(s) = val.as_str()
+            {
+                return regex_query(f, &path, &case_insensitive_regex(&escape_regex(s)));
             }
             // the values gathered under a flat_object keep the spelling and
             // the type they were stored with, whether the query names the
@@ -234,29 +234,25 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 }
                 found
             };
-            if under_flat {
-                if let Some(text) = val.as_str() {
-                    let mut terms = term_for(f, &path, &val);
-                    let normal = normalized(ctx, &field, text);
-                    if normal != text {
-                        terms.extend(term_for(f, &path, &Value::String(normal)));
-                    }
-                    if let Some(iso) =
-                        crate::store::canonical_date(&Value::String(text.to_string()))
-                    {
-                        if iso != text {
-                            terms.extend(term_for(f, &path, &Value::String(iso)));
-                        }
-                    }
-                    // a number gathered under a flat_object is still a number
-                    if let Ok(n) = text.parse::<f64>() {
-                        if let Some(num) = serde_json::Number::from_f64(n) {
-                            terms.extend(term_for(f, &path, &Value::Number(num)));
-                        }
-                    }
-                    // the values are text like any other, and score like it
-                    return Ok(any_of(terms));
+            if under_flat && let Some(text) = val.as_str() {
+                let mut terms = term_for(f, &path, &val);
+                let normal = normalized(ctx, &field, text);
+                if normal != text {
+                    terms.extend(term_for(f, &path, &Value::String(normal)));
                 }
+                if let Some(iso) = crate::store::canonical_date(&Value::String(text.to_string()))
+                    && iso != text
+                {
+                    terms.extend(term_for(f, &path, &Value::String(iso)));
+                }
+                // a number gathered under a flat_object is still a number
+                if let Ok(n) = text.parse::<f64>()
+                    && let Some(num) = serde_json::Number::from_f64(n)
+                {
+                    terms.extend(term_for(f, &path, &Value::Number(num)));
+                }
+                // the values are text like any other, and score like it
+                return Ok(any_of(terms));
             }
 
             let val = ip_value(ctx, &field, &val);
@@ -296,14 +292,14 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     .collect();
                 return Ok(Box::new(ConstScore::new(any_of(terms), 1.0)));
             }
-            if let Some(n) = vals.as_array().map(|a| a.len()) {
-                if n > ctx.max_terms_count {
-                    return Err(anyhow!(
-                        "The number of terms [{n}] used in the Terms Query request has exceeded \
+            if let Some(n) = vals.as_array().map(|a| a.len())
+                && n > ctx.max_terms_count
+            {
+                return Err(anyhow!(
+                    "The number of terms [{n}] used in the Terms Query request has exceeded \
                          the allowed maximum of [{}].",
-                        ctx.max_terms_count
-                    ));
-                }
+                    ctx.max_terms_count
+                ));
             }
             let (f, path, _) = ctx.resolve(&field, false);
             let arr = vals.as_array().cloned().unwrap_or_default();

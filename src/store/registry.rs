@@ -26,10 +26,10 @@ impl Store {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(idle_secs.max(1) / 2 + 1));
                 for name in store.names() {
-                    if let Some(st) = store.get(&name) {
-                        if st.write().release_idle_writer(idle) {
-                            store.note_writer_closed(&name);
-                        }
+                    if let Some(st) = store.get(&name)
+                        && st.write().release_idle_writer(idle)
+                    {
+                        store.note_writer_closed(&name);
                     }
                 }
             }
@@ -156,10 +156,10 @@ impl Store {
             let limit = Self::writer_limit();
             if live.len() > limit { Some(live.remove(0)) } else { None }
         };
-        if let Some(victim) = evict {
-            if let Some(st) = self.get(&victim) {
-                st.write().release_idle_writer(std::time::Duration::ZERO);
-            }
+        if let Some(victim) = evict
+            && let Some(st) = self.get(&victim)
+        {
+            st.write().release_idle_writer(std::time::Duration::ZERO);
         }
     }
 
@@ -286,10 +286,10 @@ impl Store {
                 // first, which is how a search over an alias came to miss
                 // every index but one
                 let mut named = self.indices_for_alias(part);
-                if named.is_empty() {
-                    if let Some(st) = self.get(part) {
-                        named.push(st.read().name.clone());
-                    }
+                if named.is_empty()
+                    && let Some(st) = self.get(part)
+                {
+                    named.push(st.read().name.clone());
                 }
                 for n in open_only(named) {
                     if !out.contains(&n) {

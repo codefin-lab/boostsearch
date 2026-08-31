@@ -362,10 +362,10 @@ pub(crate) fn flatten_composite(
             continue;
         }
         let mut raw = b.get("key").cloned().unwrap_or(Value::Null);
-        if sources[depth].ip {
-            if let Some(text) = raw.as_str().and_then(crate::store::ip_from_canonical) {
-                raw = json!(text);
-            }
+        if sources[depth].ip
+            && let Some(text) = raw.as_str().and_then(crate::store::ip_from_canonical)
+        {
+            raw = json!(text);
         }
         if sources[depth].date {
             // a date key is a whole number of milliseconds, not a float

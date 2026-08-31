@@ -7,17 +7,16 @@ use crate::search::*;
 pub(crate) fn hdr_percentiles_field(node: &Value) -> Option<String> {
     let o = node.as_object()?;
     for (_, def) in o {
-        if let Some(spec) = def.get("percentiles") {
-            if spec.get("hdr").is_some() {
-                if let Some(f) = spec.get("field").and_then(|f| f.as_str()) {
-                    return Some(f.to_string());
-                }
-            }
+        if let Some(spec) = def.get("percentiles")
+            && spec.get("hdr").is_some()
+            && let Some(f) = spec.get("field").and_then(|f| f.as_str())
+        {
+            return Some(f.to_string());
         }
-        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) {
-            if let Some(f) = hdr_percentiles_field(subs) {
-                return Some(f);
-            }
+        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations"))
+            && let Some(f) = hdr_percentiles_field(subs)
+        {
+            return Some(f);
         }
     }
     None
@@ -69,10 +68,8 @@ pub(crate) fn collect_field_values(
                 out.push(v);
                 any = true;
             }
-            if !any {
-                if let Some(m) = missing {
-                    out.push(m);
-                }
+            if !any && let Some(m) = missing {
+                out.push(m);
             }
         }
     }
@@ -311,14 +308,14 @@ pub(crate) fn run_mad_agg(
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("median_absolute_deviation").cloned().unwrap_or(json!({}));
-    if let Some(c) = spec.get("compression").and_then(|v| v.as_f64()) {
-        if c <= 0.0 {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "illegal_argument_exception",
-                format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
-            ));
-        }
+    if let Some(c) = spec.get("compression").and_then(|v| v.as_f64())
+        && c <= 0.0
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[compression] must be greater than 0. Found [{c:?}] in [mad]"),
+        ));
     }
     let (field, missing) = agg_field_and_missing(&spec);
     let query = combine(main_query, None);

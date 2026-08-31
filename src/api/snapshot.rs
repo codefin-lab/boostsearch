@@ -268,14 +268,14 @@ pub async fn get_snapshot(
         );
     }
     let (mut found, missing) = pick_snapshots(&store, &repo, &name);
-    if let Some(gone) = missing {
-        if !ignore_unavailable(&p) {
-            return err(
-                StatusCode::NOT_FOUND,
-                "snapshot_missing_exception",
-                format!("[{repo}:{gone}] is missing"),
-            );
-        }
+    if let Some(gone) = missing
+        && !ignore_unavailable(&p)
+    {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{gone}] is missing"),
+        );
     }
     // `verbose: false` asks only for what a listing needs
     if p.get("verbose").map(|v| v == "false").unwrap_or(false) {
@@ -329,14 +329,14 @@ pub async fn snapshot_status(
         return respond(&p, json!({"snapshots": []}));
     };
     let (found, missing) = pick_snapshots(&store, &repo, &name);
-    if let Some(gone) = missing {
-        if !ignore_unavailable(&p) {
-            return err(
-                StatusCode::NOT_FOUND,
-                "snapshot_missing_exception",
-                format!("[{repo}:{gone}] is missing"),
-            );
-        }
+    if let Some(gone) = missing
+        && !ignore_unavailable(&p)
+    {
+        return err(
+            StatusCode::NOT_FOUND,
+            "snapshot_missing_exception",
+            format!("[{repo}:{gone}] is missing"),
+        );
     }
     let out: Vec<Value> = found
         .into_iter()

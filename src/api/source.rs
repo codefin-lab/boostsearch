@@ -117,7 +117,7 @@ pub fn apply_source_selector(src: &Value, sel: &Value) -> Value {
     match sel {
         Value::Bool(true) | Value::Null => src.clone(),
         Value::Bool(false) => Value::Null,
-        Value::String(pat) => crate::source::filter(src, &[pat.clone()], &[]),
+        Value::String(pat) => crate::source::filter(src, std::slice::from_ref(pat), &[]),
         Value::Array(items) => {
             let inc: Vec<String> =
                 items.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();

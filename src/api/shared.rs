@@ -194,17 +194,17 @@ pub(crate) fn parse_body(body: &str) -> std::result::Result<Value, Response> {
 
 /// Query-string forms of the search request that the suite exercises.
 pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
-    if let Some(q) = p.get("q") {
-        if body.get("query").is_none() {
-            let mut qs = json!({"query": q});
-            if let Some(df) = p.get("df").or_else(|| p.get("default_field")) {
-                qs["default_field"] = json!(df);
-            }
-            if let Some(op) = p.get("default_operator") {
-                qs["default_operator"] = json!(op.to_lowercase());
-            }
-            body["query"] = json!({ "query_string": qs });
+    if let Some(q) = p.get("q")
+        && body.get("query").is_none()
+    {
+        let mut qs = json!({"query": q});
+        if let Some(df) = p.get("df").or_else(|| p.get("default_field")) {
+            qs["default_field"] = json!(df);
         }
+        if let Some(op) = p.get("default_operator") {
+            qs["default_operator"] = json!(op.to_lowercase());
+        }
+        body["query"] = json!({ "query_string": qs });
     }
     for key in ["from", "size", "track_total_hits"] {
         if let (Some(v), None) = (p.get(key), body.get(key)) {
@@ -215,17 +215,17 @@ pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
             };
         }
     }
-    if let Some(s) = p.get("sort") {
-        if body.get("sort").is_none() {
-            let items: Vec<Value> = s
-                .split(',')
-                .map(|part| match part.split_once(':') {
-                    Some((f, o)) => json!({ f: o }),
-                    None => json!(part),
-                })
-                .collect();
-            body["sort"] = Value::Array(items);
-        }
+    if let Some(s) = p.get("sort")
+        && body.get("sort").is_none()
+    {
+        let items: Vec<Value> = s
+            .split(',')
+            .map(|part| match part.split_once(':') {
+                Some((f, o)) => json!({ f: o }),
+                None => json!(part),
+            })
+            .collect();
+        body["sort"] = Value::Array(items);
     }
 }
 

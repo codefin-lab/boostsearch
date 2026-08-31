@@ -44,11 +44,13 @@ pub(crate) fn composite_under_a_parent(node: &Value) -> bool {
 pub(crate) fn millis_in_keys(node: &mut Value) {
     match node {
         Value::Object(o) => {
-            if let Some(Value::String(text)) = o.get("key_as_string") {
-                if text.len() == 20 && text.ends_with('Z') && !text.contains('.') {
-                    let with = format!("{}.000Z", &text[..text.len() - 1]);
-                    o.insert("key_as_string".into(), json!(with));
-                }
+            if let Some(Value::String(text)) = o.get("key_as_string")
+                && text.len() == 20
+                && text.ends_with('Z')
+                && !text.contains('.')
+            {
+                let with = format!("{}.000Z", &text[..text.len() - 1]);
+                o.insert("key_as_string".into(), json!(with));
             }
             for (_, v) in o.iter_mut() {
                 millis_in_keys(v);
@@ -80,16 +82,14 @@ pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
                     .collect()
             });
         let Some(node) = answer.get_mut(name) else { continue };
-        if let Some(asked) = asked {
-            if let Some(buckets) = node.get_mut("buckets").and_then(|b| b.as_array_mut()) {
-                buckets.retain(|b| {
-                    let pair = (
-                        b.get("from").and_then(|v| v.as_f64()),
-                        b.get("to").and_then(|v| v.as_f64()),
-                    );
-                    asked.contains(&pair)
-                });
-            }
+        if let Some(asked) = asked
+            && let Some(buckets) = node.get_mut("buckets").and_then(|b| b.as_array_mut())
+        {
+            buckets.retain(|b| {
+                let pair =
+                    (b.get("from").and_then(|v| v.as_f64()), b.get("to").and_then(|v| v.as_f64()));
+                asked.contains(&pair)
+            });
         }
         let subs = def.get("aggs").or_else(|| def.get("aggregations"));
         if let Some(subs) = subs {
@@ -138,17 +138,13 @@ pub(crate) fn name_date_metrics(
                 .iter()
                 .filter_map(|n| store.get(n))
                 .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
-            if matches!(ty.as_deref(), Some("date") | Some("date_nanos")) {
-                if let Some(v) = answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
-                {
-                    let millis = if ty.as_deref() == Some("date_nanos") {
-                        (v / 1e6) as i64
-                    } else {
-                        v as i64
-                    };
-                    if let Some(text) = crate::store::format_millis(millis, "iso8601") {
-                        answer[name.clone()]["value_as_string"] = json!(text);
-                    }
+            if matches!(ty.as_deref(), Some("date") | Some("date_nanos"))
+                && let Some(v) = answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
+            {
+                let millis =
+                    if ty.as_deref() == Some("date_nanos") { (v / 1e6) as i64 } else { v as i64 };
+                if let Some(text) = crate::store::format_millis(millis, "iso8601") {
+                    answer[name.clone()]["value_as_string"] = json!(text);
                 }
             }
         }

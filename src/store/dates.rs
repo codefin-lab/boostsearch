@@ -248,18 +248,19 @@ pub fn date_number_bound(
     // `gte: 2019` on a date field is the year, not two seconds past the epoch:
     // the default format reads a bare four-digit number as a year, and nothing
     // sane asks for a bound two seconds into 1970
-    if format.is_none() {
-        if let Some(year) = v.as_i64().filter(|n| (1000..=9999).contains(n)) {
-            return date_number_bound(&Value::String(year.to_string()), round_up, None, nanos);
-        }
+    if format.is_none()
+        && let Some(year) = v.as_i64().filter(|n| (1000..=9999).contains(n))
+    {
+        return date_number_bound(&Value::String(year.to_string()), round_up, None, nanos);
     }
     let text = v.as_str().unwrap_or_default();
-    if round_up && (text.contains("||") || text.starts_with("now")) {
-        if let Some((dt, Some(unit))) = parse_date_math(text) {
-            let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
-            let per: i128 = if nanos { 1 } else { 1_000_000 };
-            return i64::try_from(end.unix_timestamp_nanos() / per).ok();
-        }
+    if round_up
+        && (text.contains("||") || text.starts_with("now"))
+        && let Some((dt, Some(unit))) = parse_date_math(text)
+    {
+        let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
+        let per: i128 = if nanos { 1 } else { 1_000_000 };
+        return i64::try_from(end.unix_timestamp_nanos() / per).ok();
     }
     date_number(v, format, nanos)
 }

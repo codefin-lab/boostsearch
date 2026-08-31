@@ -11,7 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # the version is pinned in rust-toolchain.toml, so the gate means the
+      # same thing here as it does on a laptop
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 

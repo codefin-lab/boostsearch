@@ -190,17 +190,17 @@ pub(crate) fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mappi
             // aggregation reading one column would not see the other.
             match ty {
                 Some("float" | "half_float" | "double" | "scaled_float") => {
-                    if let Some(n) = leaf.as_i64() {
-                        if let Some(f) = serde_json::Number::from_f64(n as f64) {
-                            *leaf = Value::Number(f);
-                        }
+                    if let Some(n) = leaf.as_i64()
+                        && let Some(f) = serde_json::Number::from_f64(n as f64)
+                    {
+                        *leaf = Value::Number(f);
                     }
                 }
                 Some("long" | "integer" | "short" | "byte") => {
-                    if let Some(f) = leaf.as_f64().filter(|f| f.fract() == 0.0) {
-                        if leaf.as_i64().is_none() {
-                            *leaf = Value::Number((f as i64).into());
-                        }
+                    if let Some(f) = leaf.as_f64().filter(|f| f.fract() == 0.0)
+                        && leaf.as_i64().is_none()
+                    {
+                        *leaf = Value::Number((f as i64).into());
                     }
                 }
                 _ => {}
@@ -208,12 +208,11 @@ pub(crate) fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mappi
             // a half_float holds sixteen bits, so the value it keeps is the
             // nearest one that fits -- 184.4 becomes 184.375, and a search
             // paging past that number has to see the same figure the index does
-            if ty == Some("half_float") {
-                if let Some(n) = leaf.as_f64() {
-                    if let Some(q) = serde_json::Number::from_f64(half_float(n)) {
-                        *leaf = Value::Number(q);
-                    }
-                }
+            if ty == Some("half_float")
+                && let Some(n) = leaf.as_f64()
+                && let Some(q) = serde_json::Number::from_f64(half_float(n))
+            {
+                *leaf = Value::Number(q);
             }
         }
     }
@@ -237,10 +236,10 @@ pub(crate) fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         };
         if dated {
             for key in ["gte", "gt", "lte", "lt"] {
-                if let Some(v) = node.get(key) {
-                    if let Some(n) = date_number(v, None, false) {
-                        node.insert(key.into(), Value::Number(n.into()));
-                    }
+                if let Some(v) = node.get(key)
+                    && let Some(n) = date_number(v, None, false)
+                {
+                    node.insert(key.into(), Value::Number(n.into()));
                 }
             }
         }

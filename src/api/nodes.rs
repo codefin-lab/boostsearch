@@ -189,15 +189,15 @@ pub async fn nodes_stats(
             "indexing_pressure": {"memory": {}},
         }},
     });
-    if !index_metrics.is_empty() && !index_metrics.iter().any(|m| m == "_all") {
-        if let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
-        {
-            // the status counter belongs to indexing, and travels with it
-            idx.retain(|k, _| {
-                index_metrics.iter().any(|m| m == k)
-                    || (k == "status_counter" && index_metrics.iter().any(|m| m == "indexing"))
-            });
-        }
+    if !index_metrics.is_empty()
+        && !index_metrics.iter().any(|m| m == "_all")
+        && let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
+    {
+        // the status counter belongs to indexing, and travels with it
+        idx.retain(|k, _| {
+            index_metrics.iter().any(|m| m == k)
+                || (k == "status_counter" && index_metrics.iter().any(|m| m == "indexing"))
+        });
     }
     respond(&p, out)
 }
@@ -295,15 +295,15 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
         )
             .into_response()
     };
-    if let Some(sort) = p.get("sort") {
-        if !matches!(sort.as_str(), "node_id" | "workload_group") {
-            return bad("Invalid value for 'sort'. Allowed: 'node_id', 'workload_group'".into());
-        }
+    if let Some(sort) = p.get("sort")
+        && !matches!(sort.as_str(), "node_id" | "workload_group")
+    {
+        return bad("Invalid value for 'sort'. Allowed: 'node_id', 'workload_group'".into());
     }
-    if let Some(order) = p.get("order") {
-        if !matches!(order.as_str(), "asc" | "desc") {
-            return bad("Invalid value for 'order'. Allowed: 'asc', 'desc'".into());
-        }
+    if let Some(order) = p.get("order")
+        && !matches!(order.as_str(), "asc" | "desc")
+    {
+        return bad("Invalid value for 'order'. Allowed: 'asc', 'desc'".into());
     }
     if let Some(size) = p.get("size") {
         let n = size.parse::<i64>().unwrap_or(-1);

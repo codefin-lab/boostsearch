@@ -153,10 +153,10 @@ pub(crate) fn write_page(
                         for v in items.iter_mut() {
                             if let Some(text) = crate::source::format_date(v, fmt) {
                                 *v = text;
-                            } else if let Some(n) = v.as_f64() {
-                                if let Some(text) = decimal_format(fmt, n) {
-                                    *v = json!(text);
-                                }
+                            } else if let Some(n) = v.as_f64()
+                                && let Some(text) = decimal_format(fmt, n)
+                            {
+                                *v = json!(text);
                             }
                         }
                     }

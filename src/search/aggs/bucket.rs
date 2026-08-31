@@ -56,11 +56,11 @@ pub(crate) fn run_filters_agg(
         let combined = combine(main_query, Some(filter.clone()));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         let mut b = json!({"doc_count": count});
-        if let Some(sub) = sub {
-            if let Some(o) = sub.as_object() {
-                for (k, v) in o {
-                    b[k] = v.clone();
-                }
+        if let Some(sub) = sub
+            && let Some(o) = sub.as_object()
+        {
+            for (k, v) in o {
+                b[k] = v.clone();
             }
         }
         buckets.push((name.clone(), b));
@@ -72,11 +72,11 @@ pub(crate) fn run_filters_agg(
         let combined = combine(main_query, Some(none_of));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         let mut b = json!({"doc_count": count});
-        if let Some(sub) = sub {
-            if let Some(o) = sub.as_object() {
-                for (k, v) in o {
-                    b[k] = v.clone();
-                }
+        if let Some(sub) = sub
+            && let Some(o) = sub.as_object()
+        {
+            for (k, v) in o {
+                b[k] = v.clone();
             }
         }
         buckets.push((Some(other_bucket_key.unwrap_or_else(|| "_other_".into())), b));
@@ -239,11 +239,11 @@ pub(crate) fn run_missing_agg(
     let combined = combine(main_query, Some(absent));
     let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
     let mut out = json!({"doc_count": count});
-    if let Some(sub) = sub {
-        if let Some(o) = sub.as_object() {
-            for (k, v) in o {
-                out[k] = v.clone();
-            }
+    if let Some(sub) = sub
+        && let Some(o) = sub.as_object()
+    {
+        for (k, v) in o {
+            out[k] = v.clone();
         }
     }
     Ok(out)
@@ -261,11 +261,11 @@ pub(crate) fn run_filter_agg(
     let combined = combine(main_query, Some(filter));
     let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
     let mut out = json!({"doc_count": count});
-    if let Some(sub) = sub {
-        if let Some(o) = sub.as_object() {
-            for (k, v) in o {
-                out[k] = v.clone();
-            }
+    if let Some(sub) = sub
+        && let Some(o) = sub.as_object()
+    {
+        for (k, v) in o {
+            out[k] = v.clone();
         }
     }
     Ok(out)
@@ -304,10 +304,8 @@ pub(crate) fn run_field_terms_agg(
         })
         .unwrap_or(false);
     let mut spec = spec;
-    if ordered_here {
-        if let Some(o) = spec.as_object_mut() {
-            o.remove("order");
-        }
+    if ordered_here && let Some(o) = spec.as_object_mut() {
+        o.remove("order");
     }
     let mut node = json!({"terms": spec});
     if let Some(plain) = plain_subs.as_ref() {
@@ -320,18 +318,18 @@ pub(crate) fn run_field_terms_agg(
     let mut answer = res.get("__f").cloned().unwrap_or_else(|| json!({"buckets": []}));
     // the order a terms aggregation is asked for by default is most documents
     // first, and between two of the same size the smaller key
-    if order.is_none() {
-        if let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut()) {
-            buckets.sort_by(|a, b| {
-                let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
-                let key = |v: &Value| match v.get("key") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => other.to_string(),
-                    None => String::new(),
-                };
-                count(b).cmp(&count(a)).then_with(|| key(a).cmp(&key(b)))
-            });
-        }
+    if order.is_none()
+        && let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut())
+    {
+        buckets.sort_by(|a, b| {
+            let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+            let key = |v: &Value| match v.get("key") {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            count(b).cmp(&count(a)).then_with(|| key(a).cmp(&key(b)))
+        });
     }
     if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
         let empty = Vec::new();
@@ -349,18 +347,17 @@ pub(crate) fn run_field_terms_agg(
             }
             filled.push(b);
         }
-        if ordered_here {
-            if let Some((key, dir)) = order
+        if ordered_here
+            && let Some((key, dir)) = order
                 .as_ref()
                 .and_then(|o| o.as_object())
                 .and_then(|o| o.iter().next())
                 .map(|(k, v)| (k.clone(), v.as_str() == Some("desc")))
-            {
-                filled.sort_by(|a, b| {
-                    let ord = compare_bucket_by(a, b, &key);
-                    if dir { ord.reverse() } else { ord }
-                });
-            }
+        {
+            filled.sort_by(|a, b| {
+                let ord = compare_bucket_by(a, b, &key);
+                if dir { ord.reverse() } else { ord }
+            });
         }
         answer["buckets"] = Value::Array(filled);
     }
@@ -512,20 +509,20 @@ pub(crate) fn run_date_range_agg(
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}-{}", shown(&from), shown(&to)));
         let mut b = json!({"key": key.clone(), "doc_count": count});
-        if let Some(f) = from.as_ref() {
-            if let Some(ms) = millis(f) {
-                b["from"] = json!(ms);
-                if let Some(s) = iso(f) {
-                    b["from_as_string"] = json!(s);
-                }
+        if let Some(f) = from.as_ref()
+            && let Some(ms) = millis(f)
+        {
+            b["from"] = json!(ms);
+            if let Some(s) = iso(f) {
+                b["from_as_string"] = json!(s);
             }
         }
-        if let Some(t) = to.as_ref() {
-            if let Some(ms) = millis(t) {
-                b["to"] = json!(ms);
-                if let Some(s) = iso(t) {
-                    b["to_as_string"] = json!(s);
-                }
+        if let Some(t) = to.as_ref()
+            && let Some(ms) = millis(t)
+        {
+            b["to"] = json!(ms);
+            if let Some(s) = iso(t) {
+                b["to_as_string"] = json!(s);
             }
         }
         if let Some(Value::Object(o)) = sub {
@@ -679,11 +676,11 @@ pub(crate) fn run_range_field_histogram(
             "key": if key.fract() == 0.0 { json!(key as i64) } else { json!(key) },
             "doc_count": count,
         });
-        if let (Some(sub), Some(o)) = (sub, b.as_object_mut()) {
-            if let Some(entries) = sub.as_object() {
-                for (k, v) in entries {
-                    o.insert(k.clone(), v.clone());
-                }
+        if let (Some(sub), Some(o)) = (sub, b.as_object_mut())
+            && let Some(entries) = sub.as_object()
+        {
+            for (k, v) in entries {
+                o.insert(k.clone(), v.clone());
             }
         }
         buckets.push(b);
@@ -1619,7 +1616,7 @@ pub(crate) fn run_significant_terms(
             }
         }
         let mut out: Vec<(Value, u64)> = counts.into_iter().map(|(k, c)| (json!(k), c)).collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|a| std::cmp::Reverse(a.1));
         Ok((total, out))
     };
     let (fg_total, fg) = counted(&query)?;
@@ -1647,15 +1644,15 @@ pub(crate) fn run_significant_terms(
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        if let Some(only) = include.as_ref() {
-            if !only.contains(&text) {
-                continue;
-            }
+        if let Some(only) = include.as_ref()
+            && !only.contains(&text)
+        {
+            continue;
         }
-        if let Some(never) = exclude.as_ref() {
-            if never.contains(&text) {
-                continue;
-            }
+        if let Some(never) = exclude.as_ref()
+            && never.contains(&text)
+        {
+            continue;
         }
         let fg_pct = count as f64 / fg_total.max(1) as f64;
         let bg_pct = bg_count as f64 / bg_total.max(1) as f64;

@@ -49,10 +49,11 @@ impl Mapping {
                 if !glob_match(pattern, name) {
                     continue;
                 }
-                if let Some(mt) = spec.get("match_mapping_type").and_then(|v| v.as_str()) {
-                    if mt != "*" && mt != kind {
-                        continue;
-                    }
+                if let Some(mt) = spec.get("match_mapping_type").and_then(|v| v.as_str())
+                    && mt != "*"
+                    && mt != kind
+                {
+                    continue;
                 }
                 if let Some(m) = spec.get("mapping") {
                     self.insert_property(name, m.clone());

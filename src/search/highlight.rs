@@ -79,10 +79,10 @@ pub(crate) fn build_highlight(
 
         // a value longer than `ignore_above` was never indexed, so there is
         // nothing in it that could have matched
-        if let Some(limit) = mapping.field_option(&name, "ignore_above").and_then(|v| v.as_u64()) {
-            if text.chars().count() as u64 > limit {
-                continue;
-            }
+        if let Some(limit) = mapping.field_option(&name, "ignore_above").and_then(|v| v.as_u64())
+            && text.chars().count() as u64 > limit
+        {
+            continue;
         }
         // A per-field cap says how much of the value to analyse. The plain
         // highlighter returns what it analysed and nothing more; the unified

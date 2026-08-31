@@ -100,10 +100,10 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (f, path, _) = ctx.resolve(&field, false);
     let get = |keys: [&str; 2]| -> Option<(Value, bool)> {
         for (i, k) in keys.iter().enumerate() {
-            if let Some(v) = spec.get(*k) {
-                if !v.is_null() {
-                    return Some((v.clone(), i == 0));
-                }
+            if let Some(v) = spec.get(*k)
+                && !v.is_null()
+            {
+                return Some((v.clone(), i == 0));
             }
         }
         None
@@ -302,12 +302,10 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if types.len() == 1
         && flat_bounds.is_none()
         && std::env::var("BOOSTSEARCH_NO_BLOCK_RANGE").is_err()
-    {
-        if let Some(q) =
+        && let Some(q) =
             block_range_query(ctx, &field, types[0], lower.as_ref(), upper.as_ref(), &general)
-        {
-            return Ok(q);
-        }
+    {
+        return Ok(q);
     }
     Ok(general)
 }

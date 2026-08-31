@@ -23,10 +23,10 @@ use crate::store::{IdxState, Store};
 /// a location a client makes up cannot land anywhere it likes -- least of all
 /// in whatever directory the process happens to have been started from.
 pub fn repo_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("BOOSTSEARCH_PATH_REPO") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("BOOSTSEARCH_PATH_REPO")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     match std::env::var("BOOSTSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("repo"),
