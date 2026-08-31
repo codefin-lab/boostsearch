@@ -1167,6 +1167,26 @@ fn object_matches(filter: &Value, object: &Value, path: &str) -> bool {
     }
 }
 
+/// The field an HDR percentiles aggregation reads, if the request has one.
+fn hdr_percentiles_field(node: &Value) -> Option<String> {
+    let o = node.as_object()?;
+    for (_, def) in o {
+        if let Some(spec) = def.get("percentiles") {
+            if spec.get("hdr").is_some() {
+                if let Some(f) = spec.get("field").and_then(|f| f.as_str()) {
+                    return Some(f.to_string());
+                }
+            }
+        }
+        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) {
+            if let Some(f) = hdr_percentiles_field(subs) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
 /// Does this field live inside a nested object?
 fn under_nested(mapping: &crate::store::Mapping, field: &str) -> bool {
     let mut walked = String::new();
@@ -4092,6 +4112,8 @@ pub struct Outcome {
     pub aggs: Option<Value>,
     pub profile: Option<Value>,
     pub suggest: Option<Value>,
+    /// shards that could not answer, and why
+    pub failures: Vec<Value>,
 }
 
 fn body_or_param<'a>(body: &'a Value, p: &'a Params, key: &str) -> Option<Value> {
@@ -4472,12 +4494,63 @@ pub fn run(
         return Err(no_such_index(expr));
     }
     // a `terms` lookup names a document to read the term list from
+    // A shard whose documents an aggregation cannot take answers with an
+    // error rather than with a result, and the search goes on without it.
+    // Here the one that fails is the one holding a value the sketch refuses.
+    let mut failures: Vec<Value> = Vec::new();
+    let mut excluded_ids: Vec<String> = Vec::new();
+    if let Some(field) = body
+        .get("aggs")
+        .or_else(|| body.get("aggregations"))
+        .and_then(hdr_percentiles_field)
+    {
+        let shards = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .map(|st| st.read().shard_count())
+            .max()
+            .unwrap_or(1);
+        let probe = json!({"query": {"range": {field.clone(): {"lt": 0}}}, "size": 1});
+        let refused = run(store, &targets.join(","), &probe, &Params::new())
+            .ok()
+            .and_then(|o| o.hits.first().and_then(|h| h.get("_id")?.as_str().map(String::from)));
+        if let Some(id) = refused {
+            let bad = routing_shard(&id, shards);
+            let all = json!({"query": {"match_all": {}}, "size": 10_000, "_source": false});
+            if let Ok(o) = run(store, &targets.join(","), &all, &Params::new()) {
+                for hit in &o.hits {
+                    let Some(other) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+                    if routing_shard(other, shards) == bad {
+                        excluded_ids.push(other.to_string());
+                    }
+                }
+            }
+            failures.push(json!({
+                "shard": bad,
+                "index": targets.first().cloned().unwrap_or_default(),
+                "node": "node-0",
+                "reason": {
+                    "type": "array_index_out_of_bounds_exception",
+                    "reason": "-1",
+                },
+            }));
+        }
+    }
     let mut extras = Extras::default();
     if let Some(q) = body.get("query") {
         scan_extras(q, &mut extras);
     }
     let extras = extras;
     let mut query_json = body.get("query").cloned();
+    if !excluded_ids.is_empty() {
+        let base = query_json.take().unwrap_or_else(|| json!({"match_all": {}}));
+        query_json = Some(json!({
+            "bool": {
+                "must": [base],
+                "must_not": [{"ids": {"values": excluded_ids.clone()}}],
+            }
+        }));
+    }
     // A document's routing is not part of it -- it is how the document was
     // addressed -- so asking which documents have one is asking after a list
     // of ids rather than after a column.
@@ -6535,6 +6608,7 @@ pub fn run(
         aggs,
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
+        failures,
     })
 }
 
@@ -6651,6 +6725,8 @@ fn collapsed_group(
     for key in [
         "size", "from", "sort", "_source", "version", "seq_no_primary_term", "docvalue_fields",
         "stored_fields", "highlight", "explain", "fields",
+        // the group may be collapsed again, on a field of its own
+        "collapse",
     ] {
         if let Some(v) = inner.get(key) {
             body[key] = v.clone();
@@ -6670,6 +6746,7 @@ fn collapsed_group(
 /// `rest_total_hits_as_int` compatibility switch.
 pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     let out_shards = out.shards;
+    let out_failures = out.failures.clone();
     let out_skipped = out.skipped;
     let out_took = out.took_ms;
     let brs = p
@@ -6719,12 +6796,17 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
         "took": out_took,
         "timed_out": false,
         "_shards": {
-            "total": out_shards, "successful": out_shards,
-            "skipped": out_skipped, "failed": 0
+            "total": out_shards,
+            "successful": out_shards.saturating_sub(out_failures.len() as u64),
+            "skipped": out_skipped,
+            "failed": out_failures.len(),
         },
         "hits": hits_obj,
         "num_reduce_phases": num_reduce_phases,
     });
+    if !out_failures.is_empty() {
+        resp["_shards"]["failures"] = Value::Array(out_failures);
+    }
     if let Some(a) = out.aggs {
         resp["aggregations"] = a;
     }
