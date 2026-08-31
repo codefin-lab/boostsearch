@@ -27,11 +27,9 @@ BoostSearch by `tools/yaml_runner.py`. Two parts, and a section is the unit:
 - *the module corpus*: 206 files, 895 sections, shipped by the modules and
   plugins that apply to a single node
 
-**The v1 target** — 2,296 of those 2,322 sections. The 26 left out are the ones
-that need something this project does not carry: a geoip database, Tika, Lucene
-expressions, a URL repository, phonetic and phone-number filters. They answer
-501 and say why. Everything else, including the Japanese, Korean, Chinese and
-ICU analysers, is in.
+**The v1 target** — all 2,322 sections, plus what of the security plugin's own
+suite can be pointed at an HTTP server. Nothing is deferred to a later version;
+`docs/plan-v1.md` is the order it gets built in.
 
 **A section** — one named test in a YAML file. The number that matters is
 sections passing out of 2,322, not files.
