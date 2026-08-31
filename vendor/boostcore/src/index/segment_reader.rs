@@ -126,6 +126,24 @@ impl SegmentReader {
         })
     }
 
+    /// The field norms a term should be scored against.
+    ///
+    /// A term inside a JSON field names a path, and that path has a length of
+    /// its own -- the way a field would in a flat schema. Falls back to the
+    /// whole field where a path has no norms of its own.
+    pub(crate) fn fieldnorms_reader_for_term(
+        &self,
+        term: &crate::Term,
+    ) -> crate::Result<Option<FieldNormReader>> {
+        if let Some((path_bytes, _)) = term.value().as_json() {
+            let path = &path_bytes[..path_bytes.len() - 1];
+            if let Some(reader) = self.fieldnorm_readers.get_json_path(term.field(), path)? {
+                return Ok(Some(reader));
+            }
+        }
+        self.fieldnorm_readers.get_field(term.field())
+    }
+
     #[doc(hidden)]
     pub fn fieldnorms_readers(&self) -> &FieldNormReaders {
         &self.fieldnorm_readers

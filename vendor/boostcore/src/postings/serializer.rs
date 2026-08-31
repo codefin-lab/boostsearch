@@ -5,7 +5,7 @@ use common::{BinarySerializable, CountingWriter, VInt};
 
 use super::TermInfo;
 use crate::directory::{CompositeWrite, WritePtr};
-use crate::fieldnorm::FieldNormReader;
+use crate::fieldnorm::{FieldNormReader, FieldNormReaders};
 use crate::index::Segment;
 use crate::positions::PositionSerializer;
 use crate::postings::compression::{BlockEncoder, VIntEncoder, COMPRESSION_BLOCK_SIZE};
@@ -108,6 +108,11 @@ impl InvertedIndexSerializer {
 pub struct FieldSerializer<'a, W: Write = WritePtr> {
     term_dictionary_builder: TermDictionaryBuilder<&'a mut CountingWriter<W>>,
     postings_serializer: PostingsSerializer,
+    /// For a JSON field: where a path's own field norms are read from, and the
+    /// whole-field norms to fall back on. The block maxima written here have to
+    /// be computed with the same norms the query will score with, or they stop
+    /// being an upper bound and pruning drops matching documents.
+    json_fieldnorms: Option<(FieldNormReaders, Field, Option<FieldNormReader>)>,
     positions_serializer_opt: Option<PositionSerializer<&'a mut CountingWriter<W>>>,
     current_term_info: TermInfo,
     term_open: bool,
@@ -143,12 +148,32 @@ impl<'a, W: Write> FieldSerializer<'a, W> {
         Ok(FieldSerializer {
             term_dictionary_builder,
             postings_serializer,
+            json_fieldnorms: None,
             positions_serializer_opt,
             current_term_info: TermInfo::default(),
             term_open: false,
             postings_write,
             postings_start_offset,
         })
+    }
+
+    /// Say that this field is a JSON field, so the norms can follow the path.
+    pub(crate) fn set_json_fieldnorms(&mut self, readers: FieldNormReaders, field: Field) {
+        let whole_field = readers.get_field(field).ok().flatten();
+        self.json_fieldnorms = Some((readers, field, whole_field));
+    }
+
+    /// Score the terms that follow against the norms of this path.
+    pub(crate) fn use_json_path(&mut self, path: &str) {
+        let Some((readers, field, whole_field)) = &self.json_fieldnorms else {
+            return;
+        };
+        let reader = readers
+            .get_json_path(*field, path.as_bytes())
+            .ok()
+            .flatten()
+            .or_else(|| whole_field.clone());
+        self.postings_serializer.set_fieldnorm_reader(reader);
     }
 
     fn postings_offset(&self) -> usize {
@@ -346,6 +371,11 @@ impl PostingsSerializer {
             avg_fieldnorm,
             term_has_freq: false,
         }
+    }
+
+    /// The field norms the block maxima are computed against.
+    pub(crate) fn set_fieldnorm_reader(&mut self, fieldnorm_reader: Option<FieldNormReader>) {
+        self.fieldnorm_reader = fieldnorm_reader;
     }
 
     /// Starts the serialization for a new term.

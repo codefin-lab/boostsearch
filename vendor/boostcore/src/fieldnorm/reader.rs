@@ -36,6 +36,80 @@ impl FieldNormReaders {
         }
     }
 
+    /// The JSON paths this field has per-path norms for, in the order they
+    /// were written.
+    pub fn json_paths(&self, field: Field) -> crate::Result<Vec<String>> {
+        let Some(file) = self.data.open_read_with_idx(field, 1) else {
+            return Ok(Vec::new());
+        };
+        let header = file.read_bytes()?;
+        let bytes: &[u8] = header.as_slice();
+        if bytes.len() < 8 {
+            return Ok(Vec::new());
+        }
+        let num_paths = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let mut paths = Vec::with_capacity(num_paths);
+        let mut cursor = 8;
+        for _ in 0..num_paths {
+            if cursor + 4 > bytes.len() {
+                break;
+            }
+            let len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            if cursor + len > bytes.len() {
+                break;
+            }
+            match std::str::from_utf8(&bytes[cursor..cursor + len]) {
+                Ok(path) => paths.push(path.to_string()),
+                Err(_) => break,
+            }
+            cursor += len;
+        }
+        Ok(paths)
+    }
+
+    /// The `FieldNormReader` for one path of a JSON field.
+    ///
+    /// `path` is the path as it is spelled inside a term: segments separated by
+    /// `JSON_PATH_SEGMENT_SEP`, without the end-of-path byte. Returns `None`
+    /// when the field has no per-path norms, or none for this path.
+    pub fn get_json_path(&self, field: Field, path: &[u8]) -> crate::Result<Option<FieldNormReader>> {
+        let Some(file) = self.data.open_read_with_idx(field, 1) else {
+            return Ok(None);
+        };
+        let header = file.read_bytes()?;
+        let bytes: &[u8] = header.as_slice();
+        if bytes.len() < 8 {
+            return Ok(None);
+        }
+        let read_u32 = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let num_paths = read_u32(0) as usize;
+        let num_docs = read_u32(4) as usize;
+        let mut cursor = 8;
+        let mut found: Option<usize> = None;
+        for i in 0..num_paths {
+            if cursor + 4 > bytes.len() {
+                return Ok(None);
+            }
+            let len = read_u32(cursor) as usize;
+            cursor += 4;
+            if cursor + len > bytes.len() {
+                return Ok(None);
+            }
+            if &bytes[cursor..cursor + len] == path {
+                found = Some(i);
+            }
+            cursor += len;
+        }
+        let Some(index) = found else {
+            return Ok(None);
+        };
+        let start = cursor + index * num_docs;
+        Ok(Some(FieldNormReader::open(
+            file.slice(start..start + num_docs),
+        )?))
+    }
+
     /// Return a break down of the space usage per field.
     pub fn space_usage(&self, schema: &Schema) -> PerFieldSpaceUsage {
         self.data.space_usage(schema)

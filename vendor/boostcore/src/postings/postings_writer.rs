@@ -82,6 +82,9 @@ pub(crate) fn serialize_postings(
         let fieldnorm_reader = fieldnorm_readers.get_field(field)?;
         let mut field_serializer =
             serializer.new_field(field, postings_writer.total_num_tokens(), fieldnorm_reader)?;
+        if schema.get_field_entry(field).field_type().value_type() == Type::Json {
+            field_serializer.set_json_fieldnorms(fieldnorm_readers.clone(), field);
+        }
         postings_writer.serialize(
             &term_offsets[byte_offsets],
             &ordered_id_to_path,

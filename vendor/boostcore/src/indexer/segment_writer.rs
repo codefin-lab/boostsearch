@@ -332,6 +332,13 @@ impl SegmentWriter {
                             field,
                             self.json_positions_per_path.total_tokens(),
                         );
+                        // and one per path, so a query on a short path is not
+                        // told the document is long because a sibling is
+                        for (path_id, num_tokens) in self.json_positions_per_path.tokens_per_path()
+                        {
+                            self.fieldnorms_writer
+                                .record_json_path(doc_id, field, path_id, num_tokens);
+                        }
                     }
                 }
                 FieldType::IpAddr(_) => {
@@ -405,8 +412,9 @@ fn remap_and_write(
     mut serializer: SegmentSerializer,
 ) -> crate::Result<()> {
     debug!("remap-and-write");
+    let paths = ctx.path_to_unordered_id.unordered_id_to_path();
     if let Some(fieldnorms_serializer) = serializer.extract_fieldnorms_serializer() {
-        fieldnorms_writer.serialize(fieldnorms_serializer)?;
+        fieldnorms_writer.serialize(fieldnorms_serializer, &paths)?;
     }
     let fieldnorm_data = serializer
         .segment()

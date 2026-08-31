@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use columnar::{
@@ -212,8 +213,56 @@ impl IndexMerger {
                 fieldnorms_data.push(fieldnorm_id);
             }
             fieldnorms_serializer.serialize_field(field, &fieldnorms_data[..])?;
+            self.write_json_fieldnorms(field, &mut fieldnorms_serializer, doc_id_mapping)?;
         }
         fieldnorms_serializer.close()?;
+        Ok(())
+    }
+
+    /// Carry a JSON field's per-path norms through the merge.
+    ///
+    /// Without this a merged segment falls back to one length for the whole
+    /// field, and the same query would score differently either side of a
+    /// merge.
+    fn write_json_fieldnorms(
+        &self,
+        field: Field,
+        fieldnorms_serializer: &mut FieldNormsSerializer,
+        doc_id_mapping: &SegmentDocIdMapping,
+    ) -> crate::Result<()> {
+        let mut paths: BTreeSet<String> = BTreeSet::new();
+        for reader in &self.readers {
+            paths.extend(reader.fieldnorms_readers().json_paths(field)?);
+        }
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut norms: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let readers: Vec<Option<FieldNormReader>> = self
+                .readers
+                .iter()
+                .map(|reader| {
+                    reader
+                        .fieldnorms_readers()
+                        .get_json_path(field, path.as_bytes())
+                })
+                .collect::<Result<_, _>>()?;
+            let mut data = Vec::with_capacity(self.max_doc as usize);
+            for old_doc_addr in doc_id_mapping.iter_old_doc_addrs() {
+                let fieldnorm_id = readers[old_doc_addr.segment_ord as usize]
+                    .as_ref()
+                    .map(|reader| reader.fieldnorm_id(old_doc_addr.doc_id))
+                    .unwrap_or(0u8);
+                data.push(fieldnorm_id);
+            }
+            norms.push((path, data));
+        }
+        let borrowed: Vec<(&str, &[u8])> = norms
+            .iter()
+            .map(|(path, data)| (path.as_str(), &data[..]))
+            .collect();
+        fieldnorms_serializer.serialize_json_paths(field, &borrowed)?;
         Ok(())
     }
 

@@ -57,6 +57,16 @@ impl PathToUnorderedId {
         result
     }
 
+    /// Returns the paths so they can be queried by the unordered id (which is
+    /// the index) -- the id they were given while the document was indexed.
+    pub(crate) fn unordered_id_to_path(&self) -> Vec<&str> {
+        let mut paths = vec![""; self.map.len()];
+        for (path, id) in &self.map {
+            paths[*id as usize] = path.as_str();
+        }
+        paths
+    }
+
     /// Returns the paths so they can be queried by the ordered id (which is the index).
     pub(crate) fn ordered_id_to_path(&self) -> Vec<&str> {
         let mut paths = self.map.keys().map(String::as_str).collect::<Vec<_>>();

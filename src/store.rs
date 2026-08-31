@@ -1933,11 +1933,18 @@ impl Store {
 
     pub fn delete(&self, name: &str) -> bool {
         let targets = self.resolve(name);
-        let mut guard = self.inner.write();
-        let mut any = false;
-        for t in targets {
-            any |= guard.remove(&t).is_some();
-            if let Some(path) = self.index_path(&t) {
+        // Dropping an index waits for its writer, and its writer waits for
+        // whatever it is merging. Held under the map lock that every other
+        // request needs, that wait is the whole server stopping -- long enough
+        // for the listen queue to fill and connections to be refused.
+        let dropped: Vec<_> = {
+            let mut guard = self.inner.write();
+            targets.iter().filter_map(|t| guard.remove(t)).collect()
+        };
+        let any = !dropped.is_empty();
+        drop(dropped);
+        for t in &targets {
+            if let Some(path) = self.index_path(t) {
                 let _ = std::fs::remove_dir_all(path);
             }
         }

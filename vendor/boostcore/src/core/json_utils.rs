@@ -63,6 +63,14 @@ impl IndexingPositionsPerPath {
     pub fn clear(&mut self) {
         self.positions_per_path.clear();
     }
+    /// How many tokens were indexed under each path, by the unordered id the
+    /// path was given while indexing.
+    pub(crate) fn tokens_per_path(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.positions_per_path
+            .iter()
+            .map(|(id, position)| (*id, position.num_tokens))
+    }
+
     /// How many tokens were indexed across every path of one JSON field.
     ///
     /// A field norm is per field, and a JSON field's length is the length of

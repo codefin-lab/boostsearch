@@ -71,10 +71,14 @@ impl<Rec: Recorder> PostingsWriter for JsonPostingsWriter<Rec> {
         let mut term_path_len = 0; // this will be set in the first iteration
         for (_field, path_id, term, addr) in ordered_term_addrs {
             if prev_term_id != path_id.path_id() {
+                let path = ordered_id_to_path[path_id.path_id() as usize];
                 term_buffer.clear();
-                term_buffer.append_json_path(ordered_id_to_path[path_id.path_id() as usize]);
+                term_buffer.append_json_path(path);
                 term_path_len = term_buffer.len();
                 prev_term_id = path_id.path_id();
+                // the block maxima that follow are this path's, and are scored
+                // against this path's field norms
+                serializer.use_json_path(path);
             }
             term_buffer.truncate(term_path_len);
             term_buffer.append_bytes(term);
