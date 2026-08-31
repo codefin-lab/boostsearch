@@ -7,6 +7,7 @@ mod api;
 mod blockstats;
 mod hdr;
 mod search;
+mod snapshot;
 mod query;
 mod source;
 mod store;
@@ -309,6 +310,10 @@ async fn main() -> anyhow::Result<()> {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
     };
+    // anything acknowledged but not committed when the process last stopped is
+    // in a translog and nowhere else; it goes back into the index before the
+    // first request is answered
+    api::recover(&store);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("boostsearch listening on {addr}");
     axum::serve(listener, app(store)).await?;

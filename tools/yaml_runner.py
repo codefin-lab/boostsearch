@@ -398,6 +398,15 @@ def reset(base):
         SESSION.delete(base + "/_search/point_in_time/_all", timeout=10)
     except Exception:
         pass
+    # a snapshot outlives the repository that held it -- the files stay on
+    # disk, and registering the repository again finds them -- so the snapshots
+    # go first, which is what a fresh cluster would have
+    try:
+        repos = SESSION.get(base + "/_snapshot/_all", timeout=10).json()
+        for repo in repos:
+            SESSION.delete(base + f"/_snapshot/{repo}/*", timeout=10)
+    except Exception:
+        pass
     # repositories, snapshots and pipelines outlive indices in the same way
     for path in (
         "/*",

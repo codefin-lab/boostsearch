@@ -4,6 +4,7 @@ pub mod blockstats;
 pub mod hdr;
 pub mod query;
 pub mod search;
+pub mod snapshot;
 pub mod source;
 pub mod store;
 pub mod tz;

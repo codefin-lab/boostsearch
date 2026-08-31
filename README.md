@@ -46,6 +46,7 @@ It listens on `127.0.0.1:9200`. Two environment variables matter:
 |---|---|
 | `BOOSTSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
 | `BOOSTSEARCH_DATA` | a directory to keep indices in, mmapped and surviving a restart; unset keeps everything in RAM |
+| `BOOSTSEARCH_PATH_REPO` | where snapshot repositories may live (default `<data>/repo`) |
 
 ## Running the conformance suite
 
@@ -74,12 +75,21 @@ Checked by running it, not by reading it:
   discovery. `number_of_replicas` is accepted and does nothing.
 - **No authentication and no TLS.** It listens on `127.0.0.1` unless told
   otherwise, and it should stay somewhere only trusted callers can reach.
-- **The snapshot API keeps bookkeeping, not data.** `_snapshot` answers the
-  way OpenSearch answers, and copies nothing; a restore does not bring
-  documents back. To back up, stop the process and copy `BOOSTSEARCH_DATA`.
-- **No translog.** A write that was acknowledged but not refreshed is lost if
-  the process is killed. A write with `refresh=true`, and anything an explicit
-  `_refresh` covered, is committed and survives — verified with `kill -9`.
+- **Snapshots copy documents, not segments.** An `fs` repository holds each
+  index's mapping, settings and documents as they were written, so a restore
+  re-indexes rather than reopening someone else's files -- slower to restore,
+  and indifferent to which version of the engine wrote it. Verified by losing
+  the whole data directory and getting the index back from the repository
+  alone. Repositories of any other type are registered and answered for, and
+  hold nothing. A location is a name under `BOOSTSEARCH_PATH_REPO` (by default
+  `<data>/repo`); one that tries to climb out of it is refused.
+- **Durability is per index, not per cluster.** A write is recorded in a
+  translog and fsynced before it is answered, so `kill -9` loses nothing that
+  was acknowledged — verified, including a bulk of 5,000 that had never been
+  refreshed. What that does not buy you is a second copy: one disk, one node.
+  `index.translog.durability: async` trades the guarantee for latency, as it
+  does in OpenSearch. In RAM mode (`BOOSTSEARCH_DATA` unset) nothing is
+  written down at all, by design.
 - **Some endpoints are not there**: `_update_by_query`, `_delete_by_query`,
   point-in-time, stored scripts, `_reindex`, `_sql`. They answer 501 rather
   than pretending. There is no scripting language.
@@ -88,9 +98,14 @@ What it costs, measured on this laptop:
 
 | | |
 |---|---|
-| write, no refresh | 0.5 ms |
+| write, no refresh, in RAM | 0.34 ms |
+| write, no refresh, on disk | 2.5 ms — the translog fsync it is answered for |
+| the same with `translog.durability: async` | 1.2 ms |
 | write with `refresh=true`, on disk | 83 ms — a refresh here is a commit, and a commit is an fsync |
 | write with `refresh=true`, in RAM | 1.3 ms |
+| bulk indexing, on disk | 62,000 docs/s (81,000 with no translog to write) |
+| snapshot of 200k documents | 0.3 s, 69 MB |
+| restoring them | 2.6 s |
 | search | 0.7 ms |
 | resident memory per index being written | ~5 MB, given back 30 s after the last write, though the allocator keeps the pages |
 | request body ceiling | 100 MB (`BOOSTSEARCH_MAX_CONTENT_MB`) |
