@@ -3084,7 +3084,7 @@ fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -> Option<St
             .filter_map(|n| store.get(n))
             .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
         match ty.as_deref() {
-            Some("unsigned_long") => "u",
+            Some("unsigned_long") => "ul",
             Some("long" | "integer" | "short" | "byte" | "date" | "date_nanos" | "boolean") => "l",
             Some("double" | "float" | "half_float" | "scaled_float") => "d",
             _ => "s",

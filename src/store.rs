@@ -153,11 +153,13 @@ pub struct Mapping {
 
 impl Mapping {
     pub fn from_body(body: &Value) -> Mapping {
+        let mut body = body.clone();
+        expand_dotted_properties(&mut body);
         let mut types = HashMap::new();
         if let Some(props) = body.get("properties").and_then(|p| p.as_object()) {
             flatten_props(props, "", &mut types);
         }
-        Mapping { types, raw: body.clone() }
+        Mapping { types, raw: body }
     }
 
     /// Multi-fields declared with a normalizer, as (parent path, sub name).
@@ -352,6 +354,9 @@ impl Mapping {
         if !self.raw.is_object() {
             self.raw = serde_json::json!({});
         }
+        let mut body = body.clone();
+        expand_dotted_properties(&mut body);
+        let body = &body;
         let Some(incoming) = body.as_object() else { return };
         for (key, val) in incoming {
             if key == "properties" {
@@ -463,6 +468,44 @@ fn collect_normalizers(
         }
         if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {
             collect_normalizers(inner, &path, out);
+        }
+    }
+}
+
+/// A property named with dots is a property of the object those dots name.
+///
+/// `object1.red` is `red` inside `object1`, and mappings written either way
+/// have to merge with each other, which they only do once both are nested.
+pub fn expand_dotted_properties(node: &mut Value) {
+    let Some(props) = node.get_mut("properties").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    let dotted: Vec<String> = props.keys().filter(|k| k.contains('.')).cloned().collect();
+    for name in dotted {
+        let Some(def) = props.remove(&name) else { continue };
+        let parts: Vec<&str> = name.split('.').collect();
+        let mut node = props
+            .entry(parts[0].to_string())
+            .or_insert_with(|| serde_json::json!({"properties": {}}));
+        for part in &parts[1..parts.len() - 1] {
+            if node.get("properties").is_none() {
+                node["properties"] = serde_json::json!({});
+            }
+            node = node["properties"]
+                .as_object_mut()
+                .unwrap()
+                .entry(part.to_string())
+                .or_insert_with(|| serde_json::json!({"properties": {}}));
+        }
+        if node.get("properties").is_none() {
+            node["properties"] = serde_json::json!({});
+        }
+        node["properties"][parts[parts.len() - 1]] = def;
+    }
+    // an object written out in full may itself hold dotted names
+    if let Some(props) = node.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for (_, def) in props.iter_mut() {
+            expand_dotted_properties(def);
         }
     }
 }
