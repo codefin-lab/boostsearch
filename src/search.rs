@@ -98,6 +98,8 @@ struct SortKey {
     /// where a document with no value for this field goes. `_last` means last
     /// in the order the caller sees, whichever direction that is.
     missing_last: bool,
+    /// the nested object this key reads inside, where the caller named one
+    nested: Option<String>,
 }
 
 fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
@@ -114,6 +116,7 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 desc: false,
                 mode: None,
                 missing_last: true,
+                nested: None,
             }),
             Value::Object(o) => {
                 for (field, opts) in o {
@@ -135,7 +138,14 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .and_then(|v| v.as_str())
                         .map(|m| m == "_last")
                         .unwrap_or(true);
-                    out.push(SortKey { field, desc, mode, missing_last });
+                    // a sort may say which nested object it reads inside;
+                    // without one it reads the document itself
+                    let nested = opts
+                        .pointer("/nested/path")
+                        .or_else(|| opts.get("nested_path"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    out.push(SortKey { field, desc, mode, missing_last, nested });
                 }
             }
             _ => {}
@@ -545,6 +555,7 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
                     desc: *want_desc,
                     mode: None,
                     missing_last: self.missing_last.get(i).copied().unwrap_or(true),
+                    nested: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {
@@ -687,6 +698,67 @@ fn replace_routing_exists(node: &mut Value, ids: &[String]) {
         }
         _ => {}
     }
+}
+
+/// Say which nested object a sort reads inside, wherever one is written under
+/// an aggregation that has already entered that object.
+fn scope_sorts_to(node: &mut Value, path: &str) {
+    match node {
+        Value::Object(o) => {
+            if let Some(sort) = o.get_mut("sort") {
+                let mut items = match sort.take() {
+                    Value::Array(a) => a,
+                    other => vec![other],
+                };
+                for item in items.iter_mut() {
+                    match item {
+                        Value::String(field) => {
+                            let field = field.clone();
+                            *item = json!({field: {"order": "asc", "nested": {"path": path}}});
+                        }
+                        Value::Object(keys) => {
+                            for (_, opts) in keys.iter_mut() {
+                                match opts {
+                                    Value::String(order) => {
+                                        let order = order.clone();
+                                        *opts =
+                                            json!({"order": order, "nested": {"path": path}});
+                                    }
+                                    Value::Object(oo) => {
+                                        oo.insert("nested".into(), json!({"path": path}));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                *sort = Value::Array(items);
+            }
+            for (_, v) in o.iter_mut() {
+                scope_sorts_to(v, path);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                scope_sorts_to(v, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Does this field live inside a nested object?
+fn under_nested(mapping: &crate::store::Mapping, field: &str) -> bool {
+    let mut walked = String::new();
+    for part in field.split('.') {
+        walked = if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
+        if walked != field && mapping.type_of(&walked) == Some("nested") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Which of the clauses that need work after the search are in this query.
@@ -3931,6 +4003,7 @@ pub fn run(
                         desc: orders.get(i).map(|o| o == "desc").unwrap_or(false),
                         mode: None,
                         missing_last: true,
+                        nested: None,
                     })
                     .collect();
                 (!keys.is_empty()).then_some(keys)
@@ -4453,6 +4526,17 @@ pub fn run(
                         desc: k.desc,
                         mode: k.mode.clone(),
                     },
+                    // The values of a field inside a nested object belong to
+                    // the object, not to the document, so a sort that does not
+                    // say which object it reads inside finds nothing -- which
+                    // is what OpenSearch's resolveNested returning null means.
+                    _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
+                        SortSource::Column {
+                            name: "_obs_no_such_column".to_string(),
+                            desc: k.desc,
+                            mode: k.mode.clone(),
+                        }
+                    }
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
@@ -6198,6 +6282,11 @@ fn run_peeled_agg(
                 .map(|s| s.to_string());
             let mut answer = run_filter_agg(store, targets, query_json, &{
                 let mut d = def.clone();
+                // inside a nested aggregation the sorting is done in that
+                // object's scope, which is what the aggregation stands for
+                if let Some(path) = path.as_deref() {
+                    scope_sorts_to(&mut d, path);
+                }
                 if let Some(o) = d.as_object_mut() {
                     o.remove("nested");
                     o.remove("reverse_nested");
