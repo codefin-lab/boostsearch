@@ -27,6 +27,12 @@ BoostSearch by `tools/yaml_runner.py`. Two parts, and a section is the unit:
 - *the module corpus*: 206 files, 895 sections, shipped by the modules and
   plugins that apply to a single node
 
+**The v1 target** — 2,296 of those 2,322 sections. The 26 left out are the ones
+that need something this project does not carry: a geoip database, Tika, Lucene
+expressions, a URL repository, phonetic and phone-number filters. They answer
+501 and say why. Everything else, including the Japanese, Korean, Chinese and
+ICU analysers, is in.
+
 **A section** — one named test in a YAML file. The number that matters is
 sections passing out of 2,322, not files.
 
@@ -39,6 +45,19 @@ numbers over them, and the tokens a text was cut into. Everything else --
 **The bench matrix** — `tools/bench_matrix.py`: index throughput, resident
 memory, and the median latency of ten query shapes, both engines, same corpus,
 same machine. "Winning a dimension" means a better number in that row.
+
+## The analysis words
+
+**An analyzer** — a tokenizer and the chain of filters after it, named by an
+index's settings or built in. A field names one; a search has to use the same
+one, or the query and the document never meet.
+
+**A chain** — the analyzer's parts in order, as this project models them:
+one source of tokens, then the steps that change, drop or add to them.
+
+**The registry** — the analyzers one index can name: the ones it defined, over
+the built-in ones. Per index, because two indices may define the same name
+differently.
 
 ## The storage words
 
