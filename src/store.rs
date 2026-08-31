@@ -1524,7 +1524,7 @@ pub fn normalize_alias(def: &Value) -> Value {
 }
 
 /// Index names are not path-safe, so each one gets a stable encoded directory.
-fn dir_name(index: &str) -> String {
+pub fn dir_name(index: &str) -> String {
     let mut out = String::new();
     for b in index.bytes() {
         match b {

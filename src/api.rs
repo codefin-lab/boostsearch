@@ -8272,6 +8272,30 @@ pub async fn put_repository(
             format!("[{name}] missing repository type"),
         );
     }
+    // a location is a name under the root repositories live in; one that tries
+    // to climb out of it is refused rather than quietly ignored
+    if body.get("type").and_then(|t| t.as_str()) == Some("fs")
+        && body.pointer("/settings/location").and_then(|v| v.as_str()).is_some()
+        && crate::snapshot::location(&body).is_none()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "repository_exception",
+            format!(
+                "[{name}] location must sit under [{}]",
+                crate::snapshot::repo_root().display()
+            ),
+        );
+    }
+    // a repository that already holds snapshots says so as soon as it is
+    // registered: the records are on its disk, not in a cluster state this
+    // server keeps across a restart
+    if let Some(dir) = crate::snapshot::location(&body) {
+        let _ = std::fs::create_dir_all(&dir);
+        for (snap, record) in crate::snapshot::read_records(&dir) {
+            store.put_snapshot(&name, &snap, record);
+        }
+    }
     store.put_repository(&name, body);
     respond(&p, json!({"acknowledged": true}))
 }
@@ -8423,13 +8447,25 @@ pub async fn create_snapshot(
     if let Some(meta) = body.get("metadata") {
         record["metadata"] = meta.clone();
     }
-    // Say plainly what this is: the snapshot APIs keep the bookkeeping a
-    // client expects to see, and copy nothing. A restore cannot bring data
-    // back that was never written anywhere.
-    tracing::warn!(
-        "snapshot [{name}] in repository [{repo}] records metadata only -- no data is copied, \
-         and a restore from it will not bring documents back. Copy the data directory instead."
-    );
+    // A repository with somewhere to write gets the documents themselves; one
+    // without keeps the bookkeeping and nothing else, and says so.
+    match store.repositories().get(&repo).and_then(crate::snapshot::location) {
+        Some(dir) => {
+            let kept: Vec<String> =
+                record["indices"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+            if let Err(e) = crate::snapshot::write(&store, &dir, &name, &kept, &record) {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "repository_exception",
+                    format!("[{repo}] could not write snapshot [{name}]: {e}"),
+                );
+            }
+        }
+        None => tracing::warn!(
+            "snapshot [{name}] in repository [{repo}] records metadata only -- the repository \
+             has no filesystem location to copy documents to"
+        ),
+    }
     store.put_snapshot(&repo, &name, record.clone());
     // without `wait_for_completion` the caller is told it has begun; with it,
     // the finished snapshot comes back
@@ -8507,12 +8543,24 @@ pub async fn delete_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    // what the repository was keeping goes with the record of it
+    let held: Vec<String> = store
+        .snapshots(&repo)
+        .keys()
+        .filter(|n| **n == name || crate::store::glob_match(&name, n))
+        .cloned()
+        .collect();
     if store.remove_snapshots(&repo, &name) == 0 && !name.contains('*') {
         return err(
             StatusCode::NOT_FOUND,
             "snapshot_missing_exception",
             format!("[{repo}:{name}] is missing"),
         );
+    }
+    if let Some(dir) = store.repositories().get(&repo).and_then(crate::snapshot::location) {
+        for snap in held {
+            crate::snapshot::remove(&dir, &snap);
+        }
     }
     respond(&p, json!({"acknowledged": true}))
 }
@@ -8622,18 +8670,49 @@ pub async fn restore_snapshot(
         }
         _ => held_indices.clone(),
     };
+    // a name may be given back changed, which is how a snapshot is restored
+    // beside the index it was taken from
+    let rename = |n: &str| -> String {
+        let (Some(pat), Some(rep)) = (
+            body.get("rename_pattern").and_then(|v| v.as_str()),
+            body.get("rename_replacement").and_then(|v| v.as_str()),
+        ) else {
+            return n.to_string();
+        };
+        match regex::Regex::new(pat) {
+            Ok(re) => re.replace(n, rep).to_string(),
+            Err(_) => n.to_string(),
+        }
+    };
+    let dir = store.repositories().get(&repo).and_then(crate::snapshot::location);
     // an index comes back from a snapshot open, and says so when asked how it
     // was recovered
     let mut restored = Vec::new();
     for n in held_indices.iter().filter(|n| {
         wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n))
     }) {
-        if let Some(st) = store.get(n) {
+        let target = rename(n);
+        if let Some(st) = store.get(&target) {
+            // still here: a restore over it says it is back, as it does today
             let mut g = st.write();
             g.closed = false;
             g.restored = true;
             g.save_meta();
-            restored.push(n.clone());
+            restored.push(target);
+            continue;
+        }
+        // gone: this is what a snapshot is for
+        let Some(dir) = dir.as_ref() else {
+            continue;
+        };
+        match crate::snapshot::restore_index(&store, dir, &name, n, &target) {
+            Ok(docs) => {
+                tracing::info!("restored [{target}] from [{repo}:{name}] with {docs} documents");
+                restored.push(target);
+            }
+            Err(e) => {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+            }
         }
     }
     let shards = restored.len().max(1);
