@@ -1,0 +1,274 @@
+//! Asking what a query means, and what an analyzer does to a text.
+
+use super::*;
+
+/// A filter written the short way, spelled out.
+///
+/// `{"term": {"field": "value"}}` and `{"term": {"field": {"value": "value"}}}`
+/// mean the same thing; the long form is what a filter is reported as, since
+/// it is where the boost would go.
+pub(crate) fn expand_filter(f: &Value) -> Value {
+    let Some(o) = f.as_object() else { return f.clone() };
+    let mut out = serde_json::Map::new();
+    for (kind, body) in o {
+        if !matches!(kind.as_str(), "term" | "prefix" | "wildcard" | "regexp" | "fuzzy") {
+            out.insert(kind.clone(), body.clone());
+            continue;
+        }
+        let Some(fields) = body.as_object() else {
+            out.insert(kind.clone(), body.clone());
+            continue;
+        };
+        let mut spelled = serde_json::Map::new();
+        for (field, v) in fields {
+            let long = match v {
+                Value::Object(_) => v.clone(),
+                other => json!({"value": other, "boost": 1.0}),
+            };
+            spelled.insert(field.clone(), long);
+        }
+        out.insert(kind.clone(), Value::Object(spelled));
+    }
+    Value::Object(out)
+}
+
+pub async fn validate_query(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let shards = json!({"total": 1, "successful": 1, "failed": 0});
+    // a body that is not empty and does not name a query is not a query at
+    // all, whatever else it contains
+    let Some(query) = body.get("query").cloned() else {
+        if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            let mut out = json!({"_shards": shards, "valid": true});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                let sample = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+                out["explanations"] = json!(
+                    sample
+                        .iter()
+                        .map(|n| json!({
+                            "index": n, "valid": true,
+                            "explanation": describe_query(&json!({"match_all": {}})),
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            return respond(&p, out);
+        }
+        let mut out = json!({"_shards": shards, "valid": false});
+        // whatever the body holds, it is not where a query goes -- said only
+        // when the caller asked to be told why
+        if p.get("explain").map(|v| v != "false").unwrap_or(false)
+            && let Some(first) = body.as_object().and_then(|o| o.keys().next())
+        {
+            out["error"] = json!(format!("request does not support [{first}]"));
+        }
+        return respond(&p, out);
+    };
+    let probe = json!({"query": query, "size": 0});
+    // building the query against one of the targets says whether it can be
+    // read at all, and `explain` asks to be told why not
+    let sample = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    if let Some(st) = sample.first().and_then(|n| store.get(n)) {
+        let g = st.read();
+        let ctx = crate::query::Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(&store),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+        };
+        if let Err(e) = crate::query::build(&ctx, &query) {
+            let mut out = json!({"_shards": shards, "valid": false});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                // the name of the index it was read against, then what went
+                // wrong, which is the shape the message has
+                let name = sample.first().cloned().unwrap_or_default();
+                out["error"] = json!(format!("[{name}] QueryShardException[{e}]"));
+            }
+            return respond(&p, out);
+        }
+    }
+    match crate::search::run(&store, &expr, &probe, &Params::new()) {
+        Ok(_) => {
+            let mut out = json!({"_shards": shards, "valid": true});
+            if p.get("explain").map(|v| v != "false").unwrap_or(false) {
+                out["explanations"] = json!(
+                    sample
+                        .iter()
+                        .map(|n| json!({
+                            "index": n, "valid": true,
+                            "explanation": describe_query(&query),
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            respond(&p, out)
+        }
+        Err(_) => respond(&p, json!({"_shards": shards, "valid": false})),
+    }
+}
+
+/// How a query reads once it has been rewritten, in the shape the engine
+/// names its own queries.
+pub(crate) fn describe_query(q: &Value) -> String {
+    let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
+        return "*:*".to_string();
+    };
+    match kind.as_str() {
+        "match_all" => {
+            "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
+                .to_string()
+        }
+        "term" | "match" => body
+            .as_object()
+            .and_then(|o| o.iter().next())
+            .map(|(f, v)| {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Object(o) => o
+                        .get("value")
+                        .or_else(|| o.get("query"))
+                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                        .unwrap_or_default(),
+                    other => other.to_string(),
+                };
+                format!("{f}:{text}")
+            })
+            .unwrap_or_else(|| "*:*".to_string()),
+        other => other.to_string(),
+    }
+}
+
+/// `_analyze` runs text through the tokenizer the query path would use.
+pub async fn analyze(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let body: Value = parse_body(&body).unwrap_or(json!({}));
+    let text = match body.get("text") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+        }
+        _ => p.get("text").map(|t| vec![t.clone()]).unwrap_or_default(),
+    };
+    let analyzer = body
+        .get("analyzer")
+        .and_then(|v| v.as_str())
+        .or_else(|| p.get("analyzer").map(|s| s.as_str()));
+    let expr = index.map(|Path(i)| i).unwrap_or_default();
+    let st = store.resolve(&expr).into_iter().next().and_then(|n| store.get(&n));
+    // a tokenizer only splits; folding case is a filter, and naming one
+    // without the other asks for the split alone
+    let tokenizer_only =
+        analyzer.is_none() && (body.get("tokenizer").is_some() || p.contains_key("tokenizer"));
+    let mut tokens = Vec::new();
+    let mut pos = 0usize;
+    for t in &text {
+        let parts = if tokenizer_only {
+            t.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_string())
+                .collect()
+        } else {
+            match &st {
+                Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer),
+                None => t.split_whitespace().map(|w| w.to_lowercase()).collect(),
+            }
+        };
+        for tok in parts {
+            tokens.push(json!({
+                "token": tok, "start_offset": 0, "end_offset": 0,
+                "type": "<ALPHANUM>", "position": pos
+            }));
+            pos += 1;
+        }
+    }
+    let cap = st
+        .as_ref()
+        .and_then(|s| s.read().numeric_setting("analyze.max_token_count"))
+        .unwrap_or(10_000) as usize;
+    if tokens.len() > cap {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "The number of tokens produced by calling _analyze has exceeded the allowed \
+                 maximum of [{cap}]. This limit can be set by changing the \
+                 [index.analyze.max_token_count] index level setting."
+            ),
+        );
+    }
+    // `explain` asks for the same tokens laid out by the step that produced
+    // them, rather than as one flat list
+    if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false)
+        || p.get("explain").map(|v| v == "true").unwrap_or(false)
+    {
+        let named = body
+            .get("tokenizer")
+            .or_else(|| body.get("analyzer"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| p.get("tokenizer").or_else(|| p.get("analyzer")).cloned())
+            .unwrap_or_else(|| "standard".to_string());
+        let stage = json!({"name": named, "tokens": tokens.clone()});
+        let detail = if tokenizer_only {
+            let filters: Vec<Value> = body
+                .get("filter")
+                .and_then(|f| f.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|f| {
+                            let name = match f {
+                                Value::String(s) => s.clone(),
+                                other => other
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("filter")
+                                    .to_string(),
+                            };
+                            // a stop filter takes words back out, which is
+                            // the whole point of naming one
+                            let stop: Vec<String> = f
+                                .get("stopwords")
+                                .and_then(|w| w.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let kept: Vec<Value> = tokens
+                                .iter()
+                                .filter(|t| {
+                                    let text =
+                                        t.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                                    !stop.iter().any(|w| w == text)
+                                })
+                                .cloned()
+                                .collect();
+                            json!({"name": name, "tokens": kept})
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({"custom_analyzer": true, "tokenizer": stage, "tokenfilters": filters})
+        } else {
+            json!({"custom_analyzer": false, "analyzer": stage})
+        };
+        return respond(&p, json!({"detail": detail}));
+    }
+
+    respond(&p, json!({"tokens": tokens}))
+}
