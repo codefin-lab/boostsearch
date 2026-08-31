@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 homepage = "https://github.com/codefin-lab/boostcore"
 repository = "https://github.com/codefin-lab/boostcore"
-description = "term hashmap used for indexing"
+description = "term hashmap used for indexing, from BoostCore"
 
 [dependencies]
 murmurhash32 = "0.3"

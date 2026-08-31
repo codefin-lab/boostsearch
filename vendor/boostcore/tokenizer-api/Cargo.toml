@@ -3,7 +3,7 @@ name = "boostcore-tokenizer-api"
 version = "0.7.0"
 license = "MIT"
 edition = "2021"
-description = "Tokenizer API of tantivy"
+description = "Tokenizer API of BoostCore, a fork of tantivy"
 homepage = "https://github.com/codefin-lab/boostcore"
 repository = "https://github.com/codefin-lab/boostcore"
 

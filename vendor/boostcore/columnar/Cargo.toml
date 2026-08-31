@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 homepage = "https://github.com/codefin-lab/boostcore"
 repository = "https://github.com/codefin-lab/boostcore"
-description = "column oriented storage for tantivy"
+description = "column oriented storage for BoostCore, a fork of tantivy"
 categories = ["database-implementations", "data-structures", "compression"]
 
 [dependencies]

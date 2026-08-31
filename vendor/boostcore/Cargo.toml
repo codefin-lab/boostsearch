@@ -139,7 +139,6 @@ members = [
     "query-grammar",
     "bitpacker",
     "common",
-    "ownedbytes",
     "stacker",
     "sstable",
     "tokenizer-api",

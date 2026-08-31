@@ -7,7 +7,7 @@ homepage = "https://github.com/codefin-lab/boostcore"
 repository = "https://github.com/codefin-lab/boostcore"
 keywords = ["search", "information", "retrieval", "sstable"]
 categories = ["database-implementations", "data-structures", "compression"]
-description = "sstables for tantivy"
+description = "sstables for BoostCore, a fork of tantivy"
 
 [dependencies]
 common = {version= "0.11", path="../common", package="boostcore-common"}

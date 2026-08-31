@@ -4,7 +4,7 @@ version = "0.11.0"
 authors = ["Paul Masurel <paul@quickwit.io>", "Pascal Seitz <pascal@quickwit.io>"]
 license = "MIT"
 edition = "2024"
-description = "common traits and utility functions used by multiple tantivy subcrates"
+description = "common traits and utility functions used by multiple BoostCore sub-crates"
 documentation = "https://docs.rs/boostcore_common/"
 homepage = "https://github.com/codefin-lab/boostcore"
 repository = "https://github.com/codefin-lab/boostcore"
@@ -13,7 +13,8 @@ repository = "https://github.com/codefin-lab/boostcore"
 
 [dependencies]
 byteorder = "1.4.3"
-ownedbytes = { version= "0.9", path="../ownedbytes" }
+# byte for byte the crates.io crate, so it is taken from there
+ownedbytes = "0.9"
 async-trait = "0.1"
 time = { version = "0.3.47", features = ["serde-well-known"] }
 serde = { version = "1.0.136", features = ["derive"] }
