@@ -16,7 +16,7 @@ use boostcore::aggregation::agg_req::Aggregations;
 use boostcore::aggregation::DistributedAggregationCollector;
 use boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use boostcore::collector::{Count, TopDocs};
-use boostcore::schema::{OwnedValue, Value as _};
+use boostcore::schema::Value as _;
 use boostcore::{DocAddress, Searcher, TantivyDocument};
 
 const DEFAULT_TRACK_TOTAL_HITS: u64 = 10_000;
@@ -417,8 +417,8 @@ impl boostcore::collector::Collector for SortCollector {
                 _ => None,
             })
             .collect();
-        // OBSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
-        let single_numeric = std::env::var("OBSEARCH_NO_BLOCK_SORT").is_err()
+        // BOOSTSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
+        let single_numeric = std::env::var("BOOSTSEARCH_NO_BLOCK_SORT").is_err()
             && self.sources.len() == 1
             && matches!(self.sources[0], SortSource::Column { ref mode, .. } if mode.is_none())
             && columns
@@ -657,23 +657,6 @@ pub fn expensive_allowed(store: &Store) -> bool {
         .cluster_setting("search.allow_expensive_queries")
         .map(|v| v != json!("false") && v != json!(false))
         .unwrap_or(true)
-}
-
-/// Does this query ask whether a document has a routing value?
-fn mentions_routing_exists(node: Option<&Value>) -> bool {
-    let Some(node) = node else { return false };
-    match node {
-        Value::Object(o) => {
-            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
-                == Some("_routing")
-            {
-                return true;
-            }
-            o.values().any(|v| mentions_routing_exists(Some(v)))
-        }
-        Value::Array(a) => a.iter().any(|v| mentions_routing_exists(Some(v))),
-        _ => false,
-    }
 }
 
 /// Turn that question into the list of documents it is really about.
@@ -2089,7 +2072,7 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 /// OpenSearch hashes the routing value as UTF-16 -- each character as two
 /// bytes, low byte first -- with seed zero, and folds the result by the shard
 /// count the way a floor-mod does, so a negative hash still names a shard.
-fn routing_shard(routing: &str, shards: u64) -> u64 {
+pub(crate) fn routing_shard(routing: &str, shards: u64) -> u64 {
     let mut bytes = Vec::with_capacity(routing.len() * 2);
     for c in routing.encode_utf16() {
         bytes.push((c & 0xff) as u8);
@@ -2262,7 +2245,7 @@ fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // path is measurably cheaper on `_dyn` -- `_raw` also holds a
                 // string column for every path, which the lookup has to consider.
                 // Strings must stay on `_raw`, whose values are untokenised.
-                let numeric_only = std::env::var("OBSEARCH_NO_NUMERIC_DYN_AGG").is_err()
+                let numeric_only = std::env::var("BOOSTSEARCH_NO_NUMERIC_DYN_AGG").is_err()
                     && ctx
                     .observed_kinds
                     .get(base)
@@ -2647,7 +2630,7 @@ fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
     };
 
     // words a document contributes, by field
-    let mut collect = |items: &[Value], out: &mut std::collections::BTreeMap<String, Vec<String>>,
+    let collect = |items: &[Value], out: &mut std::collections::BTreeMap<String, Vec<String>>,
                        ids: &mut Vec<String>| {
         for item in items {
             let Some((id, src)) = source_of_item(item) else { continue };
@@ -2953,7 +2936,7 @@ fn profiled_agg_search(
         })
         .collect();
     let profile = json!({
-        "id": "[obsearch][0]",
+        "id": "[boostsearch][0]",
         "searches": [],
         "aggregations": entries,
         "took": started.elapsed().as_nanos() as u64,
@@ -3079,8 +3062,8 @@ fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
 /// the sum of the field and how many documents carry it -- and the correction
 /// is `doc_count + sum - carried`: documents without the field still count
 /// once, documents with it count what it says.
-const DC_SUM: &str = "__obs_dc_sum";
-const DC_CNT: &str = "__obs_dc_count";
+const DC_SUM: &str = "__bs_dc_sum";
+const DC_CNT: &str = "__bs_dc_count";
 
 fn inject_doc_count_helpers(node: &mut Value) {
     let Some(o) = node.as_object_mut() else { return };
@@ -4899,7 +4882,7 @@ pub fn run(
     let mut total: u64 = 0;
     let mut shards: u64 = 0;
     let mut empty_shards: u64 = 0;
-    let mut agg_acc: Option<IntermediateAggregationResults> = None;
+    let agg_acc: Option<IntermediateAggregationResults>;
     let mut agg_req: Option<Aggregations> = None;
     let mut fruits: Vec<IntermediateAggregationResults> = Vec::new();
     let mut shard_profiles: Vec<Value> = Vec::new();
@@ -5138,7 +5121,7 @@ pub fn run(
                     // is what OpenSearch's resolveNested returning null means.
                     _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
                         SortSource::Column {
-                            name: "_obs_no_such_column".to_string(),
+                            name: "_bs_no_such_column".to_string(),
                             desc: k.desc,
                             mode: k.mode.clone(),
                         }
@@ -5193,7 +5176,7 @@ pub fn run(
         // search with no aggregations still has a shard to report on
         if profiling && this_agg.is_none() {
             shard_profile = Some(json!({
-                "id": "[obsearch][0]",
+                "id": "[boostsearch][0]",
                 "searches": [],
                 "aggregations": [],
             }));
@@ -6139,7 +6122,7 @@ pub fn run(
                     }
                 }
                 None => shard_profiles.push(json!({
-                    "id": "[node-0][obsearch][0]",
+                    "id": "[node-0][boostsearch][0]",
                     "searches": [],
                     "aggregations": own,
                 })),
@@ -6761,10 +6744,6 @@ pub fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
         resp["suggest"] = sg;
     }
     resp
-}
-
-pub fn owned_to_json(v: &OwnedValue) -> Value {
-    serde_json::to_value(v).unwrap_or(Value::Null)
 }
 
 
@@ -8296,7 +8275,7 @@ fn run_adjacency_matrix_agg(
         filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     let mut buckets = Vec::new();
-    let mut push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
+    let push = |key: String, filter: Value, buckets: &mut Vec<Value>| -> std::result::Result<(), Response> {
         let combined = combine(main_query, Some(filter));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count == 0 {

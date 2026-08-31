@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      # Only the test suite is needed, and it is a small corner of a large
+      # repository.
+      - name: Fetch OpenSearch's rest-api-spec
+        run: |
+          git clone --filter=blob:none --sparse --depth 1 \
+            https://github.com/opensearch-project/OpenSearch study/OpenSearch
+          cd study/OpenSearch
+          git sparse-checkout set rest-api-spec/src/main/resources/rest-api-spec
+
+      - name: Install the runner's dependencies
+        run: pip install --quiet pyyaml requests
+
+      - name: Run the conformance suite
+        run: |
+          BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &
+          for i in $(seq 30); do curl -sf localhost:9200/ >/dev/null && break; sleep 1; done
+          python3 - <<'PY'
+          import pathlib, json
+          root = pathlib.Path('study/OpenSearch/rest-api-spec/src/main/resources/rest-api-spec/test')
+          files = sorted(str(p.relative_to(root)) for p in root.rglob('*.yml'))
+          json.dump({'clean': files}, open('/tmp/every.json', 'w'))
+          print(f'{len(files)} files')
+          PY
+          python3 tools/yaml_runner.py --manifest /tmp/every.json
+
+      # The same suite again, this time against indices on disk rather than in
+      # memory: the storage mode a deployment would use.
+      - name: Run it again, on disk
+        run: |
+          pkill -f 'release/boostsearch' || true
+          sleep 1
+          BOOSTSEARCH_DATA=$RUNNER_TEMP/data BOOSTSEARCH_NODE_ATTRS=testattr=test \
+            ./target/release/boostsearch &
+          for i in $(seq 30); do curl -sf localhost:9200/ >/dev/null && break; sleep 1; done
+          python3 tools/yaml_runner.py --manifest /tmp/every.json

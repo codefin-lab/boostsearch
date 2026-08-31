@@ -29,6 +29,15 @@ pub struct Fields {
 /// flushes. Without a cap, a large bulk load holds every document twice.
 pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
+/// How many writes wait for their shard's refresh before they are handed to
+/// the writer anyway.
+///
+/// The queue is what lets one shard's refresh show one shard's writes, and it
+/// is only worth keeping while a refresh is close behind. A load bigger than
+/// this is past that: it goes to the writer, which is not the same as showing
+/// it -- that still takes a commit and a reload.
+const DEFERRED_MAX_OPS: usize = 2048;
+
 /// Value-kind bits recorded per field path.
 pub const KIND_I64: u8 = 1;
 pub const KIND_U64: u8 = 2;
@@ -545,6 +554,18 @@ pub struct DocMeta {
     pub live: bool,
 }
 
+/// A write waiting for the shard it belongs to to be refreshed.
+///
+/// A refresh in OpenSearch reaches one shard: a delete on the shard holding
+/// document 1 becomes visible while a delete on another shard does not. One
+/// BoostCore index stands in for every shard here, and a commit would show
+/// everything at once -- so an operation waits here until its own shard is
+/// refreshed, and only then reaches the writer.
+pub enum PendingOp {
+    Add(Box<TantivyDocument>),
+    Delete(String),
+}
+
 pub struct IdxState {
     pub name: String,
     /// whether this index was last brought back from a snapshot
@@ -585,6 +606,8 @@ pub struct IdxState {
     /// Writes not yet visible to search -- `Some(json)` = upsert, `None` =
     /// tombstone. Kept as raw JSON to avoid holding a parsed tree per document.
     pub pending: HashMap<String, Option<String>>,
+    /// Writes the writer has not been handed yet, by the shard they belong to.
+    deferred: Vec<(u64, PendingOp)>,
     /// arrival order of the writes not yet visible to the refreshed reader
     pub pending_seq: HashMap<String, u64>,
     pub pending_bytes: usize,
@@ -653,8 +676,84 @@ impl IdxState {
         let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
     }
 
+    /// Which shard a routing value lands on, the way OpenSearch routes it.
+    pub fn shard_for(&self, routing: &str) -> u64 {
+        crate::search::routing_shard(routing, self.shard_count().max(1))
+    }
+
+    /// Which shard a document lands on: by the routing it was written with if
+    /// it was given one, and by its id otherwise.
+    pub fn shard_of_doc(&self, id: &str) -> u64 {
+        let routing = self.routing.get(id).map(|s| s.as_str()).unwrap_or(id);
+        self.shard_for(routing)
+    }
+
+    /// Hold a write until the shard it belongs to is refreshed.
+    pub fn queue_op(&mut self, shard: u64, op: PendingOp) {
+        self.deferred.push((shard, op));
+        if self.deferred.len() >= DEFERRED_MAX_OPS {
+            let _ = self.apply_ops(None);
+        }
+    }
+
+    /// Hand the writer what is queued -- for one shard, or for all of them.
+    fn apply_ops(&mut self, only: Option<u64>) -> Result<()> {
+        if self.deferred.is_empty() {
+            return Ok(());
+        }
+        let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred)
+            .into_iter()
+            .partition(|(shard, _)| only.map(|one| *shard == one).unwrap_or(true));
+        self.deferred = keep;
+        let id_field = self.fields.id;
+        let w = self.writer()?;
+        for (_, op) in go {
+            match op {
+                PendingOp::Add(doc) => {
+                    w.add_document(*doc)?;
+                }
+                PendingOp::Delete(id) => {
+                    w.delete_term(boostcore::Term::from_field_text(id_field, &id));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refresh one shard, which is the only thing a write can force.
+    ///
+    /// What other shards have queued stays queued, and stays invisible.
+    pub fn refresh_shard(&mut self, shard: u64) -> Result<()> {
+        self.apply_ops(Some(shard))?;
+        if let Some(w) = self.writer.as_mut() {
+            w.commit()?;
+        }
+        self.save_meta();
+        self.reader.reload()?;
+        self.realtime.reload()?;
+        // what this shard held is in the index now, so the copy kept for a
+        // realtime read is no longer the only place it lives
+        let mine: Vec<String> = self
+            .pending
+            .keys()
+            .filter(|id| self.shard_of_doc(id) == shard)
+            .cloned()
+            .collect();
+        for id in mine {
+            self.pending.remove(&id);
+            self.pending_seq.remove(&id);
+        }
+        self.pending_bytes = self
+            .pending
+            .iter()
+            .map(|(id, src)| id.len() + src.as_ref().map(|s| s.len()).unwrap_or(0) + 48)
+            .sum();
+        Ok(())
+    }
+
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
+        self.apply_ops(None)?;
         // nothing was ever written, so there is nothing to commit
         if let Some(w) = self.writer.as_mut() {
             w.commit()?;
@@ -678,6 +777,9 @@ impl IdxState {
         self.pending_bytes += id.len() + source.as_ref().map(|s| s.len()).unwrap_or(0) + 48;
         self.pending.insert(id.to_string(), source);
         if self.pending_bytes > PENDING_BUDGET_BYTES {
+            // the copy kept here is the only record of a queued write, so
+            // nothing can be dropped until the writer has it
+            let _ = self.apply_ops(None);
             let committed = self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
             if committed {
                 let _ = self.realtime.reload();
@@ -736,6 +838,9 @@ impl IdxState {
         if self.writer.is_none() || self.last_write.elapsed() < idle_for {
             return false;
         }
+        // whatever is queued has to reach the writer first: the copy kept for a
+        // realtime read is cleared below, and it is the only other record of it
+        let _ = self.apply_ops(None);
         if let Some(mut w) = self.writer.take() {
             if w.commit().is_err() {
                 // could not flush cleanly: keep it rather than lose the writes
@@ -1182,7 +1287,7 @@ impl Store {
     /// had written by now, so a later search can be held to that.
     pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
         let n = self.pit_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("obsearch-pit-{n:016x}");
+        let id = format!("boostsearch-pit-{n:016x}");
         let mut ceiling = HashMap::new();
         for name in self.resolve(expr) {
             if let Some(st) = self.get(&name) {
@@ -1267,14 +1372,14 @@ pub fn release_freed_memory() {
 }
 
 fn shared_executor() -> boostcore::Executor {
-    let threads = std::env::var("OBSEARCH_SEARCH_THREADS")
+    let threads = std::env::var("BOOSTSEARCH_SEARCH_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     if threads <= 1 {
         return boostcore::Executor::single_thread();
     }
-    boostcore::Executor::multi_thread(threads, "obsearch-search-")
+    boostcore::Executor::multi_thread(threads, "boostsearch-search-")
         .unwrap_or_else(|_| boostcore::Executor::single_thread())
 }
 
@@ -1321,7 +1426,7 @@ impl Store {
     /// quiet. With one index this is invisible; with hundreds it is the
     /// difference between 13 MB per index and nothing.
     fn start_writer_reaper(&self) {
-        let idle_secs: u64 = std::env::var("OBSEARCH_WRITER_IDLE_SECS")
+        let idle_secs: u64 = std::env::var("BOOSTSEARCH_WRITER_IDLE_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
@@ -1445,7 +1550,7 @@ impl Store {
 
     /// How many indices may hold a writer at once.
     pub fn writer_limit() -> usize {
-        std::env::var("OBSEARCH_MAX_LIVE_WRITERS")
+        std::env::var("BOOSTSEARCH_MAX_LIVE_WRITERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8)
@@ -1611,7 +1716,7 @@ impl Store {
     /// after the batch the opening search already delivered.
     pub fn open_scroll(&self, expr: &str, body: &Value, size: usize) -> String {
         let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("obsearch-scroll-{n:016x}");
+        let id = format!("boostsearch-scroll-{n:016x}");
         self.scrolls.write().insert(
             id.clone(),
             ScrollState {
@@ -1854,13 +1959,13 @@ impl Store {
         index.set_executor(self.executor.clone());
         // one arena per indexing thread; a bigger budget means fewer segment
         // flushes and less merging, at the cost of resident memory
-        let writer_budget: usize = std::env::var("OBSEARCH_WRITER_BUDGET_MB")
+        let writer_budget: usize = std::env::var("BOOSTSEARCH_WRITER_BUDGET_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64)
             * 1024
             * 1024;
-        let writer_threads: usize = std::env::var("OBSEARCH_WRITER_THREADS")
+        let writer_threads: usize = std::env::var("BOOSTSEARCH_WRITER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
@@ -1900,6 +2005,7 @@ impl Store {
                 .unwrap_or(0),
             live_ids: Default::default(),
             pending: HashMap::new(),
+            deferred: Vec::new(),
             pending_seq: HashMap::new(),
             pending_bytes: 0,
             realtime,
@@ -2173,6 +2279,27 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
             }
+            // A field the mapping calls a number holds that kind of number,
+            // whatever the document wrote: 1 and 1.0 are the same value to
+            // OpenSearch, but they are different column types here, and an
+            // aggregation reading one column would not see the other.
+            match ty {
+                Some("float" | "half_float" | "double" | "scaled_float") => {
+                    if let Some(n) = leaf.as_i64() {
+                        if let Some(f) = serde_json::Number::from_f64(n as f64) {
+                            *leaf = Value::Number(f);
+                        }
+                    }
+                }
+                Some("long" | "integer" | "short" | "byte") => {
+                    if let Some(f) = leaf.as_f64().filter(|f| f.fract() == 0.0) {
+                        if leaf.as_i64().is_none() {
+                            *leaf = Value::Number((f as i64).into());
+                        }
+                    }
+                }
+                _ => {}
+            }
             // a half_float holds sixteen bits, so the value it keeps is the
             // nearest one that fits -- 184.4 becomes 184.375, and a search
             // paging past that number has to see the same figure the index does
@@ -2430,7 +2557,7 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 
 /// Where a flat_object field's values are gathered so the field itself can be
 /// queried without naming a path inside it.
-pub const FLAT_VALUES: &str = "_obs_values";
+pub const FLAT_VALUES: &str = "_bs_values";
 
 /// How many tokens a standard analyser would find.
 pub fn token_count(text: &str) -> u64 {
@@ -2590,21 +2717,6 @@ fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTime, Option<c
     Some((dt, rounded))
 }
 
-/// A rounded date math expression names a whole unit, not an instant. Which
-/// end of it a bound means depends on the bound: `gt: .../d` excludes the whole
-/// day, `gte: .../d` includes it from the start.
-pub fn canonical_date_bound(v: &Value, round_up: bool) -> Option<String> {
-    let Some(s) = v.as_str() else { return canonical_date(v) };
-    if !round_up || !(s.contains("||") || s.starts_with("now")) {
-        return canonical_date(v);
-    }
-    let (dt, unit) = parse_date_math(s)?;
-    let Some(unit) = unit else { return canonical_date(v) };
-    // the last instant the unit covers
-    let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
-    canonical_date(&Value::String(format_utc_millis(end)))
-}
-
 fn advance_unit(
     dt: boostcore::time::OffsetDateTime,
     unit: char,
@@ -2620,19 +2732,6 @@ fn advance_unit(
         's' => dt + Duration::seconds(1),
         _ => return None,
     })
-}
-
-fn format_utc_millis(dt: boostcore::time::OffsetDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        dt.year(),
-        dt.month() as u8,
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second(),
-        dt.millisecond(),
-    )
 }
 
 fn round_down(
@@ -2681,12 +2780,6 @@ fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
             }
         }
     }
-}
-
-/// Re-format a stored date string with milliseconds, which is how a key is
-/// written back out.
-pub fn canonical_date_str(s: &str) -> Option<String> {
-    canonical_date(&Value::String(s.to_string()))
 }
 
 /// A date in the one spelling the index holds.

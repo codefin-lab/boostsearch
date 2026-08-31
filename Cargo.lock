@@ -154,6 +154,7 @@ dependencies = [
 [[package]]
 name = "boostcore"
 version = "0.26.1"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -205,6 +206,7 @@ dependencies = [
 [[package]]
 name = "boostcore-bitpacker"
 version = "0.10.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "bitpacking",
 ]
@@ -212,6 +214,7 @@ dependencies = [
 [[package]]
 name = "boostcore-columnar"
 version = "0.7.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "boostcore-bitpacker",
  "boostcore-common",
@@ -226,6 +229,7 @@ dependencies = [
 [[package]]
 name = "boostcore-common"
 version = "0.11.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -237,6 +241,7 @@ dependencies = [
 [[package]]
 name = "boostcore-query-grammar"
 version = "0.26.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "fnv",
  "nom",
@@ -248,6 +253,7 @@ dependencies = [
 [[package]]
 name = "boostcore-sstable"
 version = "0.7.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "boostcore-bitpacker",
  "boostcore-common",
@@ -260,6 +266,7 @@ dependencies = [
 [[package]]
 name = "boostcore-stacker"
 version = "0.7.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "boostcore-common",
  "murmurhash32",
@@ -268,8 +275,31 @@ dependencies = [
 [[package]]
 name = "boostcore-tokenizer-api"
 version = "0.7.0"
+source = "git+https://github.com/codefin-lab/boostcore?rev=a8861dca8dac4c25f98cbb309a879f74c18e694f#a8861dca8dac4c25f98cbb309a879f74c18e694f"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "boostsearch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "boostcore",
+ "boostcore-common",
+ "libc",
+ "libmimalloc-sys",
+ "mimalloc",
+ "parking_lot",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tantivy-fst",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -893,28 +923,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "obsearch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "boostcore",
- "boostcore-common",
- "libc",
- "libmimalloc-sys",
- "mimalloc",
- "parking_lot",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "tantivy-fst",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -938,6 +946,8 @@ dependencies = [
 [[package]]
 name = "ownedbytes"
 version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fbd56f7631767e61784dc43f8580f403f4475bd4aaa4da003e6295e1bab4a7e"
 dependencies = [
  "stable_deref_trait",
 ]

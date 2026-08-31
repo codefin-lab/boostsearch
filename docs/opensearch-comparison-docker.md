@@ -1,4 +1,4 @@
-# obsearch vs OpenSearch 3.1 — วัดใน Docker ทั้งสองฝั่ง
+# boostsearch vs OpenSearch 3.1 — วัดใน Docker ทั้งสองฝั่ง
 
 เครื่อง: Apple Silicon 14 core / 36 GB · Docker Desktop 14 cpu / 16 GB
 OpenSearch 3.1.0 heap 512 MB (ที่ 2 GB ช้ากว่า — เคยวัดไว้แล้ว จึงใช้ 512 MB
@@ -9,7 +9,7 @@ harness เดียวกัน (`tools/bench.py`, `Dockerfile`)
 
 ## กรณีที่ 1 — index เดียว 200,000 docs (workload http_logs)
 
-| | obsearch | OpenSearch | |
+| | boostsearch | OpenSearch | |
 |---|---:|---:|---|
 | index docs/s | 70,034 | 70,643 | 0.99× |
 | RSS idle | **19.6 MB** | 1,855.4 MB | 94.7× |
@@ -22,7 +22,7 @@ harness เดียวกัน (`tools/bench.py`, `Dockerfile`)
 
 รายละเอียดต่อ query — **วัดแบบสลับฝั่งทีละ query** (p50, 40 รอบ):
 
-| query | obsearch | OpenSearch | รอบ 1 | รอบ 2 |
+| query | boostsearch | OpenSearch | รอบ 1 | รอบ 2 |
 |---|---:|---:|---:|---:|
 | match_all | 1.07 | 1.23 | 1.43× | 1.15× |
 | term_keyword | 1.00 | 1.33 | 1.53× | 1.34× |
@@ -47,14 +47,14 @@ harness เดียวกัน (`tools/bench.py`, `Dockerfile`)
 
 พอวัดใหม่แบบสลับฝั่งทีละ query ทั้งสองตัวกลายเป็นชนะ — ความต่างเดิมมาจากสภาพ
 เครื่องระหว่างสองช่วงเวลา ไม่ใช่จากเครื่องยนต์ เอกสาร
-`opensearch-comparison.md` บันทึกกับดักนี้ไว้แล้ว (วัด obsearch สองครั้งห่างกัน
+`opensearch-comparison.md` บันทึกกับดักนี้ไว้แล้ว (วัด boostsearch สองครั้งห่างกัน
 ไม่กี่สิบนาทีได้ qps 562 แล้ว 409 ทั้งที่โค้ดเดียวกัน) แต่รอบนี้ยังพลาดซ้ำ
 
 **ตัวเลขเทียบสองเครื่องยนต์ต้องสลับฝั่งเสมอ ไม่มีข้อยกเว้น**
 
 ## ขนาด image และ data
 
-| | obsearch | OpenSearch | |
+| | boostsearch | OpenSearch | |
 |---|---:|---:|---|
 | image ที่ pull (registry) | **33.9 MB** | 811.9 MB | 23.9× |
 | image กางบนดิสก์ | **158 MB** | 2.03 GB | 12.8× |
@@ -65,7 +65,7 @@ harness เดียวกัน (`tools/bench.py`, `Dockerfile`)
 
 ## กรณีที่ 2 — 200 index × 2,000 docs (400,000 docs)
 
-| query | obsearch | OpenSearch | |
+| query | boostsearch | OpenSearch | |
 |---|---:|---:|---|
 | match_all | 1.86 | 4.45 | 2.39× |
 | term | 1.70 | 4.74 | 2.78× |
@@ -114,7 +114,7 @@ Linux host
 
 ### ผลที่ถูกต้อง (k6, ทั้งคู่ใน Docker, saturate จริง)
 
-| | obsearch | OpenSearch | |
+| | boostsearch | OpenSearch | |
 |---|---:|---:|---|
 | qps ที่ saturation | 18,000 | **26,500** | **0.68×** |
 

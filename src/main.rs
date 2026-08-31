@@ -1,4 +1,4 @@
-//! obsearch -- an OpenSearch-compatible search server on BoostCore.
+//! boostsearch -- an OpenSearch-compatible search server on BoostCore.
 //!
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
@@ -21,17 +21,17 @@ use axum::Router;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use axum::response::IntoResponse;
-use axum::routing::{any, delete, get, head, post, put};
+use axum::routing::{any, get, head, post, put};
 use serde_json::json;
 use store::Store;
 
 async fn root() -> impl IntoResponse {
     axum::Json(json!({
-        "name": "obsearch",
-        "cluster_name": "obsearch",
+        "name": "boostsearch",
+        "cluster_name": "boostsearch",
         "cluster_uuid": "_na_",
         "version": {
-            "distribution": "obsearch",
+            "distribution": "boostsearch",
             "number": "3.9.0",
             "lucene_version": "BoostCore-0.26",
         },
@@ -59,7 +59,7 @@ fn app(store: Store) -> Router {
         .route("/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_update/{id}", post(api::update_doc))
-        .route("/_obsearch/memory", get(api::memory_report))
+        .route("/_boostsearch/memory", get(api::memory_report))
         // --- cluster ---
         .route("/_cluster/health", get(api::cluster_health))
         .route("/_cluster/health/{index}", get(api::cluster_health))
@@ -280,21 +280,37 @@ fn app(store: Store) -> Router {
         // a path we route but with an unported method should read as "not ported",
         // not as a 405 the suite cannot interpret
         .method_not_allowed_fallback(api::not_ported)
+        // A bulk request is as big as the client wants to make it. Axum
+        // stops at 2 MB by default, which is smaller than any bulk helper's
+        // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
+        // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
+        .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
         .with_state(store)
+}
+
+/// How large a request body may be, in bytes.
+fn max_content_bytes() -> usize {
+    std::env::var("BOOSTSEARCH_MAX_CONTENT_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(100)
+        * 1024
+        * 1024
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
-    let addr = std::env::var("OBSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
-    // OBSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
+    let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
+    // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
-    let store = match std::env::var("OBSEARCH_DATA") {
+    let store = match std::env::var("BOOSTSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
     };
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("obsearch listening on {addr}");
+    eprintln!("boostsearch listening on {addr}");
     axum::serve(listener, app(store)).await?;
     Ok(())
 }
