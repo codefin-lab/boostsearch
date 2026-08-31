@@ -3057,7 +3057,17 @@ fn completion_suggest(
             .and_then(|c| c.as_array())
             .map(|c| !c.is_empty())
             .unwrap_or(false);
-        if declared && spec.get("contexts").is_none() {
+        // an empty contexts clause names none of them, which is the same as
+        // not naming any
+        let named_none = match spec.get("contexts") {
+            None => true,
+            Some(Value::Object(o)) => {
+                o.is_empty()
+                    || o.values().any(|v| v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+            }
+            _ => false,
+        };
+        if declared && named_none {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
