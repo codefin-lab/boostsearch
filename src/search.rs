@@ -358,7 +358,15 @@ struct Hit {
 enum SortSource {
     Score,
     Doc,
-    Column { name: String, desc: bool, mode: Option<String> },
+    Column {
+        name: String,
+        desc: bool,
+        mode: Option<String>,
+        /// what to divide a raw value by before it counts as the sort value.
+        /// A `date` is kept in nanoseconds here but reported and compared in
+        /// milliseconds, which is the number OpenSearch holds for it.
+        scale: i64,
+    },
 }
 
 /// Top-K collector that evaluates the sort keys while collecting, so a query
@@ -469,14 +477,27 @@ impl tantivy::collector::Collector for SortCollector {
     }
 }
 
+/// A raw column value as the sort value it stands for.
+fn scaled(v: SortValue, scale: i64) -> SortValue {
+    if scale <= 1 {
+        return v;
+    }
+    match v {
+        SortValue::I64(n) => SortValue::I64(n.div_euclid(scale)),
+        SortValue::U64(n) => SortValue::U64(n / scale as u64),
+        SortValue::F64(n) => SortValue::F64(n / scale as f64),
+        other => other,
+    }
+}
+
 impl SortSegmentCollector {
     fn read_key(&self, i: usize, doc: tantivy::DocId, score: tantivy::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
             SortSource::Doc => SortValue::I64(doc as i64),
-            SortSource::Column { desc, mode, .. } => self.columns[i]
+            SortSource::Column { desc, mode, scale, .. } => self.columns[i]
                 .as_ref()
-                .map(|c| c.read(doc, *desc, mode.as_deref()))
+                .map(|c| scaled(c.read(doc, *desc, mode.as_deref()), *scale))
                 .unwrap_or(SortValue::Missing),
         }
     }
@@ -515,9 +536,13 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
         let mut block = self.block.take().unwrap();
         block.fetch_block(docs, &col);
         let desc = self.desc[0];
+        let scale = match &self.sources[0] {
+            SortSource::Column { scale, .. } => *scale,
+            _ => 1,
+        };
         let after = self.after.as_ref().and_then(|a| a.first().cloned());
         for (doc, raw) in block.iter_docid_vals(docs, &col) {
-            let Some(v) = decode_col_value(raw, ty) else { continue };
+            let Some(v) = decode_col_value(raw, ty).map(|v| scaled(v, scale)) else { continue };
             // the vectorized path has to honour the page boundary too
             if let Some(marker) = &after {
                 let ord = v.cmp_asc(marker);
@@ -651,17 +676,19 @@ fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
         // a marker for a date is written in the unit that field reports in,
         // and the column counts nanoseconds either way
         Value::Number(n) => match date {
-            // nanoseconds do not survive a trip through an f64, and a marker
-            // that has lost its last digits cannot tell two pages apart
-            Some(true) => SortValue::I64(n.as_i64().unwrap_or(0)),
-            Some(false) => SortValue::I64(n.as_i64().unwrap_or(0).saturating_mul(1_000_000)),
+            // a marker is written in the unit the field reports in, which is
+            // the unit the values are compared in
+            Some(_) => SortValue::I64(n.as_i64().unwrap_or(0)),
             None => SortValue::F64(n.as_f64().unwrap_or(0.0)),
         },
         // a marker for a date field may be written as a date rather than as
         // the number the column holds
         Value::String(s) if date.is_some() => crate::store::canonical_date(v)
             .and_then(|d| crate::store::parse_date_lenient(&d))
-            .map(|d| SortValue::I64(d.unix_timestamp_nanos() as i64))
+            .map(|d| {
+                let nanos = d.unix_timestamp_nanos() as i64;
+                SortValue::I64(if date == Some(true) { nanos } else { nanos / 1_000_000 })
+            })
             .unwrap_or_else(|| SortValue::Str(s.clone())),
         Value::String(s) => SortValue::Str(s.clone()),
         Value::Null => SortValue::Missing,
@@ -5073,6 +5100,7 @@ pub fn run(
                         name: "_seq".to_string(),
                         desc: k.desc,
                         mode: k.mode.clone(),
+                        scale: 1,
                     },
                     // The values of a field inside a nested object belong to
                     // the object, not to the document, so a sort that does not
@@ -5083,12 +5111,20 @@ pub fn run(
                             name: "_obs_no_such_column".to_string(),
                             desc: k.desc,
                             mode: k.mode.clone(),
+                            scale: 1,
                         }
                     }
+                    // a `date` is held in nanoseconds here and reported in
+                    // milliseconds, which is the number OpenSearch keeps for it
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
                         mode: k.mode.clone(),
+                        scale: if ctx.mapping.type_of(&k.field) == Some("date") {
+                            1_000_000
+                        } else {
+                            1
+                        },
                     },
                 })
                 .collect();
@@ -5479,6 +5515,19 @@ pub fn run(
                         }
                     }
                 }
+                // the values are read as instants; a `date` is reported in
+                // milliseconds, which is the unit it is compared in
+                let nanos_kept = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().mapping.type_of(&key.field).map(|t| t.to_string()))
+                    .map(|t| t != "date")
+                    .unwrap_or(true);
+                let values: Vec<f64> = if nanos_kept {
+                    values
+                } else {
+                    values.into_iter().map(|v| (v / 1e6).trunc()).collect()
+                };
                 let picked = match key.mode.as_deref() {
                     Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                     Some("sum") => values.iter().sum(),
@@ -5733,7 +5782,9 @@ pub fn run(
                     h.sort
                         .iter()
                         .zip(date_keys.iter())
-                        .map(|(s, is_date)| s.to_json_scaled(*is_date))
+                        // the value is already in the unit the field reports
+                        // in, so nothing is scaled on the way out
+                        .map(|(s, _)| s.to_json_scaled(false))
                         .collect(),
                 );
             }
@@ -5755,33 +5806,38 @@ pub fn run(
                         g.mapping.field_option(n, "doc_values") != Some(json!(false))
                     })
                     .collect();
-                let mut f = crate::source::extract_fields(&h.source, &names, &is_leaf);
-                // the metadata a document carries is asked for the same way as
-                // its own fields, and is not in the source to be read from
-                for (name, _) in specs.iter() {
-                    match name.as_str() {
-                        "_seq_no" => {
-                            f.insert(name.clone(), json!([h.seq]));
-                        }
-                        "_index" => {
-                            f.insert(name.clone(), json!([h.index.clone()]));
-                        }
-                        "_id" => {
-                            f.insert(name.clone(), json!([h.id.clone()]));
-                        }
-                        _ => {}
-                    }
-                }
-                // a format asks for the value written that way rather than
-                // as the number it is
+                let raw = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // A field may be asked for more than once, each time with its
+                // own format, and each asking adds its values to the one list
+                // the field is reported under.
+                let mut f = serde_json::Map::new();
                 for (name, fmt) in specs.iter() {
-                    let Some(fmt) = fmt else { continue };
-                    let Some(Value::Array(items)) = f.get_mut(name) else { continue };
-                    for v in items.iter_mut() {
-                        if let Some(n) = v.as_f64() {
-                            if let Some(text) = decimal_format(fmt, n) {
-                                *v = json!(text);
+                    let mut values = match name.as_str() {
+                        // the metadata a document carries is asked for the same
+                        // way as its own fields, and is not in the source
+                        "_seq_no" => json!([h.seq]),
+                        "_index" => json!([h.index.clone()]),
+                        "_id" => json!([h.id.clone()]),
+                        _ => match raw.get(name) {
+                            Some(v) => v.clone(),
+                            None => continue,
+                        },
+                    };
+                    if let (Some(fmt), Value::Array(items)) = (fmt, &mut values) {
+                        for v in items.iter_mut() {
+                            if let Some(text) = crate::source::format_date(v, fmt) {
+                                *v = text;
+                            } else if let Some(n) = v.as_f64() {
+                                if let Some(text) = decimal_format(fmt, n) {
+                                    *v = json!(text);
+                                }
                             }
+                        }
+                    }
+                    match (f.get_mut(name.as_str()), values) {
+                        (Some(Value::Array(into)), Value::Array(more)) => into.extend(more),
+                        (_, values) => {
+                            f.insert(name.clone(), values);
                         }
                     }
                 }
@@ -5802,16 +5858,6 @@ pub fn run(
                 if let Some(Value::Array(ig)) = &h.ignored {
                     for name in ig.iter().filter_map(|v| v.as_str()) {
                         f.remove(name);
-                    }
-                }
-                // apply any `format` the caller attached to a field
-                for (name, fmt) in specs {
-                    let Some(fmt) = fmt else { continue };
-                    let Some(Value::Array(vals)) = f.get_mut(name) else { continue };
-                    for v in vals.iter_mut() {
-                        if let Some(formatted) = crate::source::format_date(v, fmt) {
-                            *v = formatted;
-                        }
                     }
                 }
                 // `stored_fields` may have filled some in already; both

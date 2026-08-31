@@ -198,24 +198,77 @@ fn prune(
 /// alone rather than guessed at.
 pub fn format_date(value: &Value, pattern: &str) -> Option<Value> {
     let text = value.as_str()?;
-    let dt = crate::query::parse_datetime(text)?;
-    let odt = dt.into_utc();
+    // read the text as written; folding it through the index's resolution
+    // would lose the part a nanosecond format is asking for
+    let odt = tantivy::time::OffsetDateTime::parse(
+        text,
+        &tantivy::time::format_description::well_known::Rfc3339,
+    )
+    .ok()
+    .or_else(|| crate::query::parse_datetime(text).map(|d| d.into_utc()))?;
+    let nanos = odt.unix_timestamp_nanos();
+    // a format may be one of the names OpenSearch gives its built-in shapes
+    match pattern {
+        "epoch_millis" => {
+            // a date_nanos has more to say than a whole millisecond, and says
+            // it after the point rather than by rounding
+            let millis = nanos.div_euclid(1_000_000);
+            let rest = nanos.rem_euclid(1_000_000);
+            let text = if rest == 0 {
+                format!("{millis}")
+            } else {
+                format!("{millis}.{}", format!("{rest:06}").trim_end_matches('0'))
+            };
+            return Some(Value::String(text));
+        }
+        "epoch_second" => {
+            return Some(Value::String(format!("{}", nanos / 1_000_000_000)));
+        }
+        _ => {}
+    }
+    // the shapes OpenSearch gives names to are written by name, not by pattern
+    const NAMED: &[&str] = &[
+        "strict_date_optional_time", "date_optional_time", "strict_date_time", "date_time",
+        "iso8601", "strict_date", "date", "basic_date", "strict_date_hour_minute_second",
+        "date_hour_minute_second",
+    ];
+    if NAMED.contains(&pattern) {
+        return crate::store::format_millis((nanos / 1_000_000) as i64, pattern)
+            .map(Value::String);
+    }
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
+        // a run of quotes marks text that is not a pattern at all
+        if c == '\'' {
+            for q in chars.by_ref() {
+                if q == '\'' {
+                    break;
+                }
+                out.push(q);
+            }
+            continue;
+        }
         let mut run = 1;
         while chars.peek() == Some(&c) {
             chars.next();
             run += 1;
         }
         match (c, run) {
-            ('y', 4) => out.push_str(&format!("{:04}", odt.year())),
-            ('y', 2) => out.push_str(&format!("{:02}", odt.year() % 100)),
+            ('y', 4) | ('u', 4) => out.push_str(&format!("{:04}", odt.year())),
+            ('y', 2) | ('u', 2) => out.push_str(&format!("{:02}", odt.year() % 100)),
             ('M', 2) => out.push_str(&format!("{:02}", odt.month() as u8)),
             ('d', 2) => out.push_str(&format!("{:02}", odt.day())),
             ('H', 2) => out.push_str(&format!("{:02}", odt.hour())),
             ('m', 2) => out.push_str(&format!("{:02}", odt.minute())),
             ('s', 2) => out.push_str(&format!("{:02}", odt.second())),
+            // a run of `S` is that many digits of the second's fraction
+            ('S', n) => {
+                let frac = odt.nanosecond();
+                let text = format!("{frac:09}");
+                out.push_str(&text[..n.min(9)]);
+            }
+            ('X', _) | ('Z', _) => out.push('Z'),
             _ => {
                 for _ in 0..run {
                     out.push(c);
