@@ -464,7 +464,11 @@ def main():
     per_file = {}
 
     for rel in files:
+        # a manifest may name a file in the core spec, or one shipped by a
+        # module or plugin -- OpenSearch's own tests live in both places
         path = TEST_ROOT / rel
+        if not path.exists():
+            path = pathlib.Path("study/OpenSearch") / rel
         try:
             docs = [d for d in yaml.load_all(path.read_text(errors="replace"), Loader=Loader) if d]
         except Exception as e:
