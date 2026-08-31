@@ -46,6 +46,12 @@ numbers over them, and the tokens a text was cut into. Everything else --
 memory, and the median latency of ten query shapes, both engines, same corpus,
 same machine. "Winning a dimension" means a better number in that row.
 
+**The commit gate** — the matrix against our own previous numbers. Red at a 5%
+fall in any dimension.
+
+**The release gate** — the matrix against OpenSearch. Every dimension ahead, or
+there is no release.
+
 ## The analysis words
 
 **An analyzer** — a tokenizer and the chain of filters after it, named by an
