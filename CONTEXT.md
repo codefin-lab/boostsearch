@@ -65,6 +65,20 @@ one source of tokens, then the steps that change, drop or add to them.
 the built-in ones. Per index, because two indices may define the same name
 differently.
 
+## The security words
+
+**The caller** — who a request is from, once it has been authenticated. Carried
+into the query path, because what a caller may see decides which documents a
+query may match and which fields anything may read.
+
+**Document-level security** — a filter the caller's role adds to every query.
+Not a filter applied to the results: a document a caller may not see must not
+be counted, aggregated or scored either.
+
+**Field-level security** — the fields a caller's role hides. Hidden means
+invisible to `_source`, to aggregations, to sorts, to `fields`, to highlighting
+and to `field_caps`, not merely stripped on the way out.
+
 ## The cluster words
 
 **A node** — one BoostSearch process. In version 1 a cluster is several of
