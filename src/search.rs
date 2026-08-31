@@ -4460,6 +4460,815 @@ fn needs_all_shards(node: &Value) -> bool {
         _ => false,
     }
 }
+
+// One shard's work touches only its own index, so the fan-out runs across
+// cores. Searching many small indices is otherwise bounded by walking them
+// one at a time.
+struct ShardOut {
+    name: String,
+    searcher: Searcher,
+    st: std::sync::Arc<parking_lot::RwLock<IdxState>>,
+    shards: u64,
+    count: usize,
+    cands: Vec<Cand>,
+    agg: Option<IntermediateAggregationResults>,
+    agg_req: Option<Aggregations>,
+    agg_meta: Vec<(String, Value)>,
+    bucket_orders: Vec<(String, String, bool)>,
+    profile: Option<Value>,
+}
+
+/// `rescore` runs a second query over the top of the page and mixes its score
+/// into the one already there.
+fn apply_rescores(
+    store: &Store,
+    targets: &[String],
+    cands: &mut [Cand],
+    searchers: &Searchers,
+    body: &Value,
+    sort_keys: &[SortKey],
+) -> std::result::Result<bool, Response> {
+    // one rescore or several, written either way
+    let rescores = match body.get("rescore") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(one) => vec![one.clone()],
+        None => vec![],
+    };
+    let mut rescored = false;
+    for spec in &rescores {
+
+        let window = spec
+            .get("window_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .max(1) as usize;
+        let inner = spec.get("query").cloned().unwrap_or(Value::Null);
+        let Some(rq) = inner.get("rescore_query").cloned() else { continue };
+        let qw = inner.get("query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let rw = inner.get("rescore_query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let mode = inner.get("score_mode").and_then(|v| v.as_str()).unwrap_or("total");
+        cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
+        let ids: Vec<String> = cands
+            .iter()
+            .take(window)
+            .filter_map(|c| {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                source_of(searcher, &g, c.addr).map(|(id, _)| id)
+            })
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let probe = json!({
+            "query": {"bool": {"must": [rq], "filter": [{"terms": {"_id": ids.clone()}}]}},
+            "size": ids.len(),
+        });
+        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
+        let mut scored: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for hit in &answer.hits {
+            if let (Some(id), Some(score)) = (
+                hit.get("_id").and_then(|v| v.as_str()),
+                hit.get("_score").and_then(|v| v.as_f64()),
+            ) {
+                scored.insert(id.to_string(), score as f32);
+            }
+        }
+        // the weight on the original query counts for every hit; only the
+        // ones inside the window are also asked the second query
+        for (at, c) in cands.iter_mut().enumerate() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let extra = if at < window {
+                source_of(searcher, &g, c.addr)
+                    .and_then(|(id, _)| scored.get(&id).copied())
+            } else {
+                None
+            };
+            match extra {
+                Some(extra) => {
+                    rescored = true;
+                    c.score = match mode {
+                        "multiply" => c.score * extra,
+                        "max" => (c.score * qw).max(extra * rw),
+                        "min" => (c.score * qw).min(extra * rw),
+                        "avg" => (c.score * qw + extra * rw) / 2.0,
+                        _ => c.score * qw + extra * rw,
+                    };
+                }
+                None if mode != "multiply" => c.score *= qw,
+                None => {}
+            }
+        }
+    
+    }
+    Ok(rescored)
+}
+
+/// `indices_boost` weights whole indices against each other.
+///
+/// It is applied to the scores before they are ranked, and an alias may name
+/// the index instead of the index naming itself.
+fn apply_indices_boost(
+    store: &Store,
+    cands: &mut [Cand],
+    searchers: &Searchers,
+    boosts: &Value,
+    p: &Params,
+) -> std::result::Result<(), Response> {
+
+    let mut pairs: Vec<(String, f32)> = Vec::new();
+    let mut take = |o: &serde_json::Map<String, Value>| {
+        for (k, v) in o {
+            if let Some(b) = v.as_f64() {
+                pairs.push((k.clone(), b as f32));
+            }
+        }
+    };
+    match boosts {
+        Value::Object(o) => take(o),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(o) = item.as_object() {
+                    take(o);
+                }
+            }
+        }
+        _ => {}
+    }
+    // a boost naming nothing is a request for an index that is not there,
+    // unless the caller said to pass over what is missing
+    let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
+    if !lenient {
+        for (pat, _) in &pairs {
+            let known = pat.contains('*')
+                || store.exists(pat)
+                || store.get(pat).is_some();
+            if !known {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "index_not_found_exception",
+                    format!("no such index [{pat}]"),
+                ));
+            }
+        }
+    }
+    if !pairs.is_empty() {
+        let names: Vec<String> = searchers.iter().map(|(n, _, _)| n.clone()).collect();
+        let factor: Vec<f32> = names
+            .iter()
+            .map(|n| {
+                pairs
+                    .iter()
+                    .find(|(pat, _)| {
+                        pat == n
+                            || crate::store::glob_match(pat, n)
+                            || store
+                                .get(pat)
+                                .map(|st| st.read().name == *n)
+                                .unwrap_or(false)
+                    })
+                    .map(|(_, b)| *b)
+                    .unwrap_or(1.0)
+            })
+            .collect();
+        for c in cands.iter_mut() {
+            if let Some(f) = factor.get(c.shard) {
+                c.score *= f;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Settle a sort that only counts some of a document's nested objects.
+///
+/// Where a sort names a filter on the objects it reads, only the objects that
+/// match it have anything to say; a document whose objects all fail the filter
+/// has no value at all, and sorts with the missing ones.
+fn sort_by_filtered_nested(
+    store: &Store,
+    targets: &[String],
+    cands: &mut [Cand],
+    searchers: &Searchers,
+    sort_keys: &[SortKey],
+) {
+
+    for (i, key) in sort_keys.iter().enumerate() {
+        let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref())
+        else {
+            continue;
+        };
+        let leaf = key.field.strip_prefix(&format!("{path}.")).unwrap_or(&key.field);
+        for c in cands.iter_mut() {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+            let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/")))
+            {
+                Some(Value::Array(a)) => a.clone(),
+                Some(other) => vec![other.clone()],
+                None => Vec::new(),
+            };
+            let mut values: Vec<f64> = Vec::new();
+            for object in objects {
+                if !object_matches(filter, &object, path) {
+                    continue;
+                }
+                if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
+                    if let Some(n) = number_of(v) {
+                        values.push(n);
+                    }
+                }
+            }
+            // the values are read as instants; a `date` is reported in
+            // milliseconds, which is the unit it is compared in
+            let nanos_kept = targets
+                .iter()
+                .filter_map(|n| store.get(n))
+                .find_map(|st| st.read().mapping.type_of(&key.field).map(|t| t.to_string()))
+                .map(|t| t != "date")
+                .unwrap_or(true);
+            let values: Vec<f64> = if nanos_kept {
+                values
+            } else {
+                values.into_iter().map(|v| (v / 1e6).trunc()).collect()
+            };
+            let picked = match key.mode.as_deref() {
+                Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                Some("sum") => values.iter().sum(),
+                Some("avg") => {
+                    values.iter().sum::<f64>() / (values.len().max(1) as f64)
+                }
+                _ => values.iter().cloned().fold(f64::INFINITY, f64::min),
+            };
+            if let Some(slot) = c.sort.get_mut(i) {
+                *slot = if values.is_empty() {
+                    SortValue::Missing
+                } else {
+                    SortValue::F64(picked)
+                };
+            }
+        }
+    }
+    
+}
+
+/// `search.max_buckets` caps how many buckets one request may build.
+///
+/// The limit is counted over the whole answer, sub-buckets included, which is
+/// what makes a nested terms aggregation the expensive one.
+fn check_max_buckets(
+    store: &Store,
+    aggs: &Option<Value>,
+) -> std::result::Result<(), Response> {
+    if let Some(limit) = store
+        .cluster_setting("search.max_buckets")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        fn count_buckets(node: &Value) -> u64 {
+            match node {
+                Value::Object(o) => o
+                    .iter()
+                    .map(|(k, v)| {
+                        let here = if k == "buckets" {
+                            match v {
+                                Value::Array(a) => a.len() as u64,
+                                Value::Object(b) => b.len() as u64,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        here + count_buckets(v)
+                    })
+                    .sum(),
+                Value::Array(a) => a.iter().map(count_buckets).sum(),
+                _ => 0,
+            }
+        }
+        let built = aggs.as_ref().map(count_buckets).unwrap_or(0);
+        if built > limit {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "Trying to create too many buckets. Must be less than or equal to: \
+                     [{limit}] but was [{built}]. This limit can be set by changing the \
+                     [search.max_buckets] cluster level setting."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Search one index, as one shard of the whole request.
+#[allow(clippy::too_many_arguments)]
+fn search_one_shard(
+    store: &Store,
+    shard_idx: usize,
+    name: &str,
+    body: &Value,
+    p: &Params,
+    query_json: &Option<Value>,
+    sort_keys: &[SortKey],
+    search_after: &Option<Vec<SortValue>>,
+    pit_ceiling: &std::collections::HashMap<String, u64>,
+    agg_json: &Option<Value>,
+    filters_aggs: &[(String, Value)],
+    page_want: usize,
+    fanned_out: bool,
+) -> std::result::Result<Option<ShardOut>, Response> {
+
+    let Some(st) = store.get(name) else { return Ok(None) };
+    let g = st.read();
+    g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
+        g.request_cache_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let mut shards = 0u64;
+    let mut cands: Vec<Cand> = Vec::new();
+    let mut agg_acc: Option<IntermediateAggregationResults> = None;
+    let mut agg_req: Option<Aggregations> = None;
+    let mut agg_meta: Vec<(String, Value)> = Vec::new();
+    let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
+    shards += g.shard_count();
+    let ctx = Ctx {
+        fields: &g.fields,
+        mapping: &g.mapping,
+        index: &g.index,
+        max_terms_count: g.max_terms_count(),
+        max_regex_length: g.max_regex_length(),
+        allow_expensive: crate::search::expensive_allowed(store),
+        observed_kinds: &g.observed_kinds,
+        kinds_complete: g.kinds_complete,
+        stats: &g.stats,
+    };
+    let q: Box<dyn boostcore::query::Query> = match &query_json {
+        Some(qj) => match crate::query::build(&ctx, qj) {
+            Ok(q) => q,
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "parsing_exception",
+                    e.to_string(),
+                ));
+            }
+        },
+        None => Box::new(boostcore::query::AllQuery),
+    };
+    // a point in time holds the search to what the index had written when
+    // it was opened, which is what makes paging through it stable
+    let q: Box<dyn boostcore::query::Query> = match pit_ceiling.get(name) {
+        Some(ceiling) => {
+            let upper = boostcore::Term::from_field_u64(g.fields.seq, *ceiling);
+            let below = boostcore::query::FastFieldRangeQuery::new(
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Excluded(upper),
+            );
+            Box::new(boostcore::query::BooleanQuery::new(vec![
+                (boostcore::query::Occur::Must, q),
+                (boostcore::query::Occur::Must, Box::new(below) as Box<dyn boostcore::query::Query>),
+            ]))
+        }
+        None => q,
+    };
+
+    let searcher = g.reader.searcher();
+
+    // the peeled aggregations never reach the parser, so their fields are
+    // checked here rather than alongside the ones that do
+    if !filters_aggs.is_empty() {
+        let peeled: Value = filters_aggs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        check_agg_types(&peeled, &ctx)?;
+    }
+
+    // aggregations, when asked for, run over the same query
+    let mut this_agg: Option<Aggregations> = None;
+    let mut agg_request_json: Option<Value> = None;
+    if let Some(aj) = &agg_json {
+        let mut rewritten = aj.clone();
+        normalize_aggs(&mut rewritten, &mut agg_meta, true);
+        check_agg_types(&rewritten, &ctx)?;
+        normalize_agg_dates(&mut rewritten);
+        bucket_orders = extract_bucket_orders(&mut rewritten);
+        let _ = extract_partitions(&mut rewritten);
+        lower_nested_filters(&mut rewritten, &ctx);
+        strip_untranslatable_term_filters(&mut rewritten, &ctx);
+        // before the fields are renamed to the columns they live in, so
+        // the mapping still answers for the name the request used
+        fixed_date_histograms(&mut rewritten, &ctx);
+        rewrite_agg_fields(&mut rewritten, &ctx);
+        agg_request_json = Some(rewritten.clone());
+        match serde_json::from_value::<Aggregations>(rewritten) {
+            Ok(a) => this_agg = Some(a),
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "x_content_parse_exception",
+                    format!("failed to parse aggregation: {e}"),
+                ));
+            }
+        }
+    }
+
+    let want = page_want;
+    // The aggregation rides along with the hit collection so the query is
+    // walked once per index rather than twice. Profiling drives the phases
+    // itself and keeps its own pass.
+    let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
+    let agg_collector = MaybeAgg(match (&this_agg, profiling) {
+        (Some(a), false) => {
+            let ctxp =
+                AggContextParams::new(Default::default(), g.index.tokenizers().clone());
+            Some(DistributedAggregationCollector::from_aggs(a.clone(), ctxp))
+        }
+        _ => None,
+    });
+
+    let searched = if want == 0 {
+        // `size: 0` asks for counts and aggregations only. Collecting a
+        // page anyway means scoring and heap-ordering every match for a
+        // result that is thrown away.
+        search_shard(&searcher, &q, &(Count, agg_collector), fanned_out)
+            .map(|(c, agg)| (c, Vec::new(), agg))
+    } else if sort_keys.is_empty()
+        && agg_collector.0.is_none()
+        && count_without_walking(&query_json)
+    {
+        // Nothing else needs every document, so the top-k collector can
+        // prune: once its heap is full, whole blocks that cannot beat the
+        // worst kept score are skipped. Bundling a counter alongside it
+        // would force every document to be visited and give that up --
+        // measured at three to four times the throughput on this shape.
+        //
+        // The count then comes from the weight, which answers it from the
+        // postings header for the queries that can, and otherwise walks
+        // the same documents the tuple would have.
+        // This query is cheap: the heap prunes and only `want` documents
+        // are kept. Splitting its segments across the pool costs more in
+        // coordination than the walk itself, and steals cores from the
+        // aggregations, which are the expensive shape and do need them.
+        let topk = search_shard(
+            &searcher,
+            &q,
+            &TopDocs::with_limit(want.max(1)).order_by_score(),
+            true,
+        );
+        topk.and_then(|docs| {
+            let cands = docs
+                .into_iter()
+                .map(|(score, addr)| Cand {
+                    shard: shard_idx,
+                    addr,
+                    score,
+                    sort: Vec::new(),
+                    seq: u64::MAX,
+                })
+                .collect::<Vec<_>>();
+            let count = count_matches(&searcher, &q)?;
+            Ok((count, cands, None))
+        })
+    } else if sort_keys.is_empty() {
+        // an aggregation needs every document anyway, so there is nothing
+        // to prune and hits ride along in the same pass
+        let collector =
+            (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
+        search_shard(&searcher, &q, &collector, fanned_out).map(|(c, docs, agg)| {
+            let cands = docs
+                .into_iter()
+                .map(|(score, addr)| Cand {
+                    shard: shard_idx,
+                    addr,
+                    score,
+                    sort: Vec::new(),
+                    seq: u64::MAX,
+                })
+                .collect::<Vec<_>>();
+            (c, cands, agg)
+        })
+    } else {
+        // sort keys are evaluated during collection, so only `want`
+        // candidates are ever held rather than one per match
+        let sources: Vec<SortSource> = sort_keys
+            .iter()
+            .map(|k| match k.field.as_str() {
+                "_score" => SortSource::Score,
+                "_doc" => SortSource::Doc,
+                // `_seq` is a column of the index itself, not a field
+                // inside either JSON view, so it is named as it is
+                "_seq" => SortSource::Column {
+                    name: "_seq".to_string(),
+                    desc: k.desc,
+                    mode: k.mode.clone(),
+                },
+                // The values of a field inside a nested object belong to
+                // the object, not to the document, so a sort that does not
+                // say which object it reads inside finds nothing -- which
+                // is what OpenSearch's resolveNested returning null means.
+                _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
+                    SortSource::Column {
+                        name: "_bs_no_such_column".to_string(),
+                        desc: k.desc,
+                        mode: k.mode.clone(),
+                    }
+                }
+                // a date is a number in the index -- milliseconds, or
+                // nanoseconds for a date_nanos -- which is the number
+                // OpenSearch reports, so nothing is rescaled
+                _ => SortSource::Column {
+                    name: ctx.column_name(&k.field, false),
+                    desc: k.desc,
+                    mode: k.mode.clone(),
+                },
+            })
+            .collect();
+        let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
+        let collector = (
+            Count,
+            SortCollector {
+                sources,
+                missing_last: sort_keys.iter().map(|k| k.missing_last).collect(),
+                desc,
+                limit: want.max(1),
+                after: search_after.clone(),
+            },
+            agg_collector,
+        );
+        search_shard(&searcher, &q, &collector, fanned_out).map(|(c, mut cands, agg)| {
+            for cand in cands.iter_mut() {
+                cand.shard = shard_idx;
+            }
+            (c, cands, agg)
+        })
+    };
+    let (count, shard_cands, shard_agg) = match searched {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "search_phase_execution_exception",
+                e.to_string(),
+            ));
+        }
+    };
+    if let Some(res) = shard_agg {
+        agg_acc = Some(res);
+        agg_req = this_agg.clone();
+    }
+    cands.extend(shard_cands);
+
+    let mut shard_profile = None;
+    // a profile is asked for by the request, not by the aggregations: a
+    // search with no aggregations still has a shard to report on
+    if profiling && this_agg.is_none() {
+        shard_profile = Some(json!({
+            "id": "[boostsearch][0]",
+            "searches": [],
+            "aggregations": [],
+        }));
+    }
+    if let (Some(a), true) = (this_agg, profiling) {
+        let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
+        let (res, prof) = profiled_agg_search(
+            &searcher,
+            &q,
+            a.clone(),
+            ctxp,
+            &ctx,
+            agg_request_json.as_ref(),
+        );
+        shard_profile = Some(prof);
+        match res {
+            Ok(res) => {
+                agg_acc = Some(res);
+                agg_req = Some(a);
+            }
+            Err(e) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "aggregation_execution_exception",
+                    e.to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(Some(ShardOut {
+        name: g.name.clone(),
+        searcher,
+        st: st.clone(),
+        shards,
+        count,
+        cands,
+        agg: agg_acc,
+        agg_req,
+        agg_meta,
+        bucket_orders,
+        profile: shard_profile,
+    }))
+    
+}
+
+/// The profile entry for an aggregation this engine computed itself.
+///
+/// One of those never reaches BoostCore's profiler, so what OpenSearch would
+/// have reported is written here: the aggregator it would have used, and what
+/// the answer turned out to hold.
+fn own_agg_profiles(
+    peeled: &[(String, Value)],
+    results: &[(String, Value)],
+    query_json: &Option<Value>,
+    shard_profiles: &mut Vec<Value>,
+) {
+
+    let mut own: Vec<Value> = Vec::new();
+    for (name, def) in peeled {
+        let found = results
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, v)| v.get("buckets"))
+            .and_then(|b| b.as_array());
+        let buckets = found.map(|b| b.len()).unwrap_or(0);
+        // an auto date histogram starts at the finest rounding, where
+        // every document has a bucket to itself, and widens until few
+        // enough are left -- so what survived is the document count
+        let surviving = if def.get("auto_date_histogram").is_some() {
+            found
+                .map(|b| {
+                    b.iter()
+                        .filter_map(|x| x.get("doc_count").and_then(|c| c.as_u64()))
+                        .sum::<u64>() as usize
+                })
+                .unwrap_or(buckets)
+        } else {
+            buckets
+        };
+        // a query narrows the segment before the aggregation runs, so
+        // there is no leaf left for it to walk
+        let visited = if query_json.is_some() { 0 } else { 1 };
+        own.push(json!({
+            "type": agg_profile_type(def),
+            "description": name,
+            "time_in_nanos": 0,
+            "breakdown": {
+                "reduce": 0, "build_aggregation": 0, "build_leaf_collector": 0,
+                "collect": 0, "initialize": 0, "post_collection": 0,
+            },
+            "debug": {
+                "total_buckets": buckets,
+                // the rewrite that turns a range into a segment lookup
+                // applies to the one segment there is
+                "optimized_segments": 1,
+                "unoptimized_segments": 0,
+                "leaf_visited": visited,
+                "inner_visited": 0,
+                "surviving_buckets": surviving,
+            },
+        }));
+    }
+    if !own.is_empty() {
+        match shard_profiles.first_mut() {
+            Some(shard) => {
+                if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut())
+                {
+                    list.extend(own);
+                } else {
+                    shard["aggregations"] = Value::Array(own);
+                }
+            }
+            None => shard_profiles.push(json!({
+                "id": "[node-0][boostsearch][0]",
+                "searches": [],
+                "aggregations": own,
+            })),
+        }
+    }
+    
+}
+
+/// What the fetch cost, for `profile`.
+///
+/// Reading each hit back is a phase of its own in OpenSearch's profile, with
+/// sub-phases under it; there is one reader per shard here, so the numbers are
+/// the ones this engine can honestly report about itself.
+fn fetch_profiles(
+    shard_profiles: &mut [Value],
+    body: &Value,
+    extras: &Extras,
+    named: &std::collections::HashMap<String, Vec<(String, f32)>>,
+    size: usize,
+    fetched: u64,
+    nanos: u64,
+) {
+    let breakdown = |n: u64| {
+        json!({
+            "load_stored_fields": nanos, "load_stored_fields_count": n,
+            "load_source": nanos, "load_source_count": n,
+            "get_next_reader": nanos, "get_next_reader_count": 1,
+            "build_sub_phase_processors": nanos, "build_sub_phase_processors_count": 1,
+            "create_stored_fields_visitor": nanos,
+            "create_stored_fields_visitor_count": 1,
+        })
+    };
+    let child = |kind: &str, n: u64| {
+        json!({
+            "type": kind,
+            "description": kind,
+            "time_in_nanos": nanos,
+            "breakdown": {
+                "process": nanos, "process_count": n,
+                "set_next_reader": nanos, "set_next_reader_count": 1,
+            },
+        })
+    };
+    let mut entries: Vec<Value> = Vec::new();
+    if size > 0 && fetched > 0 {
+        let mut children = Vec::new();
+        if body.get("_source").map(|v| v != &json!(false)).unwrap_or(true) {
+            children.push(child("FetchSourcePhase", fetched));
+        }
+        if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
+            children.push(child("ExplainPhase", fetched));
+        }
+        if body.get("docvalue_fields").is_some() {
+            children.push(child("FetchDocValuesPhase", fetched));
+        }
+        if body.get("fields").is_some() {
+            children.push(child("FetchFieldsPhase", fetched));
+        }
+        if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+            children.push(child("FetchVersionPhase", fetched));
+        }
+        if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
+            children.push(child("SeqNoPrimaryTermPhase", fetched));
+        }
+        if !named.is_empty() {
+            children.push(child("MatchedQueriesPhase", fetched));
+        }
+        if body.get("highlight").is_some() {
+            children.push(child("HighlightPhase", fetched));
+        }
+        if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
+            children.push(child("FetchScorePhase", fetched));
+        }
+        entries.push(json!({
+            "type": "fetch",
+            "description": "fetch",
+            "time_in_nanos": nanos,
+            "breakdown": breakdown(fetched),
+            "children": children,
+            "debug": {},
+        }));
+        // an inner-hits clause fetches documents of its own
+        if let Some((path, _)) = extras
+            .nested_inner_hits
+            .then(|| body.get("query").and_then(find_nested_inner_hits))
+            .flatten()
+        {
+            entries.push(json!({
+                "type": format!("fetch_inner_hits[{path}]"),
+                "description": format!("fetch_inner_hits[{path}]"),
+                "time_in_nanos": nanos,
+                "breakdown": breakdown(fetched),
+                "children": [child("FetchSourcePhase", fetched)],
+                "debug": {},
+            }));
+        }
+    }
+    // so does every top_hits aggregation
+    if let Some(o) = body
+        .get("aggs")
+        .or_else(|| body.get("aggregations"))
+        .and_then(|a| a.as_object())
+    {
+        for (name, def) in o {
+            if def.get("top_hits").is_none() {
+                continue;
+            }
+            entries.push(json!({
+                "type": format!("fetch_top_hits_aggregation[{name}]"),
+                "description": format!("fetch_top_hits_aggregation[{name}]"),
+                "time_in_nanos": nanos,
+                "breakdown": breakdown(1),
+                "children": [child("FetchSourcePhase", 1)],
+                "debug": {},
+            }));
+        }
+    }
+    for shard in shard_profiles.iter_mut() {
+        shard["fetch"] = Value::Array(entries.clone());
+    }
+    
+}
+
 /// Write the page of hits the client reads.
 ///
 /// Everything expensive has happened by now: these are the documents that made
@@ -5582,22 +6391,6 @@ pub fn run(
         .map(|mut a| extract_partitions(&mut a))
         .unwrap_or_default();
 
-    // One shard's work touches only its own index, so the fan-out runs across
-    // cores. Searching many small indices is otherwise bounded by walking them
-    // one at a time.
-    struct ShardOut {
-        name: String,
-        searcher: Searcher,
-        st: std::sync::Arc<parking_lot::RwLock<IdxState>>,
-        shards: u64,
-        count: usize,
-        cands: Vec<Cand>,
-        agg: Option<IntermediateAggregationResults>,
-        agg_req: Option<Aggregations>,
-        agg_meta: Vec<(String, Value)>,
-        bucket_orders: Vec<(String, String, bool)>,
-        profile: Option<Value>,
-    }
 
     // `search_after` names where the previous page ended
     let search_after: Option<Vec<SortValue>> = body
@@ -5616,298 +6409,23 @@ pub fn run(
         });
     let fanned_out = targets.len() > 1;
     let run_shard = |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
-        let Some(st) = store.get(name) else { return Ok(None) };
-        let g = st.read();
-        g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
-            g.request_cache_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        let mut shards = 0u64;
-        let mut cands: Vec<Cand> = Vec::new();
-        let mut agg_acc: Option<IntermediateAggregationResults> = None;
-        let mut agg_req: Option<Aggregations> = None;
-        let mut agg_meta: Vec<(String, Value)> = Vec::new();
-        let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
-        shards += g.shard_count();
-        let ctx = Ctx {
-            fields: &g.fields,
-            mapping: &g.mapping,
-            index: &g.index,
-            max_terms_count: g.max_terms_count(),
-            max_regex_length: g.max_regex_length(),
-            allow_expensive: crate::search::expensive_allowed(store),
-            observed_kinds: &g.observed_kinds,
-            kinds_complete: g.kinds_complete,
-            stats: &g.stats,
-        };
-        let q: Box<dyn boostcore::query::Query> = match &query_json {
-            Some(qj) => match crate::query::build(&ctx, qj) {
-                Ok(q) => q,
-                Err(e) => {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "parsing_exception",
-                        e.to_string(),
-                    ));
-                }
-            },
-            None => Box::new(boostcore::query::AllQuery),
-        };
-        // a point in time holds the search to what the index had written when
-        // it was opened, which is what makes paging through it stable
-        let q: Box<dyn boostcore::query::Query> = match pit_ceiling.get(name) {
-            Some(ceiling) => {
-                let upper = boostcore::Term::from_field_u64(g.fields.seq, *ceiling);
-                let below = boostcore::query::FastFieldRangeQuery::new(
-                    std::ops::Bound::Unbounded,
-                    std::ops::Bound::Excluded(upper),
-                );
-                Box::new(boostcore::query::BooleanQuery::new(vec![
-                    (boostcore::query::Occur::Must, q),
-                    (boostcore::query::Occur::Must, Box::new(below) as Box<dyn boostcore::query::Query>),
-                ]))
-            }
-            None => q,
-        };
-
-        let searcher = g.reader.searcher();
-
-        // the peeled aggregations never reach the parser, so their fields are
-        // checked here rather than alongside the ones that do
-        if !filters_aggs.is_empty() {
-            let peeled: Value = filters_aggs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-            check_agg_types(&peeled, &ctx)?;
-        }
-
-        // aggregations, when asked for, run over the same query
-        let mut this_agg: Option<Aggregations> = None;
-        let mut agg_request_json: Option<Value> = None;
-        if let Some(aj) = &agg_json {
-            let mut rewritten = aj.clone();
-            normalize_aggs(&mut rewritten, &mut agg_meta, true);
-            check_agg_types(&rewritten, &ctx)?;
-            normalize_agg_dates(&mut rewritten);
-            bucket_orders = extract_bucket_orders(&mut rewritten);
-            let _ = extract_partitions(&mut rewritten);
-            lower_nested_filters(&mut rewritten, &ctx);
-            strip_untranslatable_term_filters(&mut rewritten, &ctx);
-            // before the fields are renamed to the columns they live in, so
-            // the mapping still answers for the name the request used
-            fixed_date_histograms(&mut rewritten, &ctx);
-            rewrite_agg_fields(&mut rewritten, &ctx);
-            agg_request_json = Some(rewritten.clone());
-            match serde_json::from_value::<Aggregations>(rewritten) {
-                Ok(a) => this_agg = Some(a),
-                Err(e) => {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "x_content_parse_exception",
-                        format!("failed to parse aggregation: {e}"),
-                    ));
-                }
-            }
-        }
-
-        let want = page_want;
-        // The aggregation rides along with the hit collection so the query is
-        // walked once per index rather than twice. Profiling drives the phases
-        // itself and keeps its own pass.
-        let profiling = body.get("profile").map(|v| v == true).unwrap_or(false);
-        let agg_collector = MaybeAgg(match (&this_agg, profiling) {
-            (Some(a), false) => {
-                let ctxp =
-                    AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-                Some(DistributedAggregationCollector::from_aggs(a.clone(), ctxp))
-            }
-            _ => None,
-        });
-
-        let searched = if want == 0 {
-            // `size: 0` asks for counts and aggregations only. Collecting a
-            // page anyway means scoring and heap-ordering every match for a
-            // result that is thrown away.
-            search_shard(&searcher, &q, &(Count, agg_collector), fanned_out)
-                .map(|(c, agg)| (c, Vec::new(), agg))
-        } else if sort_keys.is_empty()
-            && agg_collector.0.is_none()
-            && count_without_walking(&query_json)
-        {
-            // Nothing else needs every document, so the top-k collector can
-            // prune: once its heap is full, whole blocks that cannot beat the
-            // worst kept score are skipped. Bundling a counter alongside it
-            // would force every document to be visited and give that up --
-            // measured at three to four times the throughput on this shape.
-            //
-            // The count then comes from the weight, which answers it from the
-            // postings header for the queries that can, and otherwise walks
-            // the same documents the tuple would have.
-            // This query is cheap: the heap prunes and only `want` documents
-            // are kept. Splitting its segments across the pool costs more in
-            // coordination than the walk itself, and steals cores from the
-            // aggregations, which are the expensive shape and do need them.
-            let topk = search_shard(
-                &searcher,
-                &q,
-                &TopDocs::with_limit(want.max(1)).order_by_score(),
-                true,
-            );
-            topk.and_then(|docs| {
-                let cands = docs
-                    .into_iter()
-                    .map(|(score, addr)| Cand {
-                        shard: shard_idx,
-                        addr,
-                        score,
-                        sort: Vec::new(),
-                        seq: u64::MAX,
-                    })
-                    .collect::<Vec<_>>();
-                let count = count_matches(&searcher, &q)?;
-                Ok((count, cands, None))
-            })
-        } else if sort_keys.is_empty() {
-            // an aggregation needs every document anyway, so there is nothing
-            // to prune and hits ride along in the same pass
-            let collector =
-                (Count, TopDocs::with_limit(want.max(1)).order_by_score(), agg_collector);
-            search_shard(&searcher, &q, &collector, fanned_out).map(|(c, docs, agg)| {
-                let cands = docs
-                    .into_iter()
-                    .map(|(score, addr)| Cand {
-                        shard: shard_idx,
-                        addr,
-                        score,
-                        sort: Vec::new(),
-                        seq: u64::MAX,
-                    })
-                    .collect::<Vec<_>>();
-                (c, cands, agg)
-            })
-        } else {
-            // sort keys are evaluated during collection, so only `want`
-            // candidates are ever held rather than one per match
-            let sources: Vec<SortSource> = sort_keys
-                .iter()
-                .map(|k| match k.field.as_str() {
-                    "_score" => SortSource::Score,
-                    "_doc" => SortSource::Doc,
-                    // `_seq` is a column of the index itself, not a field
-                    // inside either JSON view, so it is named as it is
-                    "_seq" => SortSource::Column {
-                        name: "_seq".to_string(),
-                        desc: k.desc,
-                        mode: k.mode.clone(),
-                    },
-                    // The values of a field inside a nested object belong to
-                    // the object, not to the document, so a sort that does not
-                    // say which object it reads inside finds nothing -- which
-                    // is what OpenSearch's resolveNested returning null means.
-                    _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
-                        SortSource::Column {
-                            name: "_bs_no_such_column".to_string(),
-                            desc: k.desc,
-                            mode: k.mode.clone(),
-                        }
-                    }
-                    // a date is a number in the index -- milliseconds, or
-                    // nanoseconds for a date_nanos -- which is the number
-                    // OpenSearch reports, so nothing is rescaled
-                    _ => SortSource::Column {
-                        name: ctx.column_name(&k.field, false),
-                        desc: k.desc,
-                        mode: k.mode.clone(),
-                    },
-                })
-                .collect();
-            let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
-            let collector = (
-                Count,
-                SortCollector {
-                    sources,
-                    missing_last: sort_keys.iter().map(|k| k.missing_last).collect(),
-                    desc,
-                    limit: want.max(1),
-                    after: search_after.clone(),
-                },
-                agg_collector,
-            );
-            search_shard(&searcher, &q, &collector, fanned_out).map(|(c, mut cands, agg)| {
-                for cand in cands.iter_mut() {
-                    cand.shard = shard_idx;
-                }
-                (c, cands, agg)
-            })
-        };
-        let (count, shard_cands, shard_agg) = match searched {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "search_phase_execution_exception",
-                    e.to_string(),
-                ));
-            }
-        };
-        if let Some(res) = shard_agg {
-            agg_acc = Some(res);
-            agg_req = this_agg.clone();
-        }
-        cands.extend(shard_cands);
-
-        let mut shard_profile = None;
-        // a profile is asked for by the request, not by the aggregations: a
-        // search with no aggregations still has a shard to report on
-        if profiling && this_agg.is_none() {
-            shard_profile = Some(json!({
-                "id": "[boostsearch][0]",
-                "searches": [],
-                "aggregations": [],
-            }));
-        }
-        if let (Some(a), true) = (this_agg, profiling) {
-            let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-            let (res, prof) = profiled_agg_search(
-                &searcher,
-                &q,
-                a.clone(),
-                ctxp,
-                &ctx,
-                agg_request_json.as_ref(),
-            );
-            shard_profile = Some(prof);
-            match res {
-                Ok(res) => {
-                    agg_acc = Some(res);
-                    agg_req = Some(a);
-                }
-                Err(e) => {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "aggregation_execution_exception",
-                        e.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(Some(ShardOut {
-            name: g.name.clone(),
-            searcher,
-            st: st.clone(),
-            shards,
-            count,
-            cands,
-            agg: agg_acc,
-            agg_req,
-            agg_meta,
-            bucket_orders,
-            profile: shard_profile,
-        }))
+        search_one_shard(
+            store,
+            shard_idx,
+            name,
+            body,
+            p,
+            &query_json,
+            &sort_keys,
+            &search_after,
+            &pit_ceiling,
+            &agg_json,
+            &filters_aggs,
+            page_want,
+            fanned_out,
+        )
     };
+
 
     let outs: Vec<std::result::Result<Option<ShardOut>, Response>> = if targets.len() > 1 {
         use rayon::prelude::*;
@@ -5970,67 +6488,7 @@ pub fn run(
     // applied to the scores before they are ranked. An alias may name the
     // index instead of the index naming itself.
     if let Some(boosts) = body.get("indices_boost") {
-        let mut pairs: Vec<(String, f32)> = Vec::new();
-        let mut take = |o: &serde_json::Map<String, Value>| {
-            for (k, v) in o {
-                if let Some(b) = v.as_f64() {
-                    pairs.push((k.clone(), b as f32));
-                }
-            }
-        };
-        match boosts {
-            Value::Object(o) => take(o),
-            Value::Array(items) => {
-                for item in items {
-                    if let Some(o) = item.as_object() {
-                        take(o);
-                    }
-                }
-            }
-            _ => {}
-        }
-        // a boost naming nothing is a request for an index that is not there,
-        // unless the caller said to pass over what is missing
-        let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
-        if !lenient {
-            for (pat, _) in &pairs {
-                let known = pat.contains('*')
-                    || store.exists(pat)
-                    || store.get(pat).is_some();
-                if !known {
-                    return Err(err(
-                        StatusCode::NOT_FOUND,
-                        "index_not_found_exception",
-                        format!("no such index [{pat}]"),
-                    ));
-                }
-            }
-        }
-        if !pairs.is_empty() {
-            let names: Vec<String> = searchers.iter().map(|(n, _, _)| n.clone()).collect();
-            let factor: Vec<f32> = names
-                .iter()
-                .map(|n| {
-                    pairs
-                        .iter()
-                        .find(|(pat, _)| {
-                            pat == n
-                                || crate::store::glob_match(pat, n)
-                                || store
-                                    .get(pat)
-                                    .map(|st| st.read().name == *n)
-                                    .unwrap_or(false)
-                        })
-                        .map(|(_, b)| *b)
-                        .unwrap_or(1.0)
-                })
-                .collect();
-            for c in cands.iter_mut() {
-                if let Some(f) = factor.get(c.shard) {
-                    c.score *= f;
-                }
-            }
-        }
+        apply_indices_boost(store, &mut cands, &searchers, boosts, p)?;
     }
 
     // a geo shape, an intervals rule or a distance_feature is settled from the
@@ -6045,139 +6503,13 @@ pub fn run(
 
     // `rescore` runs a second query over the top of the page and mixes its
     // score into the one already there
-    let mut rescored = false;
-    let rescores = match body.get("rescore") {
-        Some(Value::Array(a)) => a.clone(),
-        Some(other) => vec![other.clone()],
-        None => Vec::new(),
-    };
-    for spec in &rescores {
-        let window = spec
-            .get("window_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10)
-            .max(1) as usize;
-        let inner = spec.get("query").cloned().unwrap_or(Value::Null);
-        let Some(rq) = inner.get("rescore_query").cloned() else { continue };
-        let qw = inner.get("query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-        let rw = inner.get("rescore_query_weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-        let mode = inner.get("score_mode").and_then(|v| v.as_str()).unwrap_or("total");
-        cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
-        let ids: Vec<String> = cands
-            .iter()
-            .take(window)
-            .filter_map(|c| {
-                let (_, searcher, st) = &searchers[c.shard];
-                let g = st.read();
-                source_of(searcher, &g, c.addr).map(|(id, _)| id)
-            })
-            .collect();
-        if ids.is_empty() {
-            continue;
-        }
-        let probe = json!({
-            "query": {"bool": {"must": [rq], "filter": [{"terms": {"_id": ids.clone()}}]}},
-            "size": ids.len(),
-        });
-        let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) else { continue };
-        let mut scored: std::collections::HashMap<String, f32> =
-            std::collections::HashMap::new();
-        for hit in &answer.hits {
-            if let (Some(id), Some(score)) = (
-                hit.get("_id").and_then(|v| v.as_str()),
-                hit.get("_score").and_then(|v| v.as_f64()),
-            ) {
-                scored.insert(id.to_string(), score as f32);
-            }
-        }
-        // the weight on the original query counts for every hit; only the
-        // ones inside the window are also asked the second query
-        for (at, c) in cands.iter_mut().enumerate() {
-            let (_, searcher, st) = &searchers[c.shard];
-            let g = st.read();
-            let extra = if at < window {
-                source_of(searcher, &g, c.addr)
-                    .and_then(|(id, _)| scored.get(&id).copied())
-            } else {
-                None
-            };
-            match extra {
-                Some(extra) => {
-                    rescored = true;
-                    c.score = match mode {
-                        "multiply" => c.score * extra,
-                        "max" => (c.score * qw).max(extra * rw),
-                        "min" => (c.score * qw).min(extra * rw),
-                        "avg" => (c.score * qw + extra * rw) / 2.0,
-                        _ => c.score * qw + extra * rw,
-                    };
-                }
-                None if mode != "multiply" => c.score *= qw,
-                None => {}
-            }
-        }
-    }
+    let rescored =
+        apply_rescores(store, &targets, &mut cands, &searchers, body, &sort_keys)?;
     // Where a sort names a filter on the nested objects it reads, only the
     // objects that match it have anything to say. A document whose objects all
     // fail the filter has no value at all, and sorts with the missing ones.
     if nested_filtered {
-        for (i, key) in sort_keys.iter().enumerate() {
-            let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref())
-            else {
-                continue;
-            };
-            let leaf = key.field.strip_prefix(&format!("{path}.")).unwrap_or(&key.field);
-            for c in cands.iter_mut() {
-                let (_, searcher, st) = &searchers[c.shard];
-                let g = st.read();
-                let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
-                let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/")))
-                {
-                    Some(Value::Array(a)) => a.clone(),
-                    Some(other) => vec![other.clone()],
-                    None => Vec::new(),
-                };
-                let mut values: Vec<f64> = Vec::new();
-                for object in objects {
-                    if !object_matches(filter, &object, path) {
-                        continue;
-                    }
-                    if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
-                        if let Some(n) = number_of(v) {
-                            values.push(n);
-                        }
-                    }
-                }
-                // the values are read as instants; a `date` is reported in
-                // milliseconds, which is the unit it is compared in
-                let nanos_kept = targets
-                    .iter()
-                    .filter_map(|n| store.get(n))
-                    .find_map(|st| st.read().mapping.type_of(&key.field).map(|t| t.to_string()))
-                    .map(|t| t != "date")
-                    .unwrap_or(true);
-                let values: Vec<f64> = if nanos_kept {
-                    values
-                } else {
-                    values.into_iter().map(|v| (v / 1e6).trunc()).collect()
-                };
-                let picked = match key.mode.as_deref() {
-                    Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-                    Some("sum") => values.iter().sum(),
-                    Some("avg") => {
-                        values.iter().sum::<f64>() / (values.len().max(1) as f64)
-                    }
-                    _ => values.iter().cloned().fold(f64::INFINITY, f64::min),
-                };
-                if let Some(slot) = c.sort.get_mut(i) {
-                    *slot = if values.is_empty() {
-                        SortValue::Missing
-                    } else {
-                        SortValue::F64(picked)
-                    };
-                }
-            }
-        }
+        sort_by_filtered_nested(store, &targets, &mut cands, &searchers, &sort_keys);
     }
     fill_seq(&mut cands, &searchers);
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
@@ -6371,74 +6703,10 @@ pub fn run(
         Some(base)
     };
 
-    // an aggregation this engine computes itself never reaches BoostCore's
-    // profiler, so its entry is written here: the aggregator OpenSearch would
-    // have used, and what the answer turned out to hold
     if p.get("profile").map(|v| v == "true").unwrap_or(false)
         || body.get("profile").and_then(|v| v.as_bool()).unwrap_or(false)
     {
-        let mut own: Vec<Value> = Vec::new();
-        for (name, def) in &filters_aggs {
-            let found = filters_results
-                .iter()
-                .find(|(n, _)| n == name)
-                .and_then(|(_, v)| v.get("buckets"))
-                .and_then(|b| b.as_array());
-            let buckets = found.map(|b| b.len()).unwrap_or(0);
-            // an auto date histogram starts at the finest rounding, where
-            // every document has a bucket to itself, and widens until few
-            // enough are left -- so what survived is the document count
-            let surviving = if def.get("auto_date_histogram").is_some() {
-                found
-                    .map(|b| {
-                        b.iter()
-                            .filter_map(|x| x.get("doc_count").and_then(|c| c.as_u64()))
-                            .sum::<u64>() as usize
-                    })
-                    .unwrap_or(buckets)
-            } else {
-                buckets
-            };
-            // a query narrows the segment before the aggregation runs, so
-            // there is no leaf left for it to walk
-            let visited = if query_json.is_some() { 0 } else { 1 };
-            own.push(json!({
-                "type": agg_profile_type(def),
-                "description": name,
-                "time_in_nanos": 0,
-                "breakdown": {
-                    "reduce": 0, "build_aggregation": 0, "build_leaf_collector": 0,
-                    "collect": 0, "initialize": 0, "post_collection": 0,
-                },
-                "debug": {
-                    "total_buckets": buckets,
-                    // the rewrite that turns a range into a segment lookup
-                    // applies to the one segment there is
-                    "optimized_segments": 1,
-                    "unoptimized_segments": 0,
-                    "leaf_visited": visited,
-                    "inner_visited": 0,
-                    "surviving_buckets": surviving,
-                },
-            }));
-        }
-        if !own.is_empty() {
-            match shard_profiles.first_mut() {
-                Some(shard) => {
-                    if let Some(list) = shard.get_mut("aggregations").and_then(|e| e.as_array_mut())
-                    {
-                        list.extend(own);
-                    } else {
-                        shard["aggregations"] = Value::Array(own);
-                    }
-                }
-                None => shard_profiles.push(json!({
-                    "id": "[node-0][boostsearch][0]",
-                    "searches": [],
-                    "aggregations": own,
-                })),
-            }
-        }
+        own_agg_profiles(&filters_aggs, &filters_results, &query_json, &mut shard_profiles);
     }
 
     // the profile is written while the aggregation runs, before there are any
@@ -6512,44 +6780,7 @@ pub fn run(
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
     // what makes a nested terms aggregation the expensive one.
-    if let Some(limit) = store
-        .cluster_setting("search.max_buckets")
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
-        fn count_buckets(node: &Value) -> u64 {
-            match node {
-                Value::Object(o) => o
-                    .iter()
-                    .map(|(k, v)| {
-                        let here = if k == "buckets" {
-                            match v {
-                                Value::Array(a) => a.len() as u64,
-                                Value::Object(b) => b.len() as u64,
-                                _ => 0,
-                            }
-                        } else {
-                            0
-                        };
-                        here + count_buckets(v)
-                    })
-                    .sum(),
-                Value::Array(a) => a.iter().map(count_buckets).sum(),
-                _ => 0,
-            }
-        }
-        let built = aggs.as_ref().map(count_buckets).unwrap_or(0);
-        if built > limit {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "too_many_buckets_exception",
-                format!(
-                    "Trying to create too many buckets. Must be less than or equal to: \
-                     [{limit}] but was [{built}]. This limit can be set by changing the \
-                     [search.max_buckets] cluster level setting."
-                ),
-            ));
-        }
-    }
+    check_max_buckets(store, &aggs)?;
 
     let agg_forces_all = body
         .get("aggs")
@@ -6586,106 +6817,16 @@ pub fn run(
     // `profile` also asks what the fetch cost: reading each hit back, and the
     // sub-phases that filled it in
     if !shard_profiles.is_empty() {
-        let fetched = page.len() as u64;
         let nanos = started.elapsed().as_nanos().max(1) as u64;
-        let breakdown = |n: u64| {
-            json!({
-                "load_stored_fields": nanos, "load_stored_fields_count": n,
-                "load_source": nanos, "load_source_count": n,
-                "get_next_reader": nanos, "get_next_reader_count": 1,
-                "build_sub_phase_processors": nanos, "build_sub_phase_processors_count": 1,
-                "create_stored_fields_visitor": nanos,
-                "create_stored_fields_visitor_count": 1,
-            })
-        };
-        let child = |kind: &str, n: u64| {
-            json!({
-                "type": kind,
-                "description": kind,
-                "time_in_nanos": nanos,
-                "breakdown": {
-                    "process": nanos, "process_count": n,
-                    "set_next_reader": nanos, "set_next_reader_count": 1,
-                },
-            })
-        };
-        let mut entries: Vec<Value> = Vec::new();
-        if size > 0 && fetched > 0 {
-            let mut children = Vec::new();
-            if body.get("_source").map(|v| v != &json!(false)).unwrap_or(true) {
-                children.push(child("FetchSourcePhase", fetched));
-            }
-            if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
-                children.push(child("ExplainPhase", fetched));
-            }
-            if body.get("docvalue_fields").is_some() {
-                children.push(child("FetchDocValuesPhase", fetched));
-            }
-            if body.get("fields").is_some() {
-                children.push(child("FetchFieldsPhase", fetched));
-            }
-            if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
-                children.push(child("FetchVersionPhase", fetched));
-            }
-            if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
-                children.push(child("SeqNoPrimaryTermPhase", fetched));
-            }
-            if !named.is_empty() {
-                children.push(child("MatchedQueriesPhase", fetched));
-            }
-            if body.get("highlight").is_some() {
-                children.push(child("HighlightPhase", fetched));
-            }
-            if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
-                children.push(child("FetchScorePhase", fetched));
-            }
-            entries.push(json!({
-                "type": "fetch",
-                "description": "fetch",
-                "time_in_nanos": nanos,
-                "breakdown": breakdown(fetched),
-                "children": children,
-                "debug": {},
-            }));
-            // an inner-hits clause fetches documents of its own
-            if let Some((path, _)) = extras
-                .nested_inner_hits
-                .then(|| body.get("query").and_then(find_nested_inner_hits))
-                .flatten()
-            {
-                entries.push(json!({
-                    "type": format!("fetch_inner_hits[{path}]"),
-                    "description": format!("fetch_inner_hits[{path}]"),
-                    "time_in_nanos": nanos,
-                    "breakdown": breakdown(fetched),
-                    "children": [child("FetchSourcePhase", fetched)],
-                    "debug": {},
-                }));
-            }
-        }
-        // so does every top_hits aggregation
-        if let Some(o) = body
-            .get("aggs")
-            .or_else(|| body.get("aggregations"))
-            .and_then(|a| a.as_object())
-        {
-            for (name, def) in o {
-                if def.get("top_hits").is_none() {
-                    continue;
-                }
-                entries.push(json!({
-                    "type": format!("fetch_top_hits_aggregation[{name}]"),
-                    "description": format!("fetch_top_hits_aggregation[{name}]"),
-                    "time_in_nanos": nanos,
-                    "breakdown": breakdown(1),
-                    "children": [child("FetchSourcePhase", 1)],
-                    "debug": {},
-                }));
-            }
-        }
-        for shard in shard_profiles.iter_mut() {
-            shard["fetch"] = Value::Array(entries.clone());
-        }
+        fetch_profiles(
+            &mut shard_profiles,
+            body,
+            &extras,
+            &named,
+            size,
+            page.len() as u64,
+            nanos,
+        );
     }
 
     Ok(Outcome {
