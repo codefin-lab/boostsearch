@@ -120,10 +120,16 @@ fn ip_value(ctx: &Ctx, field: &str, v: &Value) -> Value {
             Some(c) => Value::String(c),
             None => v.clone(),
         },
-        Some("date") | Some("date_nanos") => match crate::store::canonical_date(v) {
-            Some(c) => Value::String(c),
-            None => v.clone(),
-        },
+        // a date is a number in the index, and a query has to name it the
+        // same way whatever spelling it was written in
+        Some(ty @ ("date" | "date_nanos")) => {
+            let fmt = ctx.mapping.field_option(field, "format");
+            let fmt = fmt.as_ref().and_then(|v| v.as_str());
+            match crate::store::date_number(v, fmt, ty == "date_nanos") {
+                Some(n) => Value::Number(n.into()),
+                None => v.clone(),
+            }
+        }
         _ => v.clone(),
     }
 }
@@ -1196,8 +1202,10 @@ fn build_range_field_query(
             return Some((v, inclusive));
         }
         let up = if inclusive { up_when_inclusive } else { !up_when_inclusive };
-        let rewritten =
-            crate::store::canonical_date_bound(&v, up).map(Value::String).unwrap_or(v);
+        // the endpoints a date_range stores are numbers, the way a date is
+        let rewritten = crate::store::date_number_bound(&v, up, None, false)
+            .map(|n| Value::Number(n.into()))
+            .unwrap_or(v);
         Some((rewritten, inclusive))
     };
     let q_lo = bound("gte", "gt", false);
@@ -1280,15 +1288,7 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let mut upper = get(["lte", "lt"]).or_else(|| older("to", "include_upper"));
     // OpenSearch's default date format accepts a bare year; our date values are
     // indexed as ISO strings, which compare correctly lexicographically
-    if ctx.mapping.type_of(&field).map(|t| t == "date").unwrap_or(false) {
-        for b in [&mut lower, &mut upper] {
-            if let Some((Value::Number(n), _)) = b.as_ref().map(|(v, i)| (v.clone(), *i)) {
-                if let Some((_, inclusive)) = b.take() {
-                    *b = Some((Value::String(n.to_string()), inclusive));
-                }
-            }
-        }
-    }
+
     // a value gathered under a flat_object was stored in its canonical
     // spelling, and a bound has to be written the same way to compare with it
     let under_flat = {
@@ -1321,14 +1321,22 @@ fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         })
         .filter(|(lo, hi)| lo.is_some() || hi.is_some());
     if matches!(ctx.mapping.type_of(&field), Some("ip" | "date" | "date_nanos")) {
+        let ty = ctx.mapping.type_of(&field).unwrap_or_default().to_string();
+        // a range query may name the format its bounds are written in, which
+        // stands in for the one the mapping declares
+        let mapped = ctx.mapping.field_option(&field, "format");
+        let fmt = spec
+            .get("format")
+            .and_then(|v| v.as_str())
+            .or_else(|| mapped.as_ref().and_then(|v| v.as_str()));
         for (is_lower, b) in [(true, &mut lower), (false, &mut upper)] {
             if let Some((v, inclusive)) = b.clone() {
                 let up = (is_lower && !inclusive) || (!is_lower && inclusive);
-                let rewritten = if matches!(ctx.mapping.type_of(&field), Some("ip")) {
+                let rewritten = if ty == "ip" {
                     ip_value(ctx, &field, &v)
                 } else {
-                    crate::store::canonical_date_bound(&v, up)
-                        .map(Value::String)
+                    crate::store::date_number_bound(&v, up, fmt, ty == "date_nanos")
+                        .map(|n| Value::Number(n.into()))
                         .unwrap_or(v.clone())
                 };
                 *b = Some((rewritten, inclusive));

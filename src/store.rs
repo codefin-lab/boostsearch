@@ -254,6 +254,11 @@ impl Mapping {
         known: &HashMap<String, String>,
         out: &mut Vec<String>,
     ) {
+        // nothing under a flat_object is a field of its own: its values keep
+        // the spelling they were sent with, whatever they look like
+        if known.get(path.as_str()).map(|t| t == "flat_object").unwrap_or(false) {
+            return;
+        }
         match node {
             Value::Object(o) => {
                 let base = path.len();
@@ -2010,7 +2015,11 @@ pub fn wildcard_to_regex(pat: &str) -> regex::Regex {
 /// moved into the first view instead of deep-copied for both.
 /// Apply a normalizer the way OpenSearch does at index time.
 pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
-    let s = value.as_str()?;
+    let Some(s) = value.as_str() else {
+        // a value that is not text -- a date is a number in the index -- has
+        // nothing to normalise, but the multi-field still needs its copy
+        return normalizer.is_empty().then(|| value.clone());
+    };
     match normalizer {
         "" => Some(Value::String(s.to_string())),
         "lowercase" => Some(Value::String(s.to_lowercase())),
@@ -2026,7 +2035,9 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 /// whatever it is given.
 fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool {
     match ty {
-        "date" | "date_nanos" => canonical_date_with(v, format).is_some() || v.is_number(),
+        "date" | "date_nanos" => {
+            date_number(v, format, ty == "date_nanos").is_some() || v.is_number()
+        }
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
@@ -2127,6 +2138,11 @@ pub fn remove_path(node: &mut Value, path: &str) {
 /// A client may send `"800.0"` for a field mapped as a float; OpenSearch stores
 /// a number there, and queries phrased with a number have to find it.
 fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
+    // whatever is under a flat_object keeps the spelling and the type it was
+    // sent with; nothing below the object is a field of its own
+    if mapping.type_of(path) == Some("flat_object") {
+        return;
+    }
     match node {
         Value::Object(obj) => {
             let base = path.len();
@@ -2149,8 +2165,10 @@ fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mapping) {
             if matches!(ty, Some("date") | Some("date_nanos")) {
                 let fmt = mapping.field_option(path, "format");
                 let fmt = fmt.as_ref().and_then(|v| v.as_str());
-                if let Some(c) = canonical_date_prec(leaf, fmt, ty == Some("date_nanos")) {
-                    *leaf = Value::String(c);
+                // a date is a number in the index, the way OpenSearch stores
+                // one; `_source` still says whatever the client sent
+                if let Some(n) = date_number(leaf, fmt, ty == Some("date_nanos")) {
+                    *leaf = Value::Number(n.into());
                 }
             } else if let Some(c) = coerce_leaf(leaf, ty) {
                 *leaf = c;
@@ -2241,8 +2259,10 @@ pub fn parse_date_lenient(s: &str) -> Option<boostcore::time::OffsetDateTime> {
 /// The window a date column can hold. Nanoseconds in an i64 reach about 292
 /// years either side of the epoch, so an open-ended range is filled to the
 /// edges of that rather than to a year the column could not represent.
-const DATE_FLOOR: &str = "1700-01-01T00:00:00.000Z";
-const DATE_CEIL: &str = "2250-01-01T00:00:00.000Z";
+/// The open side of a date range, as the number the index holds: a date is
+/// milliseconds here, so these are the ends of what a range can reach.
+const DATE_FLOOR: i64 = -8_520_336_000_000;
+const DATE_CEIL: i64 = 8_835_004_800_000;
 
 /// A range field written with only one end is open at the other, which a
 /// comparison against a missing sub-field cannot express. The open side is
@@ -2263,8 +2283,8 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         if dated {
             for key in ["gte", "gt", "lte", "lt"] {
                 if let Some(v) = node.get(key) {
-                    if let Some(c) = canonical_date(v) {
-                        node.insert(key.into(), Value::String(c));
+                    if let Some(n) = date_number(v, None, false) {
+                        node.insert(key.into(), Value::Number(n.into()));
                     }
                 }
             }
@@ -2273,13 +2293,10 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
         // moved one step inward rather than left in a form nothing reads
         let step = |v: &Value, forward: bool| -> Option<Value> {
             if dated {
-                let dt = parse_date_lenient(v.as_str()?)?;
-                let shifted = if forward {
-                    dt + boostcore::time::Duration::milliseconds(1)
-                } else {
-                    dt - boostcore::time::Duration::milliseconds(1)
-                };
-                return Some(Value::String(format_utc_millis(shifted)));
+                // a date is milliseconds here, so the next value along is the
+                // next millisecond
+                let n = v.as_i64().or_else(|| date_number(v, None, false))?;
+                return Some(Value::from(if forward { n + 1 } else { n - 1 }));
             }
             // a whole-number range steps by one; a fractional one has no next
             // value to move to, so the bound is kept as written
@@ -2300,7 +2317,7 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
             node.insert(
                 "gte".into(),
                 if dated {
-                    Value::String(DATE_FLOOR.into())
+                    Value::from(DATE_FLOOR)
                 } else {
                     serde_json::json!(f64::MIN)
                 },
@@ -2310,7 +2327,7 @@ fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
             node.insert(
                 "lte".into(),
                 if dated {
-                    Value::String(DATE_CEIL.into())
+                    Value::from(DATE_CEIL)
                 } else {
                     serde_json::json!(f64::MAX)
                 },
@@ -2685,6 +2702,70 @@ pub fn canonical_date_with(v: &Value, format: Option<&str>) -> Option<String> {
     canonical_date_prec(v, format, false)
 }
 
+/// A date bound as the number the index holds, rounding date math up where the
+/// bound is the end of the range it names.
+pub fn date_number_bound(
+    v: &Value,
+    round_up: bool,
+    format: Option<&str>,
+    nanos: bool,
+) -> Option<i64> {
+    // `gte: 2019` on a date field is the year, not two seconds past the epoch:
+    // the default format reads a bare four-digit number as a year, and nothing
+    // sane asks for a bound two seconds into 1970
+    if format.is_none() {
+        if let Some(year) = v.as_i64().filter(|n| (1000..=9999).contains(n)) {
+            return date_number_bound(&Value::String(year.to_string()), round_up, None, nanos);
+        }
+    }
+    let text = v.as_str().unwrap_or_default();
+    if round_up && (text.contains("||") || text.starts_with("now")) {
+        if let Some((dt, Some(unit))) = parse_date_math(text) {
+            let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
+            let per: i128 = if nanos { 1 } else { 1_000_000 };
+            return i64::try_from(end.unix_timestamp_nanos() / per).ok();
+        }
+    }
+    date_number(v, format, nanos)
+}
+
+/// A date as the number the index holds: milliseconds, or nanoseconds for a
+/// `date_nanos`.
+///
+/// This is `DateFieldMapper.Resolution` -- what OpenSearch stores, and what a
+/// sort on a date reports. It is also the only representation with the range
+/// dates need: text compares by spelling, so a year past 9999 stops ordering
+/// correctly, and a count of nanoseconds in an i64 runs out in 2262.
+pub fn date_number(v: &Value, format: Option<&str>, nanos: bool) -> Option<i64> {
+    // a number is a count already, in whatever unit the format names
+    let count = |n: f64| -> Option<i64> {
+        let millis = match format {
+            Some(f) if f.contains("epoch_second") => n * 1_000.0,
+            _ => n,
+        };
+        let out = if nanos { millis * 1_000_000.0 } else { millis };
+        (out.is_finite() && out.abs() < 9.2e18).then_some(out as i64)
+    };
+    let unit: i128 = if nanos { 1 } else { 1_000_000 };
+    let read = |s: &str| -> Option<i64> {
+        let dt = parse_date_lenient(s)?;
+        i64::try_from(dt.unix_timestamp_nanos() / unit).ok()
+    };
+    match v {
+        Value::Number(n) => count(n.as_f64()?),
+        Value::String(s) => match s.parse::<f64>() {
+            // a number written as text still means what the format says
+            Ok(n) if format.is_some() => count(n),
+            // `2019` is a year before it is a count of milliseconds, so the
+            // date reading is tried first and the epoch only where nothing
+            // else could be read from the digits
+            Ok(n) => read(s).or_else(|| count(n)),
+            _ => read(s),
+        },
+        _ => None,
+    }
+}
+
 /// As `canonical_date_with`, but able to keep the whole fraction.
 ///
 /// A `date` reports milliseconds and a `date_nanos` reports nanoseconds; the
@@ -2881,6 +2962,26 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
                 None => continue,
             },
         };
+        // a multi-field of a date counts in its own resolution: a date is
+        // milliseconds and a date_nanos is nanoseconds, and the copy carries
+        // the number the parent was coerced to
+        let mut normalized = normalized;
+        let step = match (mapping.type_of(&parent), mapping.type_of(&format!("{parent}.{sub}"))) {
+            (Some("date"), Some("date_nanos")) => 1_000_000i64,
+            (Some("date_nanos"), Some("date")) => -1_000_000,
+            _ => 0,
+        };
+        if step != 0 {
+            let rescale = |v: &mut Value| {
+                if let Some(n) = v.as_i64() {
+                    *v = Value::from(if step > 0 { n * step } else { n / -step });
+                }
+            };
+            match &mut normalized {
+                Value::Array(items) => items.iter_mut().for_each(rescale),
+                other => rescale(other),
+            }
+        }
         obj.insert(format!("{parent}.{sub}"), normalized);
     }
     out

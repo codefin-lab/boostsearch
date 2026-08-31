@@ -60,20 +60,6 @@ impl SortValue {
         }
     }
 
-    /// A date sort value is stored in nanoseconds and reported in
-    /// milliseconds, which is the unit the field was given in.
-    fn to_json_scaled(&self, is_date: bool) -> Value {
-        if !is_date {
-            return self.to_json();
-        }
-        match self {
-            SortValue::I64(v) => json!(v / 1_000_000),
-            SortValue::U64(v) => json!(v / 1_000_000),
-            SortValue::F64(n) => json!((*n / 1e6) as i64),
-            other => other.to_json(),
-        }
-    }
-
     fn to_json(&self) -> Value {
         match self {
             SortValue::I64(v) => json!(v),
@@ -362,10 +348,6 @@ enum SortSource {
         name: String,
         desc: bool,
         mode: Option<String>,
-        /// what to divide a raw value by before it counts as the sort value.
-        /// A `date` is kept in nanoseconds here but reported and compared in
-        /// milliseconds, which is the number OpenSearch holds for it.
-        scale: i64,
     },
 }
 
@@ -477,27 +459,14 @@ impl boostcore::collector::Collector for SortCollector {
     }
 }
 
-/// A raw column value as the sort value it stands for.
-fn scaled(v: SortValue, scale: i64) -> SortValue {
-    if scale <= 1 {
-        return v;
-    }
-    match v {
-        SortValue::I64(n) => SortValue::I64(n.div_euclid(scale)),
-        SortValue::U64(n) => SortValue::U64(n / scale as u64),
-        SortValue::F64(n) => SortValue::F64(n / scale as f64),
-        other => other,
-    }
-}
-
 impl SortSegmentCollector {
     fn read_key(&self, i: usize, doc: boostcore::DocId, score: boostcore::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
             SortSource::Doc => SortValue::I64(doc as i64),
-            SortSource::Column { desc, mode, scale, .. } => self.columns[i]
+            SortSource::Column { desc, mode, .. } => self.columns[i]
                 .as_ref()
-                .map(|c| scaled(c.read(doc, *desc, mode.as_deref()), *scale))
+                .map(|c| c.read(doc, *desc, mode.as_deref()))
                 .unwrap_or(SortValue::Missing),
         }
     }
@@ -536,13 +505,9 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
         let mut block = self.block.take().unwrap();
         block.fetch_block(docs, &col);
         let desc = self.desc[0];
-        let scale = match &self.sources[0] {
-            SortSource::Column { scale, .. } => *scale,
-            _ => 1,
-        };
         let after = self.after.as_ref().and_then(|a| a.first().cloned());
         for (doc, raw) in block.iter_docid_vals(docs, &col) {
-            let Some(v) = decode_col_value(raw, ty).map(|v| scaled(v, scale)) else { continue };
+            let Some(v) = decode_col_value(raw, ty) else { continue };
             // the vectorized path has to honour the page boundary too
             if let Some(marker) = &after {
                 let ord = v.cmp_asc(marker);
@@ -645,16 +610,6 @@ struct Cand {
     /// the order this document's write arrived in; filled once the candidates
     /// from every segment are together, and only used to settle ties
     seq: u64,
-}
-
-/// Is this sort key a date field, whose values need rescaling on the way out?
-/// Does this sort key need rescaling on the way out?
-///
-/// The column counts nanoseconds either way, but a `date` reports
-/// milliseconds and a `date_nanos` reports the nanoseconds themselves -- that
-/// resolution is the whole reason for the second type.
-fn date_sort_key(store: &Store, targets: &[String], field: &str) -> bool {
-    date_sort_kind(store, targets, field) == Some(false)
 }
 
 /// Which kind of date a sort key names, if it names one at all: `Some(false)`
@@ -4810,10 +4765,10 @@ pub fn run(
                     || def.get("weighted_avg").is_some()
                     || def.get("auto_date_histogram").is_some()
                     || def.get("variable_width_histogram").is_some()
-                    // calendar units are not fixed lengths, which is all
-                    // BoostCore's date histogram knows how to step by, and a
-                    // named zone is a history of offsets it knows nothing of
-                    || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
+                    // a date is a number in the index, and BoostCore's date
+                    // histogram reads a date column, so every date histogram
+                    // is walked here
+                    || def.get("date_histogram").is_some()
                     // a range field holds no single value to bucket a document
                     // by, so BoostCore's histogram sees nothing there at all
                     || def
@@ -5173,7 +5128,6 @@ pub fn run(
                         name: "_seq".to_string(),
                         desc: k.desc,
                         mode: k.mode.clone(),
-                        scale: 1,
                     },
                     // The values of a field inside a nested object belong to
                     // the object, not to the document, so a sort that does not
@@ -5184,20 +5138,15 @@ pub fn run(
                             name: "_obs_no_such_column".to_string(),
                             desc: k.desc,
                             mode: k.mode.clone(),
-                            scale: 1,
                         }
                     }
-                    // a `date` is held in nanoseconds here and reported in
-                    // milliseconds, which is the number OpenSearch keeps for it
+                    // a date is a number in the index -- milliseconds, or
+                    // nanoseconds for a date_nanos -- which is the number
+                    // OpenSearch reports, so nothing is rescaled
                     _ => SortSource::Column {
                         name: ctx.column_name(&k.field, false),
                         desc: k.desc,
                         mode: k.mode.clone(),
-                        scale: if ctx.mapping.type_of(&k.field) == Some("date") {
-                            1_000_000
-                        } else {
-                            1
-                        },
                     },
                 })
                 .collect();
@@ -5758,10 +5707,6 @@ pub fn run(
         None => None,
     };
 
-    let date_keys: Vec<bool> = sort_keys
-        .iter()
-        .map(|k| date_sort_key(store, &targets, &k.field))
-        .collect();
     // a clause given a name says so on every hit it matched
     let page_ids: Vec<String> = all_hits.iter().map(|h| h.id.clone()).collect();
     let named = if extras.named {
@@ -5849,17 +5794,10 @@ pub fn run(
                 });
             }
             if !h.sort.is_empty() {
-                // a date column counts in nanoseconds; a sort value is
-                // reported in milliseconds, as the field was written
-                hit["sort"] = Value::Array(
-                    h.sort
-                        .iter()
-                        .zip(date_keys.iter())
-                        // the value is already in the unit the field reports
-                        // in, so nothing is scaled on the way out
-                        .map(|(s, _)| s.to_json_scaled(false))
-                        .collect(),
-                );
+                // the column holds the number the field reports -- a date is
+                // milliseconds, a date_nanos is nanoseconds -- so a sort value
+                // goes out as it was read
+                hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
@@ -7094,23 +7032,9 @@ fn peelable_here(def: &Value) -> bool {
         "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
         "geo_distance", "percentile_ranks", "sampler", "diversified_sampler",
     ];
-    OWN.iter().any(|k| def.get(k).is_some())
-        || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
+    OWN.iter().any(|k| def.get(k).is_some()) || def.get("date_histogram").is_some()
 }
 
-/// A date histogram this engine has to run itself: one stepping by a calendar
-/// unit, or one reported in a zone that is not simply UTC.
-fn zoned_or_calendar(spec: &Value) -> bool {
-    if spec.get("calendar_interval").is_some() {
-        return true;
-    }
-    // any zone but UTC has to be placed here: even one that is on UTC today
-    // may not have been at the instant a bucket falls in
-    match spec.get("time_zone").and_then(|v| v.as_str()).map(|z| z.trim()) {
-        None | Some("") => false,
-        Some(z) => !matches!(z, "Z" | "UTC" | "utc" | "+00:00" | "-00:00" | "+0000" | "-0000"),
-    }
-}
 
 /// Count the documents a query matches, and run its sub-aggregations --
 /// including the ones BoostCore cannot parse, which are run here against the
@@ -7834,38 +7758,66 @@ fn run_date_range_agg(
         .map(|s| s.to_string())
         .or(mapped_format);
 
-    let iso = |v: &Value| crate::store::canonical_date_with(v, format.as_deref());
-    let millis = |v: &Value| {
-        iso(v)
-            .and_then(|s| crate::store::parse_date_lenient(&s))
-            .map(|d| (d.unix_timestamp_nanos() / 1_000_000) as i64)
+    // a bound is the number the index holds, and the date it stands for
+    let millis = |v: &Value| crate::store::date_number(v, format.as_deref(), false);
+    let iso = |v: &Value| {
+        millis(v).and_then(|ms| crate::store::format_millis(ms, "strict_date_optional_time"))
     };
     // a bound is named in the key the way it is reported beside it, not the
     // way the request happened to spell it
     let shown = |v: &Option<Value>| match v {
         // a bound written as a date is named in the key the way it is
         // reported beside it; one written as a number is a number
-        Some(Value::String(s)) => iso(&json!(s))
-            .and_then(|t| crate::store::parse_date_lenient(&t))
-            .map(iso_millis)
-            .unwrap_or_else(|| s.clone()),
+        Some(Value::String(s)) => iso(&json!(s)).unwrap_or_else(|| s.clone()),
         Some(other) if !other.is_null() => other.to_string(),
         _ => "*".to_string(),
     };
 
     let mut buckets = Vec::new();
     let mut keyed_out = serde_json::Map::new();
-    for range in spec.get("ranges").and_then(|r| r.as_array()).into_iter().flatten() {
+    // AbstractRangeBuilder sorts the ranges it was given by where they start,
+    // so the buckets come back in that order however the request listed them
+    let mut asked: Vec<Value> =
+        spec.get("ranges").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let edge = |range: &Value, key: &str, open: f64| -> f64 {
+        range
+            .get(key)
+            .filter(|v| !v.is_null())
+            .and_then(millis)
+            .map(|ms| ms as f64)
+            .unwrap_or(open)
+    };
+    asked.sort_by(|a, b| {
+        edge(a, "from", f64::NEG_INFINITY)
+            .total_cmp(&edge(b, "from", f64::NEG_INFINITY))
+            .then_with(|| edge(a, "to", f64::INFINITY).total_cmp(&edge(b, "to", f64::INFINITY)))
+    });
+    for range in &asked {
         let from = range.get("from").cloned().filter(|v| !v.is_null());
         let to = range.get("to").cloned().filter(|v| !v.is_null());
         let mut clause = serde_json::Map::new();
-        if let Some(f) = from.as_ref().and_then(iso) {
+        if let Some(f) = from.as_ref().and_then(millis) {
             clause.insert("gte".into(), json!(f));
         }
-        if let Some(t) = to.as_ref().and_then(iso) {
+        if let Some(t) = to.as_ref().and_then(millis) {
             clause.insert("lt".into(), json!(t));
         }
+        // the bounds are already the numbers the index holds, whatever format
+        // the field itself was written in
+        if !clause.is_empty() {
+            clause.insert("format".into(), json!("epoch_millis"));
+        }
         let unbounded = clause.is_empty();
+        // a document with no value stands in with what `missing` names, and
+        // so belongs to whichever bucket that value falls in
+        let missing_here = missing
+            .as_ref()
+            .and_then(millis)
+            .map(|ms| {
+                from.as_ref().and_then(millis).map(|f| ms >= f).unwrap_or(true)
+                    && to.as_ref().and_then(millis).map(|t| ms < t).unwrap_or(true)
+            })
+            .unwrap_or(false);
         let filter = if unbounded {
             // documents with no value take part when a stand-in was named
             if missing.is_some() {
@@ -7873,6 +7825,11 @@ fn run_date_range_agg(
             } else {
                 json!({"exists": {"field": field}})
             }
+        } else if missing_here {
+            json!({"bool": {"should": [
+                {"range": {field.clone(): Value::Object(clause)}},
+                {"bool": {"must_not": [{"exists": {"field": field}}]}},
+            ], "minimum_should_match": 1}})
         } else {
             json!({"range": {field.clone(): Value::Object(clause)}})
         };
@@ -8402,15 +8359,14 @@ fn terms_key_view(raw: Value, ty: Option<&str>) -> (Value, Option<String>) {
             let n = raw.as_u64().unwrap_or(0);
             (json!(n), Some(if n != 0 { "true".into() } else { "false".into() }))
         }
-        Some("date") | Some("date_nanos") => {
-            let iso = raw.as_str().and_then(crate::store::canonical_date_str);
-            let millis = raw
-                .as_str()
-                .and_then(crate::store::parse_date_lenient)
-                .map(|d| d.unix_timestamp_nanos() / 1_000_000);
-            match (millis, iso) {
-                (Some(ms), Some(iso)) => (json!(ms as i64), Some(iso)),
-                _ => (raw, None),
+        Some(ty @ ("date" | "date_nanos")) => {
+            // a date key is the number the index holds -- milliseconds, or
+            // nanoseconds for a date_nanos -- and is shown as a date besides
+            let Some(n) = raw.as_f64() else { return (raw, None) };
+            let millis = if ty == "date_nanos" { n / 1e6 } else { n } as i64;
+            match crate::store::format_millis(millis, "strict_date_optional_time") {
+                Some(text) => (json!(n as i64), Some(text)),
+                None => (raw, None),
             }
         }
         _ => (raw, None),
@@ -8740,11 +8696,16 @@ fn multi_terms_key(v: Value, ty: Option<&str>) -> Value {
             Some(n) => Value::Bool(n != 0),
             None => v,
         },
-        Some("date") | Some("date_nanos") => v
-            .as_str()
-            .and_then(crate::store::canonical_date_str)
-            .map(Value::String)
-            .unwrap_or(v),
+        // a date key is shown as a date, from the number the index holds
+        Some(ty @ ("date" | "date_nanos")) => {
+            let millis = v.as_f64().map(|n| if ty == "date_nanos" { n / 1e6 } else { n });
+            millis
+                .and_then(|ms| {
+                    crate::store::format_millis(ms as i64, "strict_date_optional_time")
+                })
+                .map(Value::String)
+                .unwrap_or(v)
+        }
         _ => v,
     }
 }
@@ -9210,7 +9171,21 @@ fn run_auto_date_histogram(
     let (Some(lo), Some(hi)) = (read("__min"), read("__max")) else {
         return Ok(json!({"buckets": [], "interval": "1s"}));
     };
-    let span_ns = (hi - lo).max(0.0);
+    // a date is a number in the index: milliseconds, or nanoseconds for a
+    // date_nanos
+    let per_ns: f64 = field
+        .as_str()
+        .and_then(|f| {
+            targets.iter().filter_map(|n| store.get(n)).find_map(|st| {
+                match st.read().mapping.type_of(f) {
+                    Some("date_nanos") => Some(1.0),
+                    Some(t) if t.starts_with("date") => Some(1_000_000.0),
+                    _ => None,
+                }
+            })
+        })
+        .unwrap_or(1.0);
+    let span_ns = ((hi - lo) * per_ns).max(0.0);
 
     // label, the unit the histogram steps by, and roughly how long it is
     const NS: f64 = 1e9;
@@ -9858,9 +9833,17 @@ fn run_composite_agg(
         let (Some(lo), Some(hi)) = (read("__min"), read("__max")) else {
             return Ok(json!({"buckets": []}));
         };
-        // the extremes are read in nanoseconds; a bucket is named in
-        // milliseconds
-        let (lo, hi) = (lo / 1e6, hi / 1e6);
+        // a bucket is named in milliseconds, and a date_nanos reads out in
+        // nanoseconds
+        let per: f64 = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| match st.read().mapping.type_of(field) {
+                Some("date_nanos") => Some(1e6),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        let (lo, hi) = (lo / per, hi / per);
         let first = ((lo - shift) / step).floor() * step + shift;
         // the rest of the sources are a composite of their own, run once
         // inside each step
@@ -10202,6 +10185,19 @@ fn run_calendar_histogram(
                 .unwrap_or(false)
         });
     let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
+    // A date is a number in the index: milliseconds, or nanoseconds for a
+    // date_nanos. A date_range keeps its endpoints as text, which BoostCore
+    // reads back as a date column counting nanoseconds.
+    let per_ns: f64 = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| match st.read().mapping.type_of(&field) {
+            Some("date_nanos") => Some(1.0),
+            // a date_range holds its endpoints as dates do, in milliseconds
+            Some(t) if t.starts_with("date") => Some(1_000_000.0),
+            _ => None,
+        })
+        .unwrap_or(1.0);
     let (mut lo_ns, mut hi_ns) = (0.0f64, 0.0f64);
     if !ranged {
         let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
@@ -10209,12 +10205,32 @@ fn run_calendar_histogram(
             "__min": {"min": {"field": field}},
             "__max": {"max": {"field": field}},
         });
-        let (_, extremes) = filtered_count(store, targets, &base, &Some(probe))?;
-        // the date column counts in nanoseconds, which is what min/max read out
-        let read = |k: &str| -> Option<f64> {
-            extremes.as_ref()?.get(k)?.get("value")?.as_f64()
-        };
-        let (Some(a), Some(b)) = (read("__min"), read("__max")) else {
+        // one index may hold the field as a date and another as a date_nanos,
+        // so each is asked in its own unit before the two spans are joined
+        let mut span: Option<(f64, f64)> = None;
+        for target in targets {
+            let one = std::slice::from_ref(target);
+            let per = store
+                .get(target)
+                .map(|st| match st.read().mapping.type_of(&field) {
+                    Some("date_nanos") => 1.0,
+                    Some(t) if t.starts_with("date") => 1_000_000.0,
+                    _ => 1.0,
+                })
+                .unwrap_or(per_ns);
+            let (_, extremes) = filtered_count(store, one, &base, &Some(probe.clone()))?;
+            let read = |k: &str| -> Option<f64> {
+                extremes.as_ref()?.get(k)?.get("value")?.as_f64()
+            };
+            if let (Some(a), Some(b)) = (read("__min"), read("__max")) {
+                let (a, b) = (a * per, b * per);
+                span = Some(match span {
+                    Some((lo, hi)) => (lo.min(a), hi.max(b)),
+                    None => (a, b),
+                });
+            }
+        }
+        let Some((a, b)) = span else {
             return Ok(json!({"buckets": []}));
         };
         (lo_ns, hi_ns) = (a, b);
@@ -10231,12 +10247,12 @@ fn run_calendar_histogram(
             extremes.as_ref()?.get(k)?.get("value")?.as_f64()
         };
         match (read("__min"), read("__max")) {
-            (Some(a), Some(b)) => (lo_ns, hi_ns) = (a, b),
+            (Some(a), Some(b)) => (lo_ns, hi_ns) = (a * per_ns, b * per_ns),
             _ => return Ok(json!({"buckets": []})),
         }
     }
-    // bounds are written the way a document would be, so they arrive in
-    // milliseconds and have to meet the column's nanoseconds
+    // bounds are written the way a document would be, so they arrive as a date
+    // and have to meet the nanoseconds the calendar is walked in
     let bound_ns = |key: &str| -> Option<f64> {
         let v = bounds?.get(key)?;
         crate::store::canonical_date(v)
