@@ -13,9 +13,8 @@ Run against the YAML tests in OpenSearch's `rest-api-spec`, all 409 files:
 
 | | |
 |---|---|
-| sections passed | **1,426 of 1,427** (99.9%) |
+| sections passed | **1,427 of 1,427** (100%) |
 | skipped | 77 (features the suite itself marks as not applicable) |
-| not passing | `delete/50_refresh` — refresh reaching one shard at a time |
 
 Measured against OpenSearch 3.1.0 in the same Docker VM, same corpus (200k
 http-log documents), same query mix, five runs a side, median:

@@ -1,6 +1,6 @@
 # ที่เหลือ และบทเรียนระหว่างทาง
 
-รันทั้ง suite (409 ไฟล์): **1,426 ผ่าน · 1 ตก · 77 skip = 99.9%**
+รันทั้ง suite (409 ไฟล์): **1,427 ผ่าน · 0 ตก · 77 skip = 100%**
 Phase 1 manifest: **398/398** · Phase 3 manifest: 1,098/1,100
 
 ## บทเรียนใหญ่ที่สุด: อ่านของจริงดีกว่าเดา
@@ -44,14 +44,28 @@ JSON ก็คือฟิลด์ในสคีมาแบน ⇒ BoostCore 
 `MappedFieldType.termsQuery` เขียนไว้ตรง ๆ ว่า "build a constant-scoring query"
 ⇒ แมตช์สองคำไม่ได้บอกอะไรมากกว่าแมตช์คำเดียว ลำดับจึงตกไปที่ doc id
 
-## 1 ตัวที่เหลือ
+## refresh ทีละ shard — ปิดแล้ว
 
-### refresh ถึงทีละ shard
+`delete/50_refresh` เคยเขียนไว้ว่าแก้ไม่ได้ เพราะ index เดียว = writer เดียว
+`refresh` จึงเห็นทุกอย่างพร้อมกัน · ที่จริงแก้ได้ ถ้าเลื่อนตัว **operation** เอง
+ไม่ใช่เลื่อน commit:
 
-`delete/50_refresh` — index หนึ่งที่นี่คือ tantivy index เดียว มี writer เดียว
-`refresh` จึงทำให้ทุกอย่างเห็นพร้อมกัน ไม่มีทางให้ delete บน shard หนึ่ง
-ยังมองไม่เห็นขณะที่อีก shard เห็นแล้ว · จะแก้ต้องกันเอกสารที่ยังไม่ refresh
-ไว้นอก writer ทีละ shard ซึ่งทำให้ realtime GET (ที่อ่านจาก writer) พังทั้งชุด
+- write ทุกตัวเข้าคิว `deferred` พร้อมเลข shard (routing เดิม ๆ ที่มีอยู่แล้ว)
+- `refresh=true` บน write → apply เฉพาะ op ของ shard นั้น แล้ว commit + reload
+- `_refresh` ทั้ง index → apply ทุก shard
+- realtime GET ไม่พัง เพราะอ่านจาก `pending` (สำเนา source) อยู่แล้ว ไม่ได้อ่านจาก writer
+
+ลำดับภายใน shard เดียวกันคงไว้ครบ (delete/add ของ id เดียวกันอยู่ shard เดียวกันเสมอ
+เพราะ routing เป็นฟังก์ชันของ id) ข้าม shard ไม่ต้องสนใจลำดับ
+
+คิวไม่ถูกเก็บไว้ยาว: เกิน 2,048 op หรือ writer ถูก reap หรือ pending budget เต็ม
+→ ส่งเข้า writer ทั้งหมด (ซึ่ง**ไม่ใช่**การทำให้เห็น — ยังต้อง commit + reload อยู่ดี)
+memory ตอน bulk 200k docs: 297 MB → 312 MB · index rate ไม่ขยับ (80.7k → 83.3k docs/s)
+
+เจอบั๊กเก่าระหว่างทางด้วย: `scaled_field: 1` (integer) กับ `1.53` (float) ลงคนละ
+column type ทำให้ range agg มองไม่เห็นตัวที่เป็น integer — เป็น flake ที่โผล่มา
+เพราะ deferral เปลี่ยนจังหวะที่เอกสารถึง writer · แก้โดย coerce ตัวเลขให้ตรงชนิด
+ที่ mapping บอกตั้งแต่ตอน index (1 → 1.0 สำหรับ float, 1.0 → 1 สำหรับ long)
 
 ## date เก็บเป็น millisecond ทั้งระบบแล้ว
 

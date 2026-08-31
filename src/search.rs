@@ -2089,7 +2089,7 @@ fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 /// OpenSearch hashes the routing value as UTF-16 -- each character as two
 /// bytes, low byte first -- with seed zero, and folds the result by the shard
 /// count the way a floor-mod does, so a negative hash still names a shard.
-fn routing_shard(routing: &str, shards: u64) -> u64 {
+pub(crate) fn routing_shard(routing: &str, shards: u64) -> u64 {
     let mut bytes = Vec::with_capacity(routing.len() * 2);
     for c in routing.encode_utf16() {
         bytes.push((c & 0xff) as u8);

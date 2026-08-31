@@ -2291,13 +2291,12 @@ pub fn write_doc_versioned(
         Some(v) => st.bump_to(id, true, v),
         None => st.bump(id, true, existed),
     };
+    // the shard a write belongs to decides which refresh will show it
+    let shard = st.shard_of_doc(id);
     // deleting is only needed when something is actually there to replace;
     // a bulk load of new documents should not queue a delete per document
     if existed {
-        let term = Term::from_field_text(st.fields.id, id);
-        if let Ok(w) = st.writer() {
-            w.delete_term(term);
-        }
+        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
     }
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
         return Err(err_caused_by(&kind, &reason, &cause));
@@ -2353,20 +2352,7 @@ pub fn write_doc_versioned(
         }
     }
     let doc = make_doc(&st.fields, id, indexed, &raw, seq);
-    match st.writer() {
-        Ok(w) => {
-            if let Err(e) = w.add_document(doc) {
-                return Err(err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "index_exception",
-                    e.to_string(),
-                ));
-            }
-        }
-        Err(e) => {
-            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "index_exception", e.to_string()));
-        }
-    }
+    st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
@@ -2387,10 +2373,8 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     if existed {
-        let term = Term::from_field_text(st.fields.id, id);
-        if let Ok(w) = st.writer() {
-            w.delete_term(term);
-        }
+        let shard = st.shard_of_doc(id);
+        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
         st.note_pending(id, None);
     }
     let body = json!({
@@ -2405,9 +2389,15 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     (body, if existed { StatusCode::OK } else { StatusCode::NOT_FOUND })
 }
 
-fn maybe_refresh(st: &mut IdxState, p: &Params) {
+/// A write that asked to refresh refreshes the shard it was written to, which
+/// is as far as a refresh reaches in OpenSearch. Without a shard to name --
+/// a bulk, which may have written to any of them -- everything is refreshed.
+fn maybe_refresh(st: &mut IdxState, p: &Params, shard: Option<u64>) {
     if flag(p, "refresh") {
-        let _ = st.refresh();
+        let _ = match shard {
+            Some(one) => st.refresh_shard(one),
+            None => st.refresh(),
+        };
     }
 }
 
@@ -2501,20 +2491,25 @@ async fn do_index(
     };
     let mut g = st.write();
     let id = id.unwrap_or_else(|| g.next_auto_id());
+    // A document written with a routing is only reachable by quoting the same
+    // routing back, so it has to be remembered -- before the write, because
+    // the routing is also what says which shard the write lands on.
+    let routed = p.get("routing").filter(|r| !r.is_empty()).cloned();
+    match &routed {
+        Some(r) => {
+            g.routing.insert(id.clone(), r.clone());
+        }
+        None => {
+            g.routing.remove(&id);
+        }
+    }
     match write_doc_checked(&mut g, &id, source, &op_type, None, &p) {
         Ok((mut body, status)) => {
-            // a document written with a routing is only reachable by quoting
-            // the same routing back, so it has to be remembered
-            match p.get("routing").filter(|r| !r.is_empty()) {
-                Some(r) => {
-                    g.routing.insert(id.clone(), r.clone());
-                    body["_routing"] = json!(r);
-                }
-                None => {
-                    g.routing.remove(&id);
-                }
+            if let Some(r) = &routed {
+                body["_routing"] = json!(r);
             }
-            maybe_refresh(&mut g, &p);
+            let shard = g.shard_of_doc(&id);
+            maybe_refresh(&mut g, &p, Some(shard));
             note_forced_refresh(&mut body, &p);
             (status, axum::Json(body)).into_response()
         }
@@ -2675,15 +2670,15 @@ pub async fn delete_doc_route(
         Ok(Some(v)) => {
             let existed = exists_doc(&g, &id);
             let (version, seq) = g.bump_to(&id, false, v);
+            // read before the routing is forgotten: it says which shard the
+            // document was on, and so which refresh can show the delete
+            let shard = g.shard_of_doc(&id);
             if existed {
-                let term = Term::from_field_text(g.fields.id, &id);
-                if let Ok(w) = g.writer() {
-                    w.delete_term(term);
-                }
+                g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
                 g.note_pending(&id, None);
             }
             g.routing.remove(&id);
-            maybe_refresh(&mut g, &p);
+            maybe_refresh(&mut g, &p, Some(shard));
             let mut body = json!({
                 "_index": g.name, "_id": id, "_version": version,
                 "result": if existed { "deleted" } else { "not_found" },
@@ -2708,9 +2703,10 @@ pub async fn delete_doc_route(
         )
             .into_response();
     }
+    let shard = g.shard_of_doc(&id);
     let (mut body, status) = delete_doc(&mut g, &id);
     g.routing.remove(&id);
-    maybe_refresh(&mut g, &p);
+    maybe_refresh(&mut g, &p, Some(shard));
     note_forced_refresh(&mut body, &p);
     (status, axum::Json(body)).into_response()
 }
@@ -4214,7 +4210,8 @@ pub async fn update_doc(
             }
         }
     }
-    maybe_refresh(&mut g, &p);
+    let shard = g.shard_of_doc(&id);
+    maybe_refresh(&mut g, &p, Some(shard));
     note_forced_refresh(&mut body_out, &p);
     let status = if result == "created" { StatusCode::CREATED } else { StatusCode::OK };
     (status, axum::Json(body_out)).into_response()
