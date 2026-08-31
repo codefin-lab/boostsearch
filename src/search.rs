@@ -718,6 +718,271 @@ fn replace_routing_exists(node: &mut Value, ids: &[String]) {
     }
 }
 
+/// A nested aggregation counts the objects at a path, not the documents that
+/// hold them, and everything under it works on those objects: a filter picks
+/// objects, a terms aggregation groups them, a metric reads their fields.
+///
+/// The objects are read back from the documents the query matched, which is
+/// the only place they are kept whole here.
+fn run_nested_over_objects(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    path: &str,
+    sub_aggs: &Option<Value>,
+) -> std::result::Result<Value, Response> {
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut objects: Vec<(String, Value)> = Vec::new();
+    for hit in &answer.hits {
+        let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let Some(source) = hit.get("_source") else { continue };
+        gather_objects(source, path, &id, &mut objects);
+    }
+    Ok(objects_agg(store, targets, &objects, path, sub_aggs))
+}
+
+/// Every object at a path inside one document, however deeply the lists nest.
+fn gather_objects(source: &Value, path: &str, id: &str, out: &mut Vec<(String, Value)>) {
+    let mut here: Vec<&Value> = vec![source];
+    for step in path.split('.') {
+        let mut next = Vec::new();
+        for node in here {
+            match node.get(step) {
+                Some(Value::Array(a)) => next.extend(a.iter()),
+                Some(other) => next.push(other),
+                None => {}
+            }
+        }
+        here = next;
+    }
+    for object in here {
+        out.push((id.to_string(), object.clone()));
+    }
+}
+
+/// Run the aggregations written under a nested one over its objects.
+fn objects_agg(
+    store: &Store,
+    targets: &[String],
+    objects: &[(String, Value)],
+    path: &str,
+    sub_aggs: &Option<Value>,
+) -> Value {
+    let mut out = json!({"doc_count": objects.len()});
+    let Some(reqs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else { return out };
+    for (name, def) in reqs {
+        let subs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+        let field_of = |spec: &Value| -> String {
+            let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+            field.strip_prefix(&format!("{path}.")).unwrap_or(field).to_string()
+        };
+        let values = |spec: &Value| -> Vec<(String, Value)> {
+            let leaf = field_of(spec);
+            objects
+                .iter()
+                .filter_map(|(id, o)| {
+                    o.pointer(&format!("/{}", leaf.replace('.', "/")))
+                        .map(|v| (id.clone(), v.clone()))
+                })
+                .collect()
+        };
+        if let Some(spec) = def.get("filter") {
+            let kept: Vec<(String, Value)> = objects
+                .iter()
+                .filter(|(_, o)| object_matches(spec, o, path))
+                .cloned()
+                .collect();
+            out[name.clone()] = objects_agg(store, targets, &kept, path, &subs);
+        } else if let Some(spec) = def.get("nested") {
+            let deeper = spec.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let leaf = deeper.strip_prefix(&format!("{path}.")).unwrap_or(deeper);
+            let mut inner = Vec::new();
+            for (id, o) in objects {
+                gather_objects(o, leaf, id, &mut inner);
+            }
+            out[name.clone()] = objects_agg(store, targets, &inner, deeper, &subs);
+        } else if def.get("reverse_nested").is_some() {
+            // back out to the documents the objects came from
+            let mut seen: Vec<String> = Vec::new();
+            for (id, _) in objects {
+                if !seen.contains(id) {
+                    seen.push(id.clone());
+                }
+            }
+            let mut answer = json!({"doc_count": seen.len()});
+            // above the objects the documents are documents again, and what is
+            // asked of them is asked the ordinary way
+            if let Some(subs) = subs.as_ref() {
+                let narrowed = json!({"bool": {"filter": [{"terms": {"_id": seen}}]}});
+                if let Ok((_, Some(Value::Object(inner)))) =
+                    count_with_sub_aggs(store, targets, &narrowed, &Some(subs.clone()), false)
+                {
+                    for (k, v) in inner {
+                        answer[k] = v;
+                    }
+                }
+            }
+            out[name.clone()] = answer;
+        } else if let Some(spec) = def.get("terms") {
+            let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let min = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
+            let mut groups: Vec<(Value, Vec<(String, Value)>)> = Vec::new();
+            for ((id, object), (_, value)) in objects.iter().zip(values(spec).into_iter()) {
+                match groups.iter_mut().find(|(k, _)| *k == value) {
+                    Some((_, list)) => list.push((id.clone(), object.clone())),
+                    None => groups.push((value, vec![(id.clone(), object.clone())])),
+                }
+            }
+            groups.sort_by(|a, b| {
+                b.1.len().cmp(&a.1.len()).then_with(|| key_order(&a.0, &b.0))
+            });
+            let buckets: Vec<Value> = groups
+                .into_iter()
+                .filter(|(_, list)| list.len() as u64 >= min)
+                .take(size)
+                .map(|(key, list)| {
+                    let mut b = json!({"key": key, "doc_count": list.len()});
+                    if let Some(Value::Object(inner)) = subs
+                        .as_ref()
+                        .map(|_| objects_agg(store, targets, &list, path, &subs))
+                    {
+                        for (k, v) in inner {
+                            if k != "doc_count" {
+                                b[k] = v;
+                            }
+                        }
+                    }
+                    b
+                })
+                .collect();
+            out[name.clone()] = json!({
+                "doc_count_error_upper_bound": 0,
+                "sum_other_doc_count": 0,
+                "buckets": buckets,
+            });
+        } else if let Some(spec) = def.get("composite") {
+            let sources: Vec<(String, Value)> = spec
+                .get("sources")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let (n, body) = e.as_object()?.iter().next()?;
+                            Some((n.clone(), body.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            // a marker says which page was already seen
+            let after: Option<Vec<Value>> = spec.get("after").and_then(|a| a.as_object()).map(
+                |o| sources.iter().map(|(n, _)| o.get(n).cloned().unwrap_or(Value::Null)).collect(),
+            );
+            let mut groups: Vec<(Vec<Value>, usize)> = Vec::new();
+            for (_, object) in objects {
+                let mut key = Vec::new();
+                let mut whole = true;
+                for (_, body) in &sources {
+                    let inner = body.get("terms").unwrap_or(body);
+                    let leaf = field_of(inner);
+                    match object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
+                        Some(v) => key.push(v.clone()),
+                        None => {
+                            whole = false;
+                            break;
+                        }
+                    }
+                }
+                if !whole {
+                    continue;
+                }
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => *n += 1,
+                    None => groups.push((key, 1)),
+                }
+            }
+            groups.sort_by(|a, b| keys_order(&a.0, &b.0));
+            if let Some(after) = after {
+                groups.retain(|(key, _)| keys_order(key, &after) == Ordering::Greater);
+            }
+            let buckets: Vec<Value> = groups
+                .into_iter()
+                .take(size)
+                .map(|(key, n)| {
+                    let named: serde_json::Map<String, Value> = sources
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .zip(key.into_iter())
+                        .collect();
+                    json!({"key": Value::Object(named), "doc_count": n})
+                })
+                .collect();
+            let mut answer = json!({"buckets": buckets});
+            if let Some(last) = answer["buckets"].as_array().and_then(|a| a.last()) {
+                answer["after_key"] = last["key"].clone();
+            }
+            out[name.clone()] = answer;
+        } else {
+            // a metric reads the objects' own values
+            let kind = def
+                .as_object()
+                .and_then(|o| o.keys().map(|k| k.to_string()).next())
+                .unwrap_or_default();
+            let spec = def.get(&kind).cloned().unwrap_or(json!({}));
+            let numbers: Vec<f64> =
+                values(&spec).iter().filter_map(|(_, v)| number_of(v)).collect();
+            let value = match kind.as_str() {
+                "max" => numbers.iter().cloned().reduce(f64::max),
+                "min" => numbers.iter().cloned().reduce(f64::min),
+                "sum" => Some(numbers.iter().sum()),
+                "avg" => (!numbers.is_empty())
+                    .then(|| numbers.iter().sum::<f64>() / numbers.len() as f64),
+                "value_count" => Some(numbers.len() as f64),
+                _ => None,
+            };
+            if let Some(v) = value {
+                out[name.clone()] = json!({"value": v});
+            }
+        }
+    }
+    out
+}
+
+/// A bucket key as text, for the cases that only need a name for it.
+fn key_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Two bucket keys in order: numbers as numbers, everything else as text.
+fn key_order(a: &Value, b: &Value) -> Ordering {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&y.as_f64().unwrap_or(0.0))
+            .unwrap_or(Ordering::Equal),
+        _ => key_text(a).cmp(&key_text(b)),
+    }
+}
+
+/// A list of keys in order, compared one after another.
+fn keys_order(a: &[Value], b: &[Value]) -> Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = key_order(x, y);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 /// Say which nested object a sort reads inside, wherever one is written under
 /// an aggregation that has already entered that object.
 fn scope_sorts_to(node: &mut Value, path: &str) {
@@ -6539,6 +6804,18 @@ fn run_peeled_agg(
                 .pointer("/nested/path")
                 .and_then(|p| p.as_str())
                 .map(|s| s.to_string());
+            // what sits under a nested aggregation works on the objects at that
+            // path, and only the hits it may ask for come from the documents
+            let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+            let asks_for_hits = sub_aggs
+                .as_ref()
+                .map(|s| s.to_string().contains("top_hits"))
+                .unwrap_or(false);
+            if let (Some(path), false, true) =
+                (path.as_deref(), asks_for_hits, sub_aggs.is_some())
+            {
+                return run_nested_over_objects(store, targets, query_json, path, &sub_aggs);
+            }
             let mut answer = run_filter_agg(store, targets, query_json, &{
                 let mut d = def.clone();
                 // inside a nested aggregation the sorting is done in that
@@ -6835,6 +7112,21 @@ fn run_field_terms_agg(
     let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
     let Some(res) = res else { return Ok(json!({"buckets": []})) };
     let mut answer = res.get("__f").cloned().unwrap_or_else(|| json!({"buckets": []}));
+    // the order a terms aggregation is asked for by default is most documents
+    // first, and between two of the same size the smaller key
+    if order.is_none() {
+        if let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+            buckets.sort_by(|a, b| {
+                let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+                let key = |v: &Value| match v.get("key") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
+                count(b).cmp(&count(a)).then_with(|| key(a).cmp(&key(b)))
+            });
+        }
+    }
     if let Some(peeled) = peeled_subs.as_ref().and_then(|v| v.as_object()) {
         let empty = Vec::new();
         let buckets = answer["buckets"].as_array().cloned().unwrap_or(empty);
