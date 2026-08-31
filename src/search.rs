@@ -7570,7 +7570,99 @@ fn run_multi_terms_agg(
     let mut flat: Vec<(Vec<Value>, u64, serde_json::Map<String, Value>)> = Vec::new();
     flatten_multi_terms(&res, 0, fields.len(), &mut Vec::new(), &mut flat);
 
-    let total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    let mut total: u64 = flat.iter().map(|(_, c, _)| *c).sum();
+    // Each shard answers with its own top few and says how much it left out;
+    // the counts that come back are therefore the shards' own, not the whole
+    // index's. That only shows where there is more than one shard and a
+    // `shard_size` small enough to cut something off.
+    let shards = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count())
+        .max()
+        .unwrap_or(1);
+    let shard_size = spec.get("shard_size").and_then(|v| v.as_u64());
+    if shards > 1 && shard_size.is_some() {
+        let shard_size = shard_size.unwrap().max(1) as usize;
+        let probe = json!({
+            "query": query.clone(),
+            "size": 10_000,
+            "_source": fields.clone(),
+        });
+        if let Ok(answer) = run(store, &targets.join(","), &probe, &Params::new()) {
+            let mut per_shard: std::collections::HashMap<u64, Vec<Vec<Value>>> =
+                std::collections::HashMap::new();
+            for hit in &answer.hits {
+                let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+                let mut combos: Vec<Vec<Value>> = vec![Vec::new()];
+                let mut usable = true;
+                for (i, field) in fields.iter().enumerate() {
+                    let at = hit.pointer(&format!("/_source/{}", field.replace('.', "/")));
+                    let values: Vec<Value> = match at {
+                        Some(Value::Array(a)) => a.clone(),
+                        Some(other) => vec![other.clone()],
+                        None => match missings.get(i).and_then(|m| m.clone()) {
+                            Some(m) => vec![m],
+                            None => {
+                                usable = false;
+                                break;
+                            }
+                        },
+                    };
+                    combos = combos
+                        .into_iter()
+                        .flat_map(|c| {
+                            values.iter().map(move |v| {
+                                let mut c = c.clone();
+                                c.push(v.clone());
+                                c
+                            })
+                        })
+                        .collect();
+                }
+                if !usable {
+                    continue;
+                }
+                // a document written with a routing value is placed by that
+                // value rather than by its id
+                let placed_by = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .find_map(|st| st.read().routing.get(id).cloned())
+                    .unwrap_or_else(|| id.to_string());
+                per_shard
+                    .entry(routing_shard(&placed_by, shards))
+                    .or_default()
+                    .extend(combos);
+            }
+            let mut merged: std::collections::HashMap<String, (Vec<Value>, u64)> =
+                std::collections::HashMap::new();
+            let mut other = 0u64;
+            for (_, combos) in per_shard {
+                let mut counts: std::collections::HashMap<String, (Vec<Value>, u64)> =
+                    std::collections::HashMap::new();
+                for c in combos {
+                    let key = format!("{c:?}");
+                    counts.entry(key).or_insert((c, 0)).1 += 1;
+                }
+                let here: u64 = counts.values().map(|(_, n)| *n).sum();
+                let mut ranked: Vec<(String, (Vec<Value>, u64))> = counts.into_iter().collect();
+                ranked.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(&b.0)));
+                ranked.truncate(shard_size);
+                let kept: u64 = ranked.iter().map(|(_, (_, n))| *n).sum();
+                other += here - kept;
+                for (key, (combo, n)) in ranked {
+                    let slot = merged.entry(key).or_insert((combo, 0));
+                    slot.1 += n;
+                }
+            }
+            flat = merged
+                .into_values()
+                .map(|(key, n)| (key, n, serde_json::Map::new()))
+                .collect();
+            total = flat.iter().map(|(_, c, _)| *c).sum::<u64>() + other;
+        }
+    }
     // `min_doc_count: 0` asks for combinations the index holds but the query
     // did not match, so the key space comes from the whole index
     if min_doc_count == 0 && main_query.is_some() {

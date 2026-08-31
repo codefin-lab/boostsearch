@@ -2968,6 +2968,16 @@ pub async fn bulk(
                     }
                 }
                 let src = source.unwrap_or_else(|| json!({}));
+                // a routing named on the action line places the document, and
+                // has to be remembered the same way a single write's does
+                match meta.get("routing").and_then(|v| v.as_str()).filter(|r| !r.is_empty()) {
+                    Some(r) => {
+                        g.routing.insert(id.clone(), r.to_string());
+                    }
+                    None => {
+                        g.routing.remove(&id);
+                    }
+                }
                 // a document the mapping cannot accept is one item's failure,
                 // not the whole request's
                 if let Some((kind, reason, cause)) = document_complaint(&g, &src) {
