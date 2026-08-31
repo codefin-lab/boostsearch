@@ -102,10 +102,10 @@ pub fn parse_datetime(s: &str) -> Option<boostcore::DateTime> {
     boostcore::time::OffsetDateTime::parse(s, &Rfc3339).ok().map(boostcore::DateTime::from_utc)
 }
 
-pub(crate) fn any_of(terms: Vec<Term>) -> Box<dyn Query> {
+pub(crate) fn any_of(mut terms: Vec<Term>) -> Box<dyn Query> {
     match terms.len() {
         0 => Box::new(EmptyQuery),
-        1 => Box::new(TermQuery::new(terms.into_iter().next().unwrap(), IndexRecordOption::Basic)),
+        1 => Box::new(TermQuery::new(terms.remove(0), IndexRecordOption::Basic)),
         _ => Box::new(BooleanQuery::new(
             terms
                 .into_iter()

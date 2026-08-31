@@ -741,10 +741,10 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 }
             }
             if !per_field.is_empty() {
-                let sub: Box<dyn Query> = if per_field.len() == 1 {
-                    per_field.into_iter().next().unwrap()
-                } else {
-                    Box::new(BooleanQuery::union(per_field))
+                let mut per_field = per_field;
+                let sub: Box<dyn Query> = match per_field.len() {
+                    1 => per_field.remove(0),
+                    _ => Box::new(BooleanQuery::union(per_field)),
                 };
                 let occur = if pending_not {
                     Occur::MustNot
@@ -794,10 +794,10 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         if per_field.is_empty() {
             continue;
         }
-        let sub: Box<dyn Query> = if per_field.len() == 1 {
-            per_field.into_iter().next().unwrap()
-        } else {
-            Box::new(BooleanQuery::union(per_field))
+        let mut per_field = per_field;
+        let sub: Box<dyn Query> = match per_field.len() {
+            1 => per_field.remove(0),
+            _ => Box::new(BooleanQuery::union(per_field))
         };
         let occur = if pending_not {
             Occur::MustNot

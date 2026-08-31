@@ -442,17 +442,9 @@ pub async fn field_caps(
                 .unwrap_or(true);
             for kind in kinds {
             let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
-            let slot = entry
-                .as_object_mut()
-                .unwrap()
-                .entry(kind.clone())
-                .or_insert_with(|| caps_for(&kind));
+            let slot = entry_of(entry, &kind, || caps_for(&kind));
             if !has_doc_values {
-                let where_not = slot
-                    .as_object_mut()
-                    .unwrap()
-                    .entry("__unaggregatable".to_string())
-                    .or_insert_with(|| json!([]));
+                let where_not = entry_of(slot, "__unaggregatable", || json!([]));
                 if let Some(a) = where_not.as_array_mut() {
                     a.push(json!(n));
                 }
@@ -460,27 +452,15 @@ pub async fn field_caps(
             if !indexed {
                 // remember where it is not searchable; if that is everywhere,
                 // the field simply is not searchable
-                let where_not = slot
-                    .as_object_mut()
-                    .unwrap()
-                    .entry("__unsearchable".to_string())
-                    .or_insert_with(|| json!([]));
+                let where_not = entry_of(slot, "__unsearchable", || json!([]));
                 if let Some(a) = where_not.as_array_mut() {
                     a.push(json!(n));
                 }
             }
             if let Some(m) = meta.clone().and_then(|m| m.as_object().cloned()) {
-                let dst = slot
-                    .as_object_mut()
-                    .unwrap()
-                    .entry("meta".to_string())
-                    .or_insert_with(|| json!({}));
+                let dst = entry_of(slot, "meta", || json!({}));
                 for (mk, mv) in m {
-                    let list = dst
-                        .as_object_mut()
-                        .unwrap()
-                        .entry(mk)
-                        .or_insert_with(|| json!([]));
+                    let list = entry_of(dst, &mk, || json!([]));
                     if let Some(a) = list.as_array_mut() {
                         if !a.contains(&mv) {
                             a.push(mv);
@@ -489,11 +469,7 @@ pub async fn field_caps(
                 }
             }
             // a type seen in only some indices lists the ones it came from
-            let indices = slot
-                .as_object_mut()
-                .unwrap()
-                .entry("__indices".to_string())
-                .or_insert_with(|| json!([]));
+            let indices = entry_of(slot, "__indices", || json!([]));
             if let Some(a) = indices.as_array_mut() {
                 a.push(json!(n));
             }
@@ -548,9 +524,10 @@ pub async fn field_caps(
         let type_count = per_type.as_object().map(|o| o.len()).unwrap_or(0);
         if let Some(o) = per_type.as_object_mut() {
             for (_, v) in o.iter_mut() {
-                let idx = v.as_object_mut().unwrap().remove("__indices");
-                let unsearchable = v.as_object_mut().unwrap().remove("__unsearchable");
-                let unaggregatable = v.as_object_mut().unwrap().remove("__unaggregatable");
+                let Some(o) = v.as_object_mut() else { continue };
+                let idx = o.remove("__indices");
+                let unsearchable = o.remove("__unsearchable");
+                let unaggregatable = o.remove("__unaggregatable");
                 if let (Some(Value::Array(no)), Some(Value::Array(all))) =
                     (unaggregatable, idx.clone())
                 {
@@ -797,7 +774,7 @@ pub async fn validate_query(
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
         };
-        if let Err(e) = crate::query::build(&ctx, probe.get("query").unwrap()) {
+        if let Err(e) = crate::query::build(&ctx, &query) {
             let mut out = json!({"_shards": shards, "valid": false});
             if p.get("explain").map(|v| v != "false").unwrap_or(false) {
                 // the name of the index it was read against, then what went
@@ -817,7 +794,7 @@ pub async fn validate_query(
                         .iter()
                         .map(|n| json!({
                             "index": n, "valid": true,
-                            "explanation": describe_query(probe.get("query").unwrap()),
+                            "explanation": describe_query(&query),
                         }))
                         .collect::<Vec<_>>()
                 );

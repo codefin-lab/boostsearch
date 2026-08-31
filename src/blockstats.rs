@@ -236,9 +236,8 @@ impl Weight for BlockRangeQuery {
 
     fn count(&self, reader: &SegmentReader) -> boostcore::Result<u32> {
         // still has to respect deletes, so fall through to the default when any
-        if reader.alive_bitset().is_some() {
+        if let Some(alive) = reader.alive_bitset() {
             let docs = self.docids(reader);
-            let alive = reader.alive_bitset().unwrap();
             return Ok(docs.into_iter().filter(|d| alive.is_alive(*d)).count() as u32);
         }
         Ok(self.docids(reader).len() as u32)

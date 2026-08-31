@@ -74,16 +74,11 @@ pub(crate) fn settings_view(raw: &Value, name: Option<&str>, flat: bool) -> Valu
         let mut cur = &mut nested;
         let segs: Vec<&str> = k.split('.').collect();
         for seg in &segs[..segs.len() - 1] {
-            cur = cur
-                .as_object_mut()
-                .unwrap()
-                .entry(seg.to_string())
-                .or_insert_with(|| json!({}));
-            if !cur.is_object() {
-                *cur = json!({});
-            }
+            cur = entry_of(cur, seg, || json!({}));
         }
-        cur.as_object_mut().unwrap().insert(segs[segs.len() - 1].to_string(), v);
+        if let Some(o) = cur.as_object_mut() {
+            o.insert(segs[segs.len() - 1].to_string(), v);
+        }
     }
     nested
 }
@@ -175,7 +170,7 @@ pub async fn put_settings(
                 o.retain(|k, _| g.setting(k.strip_prefix("index.").unwrap_or(k)).is_none());
             }
         }
-        let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+        let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &patch);
         g.settings = settings;
         g.save_meta();

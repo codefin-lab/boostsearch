@@ -252,11 +252,12 @@ pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query
             None => sub,
         });
     }
-    if subs.is_empty() {
-        return Ok(Box::new(EmptyQuery));
-    }
-    if subs.len() == 1 {
-        return Ok(subs.into_iter().next().unwrap());
+    // one clause is the query; none is a query that matches nothing
+    let mut subs = subs;
+    match subs.len() {
+        0 => return Ok(Box::new(EmptyQuery)),
+        1 => return Ok(subs.remove(0)),
+        _ => {}
     }
     // most_fields/cross_fields sum the per-field scores; best_fields takes the best
     if kind == "most_fields" || kind == "cross_fields" || kind == "bool_prefix" {

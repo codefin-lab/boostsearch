@@ -284,7 +284,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     }
     let general: Box<dyn Query> = match subs.len() {
         0 => Box::new(EmptyQuery),
-        1 => subs.into_iter().next().unwrap(),
+        1 => subs.remove(0),
         _ => Box::new(BooleanQuery::new(
             subs.into_iter().map(|s| (Occur::Should, s)).collect(),
         )),

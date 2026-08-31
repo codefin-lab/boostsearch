@@ -192,7 +192,8 @@ impl Store {
         for (_, t) in matched {
             for key in ["settings", "mappings", "aliases"] {
                 if let Some(v) = t.get(key) {
-                    let slot = merged.as_object_mut().unwrap().entry(key).or_insert(serde_json::json!({}));
+                    let Some(into) = merged.as_object_mut() else { continue };
+                    let slot = into.entry(key).or_insert(serde_json::json!({}));
                     deep_merge(slot, v);
                 }
             }

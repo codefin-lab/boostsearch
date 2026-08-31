@@ -314,11 +314,11 @@ pub(crate) fn run_geo_distance_agg(
         if let Some(subs) = sub_aggs.as_ref() {
             // the documents in this bucket are named outright, which is the
             // only handle a distance leaves behind
-            let narrowed = Some(json!({"bool": {"filter": [{"terms": {"_id": ids}}]}}));
+            let narrowed = json!({"bool": {"filter": [{"terms": {"_id": ids}}]}});
             let (_, sub) = count_with_sub_aggs(
                 store,
                 targets,
-                &narrowed.clone().unwrap(),
+                &narrowed,
                 &Some(subs.clone()),
                 weighted,
             )?;

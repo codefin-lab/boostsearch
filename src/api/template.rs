@@ -248,7 +248,7 @@ pub(crate) fn compose_template(store: &Store, body: &Value) -> Value {
         // an alias is defined whole: a later layer replaces the definition
         // rather than adding to it
         if let Some(Value::Object(o)) = layer.get("aliases") {
-            let slot = aliases.as_object_mut().unwrap();
+            let Some(slot) = aliases.as_object_mut() else { continue };
             for (name, def) in o {
                 slot.insert(name.clone(), def.clone());
             }

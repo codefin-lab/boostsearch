@@ -45,13 +45,18 @@ impl IdxState {
     /// The writer, created on demand.
     pub fn writer(&mut self) -> Result<&mut IndexWriter> {
         self.last_write = std::time::Instant::now();
-        if self.writer.is_none() {
+        // built on first use and kept until the index goes quiet
+        if let Some(writer) = self.writer.as_mut() {
+            // NLL cannot see that this borrow ends, so the writer is taken
+            // again below rather than returned from here
+            let _ = writer;
+        } else {
             self.writer = Some(
                 self.index
                     .writer_with_num_threads(self.writer_threads.max(1), self.writer_budget)?,
             );
         }
-        Ok(self.writer.as_mut().unwrap())
+        self.writer.as_mut().ok_or_else(|| anyhow!("index [{}] has no writer", self.name))
     }
 
     /// Give back the indexing threads and arena for an index that has gone

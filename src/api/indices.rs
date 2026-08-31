@@ -387,7 +387,7 @@ pub async fn resize_index(
             if !set.is_object() {
                 set = json!({});
             }
-            let slot = set.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+            let slot = entry_of(&mut set, "index", || json!({}));
             crate::store::deep_merge(slot, &Value::Object(held_back));
             g.settings = set;
             g.save_meta();
@@ -677,7 +677,7 @@ pub async fn add_block(
         if !settings.is_object() {
             settings = json!({});
         }
-        let slot = settings.as_object_mut().unwrap().entry("index").or_insert(json!({}));
+        let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &json!({format!("blocks.{block}"): "true"}));
         g.settings = settings;
         g.save_meta();

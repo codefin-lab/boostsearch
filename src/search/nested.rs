@@ -550,7 +550,7 @@ pub(crate) fn nested_inner_hits(
                 let steps: Vec<&str> = path.split('.').collect();
                 for step in &steps[..steps.len() - 1] {
                     node[*step] = json!({});
-                    node = node.get_mut(*step).unwrap();
+                    node = &mut node[*step];
                 }
                 node[steps[steps.len() - 1]] = object.clone();
                 if let Some(hl) = build_highlight(spec, &here, query, mapping, index) {

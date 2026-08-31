@@ -302,7 +302,9 @@ pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
                         if !f.is_string() {
                             match as_boostcore_query_string(&f, ctx) {
                                 Some(qs) => {
-                                    sdef.as_object_mut().unwrap().insert("filter".into(), json!(qs));
+                                    if let Some(o) = sdef.as_object_mut() {
+                                        o.insert("filter".into(), json!(qs));
+                                    }
                                 }
                                 None => {}
                             }
@@ -364,7 +366,9 @@ pub(crate) fn extract_bucket_orders(node: &mut Value) -> Vec<(String, String, bo
         }
         let sub = key.split('.').next().unwrap_or("").to_string();
         let desc = dir.as_str().map(|d| d == "desc").unwrap_or(false);
-        terms.as_object_mut().unwrap().remove("order");
+        if let Some(o) = terms.as_object_mut() {
+            o.remove("order");
+        }
         out.push((name.clone(), sub, desc));
     }
     out

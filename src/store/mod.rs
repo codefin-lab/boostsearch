@@ -878,3 +878,22 @@ fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
 
 
 
+
+/// The value at `key` inside `node`, made by `make` if it is not there.
+///
+/// What is being built here is the index's own view of a mapping or a
+/// settings tree, not a document a client sent, so a value that should be an
+/// object and is not is replaced rather than complained about.
+pub(crate) fn entry_of<'a>(
+    node: &'a mut Value,
+    key: &str,
+    make: impl FnOnce() -> Value,
+) -> &'a mut Value {
+    if !node.is_object() {
+        *node = serde_json::json!({});
+    }
+    node.as_object_mut()
+        .expect("replaced with an object just above")
+        .entry(key.to_string())
+        .or_insert_with(make)
+}

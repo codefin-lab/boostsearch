@@ -342,12 +342,23 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
             }
             return;
         }
-        let (col, ty) = {
-            let sc = self.columns[0].as_ref().unwrap();
+        // the block path is only taken where there is one numeric column and a
+        // buffer to read it into; anything else collects a document at a time
+        let Some((col, ty)) = self.columns[0].as_ref().and_then(|sc| {
             let (_, num, ty) = &sc.per_segment[0];
-            (num.clone().unwrap(), ty.unwrap())
+            Some((num.clone()?, (*ty)?))
+        }) else {
+            for &d in docs {
+                self.collect(d, 0.0);
+            }
+            return;
         };
-        let mut block = self.block.take().unwrap();
+        let Some(mut block) = self.block.take() else {
+            for &d in docs {
+                self.collect(d, 0.0);
+            }
+            return;
+        };
         block.fetch_block(docs, &col);
         let desc = self.desc[0];
         let after = self.after.as_ref().and_then(|a| a.first().cloned());
@@ -2457,6 +2468,10 @@ enum CalendarUnit {
     Year,
 }
 
+/// Why the calendar arithmetic below cannot fail.
+const ZERO_IS_IN_RANGE: &str = "zero is in range for every field of a time";
+const FIRST_EXISTS: &str = "the first day exists in every month";
+
 impl CalendarUnit {
     fn parse(s: &str) -> Option<CalendarUnit> {
         Some(match s {
@@ -2477,15 +2492,20 @@ impl CalendarUnit {
         use boostcore::time::{Date, Month, Time};
         let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
         match self {
-            CalendarUnit::Second => dt.replace_nanosecond(0).unwrap(),
-            CalendarUnit::Minute => dt.replace_second(0).unwrap().replace_nanosecond(0).unwrap(),
+            // zero is in range for every one of these, whatever the instant
+            CalendarUnit::Second => dt.replace_nanosecond(0).expect(ZERO_IS_IN_RANGE),
+            CalendarUnit::Minute => dt
+                .replace_second(0)
+                .expect(ZERO_IS_IN_RANGE)
+                .replace_nanosecond(0)
+                .expect(ZERO_IS_IN_RANGE),
             CalendarUnit::Hour => dt
                 .replace_minute(0)
-                .unwrap()
+                .expect(ZERO_IS_IN_RANGE)
                 .replace_second(0)
-                .unwrap()
+                .expect(ZERO_IS_IN_RANGE)
                 .replace_nanosecond(0)
-                .unwrap(),
+                .expect(ZERO_IS_IN_RANGE),
             CalendarUnit::Day => midnight(dt.date()),
             // calendar weeks start on Monday
             CalendarUnit::Week => {
@@ -2496,18 +2516,19 @@ impl CalendarUnit {
                 let back = dt.weekday().number_days_from_sunday() as i64;
                 midnight(dt.date() - boostcore::time::Duration::days(back))
             }
-            CalendarUnit::Month => midnight(
-                Date::from_calendar_date(dt.year(), dt.month(), 1).unwrap(),
-            ),
+            // the first of a month exists in every month of every year the
+            // instant itself could be in
+            CalendarUnit::Month => {
+                midnight(Date::from_calendar_date(dt.year(), dt.month(), 1).expect(FIRST_EXISTS))
+            }
             CalendarUnit::Quarter => {
                 let m = ((dt.month() as u8 - 1) / 3) * 3 + 1;
-                midnight(
-                    Date::from_calendar_date(dt.year(), Month::try_from(m).unwrap(), 1).unwrap(),
-                )
+                let month = Month::try_from(m).expect("a quarter starts in month 1, 4, 7 or 10");
+                midnight(Date::from_calendar_date(dt.year(), month, 1).expect(FIRST_EXISTS))
             }
-            CalendarUnit::Year => {
-                midnight(Date::from_calendar_date(dt.year(), Month::January, 1).unwrap())
-            }
+            CalendarUnit::Year => midnight(
+                Date::from_calendar_date(dt.year(), Month::January, 1).expect(FIRST_EXISTS),
+            ),
         }
     }
 
@@ -2516,10 +2537,14 @@ impl CalendarUnit {
         let add_months = |dt: boostcore::time::OffsetDateTime, n: u32| {
             let total = dt.year() * 12 + (dt.month() as i32 - 1) + n as i32;
             let (y, m) = (total.div_euclid(12), total.rem_euclid(12) as u8 + 1);
-            Date::from_calendar_date(y, Month::try_from(m).unwrap(), 1)
-                .unwrap()
-                .with_time(Time::MIDNIGHT)
-                .assume_utc()
+            // a remainder of twelve plus one is a month, and the first of it
+            // exists -- but a year past what a date can hold does not, and
+            // that is the one case where the instant stands still
+            let month = Month::try_from(m).expect("a remainder mod twelve, plus one, is a month");
+            match Date::from_calendar_date(y, month, 1) {
+                Ok(d) => d.with_time(Time::MIDNIGHT).assume_utc(),
+                Err(_) => dt,
+            }
         };
         match self {
             CalendarUnit::Second => dt + Duration::seconds(1),

@@ -71,12 +71,7 @@ impl Mapping {
         if !self.raw.is_object() {
             self.raw = serde_json::json!({});
         }
-        let props = self
-            .raw
-            .as_object_mut()
-            .unwrap()
-            .entry("properties")
-            .or_insert_with(|| serde_json::json!({}));
+        let props = entry_of(&mut self.raw, "properties", || serde_json::json!({}));
         if let Some(o) = props.as_object_mut() {
             o.insert(name.to_string(), def.clone());
             let mut one = Map::new();
@@ -218,12 +213,7 @@ impl Mapping {
             if key == "properties" {
                 if let Some(props) = val.as_object() {
                     flatten_props(props, "", &mut self.types);
-                    let slot = self
-                        .raw
-                        .as_object_mut()
-                        .unwrap()
-                        .entry("properties")
-                        .or_insert_with(|| serde_json::json!({}));
+                    let slot = entry_of(&mut self.raw, "properties", || serde_json::json!({}));
                     if let Some(existing) = slot.as_object_mut() {
                         for (k, v) in props {
                             // a dotted name is an object with one field in it,
@@ -251,7 +241,9 @@ impl Mapping {
                     }
                 }
             } else {
-                self.raw.as_object_mut().unwrap().insert(key.clone(), val.clone());
+                if let Some(o) = self.raw.as_object_mut() {
+                    o.insert(key.clone(), val.clone());
+                }
             }
         }
     }

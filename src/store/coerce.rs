@@ -40,11 +40,7 @@ pub fn expand_dotted_properties(node: &mut Value) {
             if node.get("properties").is_none() {
                 node["properties"] = serde_json::json!({});
             }
-            node = node["properties"]
-                .as_object_mut()
-                .unwrap()
-                .entry(part.to_string())
-                .or_insert_with(|| serde_json::json!({"properties": {}}));
+            node = entry_of(&mut node["properties"], part, || serde_json::json!({"properties": {}}));
         }
         if node.get("properties").is_none() {
             node["properties"] = serde_json::json!({});

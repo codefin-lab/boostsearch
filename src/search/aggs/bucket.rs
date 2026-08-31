@@ -84,12 +84,11 @@ pub(crate) fn run_filters_agg(
         buckets.push((Some(other_bucket_key.unwrap_or_else(|| "_other_".into())), b));
     }
 
-    if buckets.iter().all(|(n, _)| n.is_some()) {
-        let mut map = serde_json::Map::new();
-        for (n, b) in buckets {
-            map.insert(n.unwrap(), b);
-        }
-        Ok(json!({"buckets": Value::Object(map)}))
+    // keyed only answers when every bucket has a name to be keyed by
+    let named: Option<Vec<(String, Value)>> =
+        buckets.iter().cloned().map(|(n, b)| n.map(|n| (n, b))).collect();
+    if let Some(named) = named {
+        Ok(json!({"buckets": Value::Object(named.into_iter().collect())}))
     } else {
         Ok(json!({"buckets": buckets.into_iter().map(|(_, b)| b).collect::<Vec<_>>()}))
     }
@@ -1072,9 +1071,9 @@ pub(crate) fn run_multi_terms_agg(
         .map(|st| st.read().shard_count())
         .max()
         .unwrap_or(1);
-    let shard_size = spec.get("shard_size").and_then(|v| v.as_u64());
-    if shards > 1 && shard_size.is_some() {
-        let shard_size = shard_size.unwrap().max(1) as usize;
+    let asked_shard_size = spec.get("shard_size").and_then(|v| v.as_u64());
+    if let Some(shard_size) = asked_shard_size.filter(|_| shards > 1) {
+        let shard_size = shard_size.max(1) as usize;
         let probe = json!({
             "query": query.clone(),
             "size": 10_000,

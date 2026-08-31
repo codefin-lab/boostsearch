@@ -290,7 +290,8 @@ pub(crate) fn cmp_with_missing(a: &SortValue, b: &SortValue, k: &SortKey) -> Ord
             (true, true) => Ordering::Equal,
             (true, false) => last,
             (false, true) => last.reverse(),
-            _ => unreachable!(),
+            // both present is settled below, not here
+            (false, false) => Ordering::Equal,
         };
     }
     let ord = a.cmp_asc(b);

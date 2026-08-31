@@ -334,11 +334,7 @@ pub(crate) fn nest_settings(flat: &Value) -> Value {
         let path: Vec<&str> = k.split('.').collect();
         let mut cur = &mut out;
         for part in &path[..path.len() - 1] {
-            cur = cur
-                .as_object_mut()
-                .unwrap()
-                .entry((*part).to_string())
-                .or_insert_with(|| json!({}));
+            cur = entry_of(cur, part, || json!({}));
             if !cur.is_object() {
                 *cur = json!({});
             }
@@ -377,4 +373,23 @@ pub(crate) fn patterns_overlap(a: &str, b: &str) -> bool {
 
 pub(crate) fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+/// The value at `key` inside `node`, made by `make` if it is not there.
+///
+/// A JSON value that should be an object and is not gets replaced by one:
+/// these are answers this server is building, not documents a client sent, so
+/// there is nothing to preserve and nothing to complain about.
+pub(crate) fn entry_of<'a>(
+    node: &'a mut Value,
+    key: &str,
+    make: impl FnOnce() -> Value,
+) -> &'a mut Value {
+    if !node.is_object() {
+        *node = json!({});
+    }
+    node.as_object_mut()
+        .expect("replaced with an object just above")
+        .entry(key.to_string())
+        .or_insert_with(make)
 }
