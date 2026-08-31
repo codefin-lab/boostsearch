@@ -3500,6 +3500,23 @@ fn check_limits(
             ));
         }
     }
+    // a collapse inside inner hits may name a field and nothing else: there is
+    // no third level to collapse, and no hits to fetch under one
+    let inners = match body.pointer("/collapse/inner_hits") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    for inner in &inners {
+        let Some(second) = inner.get("collapse").and_then(|c| c.as_object()) else { continue };
+        if second.keys().any(|k| k != "field") {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "parse_exception",
+                "Invalid token in the inner collapse",
+            ));
+        }
+    }
     // rescoring reorders the top of the result set, which is the very thing
     // collapsing has already decided
     if body.get("rescore").is_some() && body.get("collapse").is_some() {

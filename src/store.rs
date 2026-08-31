@@ -120,6 +120,7 @@ pub fn build_schema() -> (Schema, Fields) {
         JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer("default")
+                .set_fieldnorms(true)
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         ),
     );
