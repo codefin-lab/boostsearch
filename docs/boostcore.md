@@ -1,16 +1,29 @@
 # BoostCore
 
-BoostCore is the search library obsearch is built on. It is a fork of
+BoostCore is the search library this is built on. It is a fork of
 [tantivy](https://github.com/quickwit-oss/tantivy) **0.26.1** (upstream tag
-`0.26.1`), vendored at `vendor/boostcore` and depended on by path.
+`0.26.1`), and it lives in its own repository:
+[codefin-lab/boostcore](https://github.com/codefin-lab/boostcore).
 
-## Why it is vendored
+`Cargo.toml` names it as a git dependency pinned to a commit, so a build is the
+same build tomorrow. To work on the fork and this together, clone it beside
+this repo and add:
 
-obsearch has to behave the way OpenSearch behaves, and some of that is decided
+```toml
+[patch."https://github.com/codefin-lab/boostcore"]
+boostcore = { path = "../boostcore" }
+boostcore-common = { path = "../boostcore/common" }
+```
+
+Once the crates are on crates.io the dependency becomes a version instead.
+
+## Why it is a fork
+
+BoostSearch has to behave the way OpenSearch behaves, and some of that is decided
 below the query layer -- in how a segment is written and how a document is
 scored. Those are one-line differences in the engine and unreachable from
-outside it. Vendoring turns "we cannot do that" into a patch, and leaves room
-to optimise the parts of the engine obsearch leans on hardest.
+outside it. A fork turns "we cannot do that" into a patch, and leaves room to
+optimise the parts of the engine this server leans on hardest.
 
 ## What the fork changes
 

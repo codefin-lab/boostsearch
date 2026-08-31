@@ -12,10 +12,17 @@ name = "obsearch"
 path = "src/main.rs"
 
 [dependencies]
-# BoostCore is the search library this is built on: a fork of tantivy kept in
-# `vendor/boostcore`, so it can be patched where the engine needs it to behave
-# the way OpenSearch does. See docs/boostcore.md.
-boostcore = { path = "vendor/boostcore" }
+# BoostCore is the search library this is built on: a fork of tantivy that
+# lives at github.com/codefin-lab/boostcore, so it can be patched where the
+# engine needs it to behave the way OpenSearch does. Pinned to a commit, so a
+# build is the same build tomorrow. See docs/boostcore.md.
+#
+# To work on the fork and this together, clone it beside this repo and add:
+#
+#     [patch."https://github.com/codefin-lab/boostcore"]
+#     boostcore = { path = "../boostcore" }
+#     boostcore-common = { path = "../boostcore/common" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "a8861dca8dac4c25f98cbb309a879f74c18e694f" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +37,7 @@ libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { path = "vendor/boostcore/common" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "a8861dca8dac4c25f98cbb309a879f74c18e694f" }
 
 [profile.release]
 opt-level = 3

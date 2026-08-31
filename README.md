@@ -79,3 +79,9 @@ own cluster is started with. A full run takes about ten seconds.
 ## Licence
 
 BoostCore is MIT, as tantivy is. This repository has no licence of its own yet.
+
+## BoostCore
+
+The engine is a dependency, pinned to a commit of
+[codefin-lab/boostcore](https://github.com/codefin-lab/boostcore).
+`docs/boostcore.md` says what the fork changes and how to work on both at once.
