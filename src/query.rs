@@ -584,7 +584,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 ));
             }
             // every document has an id, an index and a sequence number
-            if field == "_id" || field == "_index" || field == "_seq_no" {
+            if field == "_id" || field == "_index" || field == "_seq_no" || field == "_version" {
                 return Ok(Box::new(AllQuery));
             }
             let col = ctx.column_name(field, false);

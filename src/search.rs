@@ -3754,6 +3754,8 @@ pub fn run(
                     || def.get("rare_terms").is_some()
                     || def.get("nested").is_some()
                     || def.get("reverse_nested").is_some()
+                    || def.get("sampler").is_some()
+                    || def.get("diversified_sampler").is_some()
                     || def.get("geo_distance").is_some()
                     || def.get("percentile_ranks").is_some()
                     || def.get("significant_terms").is_some()
@@ -5628,7 +5630,11 @@ fn run_peeled_agg(
         run_geo_distance_agg(store, targets, query_json, def, weighted)
     } else if def.get("percentile_ranks").is_some() {
         run_percentile_ranks(store, targets, query_json, def)
-    } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
+    } else if def.get("nested").is_some()
+        || def.get("reverse_nested").is_some()
+        || def.get("sampler").is_some()
+        || def.get("diversified_sampler").is_some()
+    {
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
         run_filter_agg(store, targets, query_json, &{
@@ -5636,6 +5642,8 @@ fn run_peeled_agg(
             if let Some(o) = d.as_object_mut() {
                 o.remove("nested");
                 o.remove("reverse_nested");
+                o.remove("sampler");
+                o.remove("diversified_sampler");
                 o.insert("filter".into(), json!({"match_all": {}}));
             }
             d
@@ -5696,7 +5704,7 @@ fn peelable_here(def: &Value) -> bool {
         "variable_width_histogram", "auto_date_histogram", "date_range", "ip_range",
         "adjacency_matrix", "rare_terms", "multi_terms", "composite",
         "significant_terms", "significant_text", "top_hits", "nested", "reverse_nested",
-        "geo_distance", "percentile_ranks",
+        "geo_distance", "percentile_ranks", "sampler", "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
         || def.get("date_histogram").map(zoned_or_calendar).unwrap_or(false)
