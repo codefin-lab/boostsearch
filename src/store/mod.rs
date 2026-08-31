@@ -229,6 +229,8 @@ pub struct IdxState {
     pub fields: Fields,
     pub mapping: Mapping,
     pub settings: Value,
+    /// The analyzers this index's settings define, on top of the built-ins.
+    pub analysis: crate::analysis::Registry,
     /// alias name -> its definition (filter, routing, is_write_index)
     pub aliases: HashMap<String, Value>,
     /// closed indices reject reads and writes until reopened
@@ -318,7 +320,31 @@ pub struct IdxState {
     pub ids_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl IdxState {}
+impl IdxState {
+    /// Tell the index what its settings and mapping say about analysis.
+    ///
+    /// The analyzers an index defines are registered under the names the
+    /// mapping uses, and every path that names one is recorded, so that
+    /// BoostCore cuts that path with it and leaves the rest alone. Called
+    /// whenever either of the two can have changed.
+    pub fn apply_analysis(&mut self) {
+        self.analysis = crate::analysis::Registry::from_settings(&self.settings);
+        for name in self.analysis.names() {
+            if let Some(chain) = self.analysis.get(&name) {
+                self.index.tokenizers().register(&name, chain.analyzer());
+            }
+        }
+        let paths = self.index.path_analyzers().clone();
+        paths.clear_field(DYN);
+        for (path, analyzer) in self.mapping.analyzed_paths() {
+            // a name the index never defined may still be one of the analyzers
+            // OpenSearch has without being told about them
+            let Some(chain) = self.analysis.get(&analyzer) else { continue };
+            self.index.tokenizers().register(&analyzer, chain.analyzer());
+            paths.set(DYN, &path, &analyzer);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {

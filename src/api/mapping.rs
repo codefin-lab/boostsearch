@@ -86,6 +86,7 @@ pub async fn put_mapping(
         if let Some(st) = store.get(&n) {
             let mut g = st.write();
             g.mapping.merge(&body);
+            g.apply_analysis();
         }
     }
     axum::Json(json!({"acknowledged": true})).into_response()

@@ -106,7 +106,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         other => other.to_string().trim_matches('"').to_string(),
     };
     let analyzer = opts.get("analyzer").and_then(|v| v.as_str());
-    let tokens = analyze_with(ctx, view, &text, analyzer);
+    let tokens = analyze_with(ctx, view, &field, &text, analyzer);
     if tokens.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
@@ -316,7 +316,7 @@ pub(crate) fn build_span_near(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>>
         let pieces = if last && prefix_last {
             vec![if view == View::Dyn { w.to_lowercase() } else { w.clone() }]
         } else {
-            analyze(ctx, view, w)
+            analyze(ctx, view, &field, w)
         };
         for p in pieces {
             let mut t = Term::from_field_json_path(f, &path, true);
@@ -350,7 +350,7 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
     let (f, path, view) = ctx.resolve(&field, true);
     let text = val.as_str().unwrap_or_default();
     let analyzer = opts.get("analyzer").and_then(|v| v.as_str());
-    let tokens = analyze_with(ctx, view, text, analyzer);
+    let tokens = analyze_with(ctx, view, &field, text, analyzer);
     if tokens.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }

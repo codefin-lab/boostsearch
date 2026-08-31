@@ -79,6 +79,7 @@ pub async fn validate_query(
         let ctx = crate::query::Ctx {
             fields: &g.fields,
             mapping: &g.mapping,
+            analysis: &g.analysis,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),
@@ -174,23 +175,69 @@ pub async fn analyze(
     // without the other asks for the split alone
     let tokenizer_only =
         analyzer.is_none() && (body.get("tokenizer").is_some() || p.contains_key("tokenizer"));
+    // What the request asked for, as a chain: a name, a field's own analyzer,
+    // or the parts spelled out. An index that defined any of them is the one
+    // asked, so this is read through its registry.
+    // an index that defined analyzers of its own answers through its registry;
+    // asked without one, the built-ins still are what OpenSearch has
+    let registry = match &st {
+        Some(s) => s.read().analysis.clone(),
+        None => crate::analysis::Registry::default(),
+    };
+    let chain = {
+        let g = st.as_ref().map(|s| s.read());
+        let g = g.as_deref();
+        if let Some(name) = analyzer {
+            registry.get(name)
+        } else if let Some(field) = body.get("field").and_then(|v| v.as_str()) {
+            g.and_then(|g| {
+                ["search_analyzer", "analyzer"]
+                    .iter()
+                    .find_map(|key| g.mapping.field_option(field, key))
+                    .and_then(|v| v.as_str().map(|n| n.to_string()))
+                    .and_then(|name| registry.get(&name))
+            })
+        } else if let Some(name) = body.get("normalizer").and_then(|v| v.as_str()) {
+            registry.get(name)
+        } else if body.get("tokenizer").is_some()
+            || body.get("filter").is_some()
+            || p.contains_key("tokenizer")
+        {
+            let named = body
+                .get("tokenizer")
+                .cloned()
+                .or_else(|| p.get("tokenizer").map(|t| json!(t)))
+                .unwrap_or_else(|| json!("standard"));
+            let filters = body.get("filter").cloned().unwrap_or_else(|| json!([]));
+            registry.custom(&json!({"tokenizer": named, "filter": filters}))
+        } else {
+            registry.get("standard")
+        }
+    };
     let mut tokens = Vec::new();
     let mut pos = 0usize;
     for t in &text {
-        let parts = if tokenizer_only {
+        // where a token came from is part of the answer: a highlighter and a
+        // caller reading `_analyze` both ask for it
+        let parts: Vec<(String, usize, usize)> = if let Some(chain) = &chain {
+            chain.tokens(t).into_iter().map(|(tok, _, from, to)| (tok, from, to)).collect()
+        } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
-                .map(|w| w.to_string())
+                .map(|w| (w.to_string(), 0, 0))
                 .collect()
         } else {
             match &st {
-                Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer),
-                None => t.split_whitespace().map(|w| w.to_lowercase()).collect(),
+                Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer)
+                    .into_iter()
+                    .map(|w| (w, 0, 0))
+                    .collect(),
+                None => t.split_whitespace().map(|w| (w.to_lowercase(), 0, 0)).collect(),
             }
         };
-        for tok in parts {
+        for (tok, from, to) in parts {
             tokens.push(json!({
-                "token": tok, "start_offset": 0, "end_offset": 0,
+                "token": tok, "start_offset": from, "end_offset": to,
                 "type": "<ALPHANUM>", "position": pos
             }));
             pos += 1;

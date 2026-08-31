@@ -378,7 +378,7 @@ impl Store {
             .and_then(|a| a.as_object())
             .map(|o| o.iter().map(|(k, v)| (k.clone(), normalize_alias(v))).collect())
             .unwrap_or_default();
-        let st = IdxState {
+        let mut st = IdxState {
             name: name.to_string(),
             restored: false,
             index,
@@ -390,6 +390,7 @@ impl Store {
             fields,
             mapping,
             settings,
+            analysis: Default::default(),
             aliases,
             closed: false,
             versions: HashMap::new(),
@@ -427,6 +428,7 @@ impl Store {
             stats: Arc::new(crate::blockstats::StatsCache::default()),
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
+        st.apply_analysis();
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())
     }

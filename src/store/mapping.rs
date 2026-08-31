@@ -152,6 +152,19 @@ impl Mapping {
         node.get(key).cloned()
     }
 
+    /// Every path whose mapping names an analyzer, and the name it names.
+    ///
+    /// A `text` field says how it is cut; a `fields` subfield under it says
+    /// how that copy is cut. Both are paths in the document as the index
+    /// writes them, which is what the index wants to be told.
+    pub fn analyzed_paths(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
+            collect_analyzers(props, "", &mut out);
+        }
+        out
+    }
+
     /// The normalizer a field's mapping declares, if any.
     pub fn normalizer_of(&self, field: &str) -> Option<String> {
         let (parent, sub) = field.rsplit_once('.')?;
@@ -285,6 +298,26 @@ pub(crate) fn flatten_props(
         // multi-fields: `title.keyword`
         if let Some(subs) = def.get("fields").and_then(|f| f.as_object()) {
             flatten_props(subs, &path, out);
+        }
+    }
+}
+
+/// Walk a mapping's properties, gathering the analyzer each path names.
+fn collect_analyzers(
+    props: &serde_json::Map<String, Value>,
+    prefix: &str,
+    out: &mut Vec<(String, String)>,
+) {
+    for (name, spec) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(analyzer) = spec.get("analyzer").and_then(|a| a.as_str()) {
+            out.push((path.clone(), analyzer.to_string()));
+        }
+        if let Some(sub) = spec.get("properties").and_then(|p| p.as_object()) {
+            collect_analyzers(sub, &path, out);
+        }
+        if let Some(sub) = spec.get("fields").and_then(|p| p.as_object()) {
+            collect_analyzers(sub, &path, out);
         }
     }
 }

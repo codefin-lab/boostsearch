@@ -98,6 +98,7 @@ pub(crate) fn term_vectors_of(
                 let ctx = crate::query::Ctx {
                     fields: &g.fields,
                     mapping: &g.mapping,
+                    analysis: &g.analysis,
                     index: &g.index,
                     max_terms_count: g.max_terms_count(),
                     max_regex_length: g.max_regex_length(),

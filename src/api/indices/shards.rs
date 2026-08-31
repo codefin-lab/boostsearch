@@ -158,6 +158,7 @@ pub async fn add_block(
         let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &json!({format!("blocks.{block}"): "true"}));
         g.settings = settings;
+        g.apply_analysis();
         g.save_meta();
         blocked.push(json!({"name": g.name.clone(), "blocked": true}));
     }

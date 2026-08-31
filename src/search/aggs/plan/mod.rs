@@ -493,6 +493,7 @@ pub(crate) fn filtered_count(
         let ctx = Ctx {
             fields: &g.fields,
             mapping: &g.mapping,
+            analysis: &g.analysis,
             index: &g.index,
             max_terms_count: g.max_terms_count(),
             max_regex_length: g.max_regex_length(),

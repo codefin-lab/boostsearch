@@ -8,15 +8,15 @@
 //! Everything here is built from what the index settings say, and handed to
 //! BoostCore as a `TextAnalyzer` under the name the mapping uses.
 //!
-//! Nothing calls into this yet: the chain is built and tested here, and the
-//! next step is the write path, the query path and `_analyze`.
-#![allow(dead_code)]
+//! A chain becomes a `TextAnalyzer` -- the whole of it, tokenizer and filters
+//! alike -- so that a document and a query are cut by the same code, and the
+//! index can be told which analyzer a path is written with.
 
 use std::collections::HashMap;
 
 use boostcore::tokenizer::{
     AsciiFoldingFilter, Language, NgramTokenizer, RawTokenizer, RegexTokenizer, RemoveLongFilter,
-    SimpleTokenizer, Stemmer, TextAnalyzer, WhitespaceTokenizer,
+    SimpleTokenizer, Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer, WhitespaceTokenizer,
 };
 use serde_json::Value;
 
@@ -135,10 +135,62 @@ impl Chain {
         base.filter_dynamic(RemoveLongFilter::limit(255)).build()
     }
 
-    /// Whether a chain leaves tokens the JSON field's own tokenizer would cut
-    /// again. Those cannot be written through the pre-analysed path.
-    pub fn splits_further(&self, tokens: &[String]) -> bool {
-        tokens.iter().any(|t| t.chars().any(|c| !c.is_alphanumeric()))
+    /// The whole chain, as an analyzer the index can be handed.
+    pub fn analyzer(&self) -> TextAnalyzer {
+        TextAnalyzer::builder(ChainTokenizer { chain: self.clone() }).build()
+    }
+}
+
+/// A whole chain, as something BoostCore can be handed.
+///
+/// The tokens are those of `Chain::tokens`: the source runs inside BoostCore
+/// and the steps here, in the order OpenSearch writes them. Cutting a
+/// document and cutting the query that looks for it is then the same code.
+#[derive(Clone, Debug)]
+pub struct ChainTokenizer {
+    chain: Chain,
+}
+
+impl Tokenizer for ChainTokenizer {
+    type TokenStream<'a> = ChainStream;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> ChainStream {
+        let tokens = self
+            .chain
+            .tokens(text)
+            .into_iter()
+            .map(|(text, position, offset_from, offset_to)| Token {
+                offset_from,
+                offset_to,
+                position,
+                text,
+                position_length: 1,
+            })
+            .collect();
+        ChainStream { tokens, cursor: 0 }
+    }
+}
+
+/// The tokens of one text, already cut.
+pub struct ChainStream {
+    tokens: Vec<Token>,
+    /// one past the token `token()` returns, so that the first `advance()`
+    /// lands on the first token
+    cursor: usize,
+}
+
+impl TokenStream for ChainStream {
+    fn advance(&mut self) -> bool {
+        self.cursor += 1;
+        self.cursor <= self.tokens.len()
+    }
+
+    fn token(&self) -> &Token {
+        &self.tokens[self.cursor - 1]
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.tokens[self.cursor - 1]
     }
 }
 
@@ -380,6 +432,10 @@ fn stop_words(language: &str) -> Vec<String> {
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     named: HashMap<String, Chain>,
+    /// the tokenizers and filters the index defined, kept so that a request
+    /// naming one -- `_analyze` does -- can still be answered
+    tokenizers: Value,
+    filters: Value,
 }
 
 impl Registry {
@@ -394,6 +450,8 @@ impl Registry {
         let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
         let tokenizers = analysis.get("tokenizer").cloned().unwrap_or(Value::Null);
         let Some(defined) = analysis.get("analyzer").and_then(|a| a.as_object()) else {
+            registry.tokenizers = tokenizers;
+            registry.filters = filters;
             return registry;
         };
         for (name, spec) in defined {
@@ -401,17 +459,20 @@ impl Registry {
                 registry.named.insert(name.clone(), chain);
             }
         }
+        registry.tokenizers = tokenizers;
+        registry.filters = filters;
         registry
+    }
+
+    /// A chain described in a request rather than named: a tokenizer, and the
+    /// filters over it. The parts may be ones this index defined.
+    pub fn custom(&self, spec: &Value) -> Option<Chain> {
+        build(spec, &self.tokenizers, &self.filters)
     }
 
     /// The chain a name stands for: the index's own first, then the built-ins.
     pub fn get(&self, name: &str) -> Option<Chain> {
         self.named.get(name).cloned().or_else(|| builtin(name))
-    }
-
-    /// Whether this name means anything at all.
-    pub fn knows(&self, name: &str) -> bool {
-        self.named.contains_key(name) || builtin(name).is_some()
     }
 
     pub fn names(&self) -> Vec<String> {

@@ -293,6 +293,7 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
                     let ctx = Ctx {
                         fields: &g.fields,
                         mapping: &g.mapping,
+                        analysis: &g.analysis,
                         index: &g.index,
                         max_terms_count: g.max_terms_count(),
                         max_regex_length: g.max_regex_length(),
@@ -367,6 +368,7 @@ pub(crate) fn resolve_terms_lookups(
                         let ctx = Ctx {
                             fields: &g.fields,
                             mapping: &g.mapping,
+                            analysis: &g.analysis,
                             index: &g.index,
                             max_terms_count: g.max_terms_count(),
                             max_regex_length: g.max_regex_length(),
