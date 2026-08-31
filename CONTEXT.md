@@ -59,6 +59,25 @@ one source of tokens, then the steps that change, drop or add to them.
 the built-in ones. Per index, because two indices may define the same name
 differently.
 
+## The cluster words
+
+**A node** — one BoostSearch process. In version 1 a cluster is several of
+them, and which shard lives where is decided by the cluster itself rather than
+by a file someone edits.
+
+**Acknowledged** — a write the client was told succeeded. In version 1 that
+means what it means in OpenSearch: the primary took it and as many copies as
+`wait_for_active_shards` asked for. It does not mean every replica has it, and
+a read from a replica may not show it yet.
+
+**The consistency mode** — which promise an index makes about that. Version 1
+ships one, `opensearch`; `linearizable` is version 2, and the replication path
+carries the parameter from the start so that adding it is not a rewrite.
+
+**The simulation** — the whole cluster running in one process on a controlled
+clock and a controlled network, driven by a seed. Where the cluster's own tests
+live, because a real network cannot be asked for a particular interleaving.
+
 ## The storage words
 
 **Refresh** — making writes visible to search. Here it is also a commit, and a
