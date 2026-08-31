@@ -41,7 +41,7 @@ pub struct IntermediateAggregationResults {
     pub(crate) aggs_res: FxHashMap<String, IntermediateAggregationResult>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialOrd, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 /// The key to identify a bucket.
 /// This might seem redundant with `Key`, but the point is to have a different
 /// Serialize implementation.
@@ -89,6 +89,73 @@ impl From<IntermediateKey> for Key {
     }
 }
 
+/// A numeric key, whatever the variant it arrived in.
+///
+/// One segment can store a JSON path as `i64` and the next as `u64` -- the
+/// first big value in a segment decides it -- and then the same number comes
+/// back under two variants. Keyed by the variant, merging leaves two buckets
+/// where there is one number, so numbers are compared as numbers here.
+#[derive(PartialEq, PartialOrd)]
+enum NumericKey {
+    Int(i128),
+    Float(f64),
+}
+
+impl IntermediateKey {
+    fn numeric(&self) -> Option<NumericKey> {
+        match self {
+            IntermediateKey::U64(val) => Some(NumericKey::Int(*val as i128)),
+            IntermediateKey::I64(val) => Some(NumericKey::Int(*val as i128)),
+            IntermediateKey::F64(val) => {
+                if val.fract() == 0.0 && val.abs() < 9_007_199_254_740_992.0 {
+                    Some(NumericKey::Int(*val as i128))
+                } else {
+                    Some(NumericKey::Float(*val))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for IntermediateKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.numeric(), other.numeric()) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => match (self, other) {
+                (IntermediateKey::Str(left), IntermediateKey::Str(right)) => left == right,
+                (IntermediateKey::Bool(left), IntermediateKey::Bool(right)) => left == right,
+                (IntermediateKey::IpAddr(left), IntermediateKey::IpAddr(right)) => left == right,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for IntermediateKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self.numeric(), other.numeric()) {
+            (Some(left), Some(right)) => left.partial_cmp(&right),
+            (None, None) => match (self, other) {
+                (IntermediateKey::Str(left), IntermediateKey::Str(right)) => {
+                    left.partial_cmp(right)
+                }
+                (IntermediateKey::Bool(left), IntermediateKey::Bool(right)) => {
+                    left.partial_cmp(right)
+                }
+                (IntermediateKey::IpAddr(left), IntermediateKey::IpAddr(right)) => {
+                    left.partial_cmp(right)
+                }
+                _ => None,
+            },
+            // a number sorts before anything that is not one
+            (Some(_), None) => Some(std::cmp::Ordering::Less),
+            (None, Some(_)) => Some(std::cmp::Ordering::Greater),
+        }
+    }
+}
+
 impl Eq for IntermediateKey {}
 
 impl std::fmt::Display for IntermediateKey {
@@ -106,6 +173,15 @@ impl std::fmt::Display for IntermediateKey {
 
 impl std::hash::Hash for IntermediateKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // every numeric variant hashes the same way, so that the same number
+        // lands in the same bucket whichever variant it arrived in
+        if let Some(numeric) = self.numeric() {
+            match numeric {
+                NumericKey::Int(val) => (0u8, val).hash(state),
+                NumericKey::Float(val) => (1u8, val.to_bits()).hash(state),
+            }
+            return;
+        }
         core::mem::discriminant(self).hash(state);
         match self {
             IntermediateKey::Str(text) => text.hash(state),
