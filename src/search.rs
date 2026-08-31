@@ -822,12 +822,33 @@ fn object_matches(filter: &Value, object: &Value, path: &str) -> bool {
             .and_then(|f| f.as_str())
             .map(|f| field_value(f).is_some())
             .unwrap_or(false),
-        "term" | "match" => {
+        "term" => {
             let Some((name, want)) = body.as_object().and_then(|o| o.iter().next()) else {
                 return false;
             };
-            let want = want.get("value").or_else(|| want.get("query")).unwrap_or(want);
+            let want = want.get("value").unwrap_or(want);
             field_value(name).map(|v| &v == want).unwrap_or(false)
+        }
+        // a match asks after the words in a value rather than the whole of it
+        "match" | "match_phrase" => {
+            let Some((name, want)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let want = want.get("query").unwrap_or(want);
+            let Some(text) = field_value(name) else { return false };
+            let text = match text {
+                Value::String(s) => s.to_lowercase(),
+                other => other.to_string().to_lowercase(),
+            };
+            let wanted = match want {
+                Value::String(s) => s.to_lowercase(),
+                other => other.to_string().to_lowercase(),
+            };
+            let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
+            wanted
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .all(|w| words.contains(&w))
         }
         "range" => {
             let Some((name, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
@@ -1129,20 +1150,172 @@ fn find_intervals(node: &Value) -> Option<(String, Value)> {
     }
 }
 
-/// A `nested` clause that asked for the objects it matched to be listed.
-fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
+/// Every `nested` clause that asked for the objects it matched to be listed.
+fn collect_nested_inner_hits(node: &Value, out: &mut Vec<(String, Value, Value)>) {
     match node {
         Value::Object(o) => {
             if let Some(nested) = o.get("nested") {
                 if let Some(inner) = nested.get("inner_hits") {
                     let path =
                         nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                    return Some((path, inner.clone()));
+                    let query = nested.get("query").cloned().unwrap_or(json!({}));
+                    out.push((path, inner.clone(), query));
                 }
             }
-            o.values().find_map(find_nested_inner_hits)
+            for (_, v) in o {
+                collect_nested_inner_hits(v, out);
+            }
         }
-        Value::Array(a) => a.iter().find_map(find_nested_inner_hits),
+        Value::Array(a) => {
+            for v in a {
+                collect_nested_inner_hits(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The inner-hits groups that belong directly under one object: those whose
+/// path is the object's own path plus one step, each carrying the groups that
+/// belong under *its* objects in turn.
+#[allow(clippy::too_many_arguments)]
+fn nested_inner_hits(
+    h: &Hit,
+    source: &Value,
+    under: &str,
+    clauses: &[(String, Value, Value)],
+    kept: bool,
+    query: &Option<Value>,
+    mapping: &crate::store::Mapping,
+    index: &tantivy::Index,
+) -> serde_json::Map<String, Value> {
+    let mut groups = serde_json::Map::new();
+    for (path, inner, inner_query) in clauses {
+        // a clause belongs here when what is left of its path after the object
+        // it sits in names a field of that object
+        let leaf = if under.is_empty() {
+            path.clone()
+        } else {
+            match path.strip_prefix(&format!("{under}.")) {
+                Some(rest) => rest.to_string(),
+                None => continue,
+            }
+        };
+        if leaf.is_empty() {
+            continue;
+        }
+        let at = source.pointer(&format!("/{}", leaf.replace('.', "/")));
+        let objects: Vec<Value> = match at {
+            Some(Value::Array(a)) => a.clone(),
+            Some(other) => vec![other.clone()],
+            None => Vec::new(),
+        };
+        let size = inner.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+        let objects: Vec<(usize, Value)> = objects
+            .into_iter()
+            .enumerate()
+            .filter(|(_, o)| object_matches(inner_query, o, path))
+            .collect();
+        let mut list = Vec::new();
+        for (offset, object) in objects.iter().cloned().take(size) {
+            let mut one = json!({
+                "_index": h.index.clone(),
+                "_id": h.id.clone(),
+                "_nested": {"field": path.clone(), "offset": offset},
+                "_score": h.score,
+            });
+            if kept {
+                one["_source"] = object.clone();
+            }
+            if inner.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
+                one["_version"] = json!(h.version);
+            }
+            let asked: Vec<String> = match inner.get("docvalue_fields") {
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| {
+                        v.as_str().map(|s| s.to_string()).or_else(|| {
+                            v.get("field").and_then(|f| f.as_str()).map(|s| s.to_string())
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !asked.is_empty() {
+                let mut fields = serde_json::Map::new();
+                for name in asked {
+                    if name == "_seq_no" {
+                        fields.insert(name.clone(), json!([h.seq]));
+                    } else if let Some(v) =
+                        object.pointer(&format!("/{}", name.replace('.', "/")))
+                    {
+                        fields.insert(
+                            name.clone(),
+                            match v {
+                                Value::Array(a) => Value::Array(a.clone()),
+                                other => json!([other.clone()]),
+                            },
+                        );
+                    }
+                }
+                one["fields"] = Value::Object(fields);
+            }
+            if let Some(spec) = inner.get("highlight") {
+                // an inner hit is highlighted from its own object, under the
+                // name the field is known by
+                let mut here = json!({});
+                let mut node = &mut here;
+                let steps: Vec<&str> = path.split('.').collect();
+                for step in &steps[..steps.len() - 1] {
+                    node[*step] = json!({});
+                    node = node.get_mut(*step).unwrap();
+                }
+                node[steps[steps.len() - 1]] = object.clone();
+                if let Some(hl) = build_highlight(spec, &here, query, mapping, index) {
+                    one["highlight"] = hl;
+                }
+            }
+            // whatever was asked of the objects under this one
+            let deeper =
+                nested_inner_hits(h, &object, path, clauses, kept, query, mapping, index);
+            if !deeper.is_empty() {
+                one["inner_hits"] = Value::Object(deeper);
+            }
+            list.push(one);
+        }
+        let name = inner.get("name").and_then(|n| n.as_str()).unwrap_or(path).to_string();
+        groups.insert(
+            name,
+            json!({"hits": {
+                "total": {"value": objects.len(), "relation": "eq"},
+                "max_score": h.score,
+                "hits": list,
+            }}),
+        );
+    }
+    groups
+}
+
+/// A `nested` clause that asked for the objects it matched to be listed: the
+/// path, the inner-hits clause, and the query the objects have to match.
+fn find_nested_inner_hits(node: &Value) -> Option<(String, Value)> {
+    find_nested_inner_hits_full(node).map(|(p, i, _)| (p, i))
+}
+
+fn find_nested_inner_hits_full(node: &Value) -> Option<(String, Value, Value)> {
+    match node {
+        Value::Object(o) => {
+            if let Some(nested) = o.get("nested") {
+                if let Some(inner) = nested.get("inner_hits") {
+                    let path =
+                        nested.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    let inner_query = nested.get("query").cloned().unwrap_or(json!({}));
+                    return Some((path, inner.clone(), inner_query));
+                }
+            }
+            o.values().find_map(find_nested_inner_hits_full)
+        }
+        Value::Array(a) => a.iter().find_map(find_nested_inner_hits_full),
         _ => None,
     }
 }
@@ -5387,105 +5560,32 @@ pub fn run(
                     hit["fields"] = Value::Object(f);
                 }
             }
-            // a nested query may ask for the objects it matched to be listed
-            if let Some((path, inner)) = extras
-                .nested_inner_hits
-                .then(|| body.get("query").and_then(find_nested_inner_hits))
-                .flatten()
-            {
-                let name = inner
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or(&path)
-                    .to_string();
-                let at = h.source.pointer(&format!("/{}", path.replace('.', "/")));
-                let objects: Vec<Value> = match at {
-                    Some(Value::Array(a)) => a.clone(),
-                    Some(other) => vec![other.clone()],
-                    None => Vec::new(),
-                };
-                let size = inner.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
-                let mut list = Vec::new();
-                for (offset, object) in objects.iter().enumerate().take(size) {
-                    let kept = searchers[h.shard_idx]
-                        .2
-                        .read()
-                        .mapping
-                        .raw
-                        .pointer("/_source/enabled")
-                        != Some(&json!(false));
-                    let mut inner_hit = json!({
-                        "_index": h.index.clone(),
-                        "_id": h.id.clone(),
-                        "_nested": {"field": path.clone(), "offset": offset},
-                        "_score": h.score,
-                    });
-                    if kept {
-                        inner_hit["_source"] = object.clone();
-                    }
-                    if inner.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        inner_hit["_version"] = json!(h.version);
-                    }
-                    let asked: Vec<String> = match inner.get("docvalue_fields") {
-                        Some(Value::Array(a)) => a
-                            .iter()
-                            .filter_map(|v| {
-                                v.as_str()
-                                    .map(|s| s.to_string())
-                                    .or_else(|| {
-                                        v.get("field")
-                                            .and_then(|f| f.as_str())
-                                            .map(|s| s.to_string())
-                                    })
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    if let Some(spec) = inner.get("highlight") {
-                        let g = searchers[h.shard_idx].2.read();
-                        if let Some(hl) =
-                            build_highlight(spec, &h.source, &query_json, &g.mapping, &g.index)
-                        {
-                            inner_hit["highlight"] = hl;
-                        }
-                    }
-                    if !asked.is_empty() {
-                        let mut fields = serde_json::Map::new();
-                        for name in asked {
-                            match name.as_str() {
-                                "_seq_no" => {
-                                    fields.insert(name.clone(), json!([h.seq]));
-                                }
-                                _ => {
-                                    if let Some(v) = object
-                                        .pointer(&format!("/{}", name.replace('.', "/")))
-                                    {
-                                        fields.insert(
-                                            name.clone(),
-                                            match v {
-                                                Value::Array(a) => Value::Array(a.clone()),
-                                                other => json!([other.clone()]),
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        inner_hit["fields"] = Value::Object(fields);
-                    }
-                    list.push(inner_hit);
+            // a nested query may ask for the objects it matched to be listed,
+            // and a nested query inside one asks the same of the objects under
+            // those
+            if extras.nested_inner_hits {
+                let mut clauses = Vec::new();
+                if let Some(q) = body.get("query") {
+                    collect_nested_inner_hits(q, &mut clauses);
                 }
-                let group = json!({"hits": {
-                    "total": {"value": objects.len(), "relation": "eq"},
-                    "max_score": h.score,
-                    "hits": list,
-                }});
-                let mut groups = match hit.get("inner_hits") {
-                    Some(Value::Object(o)) => o.clone(),
-                    _ => serde_json::Map::new(),
-                };
-                groups.insert(name, group);
-                hit["inner_hits"] = Value::Object(groups);
+                if !clauses.is_empty() {
+                    let g = searchers[h.shard_idx].2.read();
+                    let kept =
+                        g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
+                    let groups = nested_inner_hits(
+                        &h,
+                        &h.source,
+                        "",
+                        &clauses,
+                        kept,
+                        &query_json,
+                        &g.mapping,
+                        &g.index,
+                    );
+                    if !groups.is_empty() {
+                        hit["inner_hits"] = Value::Object(groups);
+                    }
+                }
             }
             if let Some(hits) = named.get(&h.id) {
                 hit["matched_queries"] = if named_scores {
