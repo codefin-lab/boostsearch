@@ -77,9 +77,13 @@ Checked by running it, not by reading it:
 - **The snapshot API keeps bookkeeping, not data.** `_snapshot` answers the
   way OpenSearch answers, and copies nothing; a restore does not bring
   documents back. To back up, stop the process and copy `BOOSTSEARCH_DATA`.
-- **No translog.** A write that was acknowledged but not refreshed is lost if
-  the process is killed. A write with `refresh=true`, and anything an explicit
-  `_refresh` covered, is committed and survives — verified with `kill -9`.
+- **Durability is per index, not per cluster.** A write is recorded in a
+  translog and fsynced before it is answered, so `kill -9` loses nothing that
+  was acknowledged — verified, including a bulk of 5,000 that had never been
+  refreshed. What that does not buy you is a second copy: one disk, one node.
+  `index.translog.durability: async` trades the guarantee for latency, as it
+  does in OpenSearch. In RAM mode (`BOOSTSEARCH_DATA` unset) nothing is
+  written down at all, by design.
 - **Some endpoints are not there**: `_update_by_query`, `_delete_by_query`,
   point-in-time, stored scripts, `_reindex`, `_sql`. They answer 501 rather
   than pretending. There is no scripting language.
@@ -88,9 +92,12 @@ What it costs, measured on this laptop:
 
 | | |
 |---|---|
-| write, no refresh | 0.5 ms |
+| write, no refresh, in RAM | 0.34 ms |
+| write, no refresh, on disk | 2.5 ms — the translog fsync it is answered for |
+| the same with `translog.durability: async` | 1.2 ms |
 | write with `refresh=true`, on disk | 83 ms — a refresh here is a commit, and a commit is an fsync |
 | write with `refresh=true`, in RAM | 1.3 ms |
+| bulk indexing, on disk | 62,000 docs/s (81,000 with no translog to write) |
 | search | 0.7 ms |
 | resident memory per index being written | ~5 MB, given back 30 s after the last write, though the allocator keeps the pages |
 | request body ceiling | 100 MB (`BOOSTSEARCH_MAX_CONTENT_MB`) |

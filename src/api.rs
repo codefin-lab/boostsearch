@@ -2361,6 +2361,9 @@ pub fn write_doc_versioned(
     let doc = make_doc(&st.fields, id, indexed, &raw, seq);
     st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    // recorded before it is answered for: the index has it only after a commit
+    let routing = st.routing.get(id).cloned();
+    st.log_write(id, routing.as_deref(), version, seq, Some(&raw));
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -2382,6 +2385,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     if existed {
         let shard = st.shard_of_doc(id);
         st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+        st.log_write(id, None, version, seq, None);
         st.note_pending(id, None);
     }
     let body = json!({
@@ -2399,7 +2403,72 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
 /// A write that asked to refresh refreshes the shard it was written to, which
 /// is as far as a refresh reaches in OpenSearch. Without a shard to name --
 /// a bulk, which may have written to any of them -- everything is refreshed.
+/// Replay what the translogs were holding when the process last stopped.
+///
+/// A write is acknowledged once it is recorded; it reaches the index at the
+/// next commit. Anything between those two points is in the translog and
+/// nowhere else, so it is replayed here before the server answers anything.
+/// Replaying a write that did make it into the index is harmless: an index by
+/// id replaces, a delete of what is not there is a no-op.
+pub fn recover(store: &Store) {
+    for name in store.names() {
+        let Some(st) = store.get(&name) else { continue };
+        let path = { st.read().path.clone() };
+        let Some(dir) = path else { continue };
+        let Ok(text) = std::fs::read_to_string(dir.join(crate::store::TRANSLOG)) else { continue };
+        let mut replayed = 0usize;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(rec) = serde_json::from_str::<Value>(line) else { continue };
+            let Some(id) = rec.get("id").and_then(|v| v.as_str()) else { continue };
+            let version = rec.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+            let mut g = st.write();
+            // the write takes back the sequence number it was answered with
+            if let Some(seq) = rec.get("seq").and_then(|v| v.as_u64()) {
+                g.seq_no = seq;
+            }
+            match rec.get("source") {
+                Some(Value::String(raw)) => {
+                    let Ok(source) = serde_json::from_str::<Value>(raw) else { continue };
+                    match rec.get("routing").and_then(|v| v.as_str()) {
+                        Some(r) => {
+                            g.routing.insert(id.to_string(), r.to_string());
+                        }
+                        None => {
+                            g.routing.remove(id);
+                        }
+                    }
+                    let _ = write_doc_versioned(
+                        &mut g,
+                        id,
+                        source,
+                        "index",
+                        Some(raw.clone()),
+                        Some(version),
+                    );
+                }
+                _ => {
+                    let (_, _) = g.bump_to(id, false, version);
+                    let shard = g.shard_of_doc(id);
+                    g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+                    g.note_pending(id, None);
+                }
+            }
+            replayed += 1;
+        }
+        if replayed > 0 {
+            // committing puts them in the index, which is what makes the
+            // record spent
+            let _ = st.write().refresh();
+            tracing::warn!("index [{name}]: recovered {replayed} writes from the translog");
+        }
+    }
+}
+
 fn maybe_refresh(st: &mut IdxState, p: &Params, shard: Option<u64>) {
+    // the write is about to be answered for, so what was recorded of it has to
+    // be on disk -- a refresh commits and makes that moot, but most writes are
+    // not refreshed
+    st.sync_translog();
     if flag(p, "refresh") {
         let _ = match shard {
             Some(one) => st.refresh_shard(one),
@@ -2682,6 +2751,7 @@ pub async fn delete_doc_route(
             let shard = g.shard_of_doc(&id);
             if existed {
                 g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+                g.log_write(&id, None, version, seq, None);
                 g.note_pending(&id, None);
             }
             g.routing.remove(&id);
@@ -3136,11 +3206,16 @@ pub async fn bulk(
         items.push(item);
     }
 
-    if flag(&p, "refresh") {
-        for n in touched {
-            if let Some(st) = store.get(&n) {
-                let _ = st.write().refresh();
-            }
+    // one bulk is one write to answer for, so its record is forced once, not
+    // once per item; a refresh commits the lot and makes the record moot
+    let refreshing = flag(&p, "refresh");
+    for n in touched {
+        let Some(st) = store.get(&n) else { continue };
+        let mut g = st.write();
+        if refreshing {
+            let _ = g.refresh();
+        } else {
+            g.sync_translog();
         }
     }
     axum::Json(json!({"took": 0, "errors": errors, "items": items})).into_response()
@@ -4713,11 +4788,14 @@ fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Val
                      "index_writer_memory_in_bytes": 0, "version_map_memory_in_bytes": 0,
                      "fixed_bit_set_memory_in_bytes": 0, "max_unsafe_auto_id_timestamp": -1,
                      "file_sizes": {}},
+        // what the translog holds is what a crash would have to replay, which
+        // is the file on disk where there is one
         "translog": {"operations": if st.closed { 0 } else { st.pending.len() },
-                     "size_in_bytes": st.pending_bytes.max(55),
+                     "size_in_bytes": st.translog_bytes().max(st.pending_bytes as u64).max(55),
                      "uncommitted_operations":
                         if st.closed { 0 } else { st.pending.len() },
-                     "uncommitted_size_in_bytes": st.pending_bytes.max(55),
+                     "uncommitted_size_in_bytes":
+                        st.translog_bytes().max(st.pending_bytes as u64).max(55),
                      "earliest_last_modified_age": 0,
                      "remote_store": {"upload": {"total_uploads": {"started": 0, "failed": 0, "succeeded": 0}}}},
         "request_cache": {

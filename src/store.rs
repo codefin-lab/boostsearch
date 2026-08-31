@@ -29,6 +29,13 @@ pub struct Fields {
 /// flushes. Without a cap, a large bulk load holds every document twice.
 pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
+/// Where an index keeps the writes that are acknowledged but not yet committed.
+pub const TRANSLOG: &str = "translog.ndjson";
+
+/// How large that record may grow before the index is committed to spend it.
+/// OpenSearch calls this `index.translog.flush_threshold_size`.
+const TRANSLOG_FLUSH_BYTES: u64 = 64 * 1024 * 1024;
+
 /// How many writes wait for their shard's refresh before they are handed to
 /// the writer anyway.
 ///
@@ -655,6 +662,16 @@ pub struct IdxState {
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
+    /// how much has been recorded since the last commit spent the record
+    translog_bytes_since_commit: u64,
+    /// Writes recorded where a crash can still find them.
+    ///
+    /// A write is in the index only once the writer has committed, and a
+    /// commit is expensive enough that it cannot happen per request. Until it
+    /// does, the only record of an acknowledged write is this file -- which is
+    /// what `index.translog.durability: request` means: appended and fsynced
+    /// before the write is answered.
+    translog: Option<std::io::BufWriter<std::fs::File>>,
     /// per-segment block statistics, built on demand
     pub stats: Arc<crate::blockstats::StatsCache>,
     /// False while the id table is still being rebuilt after a reopen. Until it
@@ -674,6 +691,91 @@ impl IdxState {
             "observed_kinds": self.observed_kinds,
         });
         let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
+    }
+
+    /// Open the translog for an index that lives on disk.
+    fn open_translog(&mut self) {
+        let Some(dir) = self.path.clone() else { return };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(TRANSLOG));
+        self.translog = file.ok().map(std::io::BufWriter::new);
+    }
+
+    /// Record a write, so a crash can find it again.
+    pub fn log_write(&mut self, id: &str, routing: Option<&str>, version: u64, seq: u64, source: Option<&str>) {
+        use std::io::Write;
+        let Some(log) = self.translog.as_mut() else { return };
+        let record = serde_json::json!({
+            "id": id,
+            "routing": routing,
+            "version": version,
+            "seq": seq,
+            "source": source,
+        });
+        let line = record.to_string();
+        let _ = writeln!(log, "{line}");
+        self.translog_bytes_since_commit += line.len() as u64 + 1;
+        // a record that outgrows the index it stands in for is a recovery that
+        // would take longer than the writing did
+        if self.translog_bytes_since_commit > TRANSLOG_FLUSH_BYTES {
+            let _ = self.apply_ops(None);
+            let committed = self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
+            if committed {
+                let _ = self.realtime.reload();
+                self.clear_translog();
+            }
+        }
+    }
+
+    /// Put what has been recorded where a crash cannot lose it.
+    ///
+    /// Once per request rather than once per document: a bulk of ten thousand
+    /// is one write to answer for, the way OpenSearch counts it too.
+    pub fn sync_translog(&mut self) {
+        use std::io::Write;
+        if self.durability_is_async() {
+            return;
+        }
+        if let Some(log) = self.translog.as_mut() {
+            let _ = log.flush();
+            let _ = log.get_ref().sync_data();
+        }
+    }
+
+    /// `index.translog.durability: async` asks for speed over the guarantee:
+    /// the record is written but not forced, and a crash may lose it.
+    fn durability_is_async(&self) -> bool {
+        self.setting("translog.durability")
+            .map(|v| v.eq_ignore_ascii_case("async"))
+            .unwrap_or(false)
+    }
+
+    /// Everything written is in the index and on disk: the record is spent.
+    fn clear_translog(&mut self) {
+        use std::io::Write;
+        let Some(dir) = self.path.clone() else { return };
+        if let Some(log) = self.translog.as_mut() {
+            let _ = log.flush();
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(dir.join(TRANSLOG));
+        self.translog = file.ok().map(std::io::BufWriter::new);
+        self.translog_bytes_since_commit = 0;
+    }
+
+    /// How much is waiting in the translog, which is what a `_stats` call
+    /// reports as the uncommitted translog.
+    pub fn translog_bytes(&self) -> u64 {
+        self.path
+            .as_ref()
+            .and_then(|d| std::fs::metadata(d.join(TRANSLOG)).ok())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Which shard a routing value lands on, the way OpenSearch routes it.
@@ -743,6 +845,9 @@ impl IdxState {
             self.pending.remove(&id);
             self.pending_seq.remove(&id);
         }
+        if self.deferred.is_empty() {
+            self.clear_translog();
+        }
         self.pending_bytes = self
             .pending
             .iter()
@@ -764,6 +869,11 @@ impl IdxState {
         self.pending.clear();
         self.pending_seq.clear();
         self.pending_bytes = 0;
+        // everything acknowledged is in the index now, and the index is on
+        // disk: what the translog was holding for a crash is spent
+        if self.deferred.is_empty() {
+            self.clear_translog();
+        }
         Ok(())
     }
 
@@ -785,6 +895,7 @@ impl IdxState {
                 let _ = self.realtime.reload();
                 self.pending.clear();
                 self.pending_bytes = 0;
+                self.clear_translog();
             }
         }
     }
@@ -856,6 +967,9 @@ impl IdxState {
         self.pending.clear();
         self.pending_seq.clear();
         self.pending_bytes = 0;
+        if self.deferred.is_empty() {
+            self.clear_translog();
+        }
         release_freed_memory();
         true
     }
@@ -1924,7 +2038,9 @@ impl Store {
                 )?;
                 self.open_index(name, body, path.clone())?;
                 if let Some(st) = self.get(name) {
-                    st.write().path = Some(path);
+                    let mut g = st.write();
+                    g.path = Some(path);
+                    g.open_translog();
                 }
                 Ok(())
             }
@@ -1938,7 +2054,9 @@ impl Store {
         let index = Index::open_or_create(dir, schema)?;
         self.finish_open(name, body, index, fields)?;
         if let Some(st) = self.get(name) {
-            st.write().path = Some(path);
+            let mut g = st.write();
+            g.path = Some(path);
+            g.open_translog();
         }
         Ok(())
     }
@@ -2026,6 +2144,8 @@ impl Store {
             bytes: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,
+            translog_bytes_since_commit: 0,
+            translog: None,
             stats: Arc::new(crate::blockstats::StatsCache::default()),
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
