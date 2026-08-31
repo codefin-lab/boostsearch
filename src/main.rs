@@ -3,6 +3,7 @@
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
 
+mod analysis;
 mod api;
 mod blockstats;
 mod hdr;

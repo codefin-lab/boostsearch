@@ -1,0 +1,40 @@
+{
+ "cluster": "http://127.0.0.1:9200",
+ "indices": [
+  {
+   "name": "an1",
+   "shards": "1",
+   "replicas": "1"
+  },
+  {
+   "name": "geo1",
+   "shards": "1",
+   "replicas": "1"
+  }
+ ],
+ "gaps": {
+  "field_types": [
+   "geo_point"
+  ],
+  "analyzers": [
+   "my_lower"
+  ],
+  "indices_with_custom_analysis": [
+   "an1"
+  ]
+ },
+ "capacity": {
+  "documents": 2.0,
+  "primary_bytes": 0.0,
+  "primary_gb": 0.0
+ },
+ "used": {
+  "field_types": [
+   "geo_point",
+   "text"
+  ],
+  "analyzers": [
+   "my_lower"
+  ]
+ }
+}
