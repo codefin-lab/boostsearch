@@ -2097,6 +2097,137 @@ pub fn write_doc_checked(
 
 /// `raw` is the document exactly as the client sent it; passing it through
 /// avoids re-serialising a tree we only just parsed.
+/// What is wrong with this document, as a kind, a reason and its cause.
+///
+/// A write and one item of a bulk request both need to say the same thing, so
+/// neither of them decides it.
+pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, String, String)> {
+    // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
+    // out in 2262
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "date_nanos" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let texts: Vec<String> = match value {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            _ => Vec::new(),
+        };
+        for text in texts {
+            // read the text as written: the usual path folds a date through
+            // the resolution the index keeps, which is the very thing being
+            // checked for
+            let Some(dt) = tantivy::time::OffsetDateTime::parse(
+                &text,
+                &tantivy::time::format_description::well_known::Rfc3339,
+            )
+            .ok()
+            .or_else(|| crate::store::parse_date_lenient(&text)) else {
+                continue;
+            };
+            let nanos = dt.unix_timestamp_nanos();
+            let complaint = if dt.year() < 1970 {
+                Some(format!(
+                    "date[{text}] is before the epoch in 1970 and cannot be stored in \
+                     nanosecond resolution"
+                ))
+            } else if nanos > i64::MAX as i128 {
+                Some(format!(
+                    "date[{text}] is after 2262-04-11T23:47:16.854775807 and cannot be stored \
+                     in nanosecond resolution"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = complaint {
+                return Some((
+                    "mapper_parsing_exception".into(),
+                    format!("failed to parse field [{name}] of type [date_nanos]"),
+                    reason,
+                ));
+            }
+        }
+    }
+    // a nested field is a list of documents of its own, and an index says how
+    // many of them one document may carry
+    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
+    let mut nested_count = 0u64;
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "nested" {
+            continue;
+        }
+        if let Some(Value::Array(a)) = source.pointer(&format!("/{}", name.replace('.', "/"))) {
+            nested_count += a.len() as u64;
+        }
+    }
+    if nested_count > nested_limit {
+        return Some((
+            "illegal_argument_exception".into(),
+            format!(
+                "The number of nested documents has exceeded the allowed limit of \
+                 [{nested_limit}]. This limit can be set by changing the \
+                 [index.mapping.nested_objects.limit] index level setting."
+            ),
+            String::new(),
+        ));
+    }
+    // a flat_object keeps whatever object it is given; it is not a place to
+    // put a string
+    for (name, kind) in st.mapping.types.iter() {
+        if kind != "flat_object" {
+            continue;
+        }
+        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
+            continue;
+        };
+        let ok = match value {
+            Value::Object(_) | Value::Null => true,
+            Value::Array(a) => a.iter().all(|v| v.is_object() || v.is_null()),
+            _ => false,
+        };
+        if !ok {
+            return Some((
+                "parsing_exception".into(),
+                format!("Failed to parse field [{name}] of type [flat_object]"),
+                String::new(),
+            ));
+        }
+    }
+    // a completion field filed under contexts has to be given them: without
+    // one the value could never be found again
+    if let Some(props) = st.mapping.raw.pointer("/properties").and_then(|p| p.as_object()) {
+        for (name, def) in props {
+            let needs = def
+                .get("contexts")
+                .and_then(|c| c.as_array())
+                .map(|c| c.iter().all(|d| d.get("path").is_none()) && !c.is_empty())
+                .unwrap_or(false);
+            if !needs {
+                continue;
+            }
+            let Some(value) = source.get(name) else { continue };
+            let given = match value {
+                Value::Object(o) => o.contains_key("contexts"),
+                Value::Array(a) => a
+                    .iter()
+                    .all(|v| v.as_object().map(|o| o.contains_key("contexts")).unwrap_or(false)),
+                _ => false,
+            };
+            if !given {
+                return Some((
+                    "mapper_parsing_exception".into(),
+                    format!("Contexts are mandatory in context enabled completion field [{name}]"),
+                    String::new(),
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub fn write_doc_raw(
     st: &mut IdxState,
     id: &str,
@@ -2168,124 +2299,8 @@ pub fn write_doc_versioned(
             w.delete_term(term);
         }
     }
-    // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
-    // out in 2262
-    for (name, kind) in st.mapping.types.iter() {
-        if kind != "date_nanos" {
-            continue;
-        }
-        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
-            continue;
-        };
-        let texts: Vec<String> = match value {
-            Value::String(s) => vec![s.clone()],
-            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
-            _ => Vec::new(),
-        };
-        for text in texts {
-            let Some(dt) = crate::store::canonical_date(&json!(text.clone()))
-                .and_then(|d| crate::store::parse_date_lenient(&d))
-            else {
-                continue;
-            };
-            let nanos = dt.unix_timestamp_nanos();
-            let complaint = if nanos < 0 {
-                Some(format!(
-                    "date[{text}] is before the epoch in 1970 and cannot be stored in \
-                     nanosecond resolution"
-                ))
-            } else if nanos > i64::MAX as i128 {
-                Some(format!(
-                    "date[{text}] is after 2262-04-11T23:47:16.854775807 and cannot be stored \
-                     in nanosecond resolution"
-                ))
-            } else {
-                None
-            };
-            if let Some(reason) = complaint {
-                return Err(err_caused_by(
-                    "mapper_parsing_exception",
-                    &format!("failed to parse field [{name}] of type [date_nanos]"),
-                    &reason,
-                ));
-            }
-        }
-    }
-    // a nested field is a list of documents of its own, and an index says how
-    // many of them one document may carry
-    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
-    let mut nested_count = 0u64;
-    for (name, kind) in st.mapping.types.iter() {
-        if kind != "nested" {
-            continue;
-        }
-        if let Some(Value::Array(a)) = source.pointer(&format!("/{}", name.replace('.', "/"))) {
-            nested_count += a.len() as u64;
-        }
-    }
-    if nested_count > nested_limit {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            format!(
-                "The number of nested documents has exceeded the allowed limit of \
-                 [{nested_limit}]. This limit can be set by changing the \
-                 [index.mapping.nested_objects.limit] index level setting."
-            ),
-        ));
-    }
-    // a flat_object keeps whatever object it is given; it is not a place to
-    // put a string
-    for (name, kind) in st.mapping.types.iter() {
-        if kind != "flat_object" {
-            continue;
-        }
-        let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
-            continue;
-        };
-        let ok = match value {
-            Value::Object(_) | Value::Null => true,
-            Value::Array(a) => a.iter().all(|v| v.is_object() || v.is_null()),
-            _ => false,
-        };
-        if !ok {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "parsing_exception",
-                format!("Failed to parse field [{name}] of type [flat_object]"),
-            ));
-        }
-    }
-    // a completion field filed under contexts has to be given them: without
-    // one the value could never be found again
-    if let Some(props) = st.mapping.raw.pointer("/properties").and_then(|p| p.as_object()) {
-        for (name, def) in props {
-            let needs = def
-                .get("contexts")
-                .and_then(|c| c.as_array())
-                .map(|c| c.iter().all(|d| d.get("path").is_none()) && !c.is_empty())
-                .unwrap_or(false);
-            if !needs {
-                continue;
-            }
-            let Some(value) = source.get(name) else { continue };
-            let given = match value {
-                Value::Object(o) => o.contains_key("contexts"),
-                Value::Array(a) => a
-                    .iter()
-                    .all(|v| v.as_object().map(|o| o.contains_key("contexts")).unwrap_or(false)),
-                _ => false,
-            };
-            if !given {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "mapper_parsing_exception",
-                    format!(
-                        "Contexts are mandatory in context enabled completion field [{name}]"
-                    ),
-                ));
-            }
-        }
+    if let Some((kind, reason, cause)) = document_complaint(st, &source) {
+        return Err(err_caused_by(&kind, &reason, &cause));
     }
     let default_lenient = st
         .setting("mapping.ignore_malformed")
@@ -2953,6 +2968,20 @@ pub async fn bulk(
                     }
                 }
                 let src = source.unwrap_or_else(|| json!({}));
+                // a document the mapping cannot accept is one item's failure,
+                // not the whole request's
+                if let Some((kind, reason, cause)) = document_complaint(&g, &src) {
+                    errors = true;
+                    let mut error = json!({"type": kind, "reason": reason});
+                    if !cause.is_empty() {
+                        error["caused_by"] =
+                            json!({"type": "illegal_argument_exception", "reason": cause});
+                    }
+                    items.push(json!({ op.clone(): {
+                        "_index": idx, "_id": id, "status": 400, "error": error,
+                    }}));
+                    continue;
+                }
                 match write_doc_raw(&mut g, &id, src, &op, doc_raw.take()) {
                     Ok((body, status)) => {
                         let mut b = body;
