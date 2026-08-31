@@ -100,6 +100,8 @@ struct SortKey {
     missing_last: bool,
     /// the nested object this key reads inside, where the caller named one
     nested: Option<String>,
+    /// only the objects matching this take part in the sort
+    nested_filter: Option<Value>,
 }
 
 fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
@@ -117,6 +119,7 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 mode: None,
                 missing_last: true,
                 nested: None,
+                nested_filter: None,
             }),
             Value::Object(o) => {
                 for (field, opts) in o {
@@ -145,7 +148,21 @@ fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .or_else(|| opts.get("nested_path"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    out.push(SortKey { field, desc, mode, missing_last, nested });
+                    // a nested sort may take only the objects that match a
+                    // filter, and a document whose objects all fail it has no
+                    // value to sort by at all
+                    let nested_filter = opts
+                        .pointer("/nested/filter")
+                        .or_else(|| opts.get("nested_filter"))
+                        .cloned();
+                    out.push(SortKey {
+                        field,
+                        desc,
+                        mode,
+                        missing_last,
+                        nested,
+                        nested_filter,
+                    });
                 }
             }
             _ => {}
@@ -556,6 +573,7 @@ impl tantivy::collector::SegmentCollector for SortSegmentCollector {
                     mode: None,
                     missing_last: self.missing_last.get(i).copied().unwrap_or(true),
                     nested: None,
+                    nested_filter: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {
@@ -746,6 +764,93 @@ fn scope_sorts_to(node: &mut Value, path: &str) {
             }
         }
         _ => {}
+    }
+}
+
+/// A value as the number it stands for: a date is its instant.
+fn number_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        // read the text as written: folding it through the resolution the
+        // index keeps would wrap a date far enough out
+        Value::String(s) => tantivy::time::OffsetDateTime::parse(
+            s,
+            &tantivy::time::format_description::well_known::Rfc3339,
+        )
+        .ok()
+        .map(|d| d.unix_timestamp_nanos() as f64)
+        .or_else(|| {
+            crate::store::parse_date_lenient(s).map(|d| d.unix_timestamp_nanos() as f64)
+        })
+        .or_else(|| s.parse().ok()),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// Does one nested object match the filter a sort put on them?
+///
+/// Only the shapes a sort filter is written in are answered here: the boolean
+/// wrappers, and the clauses that compare one of the object's own fields.
+fn object_matches(filter: &Value, object: &Value, path: &str) -> bool {
+    let Some((kind, body)) = filter.as_object().and_then(|o| o.iter().next()) else {
+        return true;
+    };
+    let field_value = |name: &str| -> Option<Value> {
+        let leaf = name.strip_prefix(&format!("{path}.")).unwrap_or(name);
+        object.pointer(&format!("/{}", leaf.replace('.', "/"))).cloned()
+    };
+    match kind.as_str() {
+        "bool" => {
+            let all = |key: &str| -> bool {
+                match body.get(key) {
+                    None => true,
+                    Some(Value::Array(a)) => a.iter().all(|c| object_matches(c, object, path)),
+                    Some(one) => object_matches(one, object, path),
+                }
+            };
+            let none = match body.get("must_not") {
+                None => true,
+                Some(Value::Array(a)) => !a.iter().any(|c| object_matches(c, object, path)),
+                Some(one) => !object_matches(one, object, path),
+            };
+            all("filter") && all("must") && none
+        }
+        "match_all" => true,
+        "exists" => body
+            .get("field")
+            .and_then(|f| f.as_str())
+            .map(|f| field_value(f).is_some())
+            .unwrap_or(false),
+        "term" | "match" => {
+            let Some((name, want)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let want = want.get("value").or_else(|| want.get("query")).unwrap_or(want);
+            field_value(name).map(|v| &v == want).unwrap_or(false)
+        }
+        "range" => {
+            let Some((name, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let Some(here) = field_value(name).as_ref().and_then(number_of) else {
+                return false;
+            };
+            let bound = |key: &str| -> Option<f64> {
+                spec.get(key).and_then(|v| match v {
+                    Value::String(s) => crate::store::canonical_date(&json!(s))
+                        .and_then(|d| crate::store::parse_date_lenient(&d))
+                        .map(|d| d.unix_timestamp_nanos() as f64)
+                        .or_else(|| s.parse().ok()),
+                    other => other.as_f64(),
+                })
+            };
+            bound("gte").map(|b| here >= b).unwrap_or(true)
+                && bound("gt").map(|b| here > b).unwrap_or(true)
+                && bound("lte").map(|b| here <= b).unwrap_or(true)
+                && bound("lt").map(|b| here < b).unwrap_or(true)
+        }
+        _ => true,
     }
 }
 
@@ -4004,6 +4109,7 @@ pub fn run(
                         mode: None,
                         missing_last: true,
                         nested: None,
+                        nested_filter: None,
                     })
                     .collect();
                 (!keys.is_empty()).then_some(keys)
@@ -4285,7 +4391,11 @@ pub fn run(
     let slice = body.get("slice").filter(|s| s.get("max").is_some()).cloned();
     // collapsing decides the page from groups rather than from documents, so
     // the best few documents are not enough to cut it from
-    let page_want = if slice.is_some() || body.get("collapse").is_some() {
+    // a sort that only counts some of a document's nested objects is settled
+    // after the candidates are in hand, so the page cannot be cut while
+    // collecting
+    let nested_filtered = sort_keys.iter().any(|k| k.nested_filter.is_some());
+    let page_want = if slice.is_some() || body.get("collapse").is_some() || nested_filtered {
         65_536
     } else {
         from + size
@@ -4897,6 +5007,55 @@ pub fn run(
                 }
                 None if mode != "multiply" => c.score *= qw,
                 None => {}
+            }
+        }
+    }
+    // Where a sort names a filter on the nested objects it reads, only the
+    // objects that match it have anything to say. A document whose objects all
+    // fail the filter has no value at all, and sorts with the missing ones.
+    if nested_filtered {
+        for (i, key) in sort_keys.iter().enumerate() {
+            let (Some(path), Some(filter)) = (key.nested.as_ref(), key.nested_filter.as_ref())
+            else {
+                continue;
+            };
+            let leaf = key.field.strip_prefix(&format!("{path}.")).unwrap_or(&key.field);
+            for c in cands.iter_mut() {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+                let objects: Vec<Value> = match src.pointer(&format!("/{}", path.replace('.', "/")))
+                {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(other) => vec![other.clone()],
+                    None => Vec::new(),
+                };
+                let mut values: Vec<f64> = Vec::new();
+                for object in objects {
+                    if !object_matches(filter, &object, path) {
+                        continue;
+                    }
+                    if let Some(v) = object.pointer(&format!("/{}", leaf.replace('.', "/"))) {
+                        if let Some(n) = number_of(v) {
+                            values.push(n);
+                        }
+                    }
+                }
+                let picked = match key.mode.as_deref() {
+                    Some("max") => values.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                    Some("sum") => values.iter().sum(),
+                    Some("avg") => {
+                        values.iter().sum::<f64>() / (values.len().max(1) as f64)
+                    }
+                    _ => values.iter().cloned().fold(f64::INFINITY, f64::min),
+                };
+                if let Some(slot) = c.sort.get_mut(i) {
+                    *slot = if values.is_empty() {
+                        SortValue::Missing
+                    } else {
+                        SortValue::F64(picked)
+                    };
+                }
             }
         }
     }
