@@ -251,9 +251,16 @@ pub fn recover(store: &Store) {
             if let Some(seq) = rec.get("seq").and_then(|v| v.as_u64()) {
                 g.seq_no = seq;
             }
-            match rec.get("source") {
-                Some(Value::String(raw)) => {
-                    let Ok(source) = serde_json::from_str::<Value>(raw) else { continue };
+            // a record written before the source went in as a value holds it
+            // as a string; both are read here
+            let held = match rec.get("source") {
+                Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).ok(),
+                Some(v @ (Value::Object(_) | Value::Array(_))) => Some(v.clone()),
+                _ => None,
+            };
+            match held {
+                Some(source) => {
+                    let raw = source.to_string();
                     match rec.get("routing").and_then(|v| v.as_str()) {
                         Some(r) => {
                             g.routing.insert(id.to_string(), r.to_string());
@@ -262,14 +269,8 @@ pub fn recover(store: &Store) {
                             g.routing.remove(id);
                         }
                     }
-                    let _ = write_doc_versioned(
-                        &mut g,
-                        id,
-                        source,
-                        "index",
-                        Some(raw.clone()),
-                        Some(version),
-                    );
+                    let _ =
+                        write_doc_versioned(&mut g, id, source, "index", Some(raw), Some(version));
                 }
                 _ => {
                     let (_, _) = g.bump_to(id, false, version);

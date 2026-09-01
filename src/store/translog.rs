@@ -21,16 +21,27 @@ impl IdxState {
     ) {
         use std::io::Write;
         let Some(log) = self.translog.as_mut() else { return };
-        let record = serde_json::json!({
-            "id": id,
-            "routing": routing,
-            "version": version,
-            "seq": seq,
-            "source": source,
-        });
-        let line = record.to_string();
-        let _ = writeln!(log, "{line}");
-        self.translog_bytes_since_commit += line.len() as u64 + 1;
+        // The document already is JSON. Recording it as a JSON *string* would
+        // copy it and escape it a second time -- which, for a bulk of large
+        // documents, was most of what recording a write cost. It goes in as
+        // the value it is.
+        let mut line = String::with_capacity(source.map(|s| s.len() + 96).unwrap_or(96));
+        line.push_str("{\"id\":");
+        push_json_str(&mut line, id);
+        if let Some(routing) = routing {
+            line.push_str(",\"routing\":");
+            push_json_str(&mut line, routing);
+        }
+        use std::fmt::Write as _;
+        let _ = write!(line, ",\"version\":{version},\"seq\":{seq}");
+        line.push_str(",\"source\":");
+        match source {
+            Some(source) => line.push_str(source),
+            None => line.push_str("null"),
+        }
+        line.push_str("}\n");
+        let _ = log.write_all(line.as_bytes());
+        self.translog_bytes_since_commit += line.len() as u64;
         // a record that outgrows the index it stands in for is a recovery that
         // would take longer than the writing did
         if self.translog_bytes_since_commit > TRANSLOG_FLUSH_BYTES {
@@ -208,5 +219,13 @@ impl IdxState {
                 self.clear_translog();
             }
         }
+    }
+}
+
+/// One string, spelled the way JSON spells it.
+fn push_json_str(out: &mut String, text: &str) {
+    match serde_json::to_string(text) {
+        Ok(quoted) => out.push_str(&quoted),
+        Err(_) => out.push_str("\"\""),
     }
 }
