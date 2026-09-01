@@ -130,14 +130,15 @@ pub(crate) fn build_highlight(
         // is marked in the text is the run
         // a field cut into pieces of words matches on the pieces, so what is
         // marked is each piece wherever it stands inside a word
-        let pieces = analyzer
-            .as_deref()
-            .and_then(|named| analysis.get(named))
-            .map(|chain| chain.cuts_into_ngrams())
-            .unwrap_or(false);
+        let chain = analyzer.as_deref().and_then(|named| analysis.get(named));
+        let pieces = chain.as_ref().map(|c| c.cuts_into_ngrams()).unwrap_or(false);
+        // pieces cut out of whole words keep the word's offsets, so a match
+        // on a piece marks the word it came from
+        let within_words = chain.as_ref().map(|c| c.filters_into_ngrams()).unwrap_or(false);
         let marked = match shingle_width(&name) {
             Some(width) => mark_runs(text, &terms, width, &pre, &post),
             None if pieces => mark_pieces(text, &terms, &pre, &post),
+            None if within_words => mark_words_containing(text, &terms, &pre, &post),
             None => mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post),
         };
         if let Some(marked) = marked {
@@ -343,6 +344,45 @@ fn mark_runs(
     }
     out.push_str(&text[cursor..]);
     Some(out)
+}
+
+/// Mark every word of the text that holds a query word inside it.
+fn mark_words_containing(
+    text: &str,
+    queries: &[(String, bool)],
+    pre: &str,
+    post: &str,
+) -> Option<String> {
+    let wanted: Vec<String> = queries
+        .iter()
+        .flat_map(|(q, _)| q.split_whitespace().map(|w| w.to_lowercase()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut marked = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some(start) = rest.find(|c: char| c.is_alphanumeric()) else { break };
+        out.push_str(&rest[..start]);
+        let word = &rest[start..];
+        let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
+        let (word, tail) = word.split_at(end);
+        let lower = word.to_lowercase();
+        if wanted.iter().any(|w| lower.contains(w.as_str())) {
+            out.push_str(pre);
+            out.push_str(word);
+            out.push_str(post);
+            marked = true;
+        } else {
+            out.push_str(word);
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    marked.then_some(out)
 }
 
 /// Mark every place a query word stands inside the text, whole word or not.

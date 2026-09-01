@@ -85,7 +85,7 @@ fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64) {
             }
         }
     }
-    (sum_doc_freq, searcher.num_docs() as u64)
+    (sum_doc_freq, searcher.num_docs())
 }
 
 pub(crate) fn term_vectors_of(

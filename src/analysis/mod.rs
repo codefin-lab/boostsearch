@@ -396,6 +396,14 @@ impl Chain {
         self.steps.iter().any(|s| matches!(s, Step::TypeAsPayload))
     }
 
+    /// Whether the chain cuts each word into pieces after cutting the words.
+    ///
+    /// The pieces carry the offsets of the word they came from, so a match on
+    /// a piece is a match on the whole word.
+    pub fn filters_into_ngrams(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::NgramTokens { .. }))
+    }
+
     /// Whether the chain cuts text into pieces of words rather than words.
     ///
     /// A field written that way is matched on the pieces, and a highlighter
@@ -2553,7 +2561,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
                 filler: text("filler_token", "_"),
             }]
         }
-        "delimited_term_freq" => vec![Step::DelimitedTermFreq(one("delimiter", '^'))],
+        "delimited_term_freq" => vec![Step::DelimitedTermFreq(one("delimiter", '|'))],
         "delimited_payload" => vec![Step::DelimitedPayload(one("delimiter", '|'))],
         "ngram" => vec![Step::NgramTokens {
             min: num("min_gram", 1),
@@ -2609,7 +2617,7 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "cjk_width" => vec![Step::CjkWidth],
         "cjk_bigram" => vec![Step::CjkBigram],
         "delimited_payload" => vec![Step::DelimitedPayload('|')],
-        "delimited_term_freq" => vec![Step::DelimitedTermFreq('^')],
+        "delimited_term_freq" => vec![Step::DelimitedTermFreq('|')],
         "stop" => vec![Step::Stop(stop_words("_english_"))],
         "kstem" => vec![Step::KStem],
         "porter_stem" | "porterStem" => vec![Step::Stem("porter".into())],
@@ -2632,6 +2640,7 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
             separator: " ".to_string(),
             filler: "_".to_string(),
         }],
+        "type_as_payload" => vec![Step::TypeAsPayload],
         "flatten_graph" => vec![Step::FlattenGraph],
         "remove_duplicates" => vec![],
         "keyword_repeat" => vec![Step::KeywordRepeat],

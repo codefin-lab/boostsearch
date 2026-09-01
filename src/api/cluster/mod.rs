@@ -319,10 +319,10 @@ fn analysis_stats(store: &Store) -> Value {
                 }
             }
             for (key, v) in o {
-                if key == "properties" || key == "fields" {
-                    if let Some(inner) = v.as_object() {
-                        inner.values().for_each(|f| walk(f, out));
-                    }
+                if (key == "properties" || key == "fields")
+                    && let Some(inner) = v.as_object()
+                {
+                    inner.values().for_each(|f| walk(f, out));
                 }
             }
         }
