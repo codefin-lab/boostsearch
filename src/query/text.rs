@@ -110,19 +110,42 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     if tokens.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
-    let terms: Vec<Term> = tokens
-        .iter()
-        .map(|t| {
-            let mut term = Term::from_field_json_path(f, &path, true);
-            term.append_type_and_str(t);
-            term
-        })
-        .collect();
+    let term_of = |t: &str| -> Term {
+        let mut term = Term::from_field_json_path(f, &path, true);
+        term.append_type_and_str(t);
+        term
+    };
+    let terms: Vec<Term> = tokens.iter().map(|t| term_of(t)).collect();
 
     if kind == "match_phrase" || kind == "match_phrase_prefix" {
         // the last word of a phrase prefix is the beginning of a word, not a
         // whole one: `lazy d` finds `lazy dog`
         if kind == "match_phrase_prefix" {
+            // more than one way through the text: each way is a phrase whose
+            // last word is only the beginning of one
+            let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+            if crate::query::branches(&arcs) {
+                let mut clauses: Vec<Box<dyn Query>> = Vec::new();
+                for way in crate::query::ways(&arcs) {
+                    let Some((last, head)) = way.split_last() else { continue };
+                    let head: Vec<Term> = head.iter().map(|w| term_of(w)).collect();
+                    for ending in prefix_terms(ctx, f, &path, last)? {
+                        let mut phrase = head.clone();
+                        phrase.push(ending);
+                        clauses.push(match phrase.len() {
+                            1 => Box::new(TermQuery::new(
+                                phrase.remove(0),
+                                IndexRecordOption::WithFreqs,
+                            )),
+                            _ => Box::new(PhraseQuery::new(phrase)),
+                        });
+                    }
+                }
+                if clauses.is_empty() {
+                    return Ok(Box::new(EmptyQuery));
+                }
+                return Ok(Box::new(BooleanQuery::union(clauses)));
+            }
             let mut head = terms.clone();
             let Some(last) = head.pop() else {
                 return Ok(Box::new(EmptyQuery));
@@ -156,39 +179,23 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         if terms.len() == 1 {
             return Ok(Box::new(TermQuery::new(terms[0].clone(), IndexRecordOption::WithFreqs)));
         }
-        // words standing in one place are alternatives, and a phrase over them
-        // is a phrase for each way of choosing between them
-        let places = analyze_positions(ctx, view, &field, &text, analyzer);
-        if places.len() == terms.len() && places.windows(2).any(|pair| pair[0].1 == pair[1].1) {
-            let mut ways: Vec<Vec<Term>> = vec![Vec::new()];
-            let mut last: Option<usize> = None;
-            for (term, (_, at)) in terms.iter().zip(places.iter()) {
-                match last {
-                    // another way of writing the word already in this place
-                    Some(before) if before == *at => {
-                        let so_far = ways.len();
-                        for i in 0..so_far {
-                            let mut other = ways[i].clone();
-                            if let Some(end) = other.last_mut() {
-                                *end = term.clone();
-                            }
-                            ways.push(other);
-                        }
-                    }
-                    _ => {
-                        for way in ways.iter_mut() {
-                            way.push(term.clone());
-                        }
-                    }
-                }
-                last = Some(*at);
-                // the ways multiply, and nobody reads more than a few of them
-                ways.truncate(64);
-            }
-            let clauses: Vec<Box<dyn Query>> = ways
+        // where the analyzer left more than one way through the text -- a
+        // synonym beside what it means, a stem on its word -- a phrase is a
+        // phrase for each way through
+        let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+        if crate::query::branches(&arcs) {
+            let clauses: Vec<Box<dyn Query>> = crate::query::ways(&arcs)
                 .into_iter()
-                .filter(|way| way.len() > 1)
-                .map(|way| Box::new(PhraseQuery::new(way)) as Box<dyn Query>)
+                .map(|way| {
+                    let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
+                    match walked.len() {
+                        1 => {
+                            Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>
+                        }
+                        _ => Box::new(PhraseQuery::new(walked)),
+                    }
+                })
                 .collect();
             if !clauses.is_empty() {
                 return Ok(Box::new(BooleanQuery::union(clauses)));
@@ -233,44 +240,57 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     let operator =
         opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
-    // words standing in one place are one word written several ways: a match
-    // wants any of them, not all of them
-    let places = analyze_positions(ctx, view, &field, &text, analyzer);
-    let stacked =
-        places.len() == terms.len() && places.windows(2).any(|pair| pair[0].1 == pair[1].1);
-    let groups: Vec<Vec<Term>> = match stacked {
-        false => terms.iter().map(|t| vec![t.clone()]).collect(),
-        true => {
-            let mut groups: Vec<Vec<Term>> = Vec::new();
-            let mut last: Option<usize> = None;
-            for (term, (_, at)) in terms.iter().zip(places.iter()) {
-                match last {
-                    Some(before) if before == *at => {
-                        if let Some(group) = groups.last_mut() {
-                            group.push(term.clone());
-                        }
-                    }
-                    _ => groups.push(vec![term.clone()]),
-                }
-                last = Some(*at);
-            }
-            groups
-        }
+    // words standing in one place are one word written several ways, and a
+    // word spanning several places is one way of reading them: the text is
+    // cut where nothing crosses, and a match wants every stretch, each by any
+    // of the ways through it
+    let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+    let stretches: Vec<Vec<Vec<String>>> = match crate::query::branches(&arcs) {
+        true => crate::query::stretches(&arcs),
+        false => tokens.iter().map(|t| vec![vec![t.clone()]]).collect(),
     };
-    let n = groups.len();
-    let clauses: Vec<(Occur, Box<dyn Query>)> = groups
+    let n = stretches.len();
+    // a way of several words is read as a phrase, unless the request asked
+    // for the words alone, in any order and at any distance
+    let as_phrase =
+        opts.get("auto_generate_synonyms_phrase_query").and_then(|v| v.as_bool()).unwrap_or(true);
+    let clauses: Vec<(Occur, Box<dyn Query>)> = stretches
         .into_iter()
-        .map(|mut group| {
-            let one: Box<dyn Query> = match group.len() {
-                1 => Box::new(TermQuery::new(group.remove(0), IndexRecordOption::WithFreqs)),
-                _ => any_of(group),
+        .map(|ways| {
+            let mut alternatives: Vec<Box<dyn Query>> = ways
+                .into_iter()
+                .map(|way| {
+                    let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
+                    match walked.len() {
+                        1 => {
+                            Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>
+                        }
+                        _ if as_phrase => Box::new(PhraseQuery::new(walked)),
+                        _ => Box::new(BooleanQuery::new(
+                            walked
+                                .into_iter()
+                                .map(|t| {
+                                    (
+                                        Occur::Must,
+                                        Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                            as Box<dyn Query>,
+                                    )
+                                })
+                                .collect(),
+                        )),
+                    }
+                })
+                .collect();
+            let one: Box<dyn Query> = match alternatives.len() {
+                1 => alternatives.remove(0),
+                _ => Box::new(BooleanQuery::union(alternatives)),
             };
             (occur, one)
         })
         .collect();
     let required = if occur == Occur::Should {
-        let msm = opts.get("minimum_should_match").and_then(parse_msm).unwrap_or(1);
-        resolve_msm(msm, n)
+        msm_required(opts.get("minimum_should_match"), n).unwrap_or_else(|| resolve_msm(1, n))
     } else {
         0
     };
@@ -515,8 +535,7 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
         clauses.push((occur, sub));
     }
     let required = if occur == Occur::Should {
-        let msm = opts.get("minimum_should_match").and_then(parse_msm).unwrap_or(1);
-        resolve_msm(msm, n)
+        msm_required(opts.get("minimum_should_match"), n).unwrap_or_else(|| resolve_msm(1, n))
     } else {
         0
     };

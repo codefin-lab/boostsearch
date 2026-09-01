@@ -213,7 +213,7 @@ fn analyzer_of(g: &IdxState, field: &str) -> Option<String> {
 /// The same, keeping the place each token stands in.
 fn analysed_at(g: &IdxState, analyzer: Option<&str>, text: &str) -> Vec<(String, usize)> {
     match analyzer.and_then(|named| g.analysis.get(named)) {
-        Some(chain) => chain.tokens(text).into_iter().map(|(t, p, _, _)| (t, p)).collect(),
+        Some(chain) => chain.tokens(text).into_iter().map(|(t, p, _, _, _)| (t, p)).collect(),
         None => analysed(g, None, text).into_iter().enumerate().map(|(p, t)| (t, p)).collect(),
     }
 }

@@ -87,7 +87,7 @@ pub(crate) fn term_vectors_of(
         // group the occurrences by the term they are of
         let mut terms: std::collections::BTreeMap<String, Vec<(usize, usize, usize)>> =
             std::collections::BTreeMap::new();
-        for (t, pos, from, to) in spans {
+        for (t, pos, from, to, _) in spans {
             terms.entry(t).or_default().push((pos, from, to));
         }
         let searcher = g.reader.searcher();

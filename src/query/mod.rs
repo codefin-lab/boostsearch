@@ -28,6 +28,8 @@ mod terms;
 pub(crate) use terms::*;
 mod spans;
 pub(crate) use spans::*;
+mod graph;
+pub(crate) use graph::*;
 mod text;
 pub(crate) use text::*;
 

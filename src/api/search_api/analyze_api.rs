@@ -1,6 +1,7 @@
 //! Asking what a query means, and what an analyzer does to a text.
 
 use super::*;
+use crate::analysis::Token;
 
 /// A filter written the short way, spelled out.
 ///
@@ -275,34 +276,40 @@ pub async fn analyze(
     for t in &text {
         // where a token came from is part of the answer: a highlighter and a
         // caller reading `_analyze` both ask for it
-        let parts: Vec<(String, usize, usize, usize)> = if let Some(chain) = &chain {
+        let parts: Vec<Token> = if let Some(chain) = &chain {
             chain.tokens(t)
         } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
                 .enumerate()
-                .map(|(i, w)| (w.to_string(), i, 0, 0))
+                .map(|(i, w)| (w.to_string(), i, 0, 0, 1))
                 .collect()
         } else {
             match &st {
                 Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer)
                     .into_iter()
                     .enumerate()
-                    .map(|(i, w)| (w, i, 0, 0))
+                    .map(|(i, w)| (w, i, 0, 0, 1))
                     .collect(),
                 None => t
                     .split_whitespace()
                     .enumerate()
-                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0))
+                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0, 1))
                     .collect(),
             }
         };
-        let parts_len = parts.iter().map(|(_, at, _, _)| *at + 1).max().unwrap_or(0);
-        for (tok, at, from, to) in parts {
+        let parts_len = parts.iter().map(|(_, at, _, _, _)| *at + 1).max().unwrap_or(0);
+        for (tok, at, from, to, length) in parts {
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
                 "type": "<ALPHANUM>", "position": pos + at,
             }));
+            // a token standing for more than one word says so
+            if length > 1
+                && let Some(last) = tokens.last_mut()
+            {
+                last["positionLength"] = json!(length);
+            }
         }
         pos += parts_len;
     }
@@ -326,9 +333,9 @@ pub async fn analyze(
     if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false)
         || p.get("explain").map(|v| v == "true").unwrap_or(false)
     {
-        let as_json = |cut: Vec<(String, usize, usize, usize)>| -> Vec<Value> {
+        let as_json = |cut: Vec<Token>| -> Vec<Value> {
             cut.into_iter()
-                .map(|(token, at, from, to)| {
+                .map(|(token, at, from, to, _)| {
                     json!({
                         "token": token, "start_offset": from, "end_offset": to,
                         "type": "<ALPHANUM>", "position": at,
@@ -379,8 +386,7 @@ pub async fn analyze(
                 })
                 .collect();
             let base = registry.tokenizer_only(&spec);
-            let cut: Vec<(String, usize, usize, usize)> =
-                prepared.iter().flat_map(|t| base.cut(t)).collect();
+            let cut: Vec<Token> = prepared.iter().flat_map(|t| base.cut(t)).collect();
             let stage = json!({"name": name, "tokens": as_json(cut)});
             // each filter is reported as the tokens standing after it, so the
             // chain is run again one filter longer each time
@@ -399,8 +405,7 @@ pub async fn analyze(
                 };
                 let chain =
                     crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
-                let cut: Vec<(String, usize, usize, usize)> =
-                    prepared.iter().flat_map(|t| chain.tokens(t)).collect();
+                let cut: Vec<Token> = prepared.iter().flat_map(|t| chain.tokens(t)).collect();
                 filters.push(json!({"name": name, "tokens": as_json(cut)}));
             }
             let mut detail = json!({
