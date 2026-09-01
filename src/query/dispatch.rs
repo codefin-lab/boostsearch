@@ -310,6 +310,19 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         // is simply which of them hold it
         "rank_feature" => {
             let field = body.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            // a log curve rises without bound, so it cannot answer for a
+            // feature whose larger values are worth less
+            let positive = ctx
+                .mapping
+                .field_option(field, "positive_score_impact")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !positive && body.get("log").is_some() {
+                return Err(anyhow!(
+                    "Cannot use the [log] function with a field that has a negative score impact \
+                     as it would trigger negative scores"
+                ));
+            }
             super::build(ctx, &serde_json::json!({"exists": {"field": field}}))?
         }
         "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"

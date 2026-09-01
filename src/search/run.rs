@@ -41,8 +41,14 @@ fn rescore_by_rank_features(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0) as f32;
             let boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-            let positive =
-                spec.get("positive_score_impact").and_then(|v| v.as_bool()).unwrap_or(true);
+            // whether a larger value is worth more is the field's own
+            // property, which the query may not override
+            let positive = g
+                .mapping
+                .field_option(field, "positive_score_impact")
+                .and_then(|v| v.as_bool())
+                .or_else(|| spec.get("positive_score_impact").and_then(|v| v.as_bool()))
+                .unwrap_or(true);
             // a feature the query says is worth less when it is larger is
             // read the other way round
             let value = held;
