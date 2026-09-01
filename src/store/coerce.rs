@@ -390,6 +390,7 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     fill_open_ranges(&mut out, mapping);
     gather_flat_objects(&mut out, mapping);
     add_shingles(&mut out, mapping);
+    copy_fields(&mut out, mapping);
     if subs.is_empty() {
         return out;
     }
@@ -461,6 +462,56 @@ pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -
 /// the words themselves the index holds every pair, triple and quadruple of
 /// neighbouring words. OpenSearch calls them `_2gram`, `_3gram` and `_4gram`,
 /// and a query may name them.
+/// The values a field's mapping says to write into another field as well.
+///
+/// `copy_to` puts the value where a second field can be searched for it. It is
+/// written into the document that is indexed, not into the one that is stored:
+/// the source a caller reads back is the one they sent.
+fn copy_fields(document: &mut Value, mapping: &Mapping) {
+    let copies = mapping.copies();
+    if copies.is_empty() {
+        return;
+    }
+    for (from, into) in copies {
+        let Some(value) = document.pointer(&format!("/{}", from.replace('.', "/"))).cloned() else {
+            continue;
+        };
+        for target in into {
+            let at = format!("/{}", target.replace('.', "/"));
+            match document.pointer_mut(&at) {
+                Some(Value::Array(items)) => match value.clone() {
+                    Value::Array(more) => items.extend(more),
+                    one => items.push(one),
+                },
+                Some(held) => {
+                    let mut items = vec![held.clone()];
+                    match value.clone() {
+                        Value::Array(more) => items.extend(more),
+                        one => items.push(one),
+                    }
+                    *held = Value::Array(items);
+                }
+                None => {
+                    // the target may sit inside an object that is not there
+                    let mut node = &mut *document;
+                    let parts: Vec<&str> = target.split('.').collect();
+                    for part in &parts[..parts.len() - 1] {
+                        node = node
+                            .as_object_mut()
+                            .map(|o| {
+                                o.entry(part.to_string()).or_insert_with(|| serde_json::json!({}))
+                            })
+                            .unwrap();
+                    }
+                    if let Some(o) = node.as_object_mut() {
+                        o.insert(parts[parts.len() - 1].to_string(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn add_shingles(document: &mut Value, mapping: &Mapping) {
     let typed: Vec<String> = mapping
         .types

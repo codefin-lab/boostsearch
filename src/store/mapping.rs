@@ -21,6 +21,28 @@ impl Mapping {
         m
     }
 
+    /// The fields whose values are written into other fields as well.
+    ///
+    /// A mapping may say `copy_to` on a field, naming one target or several.
+    pub fn copies(&self) -> Vec<(String, Vec<String>)> {
+        let mut out = Vec::new();
+        for path in self.types.keys() {
+            let Some(named) = self.field_option(path, "copy_to") else { continue };
+            let targets: Vec<String> = match named {
+                Value::String(one) => vec![one],
+                Value::Array(items) => {
+                    items.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                }
+                _ => continue,
+            };
+            if !targets.is_empty() {
+                out.push((path.clone(), targets));
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Multi-fields declared with a normalizer, as (parent path, sub name).
     ///
     /// A normalizer transforms the value at index time rather than tokenising
