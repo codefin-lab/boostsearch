@@ -13,6 +13,7 @@
 //! index can be told which analyzer a path is written with.
 
 mod morph;
+mod rslp;
 mod snowball;
 mod stem;
 
@@ -662,6 +663,7 @@ fn apply_step(
                 "italian_light" | "light_italian" => return word_by_word(&stem::italian_light),
                 "spanish_light" | "light_spanish" => return word_by_word(&stem::spanish_light),
                 "greek" => return word_by_word(&stem::greek),
+                "galician" => return word_by_word(&rslp::galician),
                 // the algorithms Snowball defines that BoostCore does not
                 // carry, generated from the definitions themselves
                 other @ ("catalan" | "basque" | "irish" | "lithuanian" | "estonian"
