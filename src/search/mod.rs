@@ -122,6 +122,9 @@ pub(crate) struct SortKey {
     nested: Option<String>,
     /// only the objects matching this take part in the sort
     nested_filter: Option<Value>,
+    /// the width the values are read as, where the caller asked for one other
+    /// than the field's own
+    numeric_type: Option<String>,
 }
 
 /// One segment's readers for one sort field: the strings, the numbers, and
@@ -428,6 +431,7 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
                     missing_last: self.missing_last.get(i).copied().unwrap_or(true),
                     nested: None,
                     nested_filter: None,
+                    numeric_type: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {

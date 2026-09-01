@@ -55,6 +55,14 @@ pub(crate) fn build_highlight(
             }
         }
     }
+    // a field the request named by its full name is looked at even where the
+    // mapping never wrote it down: the sub-fields a `search_as_you_type`
+    // mapping makes are named that way
+    for (pat, _) in &patterns {
+        if !pat.contains('*') && !candidates.contains(pat) {
+            candidates.push(pat.clone());
+        }
+    }
     candidates.sort();
     candidates.dedup();
 
@@ -117,7 +125,12 @@ pub(crate) fn build_highlight(
         }
         let analyzer =
             mapping.field_option(&name, "analyzer").and_then(|v| v.as_str().map(|s| s.to_string()));
-        let marked = mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post);
+        // a shingle sub-field holds runs of words rather than words, so what
+        // is marked in the text is the run
+        let marked = match shingle_width(&name) {
+            Some(width) => mark_runs(text, &terms, width, &pre, &post),
+            None => mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post),
+        };
         if let Some(marked) = marked {
             out.insert(name, json!([marked]));
         }
@@ -126,6 +139,19 @@ pub(crate) fn build_highlight(
 }
 
 /// The text each field was searched for, gathered from the query.
+/// The words of a bool prefix query that are whole words.
+///
+/// The last one is the beginning of a word, which a `search_as_you_type`
+/// field answers from the terms it keeps of word beginnings rather than from
+/// its own; nothing in this field's text stands for it.
+fn whole_words(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.len() {
+        0 | 1 => String::new(),
+        n => words[..n - 1].join(" "),
+    }
+}
+
 pub(crate) fn query_terms_by_field(query: Option<&Value>) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     fn walk(node: &Value, out: &mut Vec<(String, String, bool)>) {
@@ -160,18 +186,32 @@ pub(crate) fn query_terms_by_field(query: Option<&Value>) -> Vec<(String, String
                                 // word rather than the whole of it
                                 let partial = matches!(
                                     kind.as_str(),
-                                    "prefix"
-                                        | "wildcard"
-                                        | "match_phrase_prefix"
-                                        | "match_bool_prefix"
+                                    "prefix" | "wildcard" | "match_phrase_prefix"
                                 );
-                                out.push((field.clone(), t, partial));
+                                // the last word of a bool prefix query is
+                                // answered by the field of word beginnings,
+                                // not by this one, so it marks nothing here
+                                let t = match kind.as_str() {
+                                    "match_bool_prefix" => whole_words(&t),
+                                    _ => t,
+                                };
+                                if !t.is_empty() {
+                                    out.push((field.clone(), t, partial));
+                                }
                             }
                         }
                     }
                 }
                 "multi_match" => {
-                    let text = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let asked = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let trimmed = match body.get("type").and_then(|v| v.as_str()) {
+                        Some("bool_prefix") => whole_words(asked),
+                        _ => asked.to_string(),
+                    };
+                    let text = trimmed.as_str();
+                    if text.is_empty() {
+                        continue;
+                    }
                     let fields = body.get("fields").and_then(|f| f.as_array());
                     match fields {
                         Some(fs) => {
@@ -221,6 +261,79 @@ pub(crate) fn terms_for_field(
         })
         .map(|(_, text, partial)| (text.clone(), *partial))
         .collect()
+}
+
+/// How many words a token of this field holds, where the field is one of the
+/// shingle sub-fields a `search_as_you_type` mapping makes.
+fn shingle_width(field: &str) -> Option<usize> {
+    let (_, leaf) = field.rsplit_once('.')?;
+    let n = leaf.strip_prefix('_')?.strip_suffix("gram")?;
+    n.parse::<usize>().ok().filter(|w| *w > 1)
+}
+
+/// Mark the runs of `width` words that the query's runs match.
+///
+/// The whole run is marked once rather than word by word: a shingle is one
+/// token, and what stands for it in the text is the words it was made of.
+fn mark_runs(
+    text: &str,
+    queries: &[(String, bool)],
+    width: usize,
+    pre: &str,
+    post: &str,
+) -> Option<String> {
+    // every run of `width` words the query asked for
+    let mut wanted: std::collections::HashSet<Vec<String>> = Default::default();
+    for (q, _) in queries {
+        let words: Vec<String> = q.split_whitespace().map(|w| w.to_lowercase()).collect();
+        for run in words.windows(width) {
+            wanted.insert(run.to_vec());
+        }
+    }
+    if wanted.is_empty() {
+        return None;
+    }
+    // the words of the text, with where each of them stands in it
+    let mut words: Vec<(usize, usize, String)> = Vec::new();
+    let mut at = 0usize;
+    while at < text.len() {
+        let rest = &text[at..];
+        let Some(start) = rest.find(|c: char| c.is_alphanumeric()) else { break };
+        let word = &rest[start..];
+        let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
+        words.push((at + start, at + start + end, word[..end].to_lowercase()));
+        at += start + end;
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (i, run) in words.windows(width).enumerate() {
+        let here: Vec<String> = run.iter().map(|(_, _, w)| w.clone()).collect();
+        if wanted.contains(&here) {
+            spans.push((words[i].0, run[width - 1].1));
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    // runs that touch are marked as one
+    spans.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in spans {
+        match merged.last_mut() {
+            Some((_, before)) if *before >= from => *before = (*before).max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut cursor = 0usize;
+    for (from, to) in merged {
+        out.push_str(&text[cursor..from]);
+        out.push_str(pre);
+        out.push_str(&text[from..to]);
+        out.push_str(post);
+        cursor = to;
+    }
+    out.push_str(&text[cursor..]);
+    Some(out)
 }
 
 /// Mark the tokens of `text` that the query's words match.

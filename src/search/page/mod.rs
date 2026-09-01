@@ -121,7 +121,26 @@ pub(crate) fn write_page(
                 // the column holds the number the field reports -- a date is
                 // milliseconds, a date_nanos is nanoseconds -- so a sort value
                 // goes out as it was read
-                hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
+                hit["sort"] = Value::Array(
+                    h.sort
+                        .iter()
+                        .enumerate()
+                        .map(|(at, s)| {
+                            // a sort asked to read a field as another width
+                            // reports its values at that width
+                            match sort_keys.get(at).and_then(|k| k.numeric_type.as_deref()) {
+                                Some("long" | "int" | "date" | "date_nanos") => match s.to_json() {
+                                    Value::Number(n) => match n.as_f64() {
+                                        Some(v) => json!(v as i64),
+                                        None => Value::Number(n),
+                                    },
+                                    other => other,
+                                },
+                                _ => s.to_json(),
+                            }
+                        })
+                        .collect(),
+                );
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
