@@ -121,8 +121,10 @@ pub(crate) fn run_hdr_percentiles(
         if sorted.is_empty() {
             return None;
         }
-        let rank = ((p / 100.0) * sorted.len() as f64).ceil().max(1.0) as usize;
-        sorted.get(rank.min(sorted.len()) - 1).copied()
+        // the value whose place that share of the way through is reached,
+        // counted the way OpenSearch counts it
+        let at = ((p / 100.0) * sorted.len() as f64).floor() as usize;
+        sorted.get(at.min(sorted.len() - 1)).copied()
     };
     let mut hist = crate::hdr::HdrHistogram::default();
     for v in &values {
@@ -248,8 +250,12 @@ pub(crate) fn run_percentile_ranks(
         if values.is_empty() {
             return None;
         }
-        let below = values.iter().filter(|x| **x <= v).count();
-        Some(below as f64 * 100.0 / values.len() as f64)
+        // a value that is there counts for half: the share of the documents
+        // below it, plus half of those standing at it
+        let under = values.iter().filter(|x| **x < v).count();
+        let at = values.iter().filter(|x| **x == v).count();
+        let below = under as f64 + at as f64 / 2.0;
+        Some(below * 100.0 / values.len() as f64)
     };
     if keyed {
         let mut map = serde_json::Map::new();

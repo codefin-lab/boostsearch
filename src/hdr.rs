@@ -150,11 +150,9 @@ pub fn quantile(sorted: &[f64], q: f64) -> f64 {
     if sorted.len() == 1 {
         return sorted[0];
     }
-    let pos = q * (sorted.len() as f64 - 1.0);
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    if lo == hi {
-        return sorted[lo];
-    }
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    // the value standing at that share of the way through, counted the way
+    // OpenSearch counts it: the one whose place is reached, not a point
+    // interpolated between two of them
+    let at = (q * sorted.len() as f64).floor() as usize;
+    sorted[at.min(sorted.len() - 1)]
 }

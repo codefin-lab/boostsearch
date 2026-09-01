@@ -162,11 +162,9 @@ pub(crate) fn run_peeled_agg(
         run_geo_distance_agg(store, targets, query_json, def, weighted)
     } else if def.get("percentile_ranks").is_some() {
         run_percentile_ranks(store, targets, query_json, def)
-    } else if def.get("nested").is_some()
-        || def.get("reverse_nested").is_some()
-        || def.get("sampler").is_some()
-        || def.get("diversified_sampler").is_some()
-    {
+    } else if def.get("sampler").is_some() || def.get("diversified_sampler").is_some() {
+        run_sampler_agg(store, targets, query_json, def, weighted)
+    } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
         {
@@ -190,8 +188,6 @@ pub(crate) fn run_peeled_agg(
                 if let Some(o) = d.as_object_mut() {
                     o.remove("nested");
                     o.remove("reverse_nested");
-                    o.remove("sampler");
-                    o.remove("diversified_sampler");
                     o.insert("filter".into(), json!({"match_all": {}}));
                 }
                 d
@@ -426,4 +422,69 @@ pub(crate) fn run_matrix_stats_agg(
         b.get("name").and_then(|v| v.as_str()).cmp(&a.get("name").and_then(|v| v.as_str()))
     });
     Ok(json!({"doc_count": count, "fields": described}))
+}
+
+/// `sampler` -- the best few documents rather than all of them.
+///
+/// A sampler narrows what its sub-aggregations see to the documents the query
+/// scored highest, which is how a significant-terms aggregation is kept from
+/// reading the whole index. `diversified_sampler` narrows it further: at most
+/// so many documents for each value of a field, so that one crowded value
+/// cannot fill the sample.
+pub(crate) fn run_sampler_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let diversified = def.get("diversified_sampler");
+    let spec = diversified.or_else(|| def.get("sampler")).cloned().unwrap_or(json!({}));
+    let most = spec.get("shard_size").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let per_value = spec.get("max_docs_per_value").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let field = spec.get("field").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let mut probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": most.max(1) * per_value.max(1),
+        "_source": false,
+    });
+    if let Some(field) = field.as_deref() {
+        probe["_source"] = json!([field]);
+    }
+    let found = run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut kept: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for hit in &found.hits {
+        let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+        if let (Some(field), true) = (field.as_deref(), diversified.is_some()) {
+            let value = hit
+                .pointer(&format!("/_source/{}", field.replace('.', "/")))
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            let count = seen.entry(value).or_insert(0);
+            if *count >= per_value {
+                continue;
+            }
+            *count += 1;
+        }
+        kept.push(id.to_string());
+        if kept.len() >= most {
+            break;
+        }
+    }
+    // what the sample holds is what the sub-aggregations are asked about
+    let narrowed = json!({"ids": {"values": kept}});
+    let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+    let mut out = json!({ "doc_count": count });
+    if let Some(Value::Object(map)) = subs {
+        for (name, value) in map {
+            out[name] = value;
+        }
+    }
+    Ok(out)
 }

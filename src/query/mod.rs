@@ -227,11 +227,18 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 
     for tok in split_query_string(text) {
         match tok.to_ascii_uppercase().as_str() {
-            "AND" | "&&" => {
+            // `a AND b` requires both of them: the word before the operator
+            // is required as much as the word after it
+            "AND" | "&&" | "+" => {
+                if let Some(last) = clauses.last_mut()
+                    && last.0 == Occur::Should
+                {
+                    last.0 = Occur::Must;
+                }
                 pending_occur = Some(Occur::Must);
                 continue;
             }
-            "OR" | "||" => {
+            "OR" | "||" | "|" => {
                 pending_occur = Some(Occur::Should);
                 continue;
             }
@@ -240,6 +247,24 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 continue;
             }
             _ => {}
+        }
+        // `+word` requires it and `-word` refuses it, which is how a simple
+        // query string writes AND and NOT
+        let mut tok = tok;
+        if let Some(rest) = tok.strip_prefix('+') {
+            if let Some(last) = clauses.last_mut()
+                && last.0 == Occur::Should
+            {
+                last.0 = Occur::Must;
+            }
+            pending_occur = Some(Occur::Must);
+            tok = rest.to_string();
+        } else if let Some(rest) = tok.strip_prefix('-') {
+            pending_not = true;
+            tok = rest.to_string();
+        }
+        if tok.is_empty() {
+            continue;
         }
         let (field_part, value) = match tok.split_once(':') {
             Some((f, v)) if !f.is_empty() && !f.contains(' ') => {
