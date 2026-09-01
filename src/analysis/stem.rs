@@ -257,22 +257,127 @@ fn french_norm(mut w: Vec<char>) -> String {
     w.into_iter().collect()
 }
 
-/// Portuguese, as `PortugueseLightStemmer` cuts it.
+/// Portuguese, as `PortugueseLightStemmer` cuts it: the plural, the feminine
+/// written as the masculine, and then the accents.
 pub(crate) fn portuguese_light(word: &str) -> String {
-    let word = strip_accents(word);
-    if len(&word) < 4 {
-        return word;
+    let mut w: Vec<char> = word.chars().collect();
+    if w.len() < 4 {
+        return w.into_iter().collect();
     }
-    let word = strip(&word, 3, &["ões", "oes", "aes", "ais", "eis", "es", "is", "s"])
-        .unwrap_or_else(|| word.clone());
-    let word = strip(&word, 4, &["adora", "ador", "aç", "acao", "acoes", "encia", "ancia"])
-        .unwrap_or(word);
-    let word = strip(&word, 4, &["issima", "issimo", "issimas", "issimos"]).unwrap_or(word);
-    let word = strip(&word, 4, &["mente", "amente"]).unwrap_or(word);
-    let word = strip(&word, 4, &["idade", "idades"]).unwrap_or(word);
-    let word =
-        strip(&word, 4, &["icas", "icos", "ica", "ico"]).map(|w| format!("{w}ic")).unwrap_or(word);
-    strip(&word, 4, &["ismo", "ista", "osa", "oso", "ona", "ao"]).unwrap_or(word)
+    portuguese_remove_suffix(&mut w);
+    if w.len() > 3 && w[w.len() - 1] == 'a' {
+        portuguese_feminine(&mut w);
+    }
+    if w.len() > 4 && matches!(w[w.len() - 1], 'e' | 'a' | 'o') {
+        w.pop();
+    }
+    for c in w.iter_mut() {
+        *c = match *c {
+            '\u{00E0}' | '\u{00E1}' | '\u{00E2}' | '\u{00E4}' | '\u{00E3}' => 'a',
+            '\u{00F2}' | '\u{00F3}' | '\u{00F4}' | '\u{00F6}' | '\u{00F5}' => 'o',
+            '\u{00E8}' | '\u{00E9}' | '\u{00EA}' | '\u{00EB}' => 'e',
+            '\u{00F9}' | '\u{00FA}' | '\u{00FB}' | '\u{00FC}' => 'u',
+            '\u{00EC}' | '\u{00ED}' | '\u{00EE}' | '\u{00EF}' => 'i',
+            '\u{00E7}' => 'c',
+            other => other,
+        };
+    }
+    w.into_iter().collect()
+}
+
+/// The ending a Portuguese plural takes, and what the singular is written as.
+fn portuguese_remove_suffix(w: &mut Vec<char>) {
+    let len = w.len();
+    let set = |w: &mut Vec<char>, back: usize, c: char| {
+        let at = w.len() - back;
+        w[at] = c;
+    };
+    if len > 4 && tail(w, "es") && matches!(w[len - 3], 'r' | 's' | 'l' | 'z') {
+        w.truncate(len - 2);
+        return;
+    }
+    if len > 3 && tail(w, "ns") {
+        set(w, 2, 'm');
+        w.truncate(len - 1);
+        return;
+    }
+    if len > 4 && (tail(w, "eis") || tail(w, "\u{00E9}is")) {
+        set(w, 3, 'e');
+        set(w, 2, 'l');
+        w.truncate(len - 1);
+        return;
+    }
+    if len > 4 && tail(w, "ais") {
+        set(w, 2, 'l');
+        w.truncate(len - 1);
+        return;
+    }
+    if len > 4 && tail(w, "\u{00F3}is") {
+        set(w, 3, 'o');
+        set(w, 2, 'l');
+        w.truncate(len - 1);
+        return;
+    }
+    if len > 4 && tail(w, "is") {
+        set(w, 1, 'l');
+        return;
+    }
+    if len > 3 && (tail(w, "\u{00F5}es") || tail(w, "\u{00E3}es")) {
+        w.truncate(len - 1);
+        set(w, 2, '\u{00E3}');
+        set(w, 1, 'o');
+        return;
+    }
+    if len > 6 && tail(w, "mente") {
+        w.truncate(len - 5);
+        return;
+    }
+    if len > 3 && w[len - 1] == 's' {
+        w.truncate(len - 1);
+    }
+}
+
+/// A Portuguese feminine ending, written as the masculine one.
+fn portuguese_feminine(w: &mut Vec<char>) {
+    let len = w.len();
+    let set = |w: &mut Vec<char>, back: usize, c: char| {
+        let at = w.len() - back;
+        w[at] = c;
+    };
+    if len > 7 && (tail(w, "inha") || tail(w, "iaca") || tail(w, "eira")) {
+        set(w, 1, 'o');
+        return;
+    }
+    if len > 6 {
+        if tail(w, "osa")
+            || tail(w, "ica")
+            || tail(w, "ida")
+            || tail(w, "ada")
+            || tail(w, "iva")
+            || tail(w, "ama")
+        {
+            set(w, 1, 'o');
+            return;
+        }
+        if tail(w, "ona") {
+            set(w, 3, '\u{00E3}');
+            set(w, 2, 'o');
+            w.truncate(len - 1);
+            return;
+        }
+        if tail(w, "ora") {
+            w.truncate(len - 1);
+            return;
+        }
+        if tail(w, "esa") {
+            set(w, 3, '\u{00EA}');
+            w.truncate(len - 1);
+            return;
+        }
+        if tail(w, "na") {
+            set(w, 1, 'o');
+        }
+    }
 }
 
 /// Italian, as `ItalianLightStemmer` cuts it: the accents go, and then the
@@ -366,14 +471,118 @@ pub(crate) fn brazilian(word: &str) -> String {
     strip(&word, 3, &["as", "os", "es", "a", "o", "e", "s"]).unwrap_or(word)
 }
 
-/// Bulgarian, as `BulgarianStemmer` cuts it.
+/// Bulgarian, as `BulgarianStemmer` cuts it: the article, the plural, and
+/// then the vowel the ending left behind.
 pub(crate) fn bulgarian(word: &str) -> String {
-    if len(word) < 4 {
-        return word.to_string();
+    let mut w: Vec<char> = word.chars().collect();
+    if w.len() < 4 {
+        return w.into_iter().collect();
     }
-    let word = strip(word, 3, &["ища", "ища", "ове", "еве", "ища"]).unwrap_or(word.to_string());
-    strip(&word, 3, &["ият", "ия", "ът", "та", "то", "те", "ове", "и", "а", "о", "е"])
-        .unwrap_or(word)
+    let set = |w: &mut Vec<char>, back: usize, c: char| {
+        let at = w.len() - back;
+        w[at] = c;
+    };
+    if w.len() > 5 && tail(&w, "\u{0438}\u{0449}\u{0430}") {
+        w.truncate(w.len() - 3);
+        return w.into_iter().collect();
+    }
+    bulgarian_article(&mut w);
+    bulgarian_plural(&mut w);
+    if w.len() > 3 {
+        if tail(&w, "\u{044F}") {
+            w.pop();
+        }
+        if tail(&w, "\u{0430}") || tail(&w, "\u{043E}") || tail(&w, "\u{0435}") {
+            w.pop();
+        }
+    }
+    if w.len() > 4 && tail(&w, "\u{0435}\u{043D}") {
+        set(&mut w, 2, '\u{043D}');
+        w.pop();
+    }
+    if w.len() > 5 && w[w.len() - 2] == '\u{044A}' {
+        let last = w[w.len() - 1];
+        set(&mut w, 2, last);
+        w.pop();
+    }
+    w.into_iter().collect()
+}
+
+/// The article a Bulgarian noun carries at its end.
+fn bulgarian_article(w: &mut Vec<char>) {
+    let len = w.len();
+    if len > 6 && tail(w, "\u{0438}\u{044F}\u{0442}") {
+        w.truncate(len - 3);
+        return;
+    }
+    if len > 5
+        && (tail(w, "\u{044A}\u{0442}")
+            || tail(w, "\u{0442}\u{043E}")
+            || tail(w, "\u{0442}\u{0435}")
+            || tail(w, "\u{0442}\u{0430}")
+            || tail(w, "\u{0438}\u{044F}"))
+    {
+        w.truncate(len - 2);
+        return;
+    }
+    if len > 4 && tail(w, "\u{044F}\u{0442}") {
+        w.truncate(len - 2);
+    }
+}
+
+/// The ending a Bulgarian plural takes, and the consonant it changes.
+fn bulgarian_plural(w: &mut Vec<char>) {
+    let len = w.len();
+    let set = |w: &mut Vec<char>, back: usize, c: char| {
+        let at = w.len() - back;
+        w[at] = c;
+    };
+    if len > 6 {
+        if tail(w, "\u{043E}\u{0432}\u{0446}\u{0438}") || tail(w, "\u{043E}\u{0432}\u{0435}") {
+            w.truncate(len - 3);
+            return;
+        }
+        if tail(w, "\u{0435}\u{0432}\u{0435}") {
+            set(w, 3, '\u{0439}');
+            w.truncate(len - 2);
+            return;
+        }
+    }
+    if len > 5 {
+        if tail(w, "\u{0438}\u{0449}\u{0430}") {
+            w.truncate(len - 3);
+            return;
+        }
+        if tail(w, "\u{0442}\u{0430}") {
+            w.truncate(len - 2);
+            return;
+        }
+        if tail(w, "\u{0446}\u{0438}") {
+            set(w, 2, '\u{043A}');
+            w.truncate(len - 1);
+            return;
+        }
+        if tail(w, "\u{0437}\u{0438}") {
+            set(w, 2, '\u{0433}');
+            w.truncate(len - 1);
+            return;
+        }
+        if w[len - 3] == '\u{0435}' && w[len - 1] == '\u{0438}' {
+            set(w, 3, '\u{044F}');
+            w.truncate(len - 1);
+            return;
+        }
+    }
+    if len > 4 {
+        if tail(w, "\u{0441}\u{0438}") {
+            set(w, 2, '\u{0445}');
+            w.truncate(len - 1);
+            return;
+        }
+        if tail(w, "\u{0438}") {
+            w.truncate(len - 1);
+        }
+    }
 }
 
 /// Latvian, as `LatvianStemmer` cuts it: the noun and adjective endings.
