@@ -468,7 +468,9 @@ pub(crate) fn brazilian(word: &str) -> String {
     let word = strip(&word, 3, &["adora", "ador", "acao", "acoes"]).unwrap_or(word);
     let word = strip(&word, 3, &["mente", "idade", "ismo", "ista", "eza"]).unwrap_or(word);
     let word = strip(&word, 3, &["inho", "inha", "ito", "ita", "ia", "io"]).unwrap_or(word);
-    strip(&word, 3, &["as", "os", "es", "a", "o", "e", "s"]).unwrap_or(word)
+    // a bare `s` is not a plural here: `dogs` is a word this stemmer has
+    // nothing to say about, and it says nothing
+    strip(&word, 3, &["as", "os", "es", "a", "o", "e"]).unwrap_or(word)
 }
 
 /// Bulgarian, as `BulgarianStemmer` cuts it: the article, the plural, and

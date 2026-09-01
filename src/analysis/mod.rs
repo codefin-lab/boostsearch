@@ -535,6 +535,11 @@ fn split_on(text: &str, pattern: &str) -> Vec<(String, usize, usize, usize)> {
 /// A word that may hold an apostrophe, a dot or a hyphen between letters,
 /// which is what `classic` keeps whole.
 fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
+    classic_with(text, false)
+}
+
+/// The same, told whether an underscore is inside a word.
+fn classic_with(text: &str, underscore_joins: bool) -> Vec<(String, usize, usize, usize)> {
     let mut out = Vec::new();
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut i = 0;
@@ -547,7 +552,7 @@ fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
         let mut end = i;
         while end < chars.len() {
             let c = chars[end].1;
-            let joins = matches!(c, '\'' | '.' | '@' | '&')
+            let joins = (matches!(c, '\'' | '.' | '@' | '&') || (underscore_joins && c == '_'))
                 && chars.get(end + 1).map(|(_, n)| n.is_alphanumeric()).unwrap_or(false);
             if c.is_alphanumeric() || joins {
                 end += 1;
@@ -572,17 +577,17 @@ fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
 fn uax_url_email(text: &str) -> Vec<(String, usize, usize, usize)> {
     let whole =
         regex::Regex::new(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+)|(?:[\w.+-]+@[\w-]+(?:\.[\w-]+)+)");
-    let Ok(whole) = whole else { return classic(text) };
+    let Ok(whole) = whole else { return classic_with(text, true) };
     let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
     let mut last = 0usize;
     for m in whole.find_iter(text) {
-        for (word, _, from, to) in classic(&text[last..m.start()]) {
+        for (word, _, from, to) in classic_with(&text[last..m.start()], true) {
             out.push((word, out.len(), last + from, last + to));
         }
         out.push((m.as_str().to_string(), out.len(), m.start(), m.end()));
         last = m.end();
     }
-    for (word, _, from, to) in classic(&text[last..]) {
+    for (word, _, from, to) in classic_with(&text[last..], true) {
         out.push((word, out.len(), last + from, last + to));
     }
     out
@@ -682,6 +687,19 @@ fn apply_step(
                 "german" => return word_by_word(&stem::german),
                 _ => {}
             }
+            // a stemmer written for a script has nothing to say about a word
+            // written in another one
+            let script_of = |lang: &str| -> Option<fn(char) -> bool> {
+                match lang {
+                    "arabic" | "persian" => Some(|c: char| ('\u{0600}'..='\u{06FF}').contains(&c)),
+                    "greek" => Some(|c: char| ('\u{0370}'..='\u{03FF}').contains(&c)),
+                    "russian" | "bulgarian" | "serbian" => {
+                        Some(|c: char| ('\u{0400}'..='\u{04FF}').contains(&c))
+                    }
+                    _ => None,
+                }
+            };
+            let its_own = script_of(&lang.to_ascii_lowercase());
             // the eighteen languages BoostCore carries an algorithm for
             if let Some(l) = language(lang) {
                 let mut analyzer =
@@ -689,6 +707,11 @@ fn apply_step(
                 return tokens
                     .into_iter()
                     .map(|(t, p, a, b)| {
+                        if let Some(written_in) = its_own
+                            && !t.chars().any(written_in)
+                        {
+                            return (t, p, a, b);
+                        }
                         let stemmed = {
                             let mut s = analyzer.token_stream(&t);
                             if s.advance() { s.token().text.clone() } else { t.clone() }
