@@ -258,6 +258,9 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     // for the words alone, in any order and at any distance
     let as_phrase =
         opts.get("auto_generate_synonyms_phrase_query").and_then(|v| v.as_bool()).unwrap_or(true);
+    // a field that keeps neither frequencies nor norms scores a word as
+    // merely there, once, in a field of no particular length
+    let flat = ctx.mapping.type_of(&field) == Some("match_only_text");
     let clauses: Vec<(Occur, Box<dyn Query>)> = stretches
         .into_iter()
         .map(|ways| {
@@ -266,6 +269,8 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                 .map(|way| {
                     let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
                     match walked.len() {
+                        1 if flat => Box::new(crate::query::SpanUnion::flat(walked.remove(0)))
+                            as Box<dyn Query>,
                         1 => {
                             Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
                                 as Box<dyn Query>

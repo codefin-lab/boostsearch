@@ -111,11 +111,20 @@ impl boostcore::DocSet for KeptDocs {
 /// ranks the short field first.
 pub(crate) struct SpanUnion {
     terms: Vec<Term>,
+    /// whether the words are scored as merely there: once, in a field of no
+    /// particular length, which is how a field that keeps neither
+    /// frequencies nor norms scores
+    flat: bool,
 }
 
 impl SpanUnion {
     pub(crate) fn new(terms: Vec<Term>) -> SpanUnion {
-        SpanUnion { terms }
+        SpanUnion { terms, flat: false }
+    }
+
+    /// A word that is either there or not, scored the same wherever it is.
+    pub(crate) fn flat(term: Term) -> SpanUnion {
+        SpanUnion { terms: vec![term], flat: true }
     }
 }
 
@@ -127,7 +136,7 @@ impl std::fmt::Debug for SpanUnion {
 
 impl Clone for SpanUnion {
     fn clone(&self) -> Self {
-        SpanUnion { terms: self.terms.clone() }
+        SpanUnion { terms: self.terms.clone(), flat: self.flat }
     }
 }
 
@@ -139,13 +148,14 @@ impl Query for SpanUnion {
             }
             EnableScoring::Disabled { .. } => None,
         };
-        Ok(Box::new(SpanUnionWeight { terms: self.terms.clone(), bm25 }))
+        Ok(Box::new(SpanUnionWeight { terms: self.terms.clone(), bm25, flat: self.flat }))
     }
 }
 
 struct SpanUnionWeight {
     terms: Vec<Term>,
     bm25: Option<boostcore::query::Bm25Weight>,
+    flat: bool,
 }
 
 impl SpanUnionWeight {
@@ -192,9 +202,16 @@ impl Weight for SpanUnionWeight {
             Some(norms) => norms,
             None => reader.get_fieldnorms_reader(first.field())?,
         };
+        // a flat score reads every document as one word long holding the
+        // term once
+        let one = boostcore::fieldnorm::FieldNormReader::fieldnorm_to_id(1);
+        let flat = self.flat;
         let scored = found
             .into_iter()
-            .map(|(doc, freq)| (doc, boost * bm25.score(norms.fieldnorm_id(doc), freq)))
+            .map(|(doc, freq)| match flat {
+                true => (doc, boost * bm25.score(one, 1)),
+                false => (doc, boost * bm25.score(norms.fieldnorm_id(doc), freq)),
+            })
             .collect();
         Ok(Box::new(ScoredDocs { docs: scored, at: 0 }))
     }
