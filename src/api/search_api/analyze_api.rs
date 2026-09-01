@@ -281,13 +281,6 @@ pub async fn analyze(
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
                 "type": "<ALPHANUM>", "position": pos + at,
-                // what the term looks like in the index, which a caller
-                // reading `explain` asks to see
-                "bytes": format!("[{}]", tok.as_bytes().iter().map(|b| format!("{b:x}"))
-                    .collect::<Vec<_>>().join(" ")),
-                "positionLength": 1,
-                "termFrequency": frequency_of(&tok),
-                "keyword": false,
             }));
         }
         pos += parts_len;

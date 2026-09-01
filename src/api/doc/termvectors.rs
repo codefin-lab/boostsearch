@@ -42,13 +42,20 @@ pub async fn termvectors(
         .and_then(|v| v.as_bool())
         .or_else(|| p.get("term_statistics").map(|v| v == "true"))
         .unwrap_or(false);
+    // what a field holds across the index is reported unless it is refused;
+    // what each term is worth is reported only when it is asked for
+    let want_field_stats = body
+        .get("field_statistics")
+        .and_then(|v| v.as_bool())
+        .or_else(|| p.get("field_statistics").map(|v| v != "false"))
+        .unwrap_or(true);
     let only: Option<Vec<String>> = body
         .get("fields")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .or_else(|| p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect()));
 
-    let fields = term_vectors_of(&g, &source, want_stats, only.as_deref());
+    let fields = term_vectors_of(&g, &source, want_stats, want_field_stats, only.as_deref());
     respond(
         &p,
         json!({
@@ -63,6 +70,7 @@ pub(crate) fn term_vectors_of(
     g: &IdxState,
     source: &Value,
     want_stats: bool,
+    want_field_stats: bool,
     only: Option<&[String]>,
 ) -> Value {
     let mut fields = serde_json::Map::new();
@@ -119,7 +127,7 @@ pub(crate) fn term_vectors_of(
             out.insert(term.clone(), entry);
         }
         let mut field = json!({"terms": Value::Object(out)});
-        if want_stats {
+        if want_field_stats {
             field["field_statistics"] = json!({
                 "sum_doc_freq": sum_doc_freq,
                 "doc_count": searcher.num_docs(),
@@ -210,7 +218,7 @@ pub async fn mtermvectors(
                 out.push(json!({
                     "_index": g.name, "_id": id, "_version": g.version_of(&id),
                     "found": true, "took": 0,
-                    "term_vectors": term_vectors_of(&g, &src, want_stats, None),
+                    "term_vectors": term_vectors_of(&g, &src, want_stats, true, None),
                 }))
             }
             None => out.push(json!({

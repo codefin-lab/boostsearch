@@ -6,10 +6,16 @@ impl IdxState {
     /// Settings echoed back by GET _settings, including the defaults the
     /// YAML suite asserts on.
     pub fn effective_settings(&self) -> Value {
+        // what an index carries whether or not anyone asked for it: when it
+        // was made, what made it, what it is called, and how it is replicated
         let mut idx = serde_json::json!({
             "number_of_shards": "1",
             "number_of_replicas": "1",
             "provided_name": self.name,
+            "creation_date": self.created_ms.to_string(),
+            "uuid": self.uuid,
+            "version": {"created": "136407827"},
+            "replication": {"type": "DOCUMENT"},
         });
         // settings arrive either nested under `index` or flat, and OpenSearch
         // always echoes the values back as strings

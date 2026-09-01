@@ -540,8 +540,25 @@ pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
             "failed": out_failures.len(),
         },
         "hits": hits_obj,
-        "num_reduce_phases": num_reduce_phases,
     });
+    // the number of reductions is said only when there was more than one
+    if num_reduce_phases > 1 {
+        resp["num_reduce_phases"] = json!(num_reduce_phases);
+    }
+    // a search that stopped before it had seen everything says so: one told
+    // how far to look, and one asking only for aggregations, which needs no
+    // hits at all
+    let asked_size = body
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse::<u64>().ok()));
+    let aggregating = body.get("aggs").or_else(|| body.get("aggregations")).is_some();
+    if body.get("terminate_after").is_some()
+        || p.contains_key("terminate_after")
+        || (asked_size == Some(0) && aggregating)
+    {
+        resp["terminated_early"] = json!(true);
+    }
     if !out_failures.is_empty() {
         resp["_shards"]["failures"] = Value::Array(out_failures);
     }

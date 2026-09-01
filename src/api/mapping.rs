@@ -38,7 +38,9 @@ pub async fn get_mapping(
             if expr.contains('*') && !reach(g.closed) {
                 continue;
             }
-            out.insert(n, mapping_view(&g));
+            let mut view = mapping_view(&g);
+            whole_numbers(&mut view);
+            out.insert(n, view);
         }
     }
     // a pattern reaching nothing is an error only when the caller said so
@@ -151,4 +153,23 @@ pub async fn get_field_mapping(
         out.insert(n.clone(), json!({"mappings": Value::Object(mappings)}));
     }
     respond(&p, Value::Object(out))
+}
+
+/// A mapping is echoed back the way it was written, and a number written
+/// without a fraction is written back without one.
+pub(crate) fn whole_numbers(node: &mut Value) {
+    match node {
+        Value::Object(o) => o.iter_mut().for_each(|(_, v)| whole_numbers(v)),
+        Value::Array(a) => a.iter_mut().for_each(whole_numbers),
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64()
+                && f.fract() == 0.0
+                && f.abs() < 9e15
+                && n.as_i64().is_none()
+            {
+                *node = Value::Number((f as i64).into());
+            }
+        }
+        _ => {}
+    }
 }
