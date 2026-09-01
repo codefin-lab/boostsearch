@@ -635,6 +635,10 @@ pub async fn explain(
                 if p.get("lenient").map(|v| v != "false").unwrap_or(false) {
                     qs["lenient"] = json!(true);
                 }
+                // the query may be cut with an analyzer the caller names
+                if let Some(named) = p.get("analyzer") {
+                    qs["analyzer"] = json!(named);
+                }
                 json!({"query_string": qs})
             }
             None => json!({"match_all": {}}),

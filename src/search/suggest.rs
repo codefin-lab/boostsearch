@@ -35,8 +35,8 @@ pub(crate) fn build_suggest(
             out.insert(key, entries);
         } else if let Some(p) = b.get("phrase") {
             // a phrase suggester is answered per whole input rather than per
-            // word; the options come from the same place the terms do
-            let entries = term_suggest(store, targets, text, p)?;
+            // word: the whole line is weighed, not each word on its own
+            let entries = phrase_suggest(store, targets, text, p)?;
             let key = if typed_keys { format!("phrase#{name}") } else { name.clone() };
             out.insert(key, entries);
         }

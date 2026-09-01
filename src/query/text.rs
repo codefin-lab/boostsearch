@@ -159,8 +159,14 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         return Ok(Box::new(PhraseQuery::new(terms)));
     }
 
+    // a field holding text holds the number as text: `1234` written into a
+    // field cut into ngrams is found by the ngrams of `1234`
+    let is_text = matches!(
+        ctx.mapping.type_of(&field),
+        Some("text" | "match_only_text" | "search_as_you_type")
+    );
     // non-string match on a numeric/keyword field falls back to an exact term
-    if view == View::Raw || !matches!(val, Value::String(_)) {
+    if (view == View::Raw || !matches!(val, Value::String(_))) && !is_text {
         let mut exact = term_for(f, &path, &val);
         if exact.is_empty() {
             exact = terms.clone();
@@ -191,8 +197,8 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     // words standing in one place are one word written several ways: a match
     // wants any of them, not all of them
     let places = analyze_positions(ctx, view, &field, &text, analyzer);
-    let stacked = places.len() == terms.len()
-        && places.windows(2).any(|pair| pair[0].1 == pair[1].1);
+    let stacked =
+        places.len() == terms.len() && places.windows(2).any(|pair| pair[0].1 == pair[1].1);
     let groups: Vec<Vec<Term>> = match stacked {
         false => terms.iter().map(|t| vec![t.clone()]).collect(),
         true => {

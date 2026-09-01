@@ -111,6 +111,10 @@ class Runner:
 
     def unstash(self, value):
         if isinstance(value, str):
+            # `$body.a.b` names a value in the answer that was just read, which
+            # is how a test says "the same as it was" without naming a number
+            if value.startswith("$body."):
+                return flatten_path(self.last, value[len("$body."):])
             if value.startswith("$"):
                 return self.stash.get(value[1:], value)
             if "${" in value:

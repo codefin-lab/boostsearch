@@ -351,7 +351,14 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 }
                 continue;
             }
-            let clause = serde_json::json!({ name.clone(): value.clone() });
+            // the query may be cut with an analyzer of its own rather than
+            // the one the field was written with
+            let clause = match body.get("analyzer").and_then(|v| v.as_str()) {
+                Some(named) => serde_json::json!({
+                    name.clone(): {"query": value.clone(), "analyzer": named}
+                }),
+                None => serde_json::json!({ name.clone(): value.clone() }),
+            };
             if let Ok(q) = build_match(ctx, "match", &clause) {
                 per_field.push(q);
             }

@@ -241,10 +241,7 @@ impl Step {
     ///
     /// A `keyword_repeat` before it means the word itself is kept as well.
     fn stems(&self) -> bool {
-        matches!(
-            self,
-            Step::Stem(_) | Step::KStem | Step::StemmerOverride(_) | Step::Decompound(_)
-        )
+        matches!(self, Step::Stem(_) | Step::KStem | Step::StemmerOverride(_) | Step::Decompound(_))
     }
 }
 
@@ -2350,10 +2347,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             vec![Step::Shingle {
                 min,
                 max,
-                unigrams: spec
-                    .get("output_unigrams")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true),
+                unigrams: spec.get("output_unigrams").and_then(|v| v.as_bool()).unwrap_or(true),
                 unigrams_if_none: spec
                     .get("output_unigrams_if_no_shingles")
                     .and_then(|v| v.as_bool())

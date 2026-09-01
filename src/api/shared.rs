@@ -204,6 +204,17 @@ pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
         if let Some(op) = p.get("default_operator") {
             qs["default_operator"] = json!(op.to_lowercase());
         }
+        // the caller may name the analyzer the query itself is cut with
+        for named in ["analyzer", "quote_analyzer", "minimum_should_match"] {
+            if let Some(v) = p.get(named) {
+                qs[named] = json!(v);
+            }
+        }
+        for named in ["lenient", "analyze_wildcard", "allow_leading_wildcard"] {
+            if let Some(v) = p.get(named) {
+                qs[named] = json!(v == "true");
+            }
+        }
         body["query"] = json!({ "query_string": qs });
     }
     for key in ["from", "size", "track_total_hits"] {

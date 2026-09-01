@@ -1040,28 +1040,134 @@ pub(crate) fn bengali(word: &str) -> String {
         let s: Vec<char> = suffix.chars().collect();
         len >= s.len() && chars[len - s.len()..] == s[..]
     };
-    if len > 9 && (ends("ইতেছিলেন") || ends("ইয়াছিলেন") || ends("িতেছিলাম") || ends("িতেছিলেন") || ends("িয়াছিলাম") || ends("িয়াছিলেন")) {
+    if len > 9
+        && (ends("ইতেছিলেন")
+            || ends("ইয়াছিলেন")
+            || ends("িতেছিলাম")
+            || ends("িতেছিলেন")
+            || ends("িয়াছিলাম")
+            || ends("িয়াছিলেন"))
+    {
         return chars[..len - 8].iter().collect();
     }
-    if len > 8 && (ends("িতেছিলা") || ends("িতেছিলি") || ends("িতেছিলে") || ends("িয়াছিলা") || ends("িয়াছিলি") || ends("িয়াছিলে") || ends("য়েদেরকে")) {
+    if len > 8
+        && (ends("িতেছিলা")
+            || ends("িতেছিলি")
+            || ends("িতেছিলে")
+            || ends("িয়াছিলা")
+            || ends("িয়াছিলি")
+            || ends("িয়াছিলে")
+            || ends("য়েদেরকে"))
+    {
         return chars[..len - 7].iter().collect();
     }
-    if len > 7 && (ends("িতেছিস") || ends("িতেছেন") || ends("িয়াছিস") || ends("িয়াছেন") || ends("েছিলাম") || ends("েছিলেন") || ends("েদেরকে")) {
+    if len > 7
+        && (ends("িতেছিস")
+            || ends("িতেছেন")
+            || ends("িয়াছিস")
+            || ends("িয়াছেন")
+            || ends("েছিলাম")
+            || ends("েছিলেন")
+            || ends("েদেরকে"))
+    {
         return chars[..len - 6].iter().collect();
     }
-    if len > 6 && (ends("ছিলাম") || ends("ছিলেন") || ends("দেরকে") || ends("িতেছা") || ends("িতেছি") || ends("িতেছে") || ends("িয়াছা") || ends("িয়াছি") || ends("িয়াছে") || ends("েছিলা") || ends("েছিলে") || ends("য়েদের")) {
+    if len > 6
+        && (ends("ছিলাম")
+            || ends("ছিলেন")
+            || ends("দেরকে")
+            || ends("িতেছা")
+            || ends("িতেছি")
+            || ends("িতেছে")
+            || ends("িয়াছা")
+            || ends("িয়াছি")
+            || ends("িয়াছে")
+            || ends("েছিলা")
+            || ends("েছিলে")
+            || ends("য়েদের"))
+    {
         return chars[..len - 5].iter().collect();
     }
-    if len > 5 && (ends("খানা") || ends("খানি") || ends("গুলি") || ends("গুলো") || ends("ছিলা") || ends("ছিলি") || ends("ছিলে") || ends("তেছে") || ends("িতাম") || ends("িতেছ") || ends("িতেন") || ends("িবেন") || ends("িলাম") || ends("িলেন") || ends("েদের") || ends("য়েরা")) {
+    if len > 5
+        && (ends("খানা")
+            || ends("খানি")
+            || ends("গুলি")
+            || ends("গুলো")
+            || ends("ছিলা")
+            || ends("ছিলি")
+            || ends("ছিলে")
+            || ends("তেছে")
+            || ends("িতাম")
+            || ends("িতেছ")
+            || ends("িতেন")
+            || ends("িবেন")
+            || ends("িলাম")
+            || ends("িলেন")
+            || ends("েদের")
+            || ends("য়েরা"))
+    {
         return chars[..len - 4].iter().collect();
     }
-    if len > 4 && (ends("ইতি") || ends("ইতে") || ends("ইবা") || ends("ইবি") || ends("ইবে") || ends("ইলা") || ends("ইলি") || ends("ইলে") || ends("ছেন") || ends("তাম") || ends("তেন") || ends("দের") || ends("বেন") || ends("লাম") || ends("লেন") || ends("িতা") || ends("িতি") || ends("িতে") || ends("িবা") || ends("িবি") || ends("িবে") || ends("িলা") || ends("িলি") || ends("িলে") || ends("েরা") || ends("য়ের") || ends("য়োন")) {
+    if len > 4
+        && (ends("ইতি")
+            || ends("ইতে")
+            || ends("ইবা")
+            || ends("ইবি")
+            || ends("ইবে")
+            || ends("ইলা")
+            || ends("ইলি")
+            || ends("ইলে")
+            || ends("ছেন")
+            || ends("তাম")
+            || ends("তেন")
+            || ends("দের")
+            || ends("বেন")
+            || ends("লাম")
+            || ends("লেন")
+            || ends("িতা")
+            || ends("িতি")
+            || ends("িতে")
+            || ends("িবা")
+            || ends("িবি")
+            || ends("িবে")
+            || ends("িলা")
+            || ends("িলি")
+            || ends("িলে")
+            || ends("েরা")
+            || ends("য়ের")
+            || ends("য়োন"))
+    {
         return chars[..len - 3].iter().collect();
     }
-    if len > 3 && (ends("কে") || ends("ছা") || ends("ছি") || ends("ছে") || ends("টা") || ends("টি") || ends("তা") || ends("তি") || ends("তে") || ends("নি") || ends("বা") || ends("বি") || ends("বে") || ends("রা") || ends("লা") || ends("লি") || ends("লে") || ends("িস") || ends("ুক") || ends("ুন") || ends("েন") || ends("ের")) {
+    if len > 3
+        && (ends("কে")
+            || ends("ছা")
+            || ends("ছি")
+            || ends("ছে")
+            || ends("টা")
+            || ends("টি")
+            || ends("তা")
+            || ends("তি")
+            || ends("তে")
+            || ends("নি")
+            || ends("বা")
+            || ends("বি")
+            || ends("বে")
+            || ends("রা")
+            || ends("লা")
+            || ends("লি")
+            || ends("লে")
+            || ends("িস")
+            || ends("ুক")
+            || ends("ুন")
+            || ends("েন")
+            || ends("ের"))
+    {
         return chars[..len - 2].iter().collect();
     }
-    if len > 2 && (ends("ত") || ends("ব") || ends("া") || ends("ি") || ends("ী") || ends("ে") || ends("ো")) {
+    if len > 2
+        && (ends("ত") || ends("ব") || ends("া") || ends("ি") || ends("ী") || ends("ে") || ends("ো"))
+    {
         return chars[..len - 1].iter().collect();
     }
     word

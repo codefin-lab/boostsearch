@@ -51,6 +51,8 @@ mod sort;
 pub(crate) use sort::*;
 mod suggest;
 pub(crate) use suggest::*;
+mod phrase_suggest;
+pub(crate) use phrase_suggest::*;
 mod aggs;
 pub(crate) use aggs::*;
 
