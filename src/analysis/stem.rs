@@ -715,6 +715,10 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
 
 /// The Bengali letters that are written two ways, written one way.
 fn bengali_normalize(word: &str) -> String {
+    // "ত" joined to nothing is the letter that stands for it
+    let word = word
+        .replace("\u{09A4}\u{09CD}\u{200D}", "\u{09CE}")
+        .replace("\u{09A4}\u{09CD}\u{200C}", "\u{09CE}");
     word.chars()
         .filter(|c| *c != '\u{0981}')
         .map(|c| match c {
@@ -735,13 +739,55 @@ fn hindi_normalize(word: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        // a nasal consonant joined to the next one is written as the mark
         let nasal = matches!(c, '\u{0919}' | '\u{091E}' | '\u{0923}' | '\u{0928}' | '\u{092E}');
         if nasal && chars.get(i + 1) == Some(&'\u{094D}') && i + 2 < chars.len() {
             out.push('\u{0902}');
             i += 2;
             continue;
         }
-        out.push(c);
+        // the letters written with a dot below are the ones without it
+        if chars.get(i + 1) == Some(&'\u{093C}') {
+            out.push(match c {
+                '\u{0928}' => '\u{0928}',
+                '\u{0930}' => '\u{0930}',
+                '\u{0915}' => '\u{0915}',
+                '\u{0916}' => '\u{0916}',
+                '\u{0917}' => '\u{0917}',
+                '\u{091C}' => '\u{091C}',
+                '\u{0921}' => '\u{0921}',
+                '\u{0922}' => '\u{0922}',
+                '\u{092B}' => '\u{092B}',
+                '\u{092F}' => '\u{092F}',
+                other => other,
+            });
+            i += 2;
+            continue;
+        }
+        out.push(match c {
+            // the candrabindu is written as the anusvara
+            '\u{0901}' => '\u{0902}',
+            '\u{0929}' => '\u{0928}',
+            '\u{0931}' => '\u{0930}',
+            '\u{0934}' => '\u{0933}',
+            '\u{0958}' => '\u{0915}',
+            '\u{0959}' => '\u{0916}',
+            '\u{095A}' => '\u{0917}',
+            '\u{095B}' => '\u{091C}',
+            '\u{095C}' => '\u{0921}',
+            '\u{095D}' => '\u{0922}',
+            '\u{095E}' => '\u{092B}',
+            '\u{095F}' => '\u{092F}',
+            // the long vowels are written short
+            '\u{0940}' => '\u{093F}',
+            '\u{0942}' => '\u{0941}',
+            '\u{0910}' => '\u{090F}',
+            '\u{0914}' => '\u{0913}',
+            '\u{0949}' | '\u{094A}' => '\u{094B}',
+            '\u{090D}' | '\u{0945}' => '\u{0947}',
+            '\u{0972}' => '\u{0905}',
+            other => other,
+        });
         i += 1;
     }
     out

@@ -151,6 +151,11 @@ pub(crate) fn describe_query(q: &Value) -> String {
 }
 
 /// `_analyze` runs text through the tokenizer the query path would use.
+/// How many times a term counts, when the text said so: `foo^3` is three.
+fn frequency_of(token: &str) -> u64 {
+    token.rsplit_once('^').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
+}
+
 pub async fn analyze(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -253,7 +258,8 @@ pub async fn analyze(
                 "bytes": format!("[{}]", tok.as_bytes().iter().map(|b| format!("{b:x}"))
                     .collect::<Vec<_>>().join(" ")),
                 "positionLength": 1,
-                "termFrequency": 1,
+                "termFrequency": frequency_of(&tok),
+                "keyword": false,
             }));
         }
         pos += parts_len;
@@ -287,7 +293,10 @@ pub async fn analyze(
                         "bytes": format!("[{}]", token.as_bytes().iter().map(|b| format!("{b:x}"))
                             .collect::<Vec<_>>().join(" ")),
                         "positionLength": 1,
-                        "termFrequency": 1,
+                        "termFrequency": frequency_of(&token),
+                        // whether a filter held this word back from the
+                        // stemmers; nothing marks one at this point
+                        "keyword": false,
                     })
                 })
                 .collect()

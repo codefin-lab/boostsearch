@@ -109,8 +109,8 @@ pub enum Step {
     Unique,
     Truncate(usize),
     Limit(usize),
-    /// each token replaced by, or joined with, what it maps to
-    Synonym(HashMap<String, Vec<String>>),
+    /// each token replaced by, or joined with, what it also means
+    Synonym(Vec<SynonymRule>),
     /// sorted, deduplicated and joined back into one token
     Fingerprint,
     /// `l'avion` is the word `avion`: the article written onto the front of it
@@ -155,6 +155,9 @@ pub enum Step {
         catenate: bool,
         on_numerics: bool,
         on_case_change: bool,
+        /// whether each part is reported where it was written, or where the
+        /// word it came from was
+        adjust_offsets: bool,
     },
     /// each word and the one after it, joined, for the words that are too
     /// common to search for on their own
@@ -186,6 +189,12 @@ pub enum Step {
     },
     /// the original token kept beside what the filter made of it
     PreserveOriginal(Box<Step>),
+    /// the smallest hash of the text in each of many buckets: two texts that
+    /// share most of their words share most of their hashes
+    MinHash {
+        buckets: usize,
+        hashes: usize,
+    },
     /// the word written the one way Unicode says it is written, in the case
     /// it is compared in: `Ruß` is `russ`
     IcuNormalize,
@@ -702,17 +711,51 @@ fn apply_step(
             tokens.into_iter().map(|(t, p, a, b)| (t.chars().take(*n).collect(), p, a, b)).collect()
         }
         Step::Limit(n) => tokens.into_iter().take(*n).collect(),
-        Step::Synonym(map) => {
-            let mut out = Vec::new();
-            for (t, p, a, b) in tokens {
-                match map.get(&t.to_lowercase()) {
-                    Some(alts) => {
-                        for alt in alts {
-                            out.push((alt.clone(), p, a, b));
-                        }
+        Step::Synonym(rules) => {
+            let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
+            let mut i = 0;
+            while i < tokens.len() {
+                // the longest rule that fits here is the one that stands
+                let matched = rules
+                    .iter()
+                    .filter(|rule| {
+                        !rule.phrase.is_empty()
+                            && i + rule.phrase.len() <= tokens.len()
+                            && rule
+                                .phrase
+                                .iter()
+                                .enumerate()
+                                .all(|(at, word)| tokens[i + at].0.to_lowercase() == *word)
+                    })
+                    .max_by_key(|rule| rule.phrase.len());
+                let Some(rule) = matched else {
+                    out.push(tokens[i].clone());
+                    i += 1;
+                    continue;
+                };
+                let (_, position, from, _) = tokens[i].clone();
+                let to = tokens[i + rule.phrase.len() - 1].3;
+                let mut written = Vec::new();
+                if rule.keep_original || rule.alternatives.is_empty() {
+                    for at in 0..rule.phrase.len() {
+                        let (text, _, from, to) = tokens[i + at].clone();
+                        written.push((text, position + at, from, to));
                     }
-                    None => out.push((t, p, a, b)),
                 }
+                let mut meant = Vec::new();
+                for alternative in &rule.alternatives {
+                    for (at, word) in alternative.iter().enumerate() {
+                        meant.push((word.clone(), position + at, from, to));
+                    }
+                }
+                if rule.alternatives_first {
+                    out.extend(meant);
+                    out.extend(written);
+                } else {
+                    out.extend(written);
+                    out.extend(meant);
+                }
+                i += rule.phrase.len();
             }
             out
         }
@@ -825,6 +868,27 @@ fn apply_step(
                 (reading, p, a, b)
             })
             .collect(),
+        Step::MinHash { buckets, hashes } => {
+            let mut out = Vec::with_capacity(*buckets);
+            for bucket in 0..*buckets {
+                let mut smallest = u64::MAX;
+                for (t, _, _, _) in &tokens {
+                    for hash in 0..(*hashes).max(1) {
+                        let mut seed = (bucket as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            ^ (hash as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                        for byte in t.as_bytes() {
+                            seed = (seed ^ *byte as u64).wrapping_mul(0x1000_0000_01B3);
+                        }
+                        smallest = smallest.min(seed);
+                    }
+                }
+                if smallest == u64::MAX {
+                    smallest = 0;
+                }
+                out.push((format!("{smallest:016x}"), bucket, 0, 0));
+            }
+            out
+        }
         Step::IcuNormalize => {
             tokens.into_iter().map(|(t, p, a, b)| (icu_normalize(&t), p, a, b)).collect()
         }
@@ -917,20 +981,30 @@ fn apply_step(
                 types.iter().any(|named| named == kind) == *keep
             })
             .collect(),
-        Step::WordDelimiter { catenate, on_numerics, on_case_change } => {
-            let mut out = Vec::new();
+        Step::WordDelimiter { catenate, on_numerics, on_case_change, adjust_offsets } => {
+            let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
             for (t, p, a, b) in tokens {
                 let parts = split_where_writing_changes(&t, *on_numerics, *on_case_change);
                 if parts.len() < 2 {
                     out.push((t, p, a, b));
                     continue;
                 }
+                // each part stands where it was written, unless the request
+                // asked for the offsets of the word it came from
+                let mut at = a;
                 for part in &parts {
-                    out.push((part.clone(), p, a, b));
+                    let (from, to) = if *adjust_offsets { (at, at + part.len()) } else { (a, b) };
+                    out.push((part.clone(), p, from, to));
+                    at += part.len();
                 }
                 if *catenate {
                     out.push((parts.concat(), p, a, b));
                 }
+            }
+            // splitting a word makes new positions, and what follows it stands
+            // further along than it did
+            for (at, token) in out.iter_mut().enumerate() {
+                token.1 = at;
             }
             out
         }
@@ -1472,6 +1546,30 @@ impl Registry {
         Chain { pre: Vec::new(), source, steps: Vec::new() }
     }
 
+    /// What is wrong with the analysis an index's settings describe, if
+    /// anything: a filter that cannot be built is refused when the index is
+    /// created rather than when the first document is written to it.
+    pub fn complaint(settings: &Value) -> Option<String> {
+        let analysis = settings
+            .pointer("/index/analysis")
+            .or_else(|| settings.pointer("/analysis"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
+        for (name, spec) in analysis.get("filter").and_then(|f| f.as_object())?.iter() {
+            if filter_of_spec(spec, &filters).is_none() {
+                let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                return Some(match kind {
+                    "elision" => {
+                        "elision filter requires [articles] or [articles_path] setting".to_string()
+                    }
+                    other => format!("Unknown filter type [{other}] for [{name}]"),
+                });
+            }
+        }
+        None
+    }
+
     /// The char filters a request or a mapping names, ready to be applied.
     pub fn char_filters(&self, named: &[Value]) -> Vec<CharFilter> {
         named.iter().filter_map(|one| self.char_filter(one)).collect()
@@ -1693,7 +1791,9 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "length" => vec![Step::Length { min: num("min", 0), max: num("max", usize::MAX) }],
         "truncate" => vec![Step::Truncate(num("length", 10))],
         "limit" => vec![Step::Limit(num("max_token_count", 1))],
-        "synonym" | "synonym_graph" => vec![Step::Synonym(synonyms(spec))],
+        "synonym" | "synonym_graph" => {
+            vec![Step::Synonym(synonyms(spec, kind == "synonym_graph"))]
+        }
         "lowercase" => vec![Step::Lowercase],
         "uppercase" => vec![Step::Uppercase],
         "asciifolding" => {
@@ -1763,6 +1863,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         }],
         "word_delimiter" | "word_delimiter_graph" => vec![Step::WordDelimiter {
             catenate: flag("catenate_all") || flag("catenate_words"),
+            adjust_offsets: spec.get("adjust_offsets").and_then(|v| v.as_bool()).unwrap_or(true),
             on_numerics: spec.get("split_on_numerics").and_then(|v| v.as_bool()).unwrap_or(true),
             on_case_change: spec
                 .get("split_on_case_change")
@@ -1801,7 +1902,10 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
                 .collect();
             vec![Step::Multiplexer(branches)]
         }
-        "min_hash" | "flatten_graph" | "remove_duplicates" => vec![],
+        "min_hash" => {
+            vec![Step::MinHash { buckets: num("bucket_count", 512), hashes: num("hash_count", 1) }]
+        }
+        "flatten_graph" | "remove_duplicates" => vec![],
         other => return filter_of_name(other),
     };
     Some(steps)
@@ -1826,9 +1930,15 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "porter_stem" | "porterStem" | "snowball" => vec![Step::Stem("english".into())],
         "fingerprint" => vec![Step::Fingerprint],
         "word_delimiter" | "word_delimiter_graph" => {
-            vec![Step::WordDelimiter { catenate: false, on_numerics: true, on_case_change: true }]
+            vec![Step::WordDelimiter {
+                catenate: false,
+                on_numerics: true,
+                on_case_change: true,
+                adjust_offsets: true,
+            }]
         }
-        "flatten_graph" | "remove_duplicates" | "min_hash" | "keyword_repeat" => vec![],
+        "min_hash" => vec![Step::MinHash { buckets: 512, hashes: 1 }],
+        "flatten_graph" | "remove_duplicates" | "keyword_repeat" => vec![],
         "icu_normalizer" => vec![Step::IcuNormalize],
         "icu_folding" => vec![Step::IcuFold],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
@@ -1902,36 +2012,65 @@ fn char_filters_of(named: &[Value], defined: &Value) -> Vec<CharFilter> {
 }
 
 /// `"a, b => c"` and `"a, b"`, which is how synonyms are written.
-fn synonyms(spec: &Value) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    let lines = spec.get("synonyms").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-    for line in lines.iter().filter_map(|l| l.as_str()) {
+fn synonyms(spec: &Value, graph: bool) -> Vec<SynonymRule> {
+    let mut rules = Vec::new();
+    let lines: Vec<String> = match spec.get("synonyms") {
+        Some(Value::Array(a)) => {
+            a.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect()
+        }
+        Some(Value::String(s)) => s.lines().map(|l| l.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace().map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect()
+    };
+    for line in lines {
         match line.split_once("=>") {
+            // `a, b => c` says what a and b are to be read as
             Some((from, to)) => {
-                let targets: Vec<String> = to
-                    .split(',')
-                    .map(|t| t.trim().to_lowercase())
-                    .filter(|t| !t.is_empty())
-                    .collect();
-                for word in from.split(',').map(|w| w.trim().to_lowercase()) {
-                    if !word.is_empty() {
-                        map.insert(word, targets.clone());
-                    }
+                let targets: Vec<Vec<String>> =
+                    to.split(',').map(words).filter(|w| !w.is_empty()).collect();
+                for phrase in from.split(',').map(words).filter(|w| !w.is_empty()) {
+                    rules.push(SynonymRule {
+                        phrase,
+                        alternatives: targets.clone(),
+                        keep_original: false,
+                        alternatives_first: true,
+                    });
                 }
             }
+            // `a, b, c` says the three are the same word
             None => {
-                let group: Vec<String> = line
-                    .split(',')
-                    .map(|w| w.trim().to_lowercase())
-                    .filter(|w| !w.is_empty())
-                    .collect();
-                for word in &group {
-                    map.insert(word.clone(), group.clone());
+                let group: Vec<Vec<String>> =
+                    line.split(',').map(words).filter(|w| !w.is_empty()).collect();
+                for phrase in &group {
+                    let alternatives: Vec<Vec<String>> =
+                        group.iter().filter(|other| *other != phrase).cloned().collect();
+                    rules.push(SynonymRule {
+                        phrase: phrase.clone(),
+                        alternatives,
+                        keep_original: true,
+                        // a graph filter reads what the word also means before
+                        // the word itself; the plain one reads it after
+                        alternatives_first: graph,
+                    });
                 }
             }
         }
     }
-    map
+    rules
+}
+
+/// One synonym rule: the words it stands for, and what may be read in their
+/// place.
+#[derive(Clone, Debug)]
+pub struct SynonymRule {
+    phrase: Vec<String>,
+    alternatives: Vec<Vec<String>>,
+    /// whether the words written are kept beside what they also mean
+    keep_original: bool,
+    /// whether what they also mean is read first
+    alternatives_first: bool,
 }
 
 /// The analyzers OpenSearch has without being told about them.

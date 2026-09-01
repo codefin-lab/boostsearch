@@ -306,6 +306,13 @@ impl Store {
         if self.exists(name) {
             return Err(anyhow!("resource_already_exists_exception"));
         }
+        // an index whose analysis cannot be built is refused now, rather than
+        // when the first document is written to it
+        if let Some(settings) = body.get("settings")
+            && let Some(complaint) = crate::analysis::Registry::complaint(settings)
+        {
+            return Err(anyhow!("{complaint}"));
+        }
         match self.index_path(name) {
             Some(path) => {
                 std::fs::create_dir_all(&path)?;
