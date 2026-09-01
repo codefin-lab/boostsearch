@@ -156,6 +156,44 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         if terms.len() == 1 {
             return Ok(Box::new(TermQuery::new(terms[0].clone(), IndexRecordOption::WithFreqs)));
         }
+        // words standing in one place are alternatives, and a phrase over them
+        // is a phrase for each way of choosing between them
+        let places = analyze_positions(ctx, view, &field, &text, analyzer);
+        if places.len() == terms.len() && places.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+            let mut ways: Vec<Vec<Term>> = vec![Vec::new()];
+            let mut last: Option<usize> = None;
+            for (term, (_, at)) in terms.iter().zip(places.iter()) {
+                match last {
+                    // another way of writing the word already in this place
+                    Some(before) if before == *at => {
+                        let so_far = ways.len();
+                        for i in 0..so_far {
+                            let mut other = ways[i].clone();
+                            if let Some(end) = other.last_mut() {
+                                *end = term.clone();
+                            }
+                            ways.push(other);
+                        }
+                    }
+                    _ => {
+                        for way in ways.iter_mut() {
+                            way.push(term.clone());
+                        }
+                    }
+                }
+                last = Some(*at);
+                // the ways multiply, and nobody reads more than a few of them
+                ways.truncate(64);
+            }
+            let clauses: Vec<Box<dyn Query>> = ways
+                .into_iter()
+                .filter(|way| way.len() > 1)
+                .map(|way| Box::new(PhraseQuery::new(way)) as Box<dyn Query>)
+                .collect();
+            if !clauses.is_empty() {
+                return Ok(Box::new(BooleanQuery::union(clauses)));
+            }
+        }
         return Ok(Box::new(PhraseQuery::new(terms)));
     }
 
