@@ -5,7 +5,26 @@ use super::*;
 pub(crate) fn mapping_view(st: &IdxState) -> Value {
     let mut m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
     add_type_defaults(&mut m);
+    scaling_factors_as_floats(&mut m);
     json!({"mappings": m})
+}
+
+/// A scaled float's factor is a float, whatever it was written as: it is what
+/// the value is divided by, and OpenSearch echoes it back that way.
+fn scaling_factors_as_floats(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            if let Some(factor) = o.get_mut("scaling_factor")
+                && let Some(n) = factor.as_f64()
+                && factor.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false)
+            {
+                *factor = json!(n);
+            }
+            o.iter_mut().for_each(|(_, v)| scaling_factors_as_floats(v));
+        }
+        Value::Array(a) => a.iter_mut().for_each(scaling_factors_as_floats),
+        _ => {}
+    }
 }
 
 pub async fn get_mapping(
@@ -38,9 +57,7 @@ pub async fn get_mapping(
             if expr.contains('*') && !reach(g.closed) {
                 continue;
             }
-            let mut view = mapping_view(&g);
-            whole_numbers(&mut view);
-            out.insert(n, view);
+            out.insert(n, mapping_view(&g));
         }
     }
     // a pattern reaching nothing is an error only when the caller said so
@@ -153,23 +170,4 @@ pub async fn get_field_mapping(
         out.insert(n.clone(), json!({"mappings": Value::Object(mappings)}));
     }
     respond(&p, Value::Object(out))
-}
-
-/// A mapping is echoed back the way it was written, and a number written
-/// without a fraction is written back without one.
-pub(crate) fn whole_numbers(node: &mut Value) {
-    match node {
-        Value::Object(o) => o.iter_mut().for_each(|(_, v)| whole_numbers(v)),
-        Value::Array(a) => a.iter_mut().for_each(whole_numbers),
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64()
-                && f.fract() == 0.0
-                && f.abs() < 9e15
-                && n.as_i64().is_none()
-            {
-                *node = Value::Number((f as i64).into());
-            }
-        }
-        _ => {}
-    }
 }

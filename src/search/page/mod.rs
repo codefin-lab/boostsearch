@@ -112,6 +112,10 @@ pub(crate) fn write_page(
                     "description": description,
                     "details": [],
                 });
+                // an explained hit says which shard answered for it, and which
+                // node that shard is on
+                hit["_shard"] = json!(format!("[{}][{}]", h.index, h.shard_idx));
+                hit["_node"] = json!("node-0");
             }
             if !h.sort.is_empty() {
                 // the column holds the number the field reports -- a date is

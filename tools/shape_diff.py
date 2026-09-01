@@ -109,9 +109,13 @@ def shape(value, key=""):
     if key in VOLATILE:
         return "~"
     if isinstance(value, dict):
+        # a map keyed by node holds one entry per node, named after it
+        if key == "nodes" and value:
+            return {"<node>": shape(next(iter(value.values())), "<node>")}
         return {k: shape(v, k) for k, v in sorted(value.items())}
     if isinstance(value, list):
-        return [shape(v, key) for v in value[:3]]
+        # how many there are is not the shape; what one of them looks like is
+        return [shape(value[0], key)] if value else []
     if isinstance(value, bool):
         return "bool"
     if isinstance(value, int):
