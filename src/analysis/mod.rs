@@ -935,6 +935,9 @@ fn apply_step(
                         meant.push((word.clone(), position + at, from, to, length));
                     }
                 }
+                // stacked in place, the words are read in the order of the
+                // places they stand in, the written word before what it means
+                let start = out.len();
                 if rule.alternatives_first {
                     out.extend(meant);
                     out.extend(written);
@@ -942,6 +945,7 @@ fn apply_step(
                     out.extend(written);
                     out.extend(meant);
                 }
+                out[start..].sort_by_key(|t| t.1);
                 i += rule.phrase.len();
             }
             out

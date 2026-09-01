@@ -131,6 +131,26 @@ pub(crate) fn describe_query(q: &Value) -> String {
             "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
                 .to_string()
         }
+        "match_phrase" | "match_phrase_prefix" => body
+            .as_object()
+            .and_then(|o| o.iter().next())
+            .map(|(f, v)| {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Object(o) => o
+                        .get("query")
+                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                        .unwrap_or_default(),
+                    other => other.to_string(),
+                };
+                let words: Vec<&str> = text.split_whitespace().collect();
+                match (kind.as_str(), words.len()) {
+                    ("match_phrase_prefix", _) => format!("{f}:\"{}*\"", words.join(" ")),
+                    (_, 1) => format!("{f}:{}", words[0]),
+                    _ => format!("{f}:\"{}\"", words.join(" ")),
+                }
+            })
+            .unwrap_or_else(|| "*:*".to_string()),
         "term" | "match" => body
             .as_object()
             .and_then(|o| o.iter().next())
@@ -350,8 +370,17 @@ pub async fn analyze(
                 })
                 .collect()
         };
-        let named_tokenizer =
-            body.get("tokenizer").cloned().or_else(|| p.get("tokenizer").map(|t| json!(t)));
+        // filters asked for on their own stand on the text whole: that is a
+        // normalizer, and a normalizer's tokenizer is `keyword`
+        let named_tokenizer = body
+            .get("tokenizer")
+            .cloned()
+            .or_else(|| p.get("tokenizer").map(|t| json!(t)))
+            .or_else(|| {
+                (analyzer.is_none()
+                    && (body.get("filter").is_some() || body.get("char_filter").is_some()))
+                .then(|| json!("keyword"))
+            });
         if let Some(spec) = named_tokenizer {
             // a tokenizer named as a string is reported under that name; one
             // described in the request has no name of its own, and is
@@ -394,6 +423,9 @@ pub async fn analyze(
                 body.get("filter").and_then(|f| f.as_array()).cloned().unwrap_or_default();
             let mut steps = Vec::new();
             let mut filters = Vec::new();
+            // the tokens as the stage before left them: a filter that reads a
+            // frequency off the end of a word reports the frequency it read
+            let mut before: Vec<Token> = prepared.iter().flat_map(|t| base.cut(t)).collect();
             for one in &asked {
                 steps.extend(registry.filter_steps(one));
                 let name = match one {
@@ -406,7 +438,16 @@ pub async fn analyze(
                 let chain =
                     crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
                 let cut: Vec<Token> = prepared.iter().flat_map(|t| chain.tokens(t)).collect();
-                filters.push(json!({"name": name, "tokens": as_json(cut)}));
+                let mut listed = as_json(cut.clone());
+                if steps.iter().any(|s| matches!(s, crate::analysis::Step::DelimitedTermFreq(_))) {
+                    for (at, token) in listed.iter_mut().enumerate() {
+                        if let Some((was, _, _, _, _)) = before.get(at) {
+                            token["termFrequency"] = json!(frequency_of(was));
+                        }
+                    }
+                }
+                before = cut;
+                filters.push(json!({"name": name, "tokens": listed}));
             }
             let mut detail = json!({
                 "custom_analyzer": true,
