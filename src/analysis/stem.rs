@@ -460,7 +460,22 @@ pub(crate) fn galician(word: &str) -> String {
 
 /// Brazilian Portuguese, as `BrazilianStemmer` cuts it.
 pub(crate) fn brazilian(word: &str) -> String {
-    let word = strip_accents(&word.to_lowercase());
+    // only the marks Portuguese writes are taken off; a letter from another
+    // language keeps the one it came with
+    let word: String = word
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            '\u{00E1}' | '\u{00E2}' | '\u{00E3}' => 'a',
+            '\u{00E9}' | '\u{00EA}' => 'e',
+            '\u{00ED}' => 'i',
+            '\u{00F3}' | '\u{00F4}' | '\u{00F5}' => 'o',
+            '\u{00FA}' | '\u{00FC}' => 'u',
+            '\u{00E7}' => 'c',
+            '\u{00F1}' => 'n',
+            other => other,
+        })
+        .collect();
     if len(&word) < 4 {
         return word;
     }
@@ -1183,38 +1198,6 @@ pub(crate) fn greek(word: &str) -> String {
         ],
     )
     .unwrap_or(word)
-}
-
-/// English, as `KStemmer` cuts it: gently, and only where what is left is
-/// still a word.
-pub(crate) fn kstem(word: &str) -> String {
-    if len(word) < 4 {
-        return word.to_string();
-    }
-    // the plural, the participle and the comparative, in that order
-    if let Some(base) = word.strip_suffix("ies").filter(|b| len(b) >= 3) {
-        return format!("{base}y");
-    }
-    if let Some(base) = word.strip_suffix("es").filter(|b| len(b) >= 3) {
-        if base.ends_with('s')
-            || base.ends_with("ch")
-            || base.ends_with("sh")
-            || base.ends_with('x')
-        {
-            return base.to_string();
-        }
-        return format!("{base}e");
-    }
-    if let Some(base) = word.strip_suffix('s').filter(|b| len(b) >= 3 && !b.ends_with('s')) {
-        return base.to_string();
-    }
-    if let Some(base) = word.strip_suffix("ing").filter(|b| len(b) >= 3) {
-        return base.to_string();
-    }
-    if let Some(base) = word.strip_suffix("ed").filter(|b| len(b) >= 3) {
-        return base.to_string();
-    }
-    word.to_string()
 }
 
 /// The letters of a script, written the one way the index keeps them.

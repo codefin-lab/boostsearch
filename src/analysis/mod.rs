@@ -12,6 +12,7 @@
 //! alike -- so that a document and a query are cut by the same code, and the
 //! index can be told which analyzer a path is written with.
 
+mod kstem;
 mod morph;
 mod rslp;
 mod snowball;
@@ -672,7 +673,7 @@ fn apply_step(
                 // the algorithms Snowball defines that BoostCore does not
                 // carry, generated from the definitions themselves
                 other @ ("catalan" | "basque" | "irish" | "lithuanian" | "estonian"
-                | "armenian" | "porter") => {
+                | "armenian" | "porter" | "finnish") => {
                     let language = other.to_string();
                     return tokens
                         .into_iter()
@@ -976,7 +977,7 @@ fn apply_step(
                 (written, p, a, b)
             })
             .collect(),
-        Step::KStem => tokens.into_iter().map(|(t, p, a, b)| (stem::kstem(&t), p, a, b)).collect(),
+        Step::KStem => tokens.into_iter().map(|(t, p, a, b)| (kstem::stem(&t), p, a, b)).collect(),
         Step::Apostrophe => tokens
             .into_iter()
             .map(|(t, p, a, b)| {

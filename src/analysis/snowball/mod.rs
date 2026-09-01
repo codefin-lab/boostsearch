@@ -29,6 +29,7 @@ mod armenian;
 mod basque;
 mod catalan;
 mod estonian;
+mod finnish;
 mod irish;
 mod lithuanian;
 mod porter;
@@ -41,6 +42,7 @@ pub fn stem(language: &str, word: &str) -> Option<String> {
         "basque" => basque::stem(&mut env),
         "catalan" => catalan::stem(&mut env),
         "estonian" => estonian::stem(&mut env),
+        "finnish" => finnish::stem(&mut env),
         "irish" => irish::stem(&mut env),
         "lithuanian" => lithuanian::stem(&mut env),
         "porter" => porter::stem(&mut env),
