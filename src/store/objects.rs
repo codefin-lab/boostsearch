@@ -192,3 +192,21 @@ impl Store {
         merged
     }
 }
+
+impl Store {
+    /// The name the next finished task is reported under.
+    pub fn next_task_id(&self) -> String {
+        let n = self.task_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        format!("node-0:{n}")
+    }
+
+    /// Keep what a task answered, for the caller that comes back for it.
+    pub fn remember_task(&self, name: &str, answer: Value) {
+        self.tasks.write().insert(name.to_string(), answer);
+    }
+
+    /// What a task answered, if this node ran it.
+    pub fn task_answer(&self, name: &str) -> Option<Value> {
+        self.tasks.read().get(name).cloned()
+    }
+}

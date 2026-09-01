@@ -6,7 +6,9 @@ mod validate;
 pub use validate::*;
 
 mod bulk;
+mod by_query;
 pub use bulk::*;
+pub use by_query::*;
 mod many;
 pub use many::*;
 mod termvectors;

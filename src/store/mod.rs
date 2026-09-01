@@ -367,6 +367,11 @@ pub struct Store {
     templates: Arc<RwLock<HashMap<String, Value>>>,
     /// live scroll cursors, keyed by the id handed to the client
     scrolls: Arc<RwLock<HashMap<String, ScrollState>>>,
+    /// What a walk over a query answered, for the caller that asked not to
+    /// wait for it. Nothing here runs long enough to need waiting on, so the
+    /// answer is ready before the task's name is handed out.
+    tasks: Arc<RwLock<HashMap<String, Value>>>,
+    task_seq: Arc<std::sync::atomic::AtomicU64>,
     scroll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous

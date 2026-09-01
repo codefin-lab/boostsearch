@@ -48,6 +48,12 @@ fn app(store: Store) -> Router {
     Router::new()
         .route("/", any(root))
         // --- bulk (static paths must be declared before `/{index}`) ---
+        .route("/_reindex", post(api::reindex))
+        .route("/_reindex/{id}/_rethrottle", post(api::rethrottle))
+        .route("/_delete_by_query/{id}/_rethrottle", post(api::rethrottle))
+        .route("/_update_by_query/{id}/_rethrottle", post(api::rethrottle))
+        .route("/{index}/_delete_by_query", post(api::delete_by_query))
+        .route("/{index}/_update_by_query", post(api::update_by_query))
         .route("/_bulk", post(api::bulk).put(api::bulk))
         .route("/{index}/_bulk", post(api::bulk).put(api::bulk))
         // --- search ---
