@@ -558,7 +558,7 @@ pub(crate) fn run_composite_over_documents(
             })
             .collect()
     };
-    buckets.sort_by(|a, b| ordering(&a.0).cmp(&ordering(&b.0)));
+    buckets.sort_by_key(|(key, _)| ordering(key));
     // a page begins after the last key of the page before it
     if let Some(after) = after.as_ref().and_then(|a| a.as_object()) {
         let marker: Vec<String> = sources
@@ -585,7 +585,7 @@ pub(crate) fn run_composite_over_documents(
         })
         .collect();
     let mut out = json!({"buckets": paged});
-    if let Some((key, _)) = buckets.iter().take(size).last() {
+    if let Some((key, _)) = buckets.iter().take(size).next_back() {
         let named: serde_json::Map<String, Value> = sources
             .iter()
             .zip(key.iter())
