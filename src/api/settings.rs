@@ -174,6 +174,7 @@ pub async fn put_settings(
         let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &patch);
         g.settings = settings;
+        g.apply_analysis();
         g.save_meta();
     }
     respond(&p, json!({"acknowledged": true}))

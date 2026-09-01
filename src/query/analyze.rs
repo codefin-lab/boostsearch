@@ -54,16 +54,43 @@ pub fn analyze_spans(
     out
 }
 
-pub(crate) fn analyze(ctx: &Ctx, view: View, text: &str) -> Vec<String> {
-    analyze_with(ctx, view, text, None)
+pub(crate) fn analyze(ctx: &Ctx, view: View, field: &str, text: &str) -> Vec<String> {
+    analyze_with(ctx, view, field, text, None)
+}
+
+/// The analyzer a field is queried with: the one the query named, else the
+/// one the mapping named for searching, else the one it was written with.
+fn named_for(ctx: &Ctx, field: &str, asked: Option<&str>) -> Option<String> {
+    if let Some(name) = asked {
+        return Some(name.to_string());
+    }
+    for key in ["search_analyzer", "analyzer"] {
+        if let Some(name) =
+            ctx.mapping.field_option(field, key).and_then(|v| v.as_str().map(|s| s.to_string()))
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 pub(crate) fn analyze_with(
     ctx: &Ctx,
     view: View,
+    field: &str,
     text: &str,
     analyzer: Option<&str>,
 ) -> Vec<String> {
+    // an analyzer the index defined, or one of the built-ins under the name
+    // OpenSearch gives it, cuts the query exactly as it cut the document
+    if let Some(name) = named_for(ctx, field, analyzer)
+        && let Some(chain) = ctx.analysis.get(&name)
+    {
+        let tokens = chain.terms(text);
+        if !tokens.is_empty() || text.is_empty() {
+            return tokens;
+        }
+    }
     if view == View::Raw && analyzer.is_none() {
         return vec![text.to_string()];
     }

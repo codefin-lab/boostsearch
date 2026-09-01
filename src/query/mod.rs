@@ -33,6 +33,8 @@ pub struct Ctx<'a> {
     pub fields: &'a Fields,
     pub mapping: &'a Mapping,
     pub index: &'a Index,
+    /// the analyzers this index knows, by the names the mapping uses
+    pub analysis: &'a crate::analysis::Registry,
     pub max_terms_count: usize,
     pub max_regex_length: usize,
     /// whether the cluster still allows the queries that cost the most to run

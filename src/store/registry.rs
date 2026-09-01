@@ -371,14 +371,14 @@ impl Store {
         let mapping = body
             .get("mappings")
             .map(Mapping::from_body)
-            .unwrap_or_else(|| Mapping { types: HashMap::new(), raw: serde_json::json!({}) });
+            .unwrap_or_else(|| Mapping::from_body(&serde_json::json!({})));
         let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
         let aliases: HashMap<String, Value> = body
             .get("aliases")
             .and_then(|a| a.as_object())
             .map(|o| o.iter().map(|(k, v)| (k.clone(), normalize_alias(v))).collect())
             .unwrap_or_default();
-        let st = IdxState {
+        let mut st = IdxState {
             name: name.to_string(),
             restored: false,
             index,
@@ -390,6 +390,7 @@ impl Store {
             fields,
             mapping,
             settings,
+            analysis: Default::default(),
             aliases,
             closed: false,
             versions: HashMap::new(),
@@ -427,6 +428,7 @@ impl Store {
             stats: Arc::new(crate::blockstats::StatsCache::default()),
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
+        st.apply_analysis();
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())
     }
