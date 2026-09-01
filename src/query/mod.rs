@@ -26,6 +26,8 @@ mod pattern;
 pub(crate) use pattern::*;
 mod terms;
 pub(crate) use terms::*;
+mod spans;
+pub(crate) use spans::*;
 mod text;
 pub(crate) use text::*;
 

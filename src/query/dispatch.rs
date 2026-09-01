@@ -282,6 +282,15 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "query_string" | "simple_query_string" => build_query_string(ctx, &body)?,
         "match" | "match_phrase" | "match_phrase_prefix" => build_match(ctx, &kind, &body)?,
         "span_near" => build_span_near(ctx, &body)?,
+        // the functions are applied to the scores after the search; what the
+        // query layer answers is the documents the inner query finds
+        "function_score" => {
+            let inner =
+                body.get("query").cloned().unwrap_or_else(|| serde_json::json!({"match_all": {}}));
+            super::build(ctx, &inner)?
+        }
+        "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"
+        | "span_multi" => build_span(ctx, q)?,
         "multi_match" => build_multi_match(ctx, &body)?,
         // combined_fields scores across fields as one; cross_fields is the
         // closest thing we can assemble from per-field matches

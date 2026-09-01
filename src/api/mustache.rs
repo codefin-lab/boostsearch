@@ -336,7 +336,6 @@ pub async fn delete_script(
     respond(&p, json!({"acknowledged": true}))
 }
 
-
 /// `_msearch/template` -- several templated searches in one request.
 pub async fn msearch_template(
     State(store): State<Store>,

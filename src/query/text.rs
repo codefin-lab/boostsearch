@@ -120,6 +120,39 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         .collect();
 
     if kind == "match_phrase" || kind == "match_phrase_prefix" {
+        // the last word of a phrase prefix is the beginning of a word, not a
+        // whole one: `lazy d` finds `lazy dog`
+        if kind == "match_phrase_prefix" {
+            let mut head = terms.clone();
+            let Some(last) = head.pop() else {
+                return Ok(Box::new(EmptyQuery));
+            };
+            let stem = tokens.last().cloned().unwrap_or_default();
+            let starts_with = prefix_terms(ctx, f, &path, &stem)?;
+            if starts_with.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            if head.is_empty() {
+                let any: Vec<(Occur, Box<dyn Query>)> = starts_with
+                    .into_iter()
+                    .map(|term| {
+                        let clause: Box<dyn Query> =
+                            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs));
+                        (Occur::Should, clause)
+                    })
+                    .collect();
+                return Ok(Box::new(BooleanQuery::new(any)));
+            }
+            // every word the last one could be, each making a phrase of its own
+            let mut ways: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for ending in starts_with {
+                let mut phrase = head.clone();
+                phrase.push(ending);
+                ways.push((Occur::Should, Box::new(PhraseQuery::new(phrase))));
+            }
+            let _ = last;
+            return Ok(Box::new(BooleanQuery::new(ways)));
+        }
         if terms.len() == 1 {
             return Ok(Box::new(TermQuery::new(terms[0].clone(), IndexRecordOption::WithFreqs)));
         }
@@ -399,4 +432,127 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
         0
     };
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+}
+
+/// `span_term` -- one word, in the field it is written in.
+///
+/// Span queries are about where words stand in a document. The ones here
+/// answer with the documents whose spans could match; a span query that only
+/// narrows -- `span_first`, `span_not`, `span_containing` -- is read as the
+/// clause it narrows, with the narrowing applied where BoostCore can see the
+/// positions.
+pub(crate) fn build_span_term(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let (field, value, _) = field_and_value(body)?;
+    let text = match &value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let (f, path, _) = ctx.resolve(&field, true);
+    let mut term = Term::from_field_json_path(f, &path, true);
+    term.append_type_and_str(&text);
+    Ok(Box::new(TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions)))
+}
+
+/// One span clause, whichever kind it is.
+pub(crate) fn build_span(ctx: &Ctx, clause: &Value) -> Result<Box<dyn Query>> {
+    let Some((kind, body)) = clause.as_object().and_then(|o| o.iter().next()) else {
+        return Err(anyhow!("[span] clause is empty"));
+    };
+    match kind.as_str() {
+        "span_term" => build_span_term(ctx, body),
+        "span_near" => build_span_near(ctx, body),
+        "span_or" => build_span_or(ctx, body),
+        "span_not" => build_span_not(ctx, body),
+        "span_first" => build_span_first(ctx, body),
+        "span_containing" | "span_within" => build_span_pair(ctx, body),
+        "span_multi" => {
+            let inner = body.get("match").ok_or_else(|| anyhow!("[span_multi] needs [match]"))?;
+            super::build(ctx, inner)
+        }
+        "span_gap" => Ok(Box::new(EmptyQuery)),
+        other => Err(anyhow!("unknown span query [{other}]")),
+    }
+}
+
+/// `span_or` -- any of its clauses.
+pub(crate) fn build_span_or(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let clauses = body
+        .get("clauses")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| anyhow!("[span_or] requires [clauses]"))?;
+    let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for clause in clauses {
+        parts.push((Occur::Should, build_span(ctx, clause)?));
+    }
+    Ok(Box::new(BooleanQuery::new(parts)))
+}
+
+/// `span_not` -- the first clause where the second does not stand.
+pub(crate) fn build_span_not(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let include = body.get("include").ok_or_else(|| anyhow!("[span_not] requires [include]"))?;
+    body.get("exclude").ok_or_else(|| anyhow!("[span_not] requires [exclude]"))?;
+    // What `exclude` takes out is a span that overlaps the included one, not
+    // every document that holds it: a document where the two stand apart is
+    // still an answer. Without spans of its own to compare, this answers with
+    // the included clause, which is the document set OpenSearch answers with
+    // wherever the two do not overlap.
+    build_span(ctx, include)
+}
+
+/// `span_first` -- a clause that stands near the beginning of the field.
+pub(crate) fn build_span_first(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let inner = body.get("match").ok_or_else(|| anyhow!("[span_first] requires [match]"))?;
+    let end = body.get("end").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
+    // where the clause is one word, how early it stands can be answered from
+    // its positions; anything else is read as the clause itself
+    if let Some(spec) = inner.get("span_term") {
+        let (field, value, _) = field_and_value(spec)?;
+        let text = match &value {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let (f, path, _) = ctx.resolve(&field, true);
+        let mut term = Term::from_field_json_path(f, &path, true);
+        term.append_type_and_str(&text);
+        return Ok(Box::new(crate::query::FirstPositions::new(term, end)));
+    }
+    build_span(ctx, inner)
+}
+
+/// `span_containing` and `span_within` -- one span inside another.
+pub(crate) fn build_span_pair(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let little = body.get("little").ok_or_else(|| anyhow!("[span] requires [little]"))?;
+    let big = body.get("big").ok_or_else(|| anyhow!("[span] requires [big]"))?;
+    let parts: Vec<(Occur, Box<dyn Query>)> =
+        vec![(Occur::Must, build_span(ctx, little)?), (Occur::Must, build_span(ctx, big)?)];
+    Ok(Box::new(BooleanQuery::new(parts)))
+}
+
+/// Every term in a field that begins with these letters.
+///
+/// A phrase prefix ends in the beginning of a word, and the words it could be
+/// are read out of the term dictionary -- capped, as OpenSearch caps them, so
+/// that one short prefix cannot name every word in the index.
+pub(crate) fn prefix_terms(ctx: &Ctx, field: Field, path: &str, stem: &str) -> Result<Vec<Term>> {
+    const MOST: usize = 50;
+    let mut out = Vec::new();
+    let searcher = ctx.index.reader()?.searcher();
+    let mut start = Term::from_field_json_path(field, path, true);
+    start.append_type_and_str(stem);
+    let prefix = start.serialized_value_bytes().to_vec();
+    for reader in searcher.segment_readers() {
+        let inverted = reader.inverted_index(field)?;
+        let mut stream = inverted.terms().stream()?;
+        while let Some((bytes, _)) = stream.next() {
+            if bytes.starts_with(&prefix) {
+                let mut term = Term::from_field_json_path(field, path, true);
+                term.append_bytes(&bytes[term.serialized_value_bytes().len()..]);
+                out.push(Term::from_field_bytes(field, bytes));
+                if out.len() >= MOST {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
