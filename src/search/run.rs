@@ -497,10 +497,23 @@ pub fn run(
             .collect();
         replace_routing_exists(q, &ids);
     }
+    // what a join asked to list is read before the join is rewritten away
+    let mut join_inner_hits: Vec<(String, String, Value, Value)> = Vec::new();
     if let Some(q) = query_json.as_mut() {
         resolve_terms_lookups(store, q)?;
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
+        // a joining query walks one set of documents to answer about another,
+        // which is one of the costs a cluster may have turned off
+        if !expensive_allowed(store) && names_a_join(q) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "[joining] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false.",
+            ));
+        }
+        collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
     }
 
@@ -550,6 +563,15 @@ pub fn run(
     for k in sort_keys.iter_mut() {
         if k.field == "_shard_doc" {
             k.field = "_seq".to_string();
+        }
+        // a join field is sorted by the relation each document stands in,
+        // which is what the field's own value is
+        let joined = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .any(|st| st.read().mapping.type_of(&k.field) == Some("join"));
+        if joined {
+            k.field = format!("{}.name", k.field);
         }
     }
     // `_doc` is the order the index holds its documents in, and an index that
@@ -1097,6 +1119,10 @@ pub fn run(
         fetch_profiles(&mut shard_profiles, body, &extras, &named, size, page.len() as u64, nanos);
     }
 
+    let mut page = page;
+    if !join_inner_hits.is_empty() {
+        attach_join_inner_hits(store, &targets, &mut page, &join_inner_hits);
+    }
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,

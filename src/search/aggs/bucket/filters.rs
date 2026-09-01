@@ -587,21 +587,43 @@ pub(crate) fn run_join_agg(
     let named = spec.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let here = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // an index with no join field has no other side to look at
+    let Some(field) = crate::search::join_field(store, targets) else {
+        let mut out = json!({"doc_count": 0});
+        if let Some(Value::Object(map)) =
+            count_with_sub_aggs(store, targets, &json!({"match_none": {}}), &sub_aggs, weighted)?.1
+        {
+            for (name, value) in map {
+                out[name] = value;
+            }
+        }
+        return Ok(out);
+    };
     // whichever side the aggregation names, the other side is what its bucket
     // is asked about
-    let mut narrowed = if children.is_some() {
-        json!({"bool": {"must": [
-            {"has_parent": {"parent_type": "", "query": here}},
-            {"term": {"join_field.name": named}},
-        ]}})
-    } else {
-        json!({"bool": {"must": [
-            {"has_child": {"type": named, "query": here}},
-        ]}})
+    let narrowed = match children.is_some() {
+        // the documents of that kind whose parent the query found
+        true => {
+            let parents = crate::search::matching_ids_here(store, targets, &here);
+            json!({"bool": {"must": [
+                {"term": {format!("{field}.name"): named}},
+                {"terms": {format!("{field}.parent"): parents}},
+            ]}})
+        }
+        // the parents of the documents of that kind the query found
+        false => {
+            let of_that_kind = json!({
+                "bool": {"must": [here.clone(), {"term": {format!("{field}.name"): named}}]}
+            });
+            let parents = crate::search::ids_of_field(
+                store,
+                targets,
+                &of_that_kind,
+                &format!("{field}.parent"),
+            );
+            json!({"ids": {"values": parents}})
+        }
     };
-    // the join is read here: the search never sees this query as the one it
-    // was asked, so nothing else would expand it
-    crate::search::expand_joins(store, targets, &mut narrowed);
     let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
     let mut out = json!({ "doc_count": count });
     if let Some(Value::Object(map)) = subs {
