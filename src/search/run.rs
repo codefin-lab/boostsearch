@@ -45,7 +45,7 @@ fn rescore_by_rank_features(
                 spec.get("positive_score_impact").and_then(|v| v.as_bool()).unwrap_or(true);
             // a feature the query says is worth less when it is larger is
             // read the other way round
-            let value = if positive { held } else { 1.0 / held.max(f32::MIN_POSITIVE) };
+            let value = held;
             let curved = if let Some(log) = spec.get("log") {
                 let scaling =
                     log.get("scaling_factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
@@ -56,18 +56,20 @@ fn rescore_by_rank_features(
                     .and_then(|v| v.as_f64())
                     .map(|p| p as f32)
                     .unwrap_or(value.max(1.0));
-                value / (value + pivot)
+                // a feature worth less when it is larger saturates the other
+                // way about
+                if positive { value / (value + pivot) } else { pivot / (value + pivot) }
             } else if let Some(sigmoid) = spec.get("sigmoid") {
                 let pivot = sigmoid.get("pivot").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                 let exponent =
                     sigmoid.get("exponent").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                 value.powf(exponent) / (value.powf(exponent) + pivot.powf(exponent))
             } else if spec.get("linear").is_some() {
-                value
+                if positive { value } else { 1.0 / value.max(f32::MIN_POSITIVE) }
             } else {
                 // without a curve named, saturation with the value as its own
                 // pivot is what OpenSearch settles on
-                value / (value + 1.0)
+                if positive { value / (value + 1.0) } else { 1.0 / (value + 1.0) }
             };
             total += boost * curved;
         }

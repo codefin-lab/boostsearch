@@ -221,6 +221,23 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "prefix" => {
             let (field, val, opts) = field_and_value(&body)?;
+            // a field searched while it is typed keeps every beginning of
+            // itself, so a prefix of several words is a term rather than a
+            // pattern
+            let root = field
+                .strip_suffix("._2gram")
+                .or_else(|| field.strip_suffix("._3gram"))
+                .or_else(|| field.strip_suffix("._4gram"))
+                .unwrap_or(&field);
+            if ctx.mapping.type_of(root) == Some("search_as_you_type")
+                && let Some(text) = val.as_str()
+            {
+                let held = format!("{root}._index_prefix");
+                let (f, path, _) = ctx.resolve(&held, false);
+                let mut term = Term::from_field_json_path(f, &path, true);
+                term.append_type_and_str(text);
+                return Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)));
+            }
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };

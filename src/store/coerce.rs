@@ -477,13 +477,34 @@ fn add_shingles(document: &mut Value, mapping: &Mapping) {
             continue;
         };
         let words: Vec<&str> = text.split_whitespace().collect();
+        let mut runs: Vec<String> = words.iter().map(|w| w.to_string()).collect();
         for size in 2..=4usize {
             if words.len() < size {
                 continue;
             }
-            let runs: Vec<Value> =
-                words.windows(size).map(|run| Value::String(run.join(" "))).collect();
-            obj.insert(format!("{path}._{size}gram"), Value::Array(runs));
+            let sized: Vec<String> = words.windows(size).map(|run| run.join(" ")).collect();
+            obj.insert(
+                format!("{path}._{size}gram"),
+                Value::Array(sized.iter().map(|r| Value::String(r.clone())).collect()),
+            );
+            runs.extend(sized);
+        }
+        // and every beginning of those runs, so that a word still being typed
+        // finds what it is the beginning of
+        const LONGEST_PREFIX: usize = 20;
+        let mut prefixes: Vec<Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for run in &runs {
+            let letters: Vec<char> = run.chars().collect();
+            for size in 1..=letters.len().min(LONGEST_PREFIX) {
+                let prefix: String = letters[..size].iter().collect();
+                if seen.insert(prefix.clone()) {
+                    prefixes.push(Value::String(prefix));
+                }
+            }
+        }
+        if !prefixes.is_empty() {
+            obj.insert(format!("{path}._index_prefix"), Value::Array(prefixes));
         }
     }
 }
