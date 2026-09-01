@@ -221,6 +221,23 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "prefix" => {
             let (field, val, opts) = field_and_value(&body)?;
+            // a field searched while it is typed keeps every beginning of
+            // itself, so a prefix of several words is a term rather than a
+            // pattern
+            let root = field
+                .strip_suffix("._2gram")
+                .or_else(|| field.strip_suffix("._3gram"))
+                .or_else(|| field.strip_suffix("._4gram"))
+                .unwrap_or(&field);
+            if ctx.mapping.type_of(root) == Some("search_as_you_type")
+                && let Some(text) = val.as_str()
+            {
+                let held = format!("{root}._index_prefix");
+                let (f, path, _) = ctx.resolve(&held, false);
+                let mut term = Term::from_field_json_path(f, &path, true);
+                term.append_type_and_str(text);
+                return Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)));
+            }
             let (f, path, view) = ctx.resolve(&field, true);
             let text = val.as_str().unwrap_or_default();
             let text = if view == View::Dyn { text.to_lowercase() } else { text.to_string() };
@@ -282,6 +299,34 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "query_string" | "simple_query_string" => build_query_string(ctx, &body)?,
         "match" | "match_phrase" | "match_phrase_prefix" => build_match(ctx, &kind, &body)?,
         "span_near" => build_span_near(ctx, &body)?,
+        // the functions are applied to the scores after the search; what the
+        // query layer answers is the documents the inner query finds
+        "function_score" => {
+            let inner =
+                body.get("query").cloned().unwrap_or_else(|| serde_json::json!({"match_all": {}}));
+            super::build(ctx, &inner)?
+        }
+        // a rank feature scores by what a field holds; which documents answer
+        // is simply which of them hold it
+        "rank_feature" => {
+            let field = body.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            // a log curve rises without bound, so it cannot answer for a
+            // feature whose larger values are worth less
+            let positive = ctx
+                .mapping
+                .field_option(field, "positive_score_impact")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !positive && body.get("log").is_some() {
+                return Err(anyhow!(
+                    "Cannot use the [log] function with a field that has a negative score impact \
+                     as it would trigger negative scores"
+                ));
+            }
+            super::build(ctx, &serde_json::json!({"exists": {"field": field}}))?
+        }
+        "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"
+        | "span_multi" => build_span(ctx, q)?,
         "multi_match" => build_multi_match(ctx, &body)?,
         // combined_fields scores across fields as one; cross_fields is the
         // closest thing we can assemble from per-field matches
@@ -398,6 +443,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                               [index_prefixes].",
             ),
             "fuzzy" | "regexp" | "wildcard" => Some(""),
+            "has_child" | "has_parent" | "parent_id" => Some(""),
             _ => None,
         };
         if let Some(tail) = tail {

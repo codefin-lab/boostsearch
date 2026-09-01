@@ -390,3 +390,18 @@ pub(crate) fn entry_of<'a>(
         .entry(key.to_string())
         .or_insert_with(make)
 }
+
+/// Where this node listens, as it reports itself.
+pub fn bound_address() -> String {
+    std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string())
+}
+
+/// The largest body this node accepts, in bytes.
+pub fn max_content_bytes() -> u64 {
+    std::env::var("BOOSTSEARCH_MAX_CONTENT_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(100)
+        * 1024
+        * 1024
+}

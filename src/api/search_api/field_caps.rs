@@ -50,6 +50,36 @@ pub async fn field_caps(
     }
 
     let mut fields: serde_json::Map<String, Value> = serde_json::Map::new();
+    // every document carries these whether its mapping names them or not
+    const CARRIED: &[(&str, &str, bool, bool)] = &[
+        ("_index", "_index", true, true),
+        ("_id", "_id", true, true),
+        ("_routing", "_routing", true, false),
+        ("_seq_no", "_seq_no", true, true),
+        ("_version", "_version", false, false),
+        ("_source", "_source", false, false),
+        ("_field_names", "_field_names", true, false),
+        ("_ignored", "_ignored", true, false),
+        ("_nested_path", "_nested_path", true, false),
+        ("_doc_count", "long", false, false),
+        ("_feature", "_feature", false, false),
+        ("_data_stream_timestamp", "_data_stream_timestamp", false, false),
+    ];
+    if !kept.is_empty() {
+        for (name, kind, searchable, aggregatable) in CARRIED {
+            if !patterns.iter().any(|pat| {
+                pat == "*" || pat == name || crate::store::wildcard_to_regex(pat).is_match(name)
+            }) {
+                continue;
+            }
+            fields.insert(
+                name.to_string(),
+                json!({ *kind: {
+                    "type": kind, "searchable": searchable, "aggregatable": aggregatable,
+                }}),
+            );
+        }
+    }
     for n in &kept {
         let Some(st) = store.get(n) else { continue };
         let g = st.read();

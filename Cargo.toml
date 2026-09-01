@@ -28,7 +28,7 @@ path = "src/main.rs"
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "233b68a5494e64e99804682f2fb1b96b82facbe2" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "e9b7a3366f340e25946c0d02b6fc40746a304235" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -43,7 +43,7 @@ libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "233b68a5494e64e99804682f2fb1b96b82facbe2" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "e9b7a3366f340e25946c0d02b6fc40746a304235" }
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"
@@ -65,6 +65,7 @@ cjk = ["dep:lindera"]
 [profile.release]
 opt-level = 3
 lto = "thin"
+
 
 
 

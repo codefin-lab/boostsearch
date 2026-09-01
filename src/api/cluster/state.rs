@@ -50,8 +50,17 @@ pub async fn reroute(
         }
         if want("metadata") {
             state["metadata"] = json!({
-                "cluster_uuid": "_na_", "templates": store.get_templates(),
+                "cluster_uuid": "_na_",
+                "cluster_uuid_committed": false,
+                "cluster_coordination": {
+                    "term": 1,
+                    "last_committed_config": ["node-0"],
+                    "last_accepted_config": ["node-0"],
+                    "voting_config_exclusions": [],
+                },
+                "templates": store.get_templates(),
                 "indices": Value::Object(indices),
+                "index-graveyard": {"tombstones": []},
             });
         }
         out["state"] = state;
@@ -264,11 +273,20 @@ pub(crate) fn cluster_state_inner(
             "metadata".into(),
             json!({
                 "cluster_uuid": "_na_",
+                // whether the cluster's name has been agreed on, and by whom:
+                // one node agrees with itself
+                "cluster_uuid_committed": false,
                 "templates": store.get_templates(),
                 "indices": Value::Object(indices.clone()),
                 "cluster_coordination": {
+                    "term": 1,
+                    "last_committed_config": ["node-0"],
+                    "last_accepted_config": ["node-0"],
                     "voting_config_exclusions": store.voting_exclusions(),
                 },
+                // the indices that were deleted, so that a node coming back
+                // with one of them knows it is gone
+                "index-graveyard": {"tombstones": []},
             }),
         );
     }

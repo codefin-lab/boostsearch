@@ -5,7 +5,26 @@ use super::*;
 pub(crate) fn mapping_view(st: &IdxState) -> Value {
     let mut m = if st.mapping.raw.is_null() { json!({}) } else { st.mapping.raw.clone() };
     add_type_defaults(&mut m);
+    scaling_factors_as_floats(&mut m);
     json!({"mappings": m})
+}
+
+/// A scaled float's factor is a float, whatever it was written as: it is what
+/// the value is divided by, and OpenSearch echoes it back that way.
+fn scaling_factors_as_floats(node: &mut Value) {
+    match node {
+        Value::Object(o) => {
+            if let Some(factor) = o.get_mut("scaling_factor")
+                && let Some(n) = factor.as_f64()
+                && factor.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false)
+            {
+                *factor = json!(n);
+            }
+            o.iter_mut().for_each(|(_, v)| scaling_factors_as_floats(v));
+        }
+        Value::Array(a) => a.iter_mut().for_each(scaling_factors_as_floats),
+        _ => {}
+    }
 }
 
 pub async fn get_mapping(

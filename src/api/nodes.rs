@@ -379,7 +379,14 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                 "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
                             "mlockall": false},
                 "plugins": [], "modules": [], "ingest": {"processors": []},
-                "thread_pool": {}, "transport": {}, "http": {},
+                "thread_pool": {}, "transport": {},
+                // where a client -- or another cluster reindexing from this
+                // one -- reaches this node
+                "http": {
+                    "bound_address": [crate::api::bound_address()],
+                    "publish_address": crate::api::bound_address(),
+                    "max_content_length_in_bytes": crate::api::max_content_bytes(),
+                },
             }},
         }),
     )

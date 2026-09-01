@@ -6,7 +6,27 @@ use super::*;
 ///
 /// Everything this engine is asked to do finishes before the request returns,
 /// so a task named here is one that has already completed.
-pub async fn get_task(Path(id): Path<String>, Query(p): Query<Params>) -> Response {
+pub async fn get_task(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    // a walk that was asked not to be waited for left its answer here
+    if let Some(answer) = store.task_answer(&id) {
+        return respond(
+            &p,
+            json!({
+                "completed": true,
+                "task": {
+                    "node": "node-0", "id": 1, "type": "transport",
+                    "action": "indices:data/write/by_query",
+                    "description": id,
+                    "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": true,
+                },
+                "response": answer,
+            }),
+        );
+    }
     // the id carries what the task was, after the node that ran it
     let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
     // a task named after a node that is not here is a task nobody has heard of

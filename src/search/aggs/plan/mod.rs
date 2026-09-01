@@ -212,10 +212,18 @@ pub(crate) fn plan_aggs(
                     .find(|k| BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort")
             })
             .unwrap_or_default();
+        // the ones that read a series want a histogram over it; the rest only
+        // want somewhere to sit
+        let want = match kind.starts_with("bucket_") {
+            true => "must be declared inside of another aggregation".to_string(),
+            false => "must have a histogram, date_histogram or auto_date_histogram as parent \
+                      but doesn't have a parent"
+                .to_string(),
+        };
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            format!("{kind} aggregation [{name}] must be declared inside of another aggregation"),
+            "action_request_validation_exception",
+            format!("Validation Failed: 1: {kind} aggregation [{name}] {want};"),
         ));
     }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();
@@ -249,6 +257,11 @@ pub(crate) fn plan_aggs(
                     || def.get("nested").is_some()
                     || def.get("reverse_nested").is_some()
                     || def.get("sampler").is_some()
+                    || def.get("children").is_some()
+                    || def.get("parent").is_some()
+                    || def.get("geo_bounds").is_some()
+                    || def.get("geo_centroid").is_some()
+                    || def.get("matrix_stats").is_some()
                     || def.get("diversified_sampler").is_some()
                     || def.get("geo_distance").is_some()
                     || def.get("percentile_ranks").is_some()
@@ -365,6 +378,11 @@ pub(crate) fn peelable_here(def: &Value) -> bool {
         "reverse_nested",
         "geo_distance",
         "percentile_ranks",
+        "children",
+        "parent",
+        "geo_bounds",
+        "geo_centroid",
+        "matrix_stats",
         "sampler",
         "diversified_sampler",
     ];

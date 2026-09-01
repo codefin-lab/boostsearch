@@ -152,15 +152,21 @@ pub(crate) fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geo_bounds").is_some() {
+        crate::search::run_geo_bounds_agg(store, targets, query_json, def)
+    } else if def.get("geo_centroid").is_some() {
+        crate::search::run_geo_centroid_agg(store, targets, query_json, def)
+    } else if def.get("matrix_stats").is_some() {
+        run_matrix_stats_agg(store, targets, query_json, def)
     } else if def.get("geo_distance").is_some() {
         run_geo_distance_agg(store, targets, query_json, def, weighted)
     } else if def.get("percentile_ranks").is_some() {
         run_percentile_ranks(store, targets, query_json, def)
-    } else if def.get("nested").is_some()
-        || def.get("reverse_nested").is_some()
-        || def.get("sampler").is_some()
-        || def.get("diversified_sampler").is_some()
-    {
+    } else if def.get("children").is_some() || def.get("parent").is_some() {
+        run_join_agg(store, targets, query_json, def, weighted)
+    } else if def.get("sampler").is_some() || def.get("diversified_sampler").is_some() {
+        run_sampler_agg(store, targets, query_json, def, weighted)
+    } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
         // documents are stored whole here, so the objects a nested aggregation
         // would descend into are already part of the document it is under
         {
@@ -184,8 +190,6 @@ pub(crate) fn run_peeled_agg(
                 if let Some(o) = d.as_object_mut() {
                     o.remove("nested");
                     o.remove("reverse_nested");
-                    o.remove("sampler");
-                    o.remove("diversified_sampler");
                     o.insert("filter".into(), json!({"match_all": {}}));
                 }
                 d
@@ -326,4 +330,207 @@ pub(crate) fn run_adjacency_matrix_agg(
         k(a).cmp(&k(b))
     });
     Ok(json!({"buckets": buckets}))
+}
+
+/// `matrix_stats` -- how a set of numeric fields move, together and apart.
+pub(crate) fn run_matrix_stats_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("matrix_stats").cloned().unwrap_or(json!({}));
+    let fields: Vec<String> = spec
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": fields.clone(),
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    // only the documents that hold every field count, which is what makes a
+    // covariance a covariance
+    let rows: Vec<Vec<f64>> = answer
+        .hits
+        .iter()
+        .filter_map(|hit| {
+            fields
+                .iter()
+                .map(|field| {
+                    hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
+                        .and_then(|v| v.as_f64())
+                })
+                .collect::<Option<Vec<f64>>>()
+        })
+        .collect();
+    let count = rows.len();
+    if count == 0 {
+        return Ok(json!({"doc_count": 0}));
+    }
+    let mean: Vec<f64> = (0..fields.len())
+        .map(|at| rows.iter().map(|row| row[at]).sum::<f64>() / count as f64)
+        .collect();
+    let moment = |at: usize, power: i32| -> f64 {
+        rows.iter().map(|row| (row[at] - mean[at]).powi(power)).sum::<f64>()
+    };
+    let covariance = |a: usize, b: usize| -> f64 {
+        if count < 2 {
+            return 0.0;
+        }
+        rows.iter().map(|row| (row[a] - mean[a]) * (row[b] - mean[b])).sum::<f64>()
+            / (count - 1) as f64
+    };
+    let mut described = Vec::new();
+    for (at, field) in fields.iter().enumerate() {
+        let variance = covariance(at, at);
+        // the shape of the spread is measured against the spread of these
+        // documents rather than of the population they stand for, which is
+        // the denominator OpenSearch uses here
+        let spread = moment(at, 2) / count as f64;
+        let skewness =
+            if spread == 0.0 { 0.0 } else { moment(at, 3) / count as f64 / spread.powf(1.5) };
+        let kurtosis =
+            if spread == 0.0 { 0.0 } else { moment(at, 4) / count as f64 / (spread * spread) };
+        let with: serde_json::Map<String, Value> = fields
+            .iter()
+            .enumerate()
+            .map(|(other, name)| (name.clone(), json!(covariance(at, other))))
+            .collect();
+        let correlation: serde_json::Map<String, Value> = fields
+            .iter()
+            .enumerate()
+            .map(|(other, name)| {
+                let spread = (covariance(at, at) * covariance(other, other)).sqrt();
+                let r = if spread == 0.0 { 0.0 } else { covariance(at, other) / spread };
+                (name.clone(), json!(r))
+            })
+            .collect();
+        described.push(json!({
+            "name": field,
+            "count": count,
+            "mean": mean[at],
+            "variance": variance,
+            "skewness": skewness,
+            "kurtosis": kurtosis,
+            "covariance": with,
+            "correlation": correlation,
+        }));
+    }
+    // the fields are named back in the order OpenSearch names them
+    described.sort_by(|a, b| {
+        b.get("name").and_then(|v| v.as_str()).cmp(&a.get("name").and_then(|v| v.as_str()))
+    });
+    Ok(json!({"doc_count": count, "fields": described}))
+}
+
+/// `sampler` -- the best few documents rather than all of them.
+///
+/// A sampler narrows what its sub-aggregations see to the documents the query
+/// scored highest, which is how a significant-terms aggregation is kept from
+/// reading the whole index. `diversified_sampler` narrows it further: at most
+/// so many documents for each value of a field, so that one crowded value
+/// cannot fill the sample.
+pub(crate) fn run_sampler_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let diversified = def.get("diversified_sampler");
+    let spec = diversified.or_else(|| def.get("sampler")).cloned().unwrap_or(json!({}));
+    let most = spec.get("shard_size").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let per_value = spec.get("max_docs_per_value").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let field = spec.get("field").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+
+    let mut probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        // more than the sample keeps: the ones a crowded value pushes out have
+        // to come from somewhere
+        "size": (most.max(1) * per_value.max(1)).saturating_mul(10).min(10_000),
+        "_source": false,
+    });
+    if let Some(field) = field.as_deref() {
+        probe["_source"] = json!([field]);
+    }
+    let found = run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut kept: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for hit in &found.hits {
+        let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+        if let (Some(field), true) = (field.as_deref(), diversified.is_some()) {
+            let value = hit
+                .pointer(&format!("/_source/{}", field.replace('.', "/")))
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            let count = seen.entry(value).or_insert(0);
+            if *count >= per_value {
+                continue;
+            }
+            *count += 1;
+        }
+        kept.push(id.to_string());
+        if kept.len() >= most {
+            break;
+        }
+    }
+    // what the sample holds is what the sub-aggregations are asked about
+    let narrowed = json!({"ids": {"values": kept}});
+    let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+    let mut out = json!({ "doc_count": count });
+    if let Some(Value::Object(map)) = subs {
+        for (name, value) in map {
+            out[name] = value;
+        }
+    }
+    Ok(out)
+}
+
+/// `children` and `parent` -- the documents on the other side of a join.
+///
+/// A `children` aggregation aggregates over the children of the documents its
+/// bucket holds, and `parent` over their parents. Documents are stored whole
+/// here, so each is a query for the other side and then the ordinary walk.
+pub(crate) fn run_join_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let children = def.get("children");
+    let spec = children.or_else(|| def.get("parent")).cloned().unwrap_or(json!({}));
+    let named = spec.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let here = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // whichever side the aggregation names, the other side is what its bucket
+    // is asked about
+    let mut narrowed = if children.is_some() {
+        json!({"bool": {"must": [
+            {"has_parent": {"parent_type": "", "query": here}},
+            {"term": {"join_field.name": named}},
+        ]}})
+    } else {
+        json!({"bool": {"must": [
+            {"has_child": {"type": named, "query": here}},
+        ]}})
+    };
+    // the join is read here: the search never sees this query as the one it
+    // was asked, so nothing else would expand it
+    crate::search::expand_joins(store, targets, &mut narrowed);
+    let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+    let mut out = json!({ "doc_count": count });
+    if let Some(Value::Object(map)) = subs {
+        for (name, value) in map {
+            out[name] = value;
+        }
+    }
+    Ok(out)
 }

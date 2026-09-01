@@ -2,6 +2,264 @@
 
 use super::*;
 
+/// Every `rank_feature` clause a query holds, wherever it stands in it.
+fn collect_rank_features(node: &Value, out: &mut Vec<Value>) {
+    match node {
+        Value::Object(o) => {
+            for (key, value) in o {
+                if key == "rank_feature" {
+                    out.push(value.clone());
+                } else {
+                    collect_rank_features(value, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_rank_features(item, out)),
+        _ => {}
+    }
+}
+
+/// The score a rank feature asks for: the value of a field, curved.
+///
+/// A feature says how much a document is worth on its own -- how many people
+/// link to it, how short its address is -- and the curve says how quickly that
+/// worth stops mattering.
+fn rescore_by_rank_features(
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    cands: &mut [Cand],
+    features: &[Value],
+) {
+    for cand in cands.iter_mut() {
+        let (_, searcher, st) = &searchers[cand.shard];
+        let g = st.read();
+        let Some((_, source)) = source_of(searcher, &g, cand.addr) else { continue };
+        let mut total = 0.0f32;
+        for spec in features {
+            let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            let held = source
+                .pointer(&format!("/{}", field.replace('.', "/")))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            let boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            // whether a larger value is worth more is the field's own
+            // property, which the query may not override
+            let positive = g
+                .mapping
+                .field_option(field, "positive_score_impact")
+                .and_then(|v| v.as_bool())
+                .or_else(|| spec.get("positive_score_impact").and_then(|v| v.as_bool()))
+                .unwrap_or(true);
+            // a feature the query says is worth less when it is larger is
+            // read the other way round
+            let value = held;
+            let curved = if let Some(log) = spec.get("log") {
+                let scaling =
+                    log.get("scaling_factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                (scaling + value).ln()
+            } else if let Some(saturation) = spec.get("saturation") {
+                let pivot = saturation
+                    .get("pivot")
+                    .and_then(|v| v.as_f64())
+                    .map(|p| p as f32)
+                    .unwrap_or(value.max(1.0));
+                // a feature worth less when it is larger saturates the other
+                // way about
+                if positive { value / (value + pivot) } else { pivot / (value + pivot) }
+            } else if let Some(sigmoid) = spec.get("sigmoid") {
+                let pivot = sigmoid.get("pivot").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                let exponent =
+                    sigmoid.get("exponent").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                value.powf(exponent) / (value.powf(exponent) + pivot.powf(exponent))
+            } else if spec.get("linear").is_some() {
+                if positive { value } else { 1.0 / value.max(f32::MIN_POSITIVE) }
+            } else {
+                // without a curve named, saturation with the value as its own
+                // pivot is what OpenSearch settles on
+                if positive { value / (value + 1.0) } else { 1.0 / (value + 1.0) }
+            };
+            total += boost * curved;
+        }
+        cand.score = total;
+    }
+}
+
+/// The score `function_score` asks for, in place of the one the query gave.
+///
+/// A function may name a filter -- it counts only for the documents that
+/// match it -- and either a weight, or a field whose value stands for how
+/// much the document is worth. `boost_mode` says how what the functions make
+/// meets what the query scored.
+fn rescore_by_functions(
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    cands: &mut [Cand],
+    spec: &Value,
+) {
+    let mut functions: Vec<Value> =
+        spec.get("functions").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    // a single function may be written beside the query rather than in a list
+    for named in ["field_value_factor", "weight", "random_score", "script_score"] {
+        if let Some(one) = spec.get(named) {
+            functions.push(json!({ named: one }));
+        }
+    }
+    if functions.is_empty() {
+        return;
+    }
+    let score_mode = spec.get("score_mode").and_then(|v| v.as_str()).unwrap_or("multiply");
+    let boost_mode = spec.get("boost_mode").and_then(|v| v.as_str()).unwrap_or("multiply");
+    let query_boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    for cand in cands.iter_mut() {
+        let (_, searcher, st) = &searchers[cand.shard];
+        let g = st.read();
+        let Some((_, source)) = source_of(searcher, &g, cand.addr) else { continue };
+        let mut made: Vec<f32> = Vec::new();
+        for function in &functions {
+            // a function with a filter counts only where the filter matches
+            if let Some(filter) = function.get("filter")
+                && !matches_here(&source, filter)
+            {
+                continue;
+            }
+            let weight = function.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let value = match function.get("field_value_factor") {
+                Some(spec) => {
+                    let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("");
+                    let factor = spec.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    let missing = spec.get("missing").and_then(|v| v.as_f64());
+                    let held = source
+                        .pointer(&format!("/{}", field.replace('.', "/")))
+                        .and_then(|v| v.as_f64())
+                        .or(missing)
+                        .unwrap_or(0.0);
+                    let scaled = held * factor;
+                    (match spec.get("modifier").and_then(|v| v.as_str()).unwrap_or("none") {
+                        "log" => scaled.log10(),
+                        "log1p" => (1.0 + scaled).log10(),
+                        "log2p" => (2.0 + scaled).log10(),
+                        "ln" => scaled.ln(),
+                        "ln1p" => (1.0 + scaled).ln_1p(),
+                        "ln2p" => (2.0 + scaled).ln(),
+                        "square" => scaled * scaled,
+                        "sqrt" => scaled.sqrt(),
+                        "reciprocal" => {
+                            if scaled == 0.0 {
+                                0.0
+                            } else {
+                                1.0 / scaled
+                            }
+                        }
+                        _ => scaled,
+                    }) as f32
+                }
+                None => 1.0,
+            };
+            made.push(weight * value);
+        }
+        if made.is_empty() {
+            continue;
+        }
+        let combined = match score_mode {
+            "sum" => made.iter().sum(),
+            "avg" => made.iter().sum::<f32>() / made.len() as f32,
+            "first" => made[0],
+            "max" => made.iter().cloned().fold(f32::MIN, f32::max),
+            "min" => made.iter().cloned().fold(f32::MAX, f32::min),
+            _ => made.iter().product(),
+        };
+        cand.score = match boost_mode {
+            "replace" => combined,
+            "sum" => cand.score + combined,
+            "avg" => (cand.score + combined) / 2.0,
+            "max" => cand.score.max(combined),
+            "min" => cand.score.min(combined),
+            _ => cand.score * combined,
+        } * query_boost;
+    }
+}
+
+/// Whether a document, as it stands, answers a simple filter.
+///
+/// Only the filters a function names are read here -- a term, a range, a
+/// match on one field -- which is what `function_score` puts in front of a
+/// weight.
+fn matches_here(source: &Value, filter: &Value) -> bool {
+    let Some((kind, body)) = filter.as_object().and_then(|o| o.iter().next()) else {
+        return true;
+    };
+    let held = |field: &str| source.pointer(&format!("/{}", field.replace('.', "/"))).cloned();
+    match kind.as_str() {
+        "match_all" => true,
+        "match_none" => false,
+        "term" | "match" | "match_phrase" => {
+            let Some((field, wanted)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let wanted = wanted.get("value").or_else(|| wanted.get("query")).unwrap_or(wanted);
+            match held(field) {
+                Some(Value::String(s)) => wanted.as_str().map(|w| s.contains(w)).unwrap_or(false),
+                Some(other) => &other == wanted,
+                None => false,
+            }
+        }
+        "terms" => {
+            let Some((field, wanted)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let held = held(field);
+            wanted
+                .as_array()
+                .map(|any| any.iter().any(|w| held.as_ref() == Some(w)))
+                .unwrap_or(false)
+        }
+        "range" => {
+            let Some((field, bounds)) = body.as_object().and_then(|o| o.iter().next()) else {
+                return false;
+            };
+            let Some(value) = held(field).and_then(|v| v.as_f64()) else { return false };
+            let past = |name: &str, ok: fn(f64, f64) -> bool| {
+                bounds
+                    .get(name)
+                    .and_then(|v| v.as_f64())
+                    .map(|edge| ok(value, edge))
+                    .unwrap_or(true)
+            };
+            past("gte", |v, e| v >= e)
+                && past("gt", |v, e| v > e)
+                && past("lte", |v, e| v <= e)
+                && past("lt", |v, e| v < e)
+        }
+        "exists" => {
+            body.get("field").and_then(|v| v.as_str()).map(|f| held(f).is_some()).unwrap_or(false)
+        }
+        "bool" => {
+            let all = |name: &str, want: bool| {
+                body.get(name)
+                    .and_then(|v| v.as_array())
+                    .map(|cs| cs.iter().all(|c| matches_here(source, c) == want))
+                    .unwrap_or(true)
+            };
+            all("must", true) && all("filter", true) && all("must_not", false)
+        }
+        _ => true,
+    }
+}
+
+/// The ids a query matches, for the passes that narrow a page rather than
+/// build one.
+fn matching_ids(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+) -> std::result::Result<std::collections::HashSet<String>, Response> {
+    let probe = json!({"query": query, "size": 10_000, "_source": false});
+    let found = run(store, &targets.join(","), &probe, &Params::new())?;
+    Ok(found
+        .hits
+        .iter()
+        .filter_map(|hit| hit.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect())
+}
+
 /// Run a search across every resolved index and merge the results.
 pub fn run(
     store: &Store,
@@ -243,6 +501,7 @@ pub fn run(
         resolve_terms_lookups(store, q)?;
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
+        expand_joins(store, &targets, q);
     }
 
     // a field cannot be both kept and dropped: naming it in both lists asks
@@ -470,6 +729,9 @@ pub fn run(
         };
     }
 
+    // the order documents arrived in settles a tie, so it has to be known
+    // before the page is cut rather than after
+    fill_seq(&mut cands, &searchers);
     prune(&mut cands, page_want, &sort_keys);
     // `indices_boost` weights whole indices against each other, so it is
     // applied to the scores before they are ranked. An alias may name the
@@ -497,7 +759,21 @@ pub fn run(
     if nested_filtered {
         sort_by_filtered_nested(store, &targets, &mut cands, &searchers, &sort_keys);
     }
-    fill_seq(&mut cands, &searchers);
+    // `function_score` says what a document's score should be, given what the
+    // query scored it and what the document itself holds
+    if let Some(spec) = body.pointer("/query/function_score") {
+        rescore_by_functions(&searchers, &mut cands, spec);
+    }
+    // a rank feature scores by the value of a field, curved the way the query
+    // asks for
+    if let Some(query) = body.get("query") {
+        let mut features = Vec::new();
+        collect_rank_features(query, &mut features);
+        if !features.is_empty() {
+            rescore_by_rank_features(&searchers, &mut cands, &features);
+        }
+    }
+
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));
 
     // a score is only the best score when the ranking is by score descending;
@@ -527,6 +803,25 @@ pub fn run(
                 }
                 None => false,
             }
+        });
+        total = cands.len() as u64;
+    }
+
+    // `min_score` is the score a document has to reach to be an answer at
+    // all: one below it is not a hit, and is not counted as one
+    if let Some(floor) = body.get("min_score").and_then(|v| v.as_f64()) {
+        cands.retain(|c| c.score as f64 >= floor);
+        total = cands.len() as u64;
+    }
+
+    // `post_filter` narrows what comes back without narrowing what the
+    // aggregations saw, which is the whole point of asking for it
+    if let Some(spec) = body.get("post_filter") {
+        let keep = matching_ids(store, &targets, spec)?;
+        cands.retain(|c| {
+            let (_, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            source_of(searcher, &g, c.addr).map(|(id, _)| keep.contains(&id)).unwrap_or(false)
         });
         total = cands.len() as u64;
     }

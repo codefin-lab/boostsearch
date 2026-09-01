@@ -178,7 +178,9 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
         None => Value::Null,
         Some(_) => Value::Object(groups),
     };
-    json!({
+    // `human` asks for the readable form beside the machine one
+    let human = p.get("human").map(|v| v != "false").unwrap_or(false);
+    let mut out = json!({
         "docs": {"count": docs, "deleted": 0},
         "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
         "indexing": {"index_total": docs, "index_time_in_millis": 0, "index_current": 0,
@@ -187,9 +189,12 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
                      "noop_update_total":
                          st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
                      "is_throttled": false,
-                     "throttle_time_in_millis": 0},
+                     "throttle_time_in_millis": 0,
+                     // what each write answered with, counted by status
+                     "doc_status": {}},
         "get": {"total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
-                "time_in_millis": 0, "time": "0s", "getTime": "0s",
+                "getTime": "0s",
+                "time_in_millis": 0,
                 "exists_total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
                 "exists_time_in_millis": 0, "missing_total": 0,
                 "missing_time_in_millis": 0, "current": 0},
@@ -198,10 +203,20 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
                    "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
                    "scroll_current": 0, "suggest_total": 0, "suggest_time_in_millis": 0,
                    "suggest_current": 0,
-                   "groups": groups_field},
+                   "point_in_time_total": 0, "point_in_time_time_in_millis": 0,
+                   "point_in_time_current": 0,
+                   // a search that reads its segments side by side counts what
+                   // that cost separately
+                   "concurrent_query_total": 0, "concurrent_query_time_in_millis": 0,
+                   "concurrent_query_current": 0, "concurrent_avg_slice_count": 0.0,
+                   "search_idle_reactivate_count_total": 0,
+                   },
         "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
                    "total": 0, "total_time_in_millis": 0, "total_docs": 0,
-                   "total_size_in_bytes": 0},
+                   "total_size_in_bytes": 0,
+                   "total_stopped_time_in_millis": 0, "total_throttled_time_in_millis": 0,
+                   "total_auto_throttle_in_bytes": 20_971_520_i64,
+                   "unreferenced_file_cleanups_performed": 0},
         "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
                     "external_total_time_in_millis": 0, "listeners": 0},
         "flush": {"total": st.flushes.load(std::sync::atomic::Ordering::Relaxed),
@@ -238,7 +253,42 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
             "miss_count": st.request_cache_miss.load(std::sync::atomic::Ordering::Relaxed)
         },
         "recovery": {"current_as_source": 0, "current_as_target": 0, "throttle_time_in_millis": 0},
-    })
+    });
+    // what a remote store and a segment replication would have moved, which
+    // for an index that has neither is nothing at all
+    out["segments"]["remote_store"] = json!({
+        "upload": {
+            "total_upload_size": {"started_bytes": 0, "succeeded_bytes": 0, "failed_bytes": 0},
+            "refresh_size_lag": {"total_bytes": 0, "max_bytes": 0},
+            "max_refresh_time_lag_in_millis": 0,
+            "total_time_spent_in_millis": 0,
+            "pressure": {"total_rejections": 0},
+        },
+        "download": {
+            "total_download_size": {"started_bytes": 0, "succeeded_bytes": 0, "failed_bytes": 0},
+            "total_time_spent_in_millis": 0,
+        },
+    });
+    out["segments"]["segment_replication"] = json!({
+        "max_bytes_behind": 0, "total_bytes_behind": 0, "max_replication_lag": 0,
+    });
+    out["translog"]["remote_store"] = json!({"upload": {
+        "total_uploads": {"started": 0, "failed": 0, "succeeded": 0},
+        "total_upload_size": {"started_bytes": 0, "failed_bytes": 0, "succeeded_bytes": 0},
+    }});
+
+    if let Value::Object(groups) = groups_field {
+        out["search"]["groups"] = Value::Object(groups);
+    }
+    if human {
+        // the readable form of what a get cost, under both of the names
+        // OpenSearch writes it as
+        out["get"]["time"] = json!("0s");
+        out["get"]["getTime"] = json!("0s");
+        out["get"]["exists_time"] = json!("0s");
+        out["get"]["missing_time"] = json!("0s");
+    }
+    out
 }
 
 pub(crate) fn sum_stats(a: &Value, b: &Value) -> Value {
