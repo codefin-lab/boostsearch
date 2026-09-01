@@ -13,6 +13,7 @@
 //! index can be told which analyzer a path is written with.
 
 mod morph;
+mod snowball;
 mod stem;
 
 use std::collections::HashMap;
@@ -119,6 +120,9 @@ pub enum Step {
     /// Greek is lowercased with its accents dropped and its final sigma
     /// written as the letter it is
     GreekLowercase,
+    /// Irish writes the letter a prefix adds in lower case, and the word
+    /// itself in the case it had: `tAthair` is `t-athair`
+    IrishLowercase,
     PersianNormalize,
     /// Romanian writes the comma below as a cedilla in older text
     RomanianNormalize,
@@ -164,6 +168,8 @@ pub enum Step {
     CommonGrams(Vec<String>),
     /// `John's` is `John`
     Apostrophe,
+    /// the `'s` at the end of an English word is not part of it
+    Possessive,
     /// the possessive gone, and the dots out of an acronym
     Classic,
     /// the wide characters written narrow
@@ -656,6 +662,20 @@ fn apply_step(
                 "italian_light" | "light_italian" => return word_by_word(&stem::italian_light),
                 "spanish_light" | "light_spanish" => return word_by_word(&stem::spanish_light),
                 "greek" => return word_by_word(&stem::greek),
+                // the algorithms Snowball defines that BoostCore does not
+                // carry, generated from the definitions themselves
+                other @ ("catalan" | "basque" | "irish" | "lithuanian" | "estonian"
+                | "armenian" | "porter") => {
+                    let language = other.to_string();
+                    return tokens
+                        .into_iter()
+                        .map(|(t, p, a, b)| {
+                            let stemmed =
+                                snowball::stem(&language, &t).unwrap_or_else(|| t.clone());
+                            (stemmed, p, a, b)
+                        })
+                        .collect();
+                }
                 "german_light" | "light_german" => return word_by_word(&stem::german_light),
                 "german" => return word_by_word(&stem::german),
                 _ => {}
@@ -812,6 +832,20 @@ fn apply_step(
             })
             .filter(|(t, _, _, _)| !t.is_empty())
             .collect(),
+        Step::IrishLowercase => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let chars: Vec<char> = t.chars().collect();
+                // a prefix of one letter, and the word it stands in front of
+                let written: String = match chars.first() {
+                    Some('n') | Some('t') if chars.len() > 1 && is_irish_vowel(chars[1]) => {
+                        chars.into_iter().collect()
+                    }
+                    _ => t.to_lowercase(),
+                };
+                (written.to_lowercase(), p, a, b)
+            })
+            .collect(),
         Step::GreekLowercase => {
             tokens.into_iter().map(|(t, p, a, b)| (stem::greek_lowercase(&t), p, a, b)).collect()
         }
@@ -908,6 +942,18 @@ fn apply_step(
             .map(|(t, p, a, b)| {
                 let cut = t.split_once('\'').map(|(head, _)| head.to_string()).unwrap_or(t);
                 (cut, p, a, b)
+            })
+            .collect(),
+        Step::Possessive => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let base = t
+                    .strip_suffix("'s")
+                    .or_else(|| t.strip_suffix("'S"))
+                    .or_else(|| t.strip_suffix("\u{2019}s"))
+                    .map(|w| w.to_string())
+                    .unwrap_or(t);
+                (base, p, a, b)
             })
             .collect(),
         Step::Classic => {
@@ -1208,6 +1254,27 @@ fn split_where_writing_changes(word: &str, on_numerics: bool, on_case: bool) -> 
         parts.push(current);
     }
     parts
+}
+
+/// The vowels Irish writes, with and without the mark on them.
+fn is_irish_vowel(c: char) -> bool {
+    matches!(
+        c,
+        'a' | 'e'
+            | 'i'
+            | 'o'
+            | 'u'
+            | 'A'
+            | 'E'
+            | 'I'
+            | 'O'
+            | 'U'
+            | '\u{00E1}'
+            | '\u{00E9}'
+            | '\u{00ED}'
+            | '\u{00F3}'
+            | '\u{00FA}'
+    )
 }
 
 /// Whether a character is written in a script that has no spaces between its
@@ -2066,7 +2133,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             vec![Step::Elision]
         }
         "kstem" => vec![Step::KStem],
-        "porter_stem" => vec![Step::Stem("english".into())],
+        "porter_stem" => vec![Step::Stem("porter".into())],
         "fingerprint" => vec![Step::Fingerprint(one("separator", ' '))],
         "apostrophe" => vec![Step::Apostrophe],
         "classic" => vec![Step::Classic],
@@ -2185,7 +2252,8 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "delimited_term_freq" => vec![Step::DelimitedTermFreq('^')],
         "stop" => vec![Step::Stop(stop_words("_english_"))],
         "kstem" => vec![Step::KStem],
-        "porter_stem" | "porterStem" | "snowball" => vec![Step::Stem("english".into())],
+        "porter_stem" | "porterStem" => vec![Step::Stem("porter".into())],
+        "snowball" => vec![Step::Stem("english".into())],
         "fingerprint" => vec![Step::Fingerprint(' ')],
         "word_delimiter" | "word_delimiter_graph" => {
             vec![Step::WordDelimiter {
@@ -2369,6 +2437,18 @@ pub fn builtin(name: &str) -> Option<Chain> {
             steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint(' ')],
         },
         "en_stem" => lang("english"),
+        // English drops the possessive before it stems, and stems with the
+        // algorithm Porter first wrote
+        "english" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Possessive,
+                Step::Lowercase,
+                Step::Stop(stop_words("_english_")),
+                Step::Stem("porter".into()),
+            ],
+        },
         // a Snowball analyzer is the English one under the name of the
         // algorithm it runs
         "snowball" => lang("english"),
@@ -2431,8 +2511,26 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stem("portuguese_light".into()),
             ],
         },
-        "irish" => normalized("irish", Step::Elision),
-        "catalan" => normalized("catalan", Step::Elision),
+        "irish" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Elision,
+                Step::IrishLowercase,
+                Step::Stop(stop_words("irish")),
+                Step::Stem("irish".into()),
+            ],
+        },
+        "catalan" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Elision,
+                Step::Lowercase,
+                Step::Stop(stop_words("catalan")),
+                Step::Stem("catalan".into()),
+            ],
+        },
         "greek" => Chain {
             pre: Vec::new(),
             source: Source::Standard,

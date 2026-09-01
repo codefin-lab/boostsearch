@@ -164,3 +164,10 @@ project; it implements the same HTTP API, and says so.
 The engine is a dependency, pinned to a commit of
 [codefin-lab/boostcore](https://github.com/codefin-lab/boostcore).
 `docs/boostcore.md` says what the fork changes and how to work on both at once.
+
+## What else is in here
+
+The Snowball stemmers for Catalan, Basque, Irish, Lithuanian, Estonian and
+Armenian, and the original Porter algorithm, are generated from the Snowball
+project's own definitions by its compiler, and are used under the BSD
+3-clause licence in `LICENSE-SNOWBALL`.
