@@ -220,7 +220,7 @@ pub async fn analyze(
         // where a token came from is part of the answer: a highlighter and a
         // caller reading `_analyze` both ask for it
         let parts: Vec<(String, usize, usize, usize)> = if let Some(chain) = &chain {
-            chain.tokens(t).into_iter().map(|(tok, at, from, to)| (tok, at, from, to)).collect()
+            chain.tokens(t)
         } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
