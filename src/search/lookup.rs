@@ -817,6 +817,9 @@ pub(crate) fn names_a_percolate(node: &Value) -> bool {
 /// document would fail where a search would fail: a query string that names
 /// a field the mapping does not know is refused.
 pub(crate) fn percolator_complaint(g: &IdxState, source: &Value) -> Option<String> {
+    if !g.mapping.has_percolator() {
+        return None;
+    }
     for (path, kind) in g.mapping.types.iter() {
         if kind != "percolator" {
             continue;

@@ -148,6 +148,14 @@ pub struct Mapping {
     aliases: HashMap<String, String>,
     /// The `format` a date path declares, for the same reason.
     formats: HashMap<String, String>,
+    /// The fields whose values are written into other fields as well, worked
+    /// out once: every document would otherwise walk the mapping for them.
+    copies: Vec<(String, Vec<String>)>,
+    /// The objects told to hold no objects of their own.
+    flat_objects: std::collections::HashSet<String>,
+    /// Whether any field holds queries, which is what decides if a document
+    /// is checked for what its queries would fail on.
+    has_percolator: bool,
 }
 
 impl Mapping {}

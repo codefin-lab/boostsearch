@@ -472,7 +472,7 @@ fn copy_fields(document: &mut Value, mapping: &Mapping) {
     if copies.is_empty() {
         return;
     }
-    for (from, into) in copies {
+    for (from, into) in copies.iter() {
         let Some(value) = document.pointer(&format!("/{}", from.replace('.', "/"))).cloned() else {
             continue;
         };

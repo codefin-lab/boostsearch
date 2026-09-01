@@ -17,6 +17,9 @@ impl Mapping {
             subs: Vec::new(),
             aliases: HashMap::new(),
             formats: HashMap::new(),
+            copies: Vec::new(),
+            flat_objects: Default::default(),
+            has_percolator: false,
         };
         m.remember_subfields();
         m
@@ -25,7 +28,16 @@ impl Mapping {
     /// The fields whose values are written into other fields as well.
     ///
     /// A mapping may say `copy_to` on a field, naming one target or several.
-    pub fn copies(&self) -> Vec<(String, Vec<String>)> {
+    pub fn copies(&self) -> &[(String, Vec<String>)] {
+        &self.copies
+    }
+
+    /// Whether any field of the mapping holds queries.
+    pub fn has_percolator(&self) -> bool {
+        self.has_percolator
+    }
+
+    fn collect_copies(&self) -> Vec<(String, Vec<String>)> {
         let mut out = Vec::new();
         for path in self.types.keys() {
             let Some(named) = self.field_option(path, "copy_to") else { continue };
@@ -131,6 +143,9 @@ impl Mapping {
         let Some(obj) = source.as_object() else { return };
         let mut learned: Vec<(String, Value)> = Vec::new();
         self.sniff_fields(obj, "", &mut learned);
+        if learned.is_empty() {
+            return;
+        }
         for (path, def) in learned {
             // a leaf under an object that holds no objects keeps its dotted
             // name as one key under that object
@@ -142,6 +157,8 @@ impl Mapping {
             }
             self.insert_path(&path, def);
         }
+        // what the flat views know follows the raw mapping, once for the lot
+        self.remember_subfields();
     }
 
     /// One leaf written under an object by its whole dotted name.
@@ -156,7 +173,6 @@ impl Mapping {
         if let Some(t) = def.get("type").and_then(|t| t.as_str()) {
             self.types.insert(format!("{parent}.{leaf}"), t.to_string());
         }
-        self.remember_subfields();
     }
 
     /// Every field the document holds that the mapping does not, with the
@@ -195,10 +211,7 @@ impl Mapping {
             if let Some(inner) = inner {
                 // an object told to hold no objects of its own maps what is
                 // under it as leaves named by their whole path
-                let flat = self
-                    .field_option(&path, "disable_objects")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let flat = self.flat_objects.contains(&path);
                 if flat {
                     let mut leaves: Vec<(String, Value)> = Vec::new();
                     self.sniff_fields(inner, &path, &mut leaves);
@@ -285,7 +298,6 @@ impl Mapping {
                 self.types.entry(walked.clone()).or_insert_with(|| "object".to_string());
             }
         }
-        self.remember_subfields();
     }
 
     /// A knob declared on one field's mapping entry.
@@ -339,6 +351,19 @@ impl Mapping {
             collect_normalizers(props, "", &mut self.subs);
             collect_indirections(props, "", &mut self.aliases, &mut self.formats);
         }
+        self.copies = self.collect_copies();
+        self.flat_objects = self
+            .types
+            .iter()
+            .filter(|(_, kind)| *kind == "object")
+            .map(|(path, _)| path.clone())
+            .filter(|path| {
+                self.field_option(path, "disable_objects")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .collect();
+        self.has_percolator = self.types.values().any(|kind| kind == "percolator");
     }
 
     /// The format a date path declares, if it declares one.
