@@ -1722,6 +1722,37 @@ pub(crate) fn classic(word: &str) -> String {
     word.to_string()
 }
 
+/// Persian, stemmed the way Lucene stems it.
+///
+/// The endings are taken off in turn, and only where the word is left with at
+/// least two letters of its own.
+pub(crate) fn persian(word: &str) -> String {
+    const ALEF: char = '\u{0627}';
+    const HEH: char = '\u{0647}';
+    const TEH: char = '\u{062A}';
+    const REH: char = '\u{0631}';
+    const NOON: char = '\u{0646}';
+    const YEH: char = '\u{064A}';
+    const ZWNJ: char = '\u{200c}';
+    let suffixes: [Vec<char>; 8] = [
+        vec![ALEF, TEH],
+        vec![ALEF, NOON],
+        vec![TEH, REH, YEH, NOON],
+        vec![TEH, REH],
+        vec![YEH, YEH],
+        vec![YEH],
+        vec![HEH, ALEF],
+        vec![ZWNJ],
+    ];
+    let mut chars: Vec<char> = word.chars().collect();
+    for suffix in suffixes {
+        if chars.len() >= suffix.len() + 2 && chars[chars.len() - suffix.len()..] == suffix[..] {
+            chars.truncate(chars.len() - suffix.len());
+        }
+    }
+    chars.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1759,35 +1790,4 @@ mod tests {
         assert_eq!(greek("\u{039C}\u{03AF}\u{03B1}"), "\u{03BC}\u{03B9}\u{03B1}");
         assert_eq!(decimal_digits("\u{0E51}\u{0E52}\u{0E53}\u{0E54}"), "1234");
     }
-}
-
-/// Persian, stemmed the way Lucene stems it.
-///
-/// The endings are taken off in turn, and only where the word is left with at
-/// least two letters of its own.
-pub(crate) fn persian(word: &str) -> String {
-    const ALEF: char = '\u{0627}';
-    const HEH: char = '\u{0647}';
-    const TEH: char = '\u{062A}';
-    const REH: char = '\u{0631}';
-    const NOON: char = '\u{0646}';
-    const YEH: char = '\u{064A}';
-    const ZWNJ: char = '\u{200c}';
-    let suffixes: [Vec<char>; 8] = [
-        vec![ALEF, TEH],
-        vec![ALEF, NOON],
-        vec![TEH, REH, YEH, NOON],
-        vec![TEH, REH],
-        vec![YEH, YEH],
-        vec![YEH],
-        vec![HEH, ALEF],
-        vec![ZWNJ],
-    ];
-    let mut chars: Vec<char> = word.chars().collect();
-    for suffix in suffixes {
-        if chars.len() >= suffix.len() + 2 && chars[chars.len() - suffix.len()..] == suffix[..] {
-            chars.truncate(chars.len() - suffix.len());
-        }
-    }
-    chars.into_iter().collect()
 }
