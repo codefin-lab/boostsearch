@@ -151,6 +151,11 @@ pub(crate) fn describe_query(q: &Value) -> String {
 }
 
 /// `_analyze` runs text through the tokenizer the query path would use.
+/// How many times a term counts, when the text said so: `foo^3` is three.
+fn frequency_of(token: &str) -> u64 {
+    token.rsplit_once('^').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
+}
+
 pub async fn analyze(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -165,6 +170,34 @@ pub async fn analyze(
         }
         _ => p.get("text").map(|t| vec![t.clone()]).unwrap_or_default(),
     };
+    // a normalizer does not cut its text, so a filter that splits a token has
+    // no place in one: asked for without a tokenizer, those are refused
+    if body.get("tokenizer").is_none()
+        && !p.contains_key("tokenizer")
+        && let Some(filters) = body.get("filter").and_then(|f| f.as_array())
+    {
+        const SPLITS: &[&str] = &[
+            "word_delimiter",
+            "word_delimiter_graph",
+            "ngram",
+            "edge_ngram",
+            "shingle",
+            "synonym_graph",
+        ];
+        for named in filters {
+            let kind = match named {
+                Value::String(s) => s.as_str(),
+                other => other.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+            };
+            if SPLITS.contains(&kind) {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("Custom normalizer may not use filter [{kind}]"),
+                );
+            }
+        }
+    }
     let analyzer = body
         .get("analyzer")
         .and_then(|v| v.as_str())
@@ -201,6 +234,7 @@ pub async fn analyze(
             registry.get(name)
         } else if body.get("tokenizer").is_some()
             || body.get("filter").is_some()
+            || body.get("char_filter").is_some()
             || p.contains_key("tokenizer")
         {
             let named = body
@@ -209,7 +243,8 @@ pub async fn analyze(
                 .or_else(|| p.get("tokenizer").map(|t| json!(t)))
                 .unwrap_or_else(|| json!("standard"));
             let filters = body.get("filter").cloned().unwrap_or_else(|| json!([]));
-            registry.custom(&json!({"tokenizer": named, "filter": filters}))
+            let chars = body.get("char_filter").cloned().unwrap_or_else(|| json!([]));
+            registry.custom(&json!({"tokenizer": named, "filter": filters, "char_filter": chars}))
         } else {
             registry.get("standard")
         }
@@ -219,29 +254,43 @@ pub async fn analyze(
     for t in &text {
         // where a token came from is part of the answer: a highlighter and a
         // caller reading `_analyze` both ask for it
-        let parts: Vec<(String, usize, usize)> = if let Some(chain) = &chain {
-            chain.tokens(t).into_iter().map(|(tok, _, from, to)| (tok, from, to)).collect()
+        let parts: Vec<(String, usize, usize, usize)> = if let Some(chain) = &chain {
+            chain.tokens(t)
         } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
-                .map(|w| (w.to_string(), 0, 0))
+                .enumerate()
+                .map(|(i, w)| (w.to_string(), i, 0, 0))
                 .collect()
         } else {
             match &st {
                 Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer)
                     .into_iter()
-                    .map(|w| (w, 0, 0))
+                    .enumerate()
+                    .map(|(i, w)| (w, i, 0, 0))
                     .collect(),
-                None => t.split_whitespace().map(|w| (w.to_lowercase(), 0, 0)).collect(),
+                None => t
+                    .split_whitespace()
+                    .enumerate()
+                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0))
+                    .collect(),
             }
         };
-        for (tok, from, to) in parts {
+        let parts_len = parts.iter().map(|(_, at, _, _)| *at + 1).max().unwrap_or(0);
+        for (tok, at, from, to) in parts {
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
-                "type": "<ALPHANUM>", "position": pos
+                "type": "<ALPHANUM>", "position": pos + at,
+                // what the term looks like in the index, which a caller
+                // reading `explain` asks to see
+                "bytes": format!("[{}]", tok.as_bytes().iter().map(|b| format!("{b:x}"))
+                    .collect::<Vec<_>>().join(" ")),
+                "positionLength": 1,
+                "termFrequency": frequency_of(&tok),
+                "keyword": false,
             }));
-            pos += 1;
         }
+        pos += parts_len;
     }
     let cap = st
         .as_ref()
@@ -258,63 +307,111 @@ pub async fn analyze(
             ),
         );
     }
-    // `explain` asks for the same tokens laid out by the step that produced
-    // them, rather than as one flat list
+    // `explain` asks for the tokens as each step left them, rather than as
+    // one flat list: the tokenizer first, then one entry per filter over it
     if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false)
         || p.get("explain").map(|v| v == "true").unwrap_or(false)
     {
-        let named = body
-            .get("tokenizer")
-            .or_else(|| body.get("analyzer"))
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .or_else(|| p.get("tokenizer").or_else(|| p.get("analyzer")).cloned())
-            .unwrap_or_else(|| "standard".to_string());
-        let stage = json!({"name": named, "tokens": tokens.clone()});
-        let detail = if tokenizer_only {
-            let filters: Vec<Value> = body
-                .get("filter")
-                .and_then(|f| f.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|f| {
-                            let name = match f {
-                                Value::String(s) => s.clone(),
-                                other => other
-                                    .get("type")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("filter")
-                                    .to_string(),
-                            };
-                            // a stop filter takes words back out, which is
-                            // the whole point of naming one
-                            let stop: Vec<String> = f
-                                .get("stopwords")
-                                .and_then(|w| w.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let kept: Vec<Value> = tokens
-                                .iter()
-                                .filter(|t| {
-                                    let text =
-                                        t.get("token").and_then(|v| v.as_str()).unwrap_or("");
-                                    !stop.iter().any(|w| w == text)
-                                })
-                                .cloned()
-                                .collect();
-                            json!({"name": name, "tokens": kept})
-                        })
-                        .collect()
+        let as_json = |cut: Vec<(String, usize, usize, usize)>| -> Vec<Value> {
+            cut.into_iter()
+                .map(|(token, at, from, to)| {
+                    json!({
+                        "token": token, "start_offset": from, "end_offset": to,
+                        "type": "<ALPHANUM>", "position": at,
+                        "bytes": format!("[{}]", token.as_bytes().iter().map(|b| format!("{b:x}"))
+                            .collect::<Vec<_>>().join(" ")),
+                        "positionLength": 1,
+                        "termFrequency": frequency_of(&token),
+                        // whether a filter held this word back from the
+                        // stemmers; nothing marks one at this point
+                        "keyword": false,
+                    })
                 })
-                .unwrap_or_default();
-            json!({"custom_analyzer": true, "tokenizer": stage, "tokenfilters": filters})
-        } else {
-            json!({"custom_analyzer": false, "analyzer": stage})
+                .collect()
         };
-        return respond(&p, json!({"detail": detail}));
+        let named_tokenizer =
+            body.get("tokenizer").cloned().or_else(|| p.get("tokenizer").map(|t| json!(t)));
+        if let Some(spec) = named_tokenizer {
+            // a tokenizer named as a string is reported under that name; one
+            // described in the request has no name of its own, and is
+            // reported under the type it gave
+            let name = match &spec {
+                Value::String(s) => s.clone(),
+                other => format!(
+                    "__anonymous__{}",
+                    other.get("type").and_then(|t| t.as_str()).unwrap_or("tokenizer")
+                ),
+            };
+            // what the char filters made of the text, before it was cut
+            let asked_chars: Vec<Value> =
+                body.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let prepared: Vec<String> = {
+                let filters = registry.char_filters(&asked_chars);
+                text.iter()
+                    .map(|t| filters.iter().fold(t.clone(), |held, filter| filter.applied(&held)))
+                    .collect()
+            };
+            let charfilters: Vec<Value> = asked_chars
+                .iter()
+                .map(|one| {
+                    let name = match one {
+                        Value::String(s) => s.clone(),
+                        other => format!(
+                            "__anonymous__{}",
+                            other.get("type").and_then(|t| t.as_str()).unwrap_or("char_filter")
+                        ),
+                    };
+                    json!({"name": name, "filtered_text": prepared.clone()})
+                })
+                .collect();
+            let base = registry.tokenizer_only(&spec);
+            let cut: Vec<(String, usize, usize, usize)> =
+                prepared.iter().flat_map(|t| base.cut(t)).collect();
+            let stage = json!({"name": name, "tokens": as_json(cut)});
+            // each filter is reported as the tokens standing after it, so the
+            // chain is run again one filter longer each time
+            let asked: Vec<Value> =
+                body.get("filter").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+            let mut steps = Vec::new();
+            let mut filters = Vec::new();
+            for one in &asked {
+                steps.extend(registry.filter_steps(one));
+                let name = match one {
+                    Value::String(s) => s.clone(),
+                    other => format!(
+                        "__anonymous__{}",
+                        other.get("type").and_then(|t| t.as_str()).unwrap_or("filter")
+                    ),
+                };
+                let chain =
+                    crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
+                let cut: Vec<(String, usize, usize, usize)> =
+                    prepared.iter().flat_map(|t| chain.tokens(t)).collect();
+                filters.push(json!({"name": name, "tokens": as_json(cut)}));
+            }
+            let mut detail = json!({
+                "custom_analyzer": true,
+                "tokenizer": stage,
+                "tokenfilters": filters,
+            });
+            if !charfilters.is_empty() {
+                detail["charfilters"] = json!(charfilters);
+            }
+            return respond(&p, json!({ "detail": detail }));
+        }
+        let name = body
+            .get("analyzer")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| p.get("analyzer").cloned())
+            .or_else(|| body.get("field").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "standard".to_string());
+        return respond(
+            &p,
+            json!({"detail": {
+                "custom_analyzer": false,
+                "analyzer": {"name": name, "tokens": tokens},
+            }}),
+        );
     }
 
     respond(&p, json!({"tokens": tokens}))

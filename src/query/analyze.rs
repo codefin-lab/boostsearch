@@ -71,6 +71,13 @@ fn named_for(ctx: &Ctx, field: &str, asked: Option<&str>) -> Option<String> {
             return Some(name);
         }
     }
+    // an index may name the analyzer every search uses, and the one every
+    // document is written with, without naming either on a field
+    for name in ["default_search", "default"] {
+        if ctx.analysis.knows_named(name) {
+            return Some(name.to_string());
+        }
+    }
     None
 }
 
