@@ -152,6 +152,10 @@ pub(crate) fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geohash_grid").is_some() {
+        crate::search::run_geo_grid_agg(store, targets, query_json, def, "geohash_grid")
+    } else if def.get("geotile_grid").is_some() {
+        crate::search::run_geo_grid_agg(store, targets, query_json, def, "geotile_grid")
     } else if def.get("geo_bounds").is_some() {
         crate::search::run_geo_bounds_agg(store, targets, query_json, def)
     } else if def.get("geo_centroid").is_some() {

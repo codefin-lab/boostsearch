@@ -47,6 +47,19 @@ pub(crate) fn run_composite_agg(
             ),
         ));
     }
+    // a source that works a key out of what a document holds is counted over
+    // the documents themselves
+    let over_documents = list.as_array().into_iter().flatten().any(|entry| {
+        entry
+            .as_object()
+            .and_then(|o| o.values().next())
+            .and_then(|body| body.as_object())
+            .map(|o| o.keys().any(|k| k == "geotile_grid" || k == "geohash_grid"))
+            .unwrap_or(false)
+    });
+    if over_documents {
+        return run_composite_over_documents(store, targets, main_query, &spec);
+    }
     let mut sources: Vec<CompSource> = Vec::new();
     for entry in list.as_array().into_iter().flatten() {
         let Some((name, body)) = entry.as_object().and_then(|o| o.iter().next()) else {
@@ -434,4 +447,151 @@ pub(crate) fn composite_key_order(a: &Value, b: &Value, sources: &[CompSource]) 
         }
     }
     Ordering::Equal
+}
+
+/// A composite whose sources include a grid over the world.
+///
+/// A grid cell is not a value any document holds -- it is worked out from the
+/// point -- so the combinations are counted here, document by document,
+/// rather than by nesting the sources as aggregations.
+pub(crate) fn run_composite_over_documents(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    spec: &Value,
+) -> std::result::Result<Value, Response> {
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let after = spec.get("after").cloned();
+    let sources: Vec<(String, String, Value)> = spec
+        .get("sources")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| {
+                    let (name, body) = entry.as_object()?.iter().next()?;
+                    let (kind, source) = body.as_object()?.iter().next()?;
+                    Some((name.clone(), kind.clone(), source.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let fields: Vec<String> = sources
+        .iter()
+        .filter_map(|(_, _, s)| s.get("field").and_then(|f| f.as_str()).map(|s| s.to_string()))
+        .collect();
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": fields,
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+
+    // one key per source per document, and the documents holding the same
+    // keys counted together
+    let mut counts: std::collections::HashMap<Vec<String>, usize> = Default::default();
+    for hit in &answer.hits {
+        // a field holding several values puts the document in a bucket for
+        // each of them, so the keys of one source are a list
+        let mut per_source: Vec<Vec<String>> = Vec::with_capacity(sources.len());
+        for (_, kind, source) in &sources {
+            let field = source.get("field").and_then(|f| f.as_str()).unwrap_or_default();
+            let Some(held) = hit.pointer(&format!("/_source/{}", field.replace('.', "/"))) else {
+                per_source.push(Vec::new());
+                continue;
+            };
+            let written = match kind.as_str() {
+                "geotile_grid" | "geohash_grid" => {
+                    let precision = source
+                        .get("precision")
+                        .and_then(|v| v.as_u64())
+                        .map(|p| p as usize)
+                        .unwrap_or(if kind == "geotile_grid" { 7 } else { 5 });
+                    crate::search::read_point(held)
+                        .map(|(lat, lon)| vec![crate::search::grid_key(kind, lat, lon, precision)])
+                        .unwrap_or_default()
+                }
+                _ => match held {
+                    Value::Array(items) => items
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                    Value::String(s) => vec![s.clone()],
+                    other => vec![other.to_string()],
+                },
+            };
+            per_source.push(written);
+        }
+        if per_source.iter().any(|values| values.is_empty()) {
+            continue;
+        }
+        let mut keys: Vec<Vec<String>> = vec![Vec::new()];
+        for values in &per_source {
+            let mut longer = Vec::new();
+            for key in &keys {
+                for value in values {
+                    let mut one = key.clone();
+                    one.push(value.clone());
+                    longer.push(one);
+                }
+            }
+            keys = longer;
+        }
+        for key in keys {
+            *counts.entry(key).or_default() += 1;
+        }
+    }
+    let mut buckets: Vec<(Vec<String>, usize)> = counts.into_iter().collect();
+    // the keys are ordered as the source that made them orders them: a tile
+    // by where it sits rather than by how its name is spelled
+    let ordering = |key: &[String]| -> Vec<(Vec<i64>, String)> {
+        key.iter()
+            .zip(sources.iter())
+            .map(|(written, (_, kind, _))| match kind.as_str() {
+                "geotile_grid" => (
+                    written.split('/').filter_map(|part| part.parse::<i64>().ok()).collect(),
+                    String::new(),
+                ),
+                _ => (Vec::new(), written.clone()),
+            })
+            .collect()
+    };
+    buckets.sort_by(|a, b| ordering(&a.0).cmp(&ordering(&b.0)));
+    // a page begins after the last key of the page before it
+    if let Some(after) = after.as_ref().and_then(|a| a.as_object()) {
+        let marker: Vec<String> = sources
+            .iter()
+            .map(|(name, _, _)| match after.get(name) {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            })
+            .collect();
+        let past = ordering(&marker);
+        buckets.retain(|(key, _)| ordering(key) > past);
+    }
+    let paged: Vec<Value> = buckets
+        .iter()
+        .take(size)
+        .map(|(key, count)| {
+            let named: serde_json::Map<String, Value> = sources
+                .iter()
+                .zip(key.iter())
+                .map(|((name, _, _), written)| (name.clone(), json!(written)))
+                .collect();
+            json!({"key": named, "doc_count": count})
+        })
+        .collect();
+    let mut out = json!({"buckets": paged});
+    if let Some((key, _)) = buckets.iter().take(size).last() {
+        let named: serde_json::Map<String, Value> = sources
+            .iter()
+            .zip(key.iter())
+            .map(|((name, _, _), written)| (name.clone(), json!(written)))
+            .collect();
+        out["after_key"] = Value::Object(named);
+    }
+    Ok(out)
 }

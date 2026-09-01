@@ -260,6 +260,8 @@ pub(crate) fn plan_aggs(
                     || def.get("children").is_some()
                     || def.get("parent").is_some()
                     || def.get("geo_bounds").is_some()
+                    || def.get("geohash_grid").is_some()
+                    || def.get("geotile_grid").is_some()
                     || def.get("geo_centroid").is_some()
                     || def.get("matrix_stats").is_some()
                     || def.get("diversified_sampler").is_some()
@@ -382,6 +384,8 @@ pub(crate) fn peelable_here(def: &Value) -> bool {
         "parent",
         "geo_bounds",
         "geo_centroid",
+        "geohash_grid",
+        "geotile_grid",
         "matrix_stats",
         "sampler",
         "diversified_sampler",

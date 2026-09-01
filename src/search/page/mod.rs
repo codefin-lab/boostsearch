@@ -193,6 +193,19 @@ pub(crate) fn write_page(
                         }
                     }
                 }
+                // a shape is reported as the GeoJSON it stands for, or as the
+                // well-known text a `wkt` format asks for
+                for (name, fmt) in specs.iter() {
+                    if g.mapping.type_of(name) != Some("geo_shape") {
+                        continue;
+                    }
+                    let Some(Value::Array(items)) = f.get_mut(name.as_str()) else { continue };
+                    for value in items.iter_mut() {
+                        if let Some(written) = crate::search::shape_as(value, fmt.as_deref()) {
+                            *value = written;
+                        }
+                    }
+                }
                 // a token_count field stores the text but reports the count
                 for (name, vals) in f.iter_mut() {
                     if g.mapping.type_of(name) != Some("token_count") {
@@ -359,9 +372,26 @@ pub(crate) fn output_specs(
                 else {
                     continue;
                 };
+                // a shape names its own formats, and a number the pattern its
+                // digits are written with; the rest have only dates to format
                 if !matches!(
                     g.mapping.type_of(f),
-                    None | Some("date" | "date_nanos" | "date_range")
+                    None | Some(
+                        "date"
+                            | "date_nanos"
+                            | "date_range"
+                            | "geo_shape"
+                            | "geo_point"
+                            | "long"
+                            | "integer"
+                            | "short"
+                            | "byte"
+                            | "double"
+                            | "float"
+                            | "half_float"
+                            | "scaled_float"
+                            | "unsigned_long"
+                    )
                 ) {
                     return Err(err(
                         StatusCode::BAD_REQUEST,

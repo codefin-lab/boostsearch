@@ -424,3 +424,148 @@ fn lat_lon_of(value: &Value) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+
+/// The geohash a point sits in at a given precision.
+///
+/// A geohash is the latitude and longitude interleaved bit by bit, each bit
+/// saying which half of the range the point is in, and the bits read off five
+/// at a time as letters.
+pub(crate) fn geohash_of(lat: f64, lon: f64, precision: usize) -> String {
+    const ALPHABET: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat_from, mut lat_to) = (-90.0f64, 90.0f64);
+    let (mut lon_from, mut lon_to) = (-180.0f64, 180.0f64);
+    let mut hash = String::with_capacity(precision);
+    let mut bits = 0u8;
+    let mut value = 0usize;
+    let mut even = true;
+    while hash.len() < precision {
+        match even {
+            true => {
+                let middle = (lon_from + lon_to) / 2.0;
+                match lon > middle {
+                    true => {
+                        value = (value << 1) | 1;
+                        lon_from = middle;
+                    }
+                    false => {
+                        value <<= 1;
+                        lon_to = middle;
+                    }
+                }
+            }
+            false => {
+                let middle = (lat_from + lat_to) / 2.0;
+                match lat > middle {
+                    true => {
+                        value = (value << 1) | 1;
+                        lat_from = middle;
+                    }
+                    false => {
+                        value <<= 1;
+                        lat_to = middle;
+                    }
+                }
+            }
+        }
+        even = !even;
+        bits += 1;
+        if bits == 5 {
+            hash.push(ALPHABET[value] as char);
+            bits = 0;
+            value = 0;
+        }
+    }
+    hash
+}
+
+/// The map tile a point sits in, written the way a tile server names it.
+pub(crate) fn geotile_of(lat: f64, lon: f64, zoom: u32) -> String {
+    let tiles = 2f64.powi(zoom as i32);
+    let lat = lat.clamp(-85.051_128_78, 85.051_128_78);
+    let x = ((lon + 180.0) / 360.0 * tiles).floor().clamp(0.0, tiles - 1.0) as i64;
+    let radians = lat.to_radians();
+    let y = ((1.0 - (radians.tan() + 1.0 / radians.cos()).ln() / std::f64::consts::PI) / 2.0
+        * tiles)
+        .floor()
+        .clamp(0.0, tiles - 1.0) as i64;
+    format!("{zoom}/{x}/{y}")
+}
+
+/// The cell one point falls in, for whichever grid the aggregation names.
+pub(crate) fn grid_key(kind: &str, lat: f64, lon: f64, precision: usize) -> String {
+    match kind {
+        "geotile_grid" => geotile_of(lat, lon, precision as u32),
+        _ => geohash_of(lat, lon, precision),
+    }
+}
+
+/// `geohash_grid` and `geotile_grid` -- how many points fall in each cell of a
+/// grid laid over the world.
+pub(crate) fn run_geo_grid_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    kind: &str,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get(kind).cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let precision = spec
+        .get("precision")
+        .and_then(|v| v.as_u64())
+        .map(|p| p as usize)
+        .unwrap_or(if kind == "geotile_grid" { 7 } else { 5 });
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10_000) as usize;
+    let points = points_found(store, targets, main_query, &field)?;
+    let mut counts: std::collections::HashMap<String, usize> = Default::default();
+    for (lat, lon) in points {
+        *counts.entry(grid_key(kind, lat, lon, precision)).or_default() += 1;
+    }
+    // the fullest cells first, and cells holding the same number by their key
+    let mut cells: Vec<(String, usize)> = counts.into_iter().collect();
+    cells.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    cells.truncate(size);
+    Ok(json!({
+        "buckets": cells
+            .into_iter()
+            .map(|(key, count)| json!({"key": key, "doc_count": count}))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// A shape written the way a `fields` request asked for it.
+///
+/// The default is the GeoJSON object the shape stands for, whatever spelling
+/// it was sent in; `wkt` asks for the text form instead.
+pub(crate) fn shape_as(value: &Value, format: Option<&str>) -> Option<Value> {
+    let wkt = format.map(|f| f.eq_ignore_ascii_case("wkt")).unwrap_or(false);
+    let (kind, coordinates) = match value {
+        Value::String(text) => {
+            if wkt {
+                return Some(json!(text));
+            }
+            let (kind, rest) = text.trim().split_once('(')?;
+            let kind = kind.trim().to_ascii_uppercase();
+            let inside = rest.trim_end().trim_end_matches(')');
+            let numbers: Vec<f64> =
+                inside.split_whitespace().filter_map(|n| n.parse::<f64>().ok()).collect();
+            match kind.as_str() {
+                "POINT" if numbers.len() == 2 => ("Point", json!(numbers)),
+                _ => return None,
+            }
+        }
+        Value::Object(o) => {
+            let kind = o.get("type")?.as_str()?.to_string();
+            let coordinates = o.get("coordinates")?.clone();
+            if !wkt {
+                return Some(json!({"type": kind, "coordinates": coordinates}));
+            }
+            let numbers: Vec<f64> =
+                coordinates.as_array()?.iter().filter_map(|n| n.as_f64()).collect();
+            let written = numbers.iter().map(|n| format!("{n:.1}")).collect::<Vec<_>>().join(" ");
+            return Some(json!(format!("{} ({written})", kind.to_ascii_uppercase())));
+        }
+        _ => return None,
+    };
+    Some(json!({"type": kind, "coordinates": coordinates}))
+}
