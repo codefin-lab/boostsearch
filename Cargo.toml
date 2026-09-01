@@ -47,6 +47,20 @@ boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "c5
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"
+# The Japanese, Korean and Chinese dictionaries are built into the binary, the
+# way OpenSearch's kuromoji, nori and smartcn plugins carry theirs. They are
+# most of what this binary weighs; a build with `--no-default-features` leaves
+# them out, and those three analyzers with them.
+lindera = { version = "6.0.0", features = [
+    "embed-ipadic",
+    "embed-ko-dic",
+    "embed-cc-cedict",
+], optional = true }
+
+[features]
+default = ["cjk"]
+# the dictionaries for the scripts that are read rather than split
+cjk = ["dep:lindera"]
 
 [profile.release]
 opt-level = 3

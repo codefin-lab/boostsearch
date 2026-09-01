@@ -9,6 +9,20 @@ It speaks the OpenSearch REST API — the same requests, the same JSON back — 
 is checked against OpenSearch's own conformance suite rather than against a
 description of it.
 
+## The dictionaries
+
+Japanese, Korean and Chinese are read with a dictionary rather than split on
+spaces, and those dictionaries are built into the binary the way OpenSearch's
+kuromoji, nori and smartcn plugins carry theirs. They are most of what the
+binary weighs -- 170 MB with them, 20 MB without:
+
+```bash
+cargo build --release --no-default-features
+```
+
+A build without them answers everything else the same way; the three analyzers
+that need them find no words.
+
 ## Where it stands
 
 Run against the YAML tests in OpenSearch's `rest-api-spec`, all 409 files --

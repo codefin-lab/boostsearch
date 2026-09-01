@@ -12,6 +12,7 @@
 //! alike -- so that a document and a query are cut by the same code, and the
 //! index can be told which analyzer a path is written with.
 
+mod morph;
 mod stem;
 
 use std::collections::HashMap;
@@ -76,6 +77,15 @@ enum Source {
     /// where one word ends and the next begins, by the Unicode rules and the
     /// dictionaries for the scripts written without spaces
     Icu,
+    /// a dictionary that also says what each word is, and what it is when it
+    /// stands on its own
+    Morph {
+        language: morph::Language,
+        /// drop the particles and endings a search has no use for
+        drop_grammar: bool,
+        /// keep each word as it stands on its own
+        base_form: bool,
+    },
     Ngram {
         min: usize,
         max: usize,
@@ -181,6 +191,13 @@ pub enum Step {
     IcuNormalize,
     /// the same, and the marks written on the letters dropped as well
     IcuFold,
+    /// a word is kept as it stands on its own: `飲み` is `飲む`
+    BaseForm(morph::Language),
+    /// the parts of speech a search has no use for -- a particle, an ending --
+    /// are dropped
+    PartOfSpeech(morph::Language),
+    /// how the word is read, rather than how it is written
+    Reading(morph::Language),
 }
 
 /// A named analysis chain.
@@ -317,6 +334,7 @@ impl Chain {
             | Source::UaxUrlEmail
             | Source::PathHierarchy { .. }
             | Source::Icu
+            | Source::Morph { .. }
             | Source::CharGroup(_) => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
             Source::Pattern(p) => match RegexTokenizer::new(p) {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
@@ -348,6 +366,31 @@ impl Chain {
             }
             Source::Classic => classic(text),
             Source::Icu => icu_words(text),
+            Source::Morph { language, drop_grammar, base_form } => {
+                // the dictionary says what each word is while it is reading
+                // the text; asking again about one word on its own would not
+                // give the same answer, so the choice is made here
+                morph::words(*language, text)
+                    .into_iter()
+                    .filter(|w| {
+                        if !drop_grammar {
+                            return true;
+                        }
+                        if w.text.chars().all(|c| !c.is_alphanumeric()) {
+                            return false;
+                        }
+                        w.part.as_deref().map(|p| !morph::is_grammar(p)).unwrap_or(true)
+                    })
+                    .enumerate()
+                    .map(|(i, w)| {
+                        let text = match base_form {
+                            true => w.base.clone().unwrap_or(w.text),
+                            false => w.text,
+                        };
+                        (text, i, w.from, w.to)
+                    })
+                    .collect()
+            }
             Source::UaxUrlEmail => uax_url_email(text),
             Source::PathHierarchy { delimiter, replacement } => {
                 path_hierarchy(text, *delimiter, *replacement)
@@ -749,6 +792,39 @@ fn apply_step(
         }
         // handled before the match, where the held-back words are recorded
         Step::KeywordMarker(_) => tokens,
+        Step::BaseForm(language) => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let base = morph::words(*language, &t)
+                    .into_iter()
+                    .next()
+                    .and_then(|w| w.base)
+                    .unwrap_or_else(|| t.clone());
+                (base, p, a, b)
+            })
+            .collect(),
+        Step::PartOfSpeech(language) => tokens
+            .into_iter()
+            .filter(|(t, _, _, _)| {
+                morph::words(*language, t)
+                    .into_iter()
+                    .next()
+                    .and_then(|w| w.part)
+                    .map(|part| !morph::is_grammar(&part))
+                    .unwrap_or(true)
+            })
+            .collect(),
+        Step::Reading(language) => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let reading = morph::words(*language, &t)
+                    .into_iter()
+                    .next()
+                    .and_then(|w| w.reading)
+                    .unwrap_or_else(|| t.clone());
+                (reading, p, a, b)
+            })
+            .collect(),
         Step::IcuNormalize => {
             tokens.into_iter().map(|(t, p, a, b)| (icu_normalize(&t), p, a, b)).collect()
         }
@@ -1560,7 +1636,23 @@ fn source_of_name(name: &str) -> Source {
         "whitespace" => Source::Whitespace,
         "letter" => Source::Letter,
         // the tokenizers that ask a dictionary where the words are
-        "icu_tokenizer" | "thai" | "smartcn_tokenizer" | "smartcn" => Source::Icu,
+        "icu_tokenizer" | "thai" => Source::Icu,
+        // and the ones whose dictionary also says what each word is
+        "kuromoji_tokenizer" | "kuromoji" => Source::Morph {
+            language: morph::Language::Japanese,
+            drop_grammar: false,
+            base_form: false,
+        },
+        "nori_tokenizer" | "nori" => Source::Morph {
+            language: morph::Language::Korean,
+            drop_grammar: false,
+            base_form: false,
+        },
+        "smartcn_tokenizer" | "smartcn" => Source::Morph {
+            language: morph::Language::Chinese,
+            drop_grammar: true,
+            base_form: false,
+        },
         "lowercase" => Source::LetterLower,
         "classic" => Source::Classic,
         "uax_url_email" => Source::UaxUrlEmail,
@@ -1630,6 +1722,11 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "cjk_bigram" => vec![Step::CjkBigram],
         "icu_normalizer" => vec![Step::IcuNormalize],
         "icu_folding" => vec![Step::IcuFold],
+        "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
+        "kuromoji_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Japanese)],
+        "kuromoji_readingform" => vec![Step::Reading(morph::Language::Japanese)],
+        "nori_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Korean)],
+        "nori_readingform" => vec![Step::Reading(morph::Language::Korean)],
         "keyword_marker" => {
             vec![Step::KeywordMarker(spec.get("keywords").map(word_list).unwrap_or_default())]
         }
@@ -1734,6 +1831,11 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "flatten_graph" | "remove_duplicates" | "min_hash" | "keyword_repeat" => vec![],
         "icu_normalizer" => vec![Step::IcuNormalize],
         "icu_folding" => vec![Step::IcuFold],
+        "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
+        "kuromoji_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Japanese)],
+        "kuromoji_readingform" => vec![Step::Reading(morph::Language::Japanese)],
+        "nori_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Korean)],
+        "nori_readingform" => vec![Step::Reading(morph::Language::Korean)],
         "arabic_normalization" => vec![Step::Normalize("arabic")],
         "bengali_normalization" => vec![Step::Normalize("bengali")],
         "german_normalization" => vec![Step::Normalize("german")],
@@ -1922,6 +2024,35 @@ pub fn builtin(name: &str) -> Option<Chain> {
             ],
         },
         "romanian" => normalized("romanian", Step::RomanianNormalize),
+        // Japanese: the words a dictionary finds, each as it stands on its
+        // own, without the particles and endings a search has no use for
+        "kuromoji" => Chain {
+            pre: Vec::new(),
+            source: Source::Morph {
+                language: morph::Language::Japanese,
+                drop_grammar: true,
+                base_form: true,
+            },
+            steps: vec![Step::Lowercase],
+        },
+        "nori" => Chain {
+            pre: Vec::new(),
+            source: Source::Morph {
+                language: morph::Language::Korean,
+                drop_grammar: true,
+                base_form: false,
+            },
+            steps: vec![Step::Lowercase],
+        },
+        "smartcn" => Chain {
+            pre: Vec::new(),
+            source: Source::Morph {
+                language: morph::Language::Chinese,
+                drop_grammar: true,
+                base_form: false,
+            },
+            steps: vec![Step::Lowercase],
+        },
         other => {
             // a language with a light stemmer of its own, or one BoostCore has
             // an algorithm for
