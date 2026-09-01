@@ -2711,9 +2711,25 @@ pub fn builtin(name: &str) -> Option<Chain> {
             ],
         },
         "persian" => Chain {
-            pre: Vec::new(),
+            // the joiner Persian writes inside a word is not part of any word:
+            // what stands either side of it is two words
+            pre: vec![CharFilter::Mapping(vec![("\u{200c}".to_string(), " ".to_string())])],
             source: Source::Standard,
-            steps: vec![Step::Lowercase, Step::PersianNormalize, Step::Stop(stop_words("persian"))],
+            steps: vec![
+                Step::Lowercase,
+                Step::DecimalDigits,
+                Step::Normalize("arabic"),
+                Step::PersianNormalize,
+                // the words to drop are compared with words that have been
+                // written the one way, so they are written that way too
+                Step::Stop(
+                    stop_words("persian")
+                        .iter()
+                        .map(|w| stem::persian_normalize(&stem::normalize("arabic", w)))
+                        .collect(),
+                ),
+                Step::Stem("persian".into()),
+            ],
         },
         "thai" => Chain {
             pre: Vec::new(),

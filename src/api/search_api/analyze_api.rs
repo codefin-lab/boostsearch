@@ -198,6 +198,27 @@ pub async fn analyze(
             }
         }
     }
+    // an ngram tokenizer that spans more widths than the index allows makes
+    // more tokens than anyone asked for
+    if let Some(spec) = body.get("tokenizer").filter(|t| t.is_object()) {
+        let kind = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let read =
+            |key: &str, fallback: u64| spec.get(key).and_then(|v| v.as_u64()).unwrap_or(fallback);
+        if kind == "ngram" {
+            let span = read("max_gram", 2).saturating_sub(read("min_gram", 1));
+            if span > 1 {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "The difference between max_gram and min_gram in NGram Tokenizer must \
+                         be less than or equal to: [1] but was [{span}]. This limit can be set \
+                         by changing the [index.max_ngram_diff] index level setting."
+                    ),
+                );
+            }
+        }
+    }
     let analyzer = body
         .get("analyzer")
         .and_then(|v| v.as_str())
