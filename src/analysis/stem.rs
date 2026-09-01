@@ -1271,9 +1271,10 @@ fn german_strip(w: &mut Vec<char>, saved: usize) {
     while w.len() > 3 {
         let len = w.len();
         let ends = |w: &Vec<char>, e: &str| tail(w, e);
-        if len + saved > 5 && ends(w, "nd") {
-            w.truncate(len - 2);
-        } else if len + saved > 4 && (ends(w, "em") || ends(w, "er")) {
+        // the two-character endings, each with the length it needs
+        let two = (len + saved > 5 && ends(w, "nd"))
+            || (len + saved > 4 && (ends(w, "em") || ends(w, "er")));
+        if two {
             w.truncate(len - 2);
         } else if matches!(w[len - 1], 'e' | 's' | 'n' | 't') {
             w.pop();
