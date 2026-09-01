@@ -416,3 +416,22 @@ pub fn max_content_bytes() -> u64 {
         * 1024
         * 1024
 }
+
+/// What a failed request answered with, as one entry of a list of answers.
+///
+/// A multi-search reports each search's own complaint rather than a single
+/// verdict over all of them, so the answer a handler already built is read
+/// back rather than replaced.
+pub(crate) async fn as_error_body(response: Response) -> Value {
+    let status = response.status().as_u16();
+    let read = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    let parsed: Value = read
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+    let mut out = json!({ "status": status });
+    if let Some(error) = parsed.get("error") {
+        out["error"] = error.clone();
+    }
+    out
+}

@@ -230,6 +230,33 @@ fn template_of(store: &Store, body: &Value, id: Option<&str>) -> Option<Value> {
 }
 
 /// A rendered template, read back as the search body it stands for.
+/// The same text with whatever it left open closed again.
+fn closed_up(text: &str) -> Option<Value> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        match (in_string, escaped, c) {
+            (true, true, _) => escaped = false,
+            (true, false, '\\') => escaped = true,
+            (true, false, '"') => in_string = false,
+            (true, false, _) => {}
+            (false, _, '"') => in_string = true,
+            (false, _, '{') => stack.push('}'),
+            (false, _, '[') => stack.push(']'),
+            (false, _, '}' | ']') => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut closed = text.to_string();
+    while let Some(c) = stack.pop() {
+        closed.push(c);
+    }
+    serde_json::from_str(&closed).ok()
+}
+
 fn rendered(template: &Value, params: &Value) -> std::result::Result<Value, String> {
     // a template may be written as a string or as the body itself
     let text = match template {
@@ -240,7 +267,22 @@ fn rendered(template: &Value, params: &Value) -> std::result::Result<Value, Stri
         return Err(format!("Improperly closed variable: {name} in query-template"));
     }
     let filled = render(&text, params);
-    serde_json::from_str(&filled).map_err(|e| format!("Failed to parse content to map: {e}"))
+    let read: std::result::Result<Value, _> = serde_json::from_str(&filled);
+    let Err(e) = read else { return read.map_err(|e| e.to_string()) };
+    if !e.is_eof() {
+        return Err(format!("Failed to parse content to map: {e}"));
+    }
+    // a template that stops early is still read as far as it goes: a clause it
+    // names that does not exist is a complaint about that clause, not about
+    // where the text ran out
+    if let Some(closed) = closed_up(&filled)
+        && let Some(named) =
+            closed.pointer("/query").and_then(|q| q.as_object()).and_then(|o| o.keys().next())
+        && crate::query::unknown_clause(named)
+    {
+        return Err(format!("parsing_exception|unknown query [{named}]"));
+    }
+    Err(format!("Failed to parse content to map: {e}"))
 }
 
 pub async fn render_template(
@@ -270,6 +312,15 @@ pub async fn search_template(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let Some(template) = template_of(&store, &body, None) else {
+        // a template named by an id that nobody stored is a missing thing,
+        // not a malformed request
+        if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
+            return err(
+                StatusCode::NOT_FOUND,
+                "resource_not_found_exception",
+                format!("unable to find script [{id}] in cluster state"),
+            );
+        }
         return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "no template named");
     };
     let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -354,13 +405,36 @@ pub async fn msearch_template(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| default_index.clone());
+        // a search in the list that names no template at all is not one
+        // failure among several: the whole request was written wrongly
+        let empty = request.get("source").map(|v| match v {
+            Value::String(text) => text.trim().is_empty(),
+            other => other.is_null(),
+        });
+        if empty == Some(true) && request.get("id").is_none() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                "Validation Failed: 1: template is missing;",
+            );
+        }
         let Some(template) = template_of(&store, &request, None) else {
+            // a template named by an id nobody stored is a missing thing
+            let (status, kind, reason) = match request.get("id").and_then(|v| v.as_str()) {
+                Some(id) => (
+                    404,
+                    "resource_not_found_exception",
+                    format!("unable to find script [{id}] in cluster state"),
+                ),
+                None => (400, "illegal_argument_exception", "no template named".to_string()),
+            };
             responses.push(json!({
                 "error": {
-                    "type": "illegal_argument_exception",
-                    "reason": "no template named",
+                    "type": kind,
+                    "reason": reason.clone(),
+                    "root_cause": [{"type": kind, "reason": reason}],
                 },
-                "status": 400,
+                "status": status,
             }));
             continue;
         };
@@ -368,26 +442,40 @@ pub async fn msearch_template(
         let filled = match rendered(&template, &params) {
             Ok(out) => out,
             Err(e) => {
+                // a template that stops in the middle of its JSON is a
+                // different complaint from one that is written wrongly, and
+                // one that names a clause nobody knows is a third
+                let (kind, reason) = match e.split_once('|') {
+                    Some((named, reason)) => (named.to_string(), reason.to_string()),
+                    None if e.contains("EOF") || e.contains("end of input") => (
+                        "unexpected_end_of_input_exception".to_string(),
+                        "Unexpected end of input".to_string(),
+                    ),
+                    None => ("json_parse_exception".to_string(), e),
+                };
                 responses.push(json!({
-                    "error": {"type": "json_parse_exception", "reason": e},
+                    "error": {
+                        "type": kind,
+                        "reason": reason.clone(),
+                        "root_cause": [{"type": kind, "reason": reason}],
+                    },
                     "status": 400,
                 }));
                 continue;
             }
         };
-        match crate::search::run(&store, &expr, &filled, &Params::new()) {
+        match crate::search::run(&store, &expr, &filled, &p) {
             Ok(out) => {
-                let mut env = crate::search::envelope(out, &filled, &Params::new());
+                // the request's own parameters -- how a total is written,
+                // whether keys are typed -- hold for every answer in the list
+                let mut env = crate::search::envelope(out, &filled, &p);
                 env["status"] = json!(200);
                 responses.push(env);
             }
-            Err(_) => responses.push(json!({
-                "error": {
-                    "type": "search_phase_execution_exception",
-                    "reason": "all shards failed",
-                },
-                "status": 400,
-            })),
+            // the search's own complaint is what the caller is told, so that
+            // an unknown query reads as an unknown query rather than as a
+            // shard that failed
+            Err(response) => responses.push(crate::api::as_error_body(response).await),
         }
     }
     respond(&p, json!({"took": 1, "responses": responses}))

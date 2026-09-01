@@ -180,14 +180,15 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         return Ok(any_of(exact));
     }
 
-    // a number written as text matches the number itself: `order:1` finds a
-    // document whose `order` is 1, whether the field was written as text or
-    // as a number
+    // a number or a flag written as text matches the value itself: `order:1`
+    // finds a document whose `order` is 1, whether the field was written as
+    // text or as a number, and `"true"` finds a flag that is set
     let as_number = text
         .parse::<i64>()
         .ok()
         .map(|n| serde_json::json!(n))
         .or_else(|| text.parse::<f64>().ok().map(|n| serde_json::json!(n)))
+        .or_else(|| text.parse::<bool>().ok().map(|b| serde_json::json!(b)))
         .map(|n| term_for(f, &path, &n))
         .filter(|exact| !exact.is_empty());
 

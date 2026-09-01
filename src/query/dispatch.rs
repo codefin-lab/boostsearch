@@ -99,7 +99,21 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             if let Some(q) = ip_term_query(ctx, &field, f, &path, &val) {
                 return Ok(q);
             }
-            let exact = any_of(term_for(f, &path, &val));
+            let mut terms = term_for(f, &path, &val);
+            // a number or a flag written as text names the value itself, which
+            // is how it was written into the index
+            if let Some(text) = val.as_str() {
+                let read = text
+                    .parse::<i64>()
+                    .ok()
+                    .map(|n| serde_json::json!(n))
+                    .or_else(|| text.parse::<f64>().ok().map(|n| serde_json::json!(n)))
+                    .or_else(|| text.parse::<bool>().ok().map(|b| serde_json::json!(b)));
+                if let Some(read) = read {
+                    terms.extend(term_for(f, &path, &read));
+                }
+            }
+            let exact = any_of(terms);
             // an exact match on a field that is not analysed has nothing to
             // rank by: every match is equally exact, so each scores one
             if view == View::Raw { Box::new(ConstScore::new(exact, 1.0)) } else { exact }
@@ -492,4 +506,66 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         Some(b) => Box::new(BoostQuery::new(inner, b as f32)),
         None => inner,
     })
+}
+
+/// Whether a name stands for no query this engine knows.
+///
+/// Used where a query cannot be built to be told apart -- a template that ran
+/// out mid-way still names its clause, and naming one that does not exist is
+/// a complaint about the name rather than about the text.
+pub(crate) fn unknown_clause(name: &str) -> bool {
+    const CLAUSES: &[&str] = &[
+        "bool",
+        "boosting",
+        "combined_fields",
+        "constant_score",
+        "dis_max",
+        "distance_feature",
+        "exists",
+        "function_score",
+        "fuzzy",
+        "geo_bounding_box",
+        "geo_distance",
+        "geo_polygon",
+        "geo_shape",
+        "has_child",
+        "has_parent",
+        "ids",
+        "intervals",
+        "knn",
+        "match",
+        "match_all",
+        "match_bool_prefix",
+        "match_none",
+        "match_phrase",
+        "match_phrase_prefix",
+        "more_like_this",
+        "multi_match",
+        "nested",
+        "parent_id",
+        "percolate",
+        "prefix",
+        "query_string",
+        "range",
+        "rank_feature",
+        "regexp",
+        "script",
+        "script_score",
+        "simple_query_string",
+        "span_containing",
+        "span_first",
+        "span_gap",
+        "span_multi",
+        "span_near",
+        "span_not",
+        "span_or",
+        "span_term",
+        "span_within",
+        "term",
+        "terms",
+        "terms_set",
+        "wildcard",
+        "wrapper",
+    ];
+    !CLAUSES.contains(&name)
 }
