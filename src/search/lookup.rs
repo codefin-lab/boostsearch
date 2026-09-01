@@ -245,6 +245,18 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
                    out: &mut std::collections::BTreeMap<String, Vec<String>>,
                    ids: &mut Vec<String>| {
         for item in items {
+            // a string that names no document is the text itself, which is
+            // how `like` is most often written
+            if let Value::String(text) = item
+                && source_of_item(item).is_none()
+            {
+                for name in fields.clone().unwrap_or_default() {
+                    for word in text.split_whitespace() {
+                        out.entry(name.clone()).or_default().push(word.to_lowercase());
+                    }
+                }
+                continue;
+            }
             let Some((id, src)) = source_of_item(item) else { continue };
             if let Some(id) = id {
                 ids.push(id);

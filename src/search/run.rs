@@ -647,6 +647,9 @@ pub fn run(
         };
     }
 
+    // the order documents arrived in settles a tie, so it has to be known
+    // before the page is cut rather than after
+    fill_seq(&mut cands, &searchers);
     prune(&mut cands, page_want, &sort_keys);
     // `indices_boost` weights whole indices against each other, so it is
     // applied to the scores before they are ranked. An alias may name the
@@ -674,7 +677,6 @@ pub fn run(
     if nested_filtered {
         sort_by_filtered_nested(store, &targets, &mut cands, &searchers, &sort_keys);
     }
-    fill_seq(&mut cands, &searchers);
     // `function_score` says what a document's score should be, given what the
     // query scored it and what the document itself holds
     if let Some(spec) = body.pointer("/query/function_score") {

@@ -170,7 +170,15 @@ pub(crate) fn search_one_shard(
         }
     }
 
-    let want = page_want;
+    // Documents that score the same come back in the order they were written,
+    // and the writer spreads one request across its threads: a shard-level
+    // prune that kept only `size` of them could drop the earlier document and
+    // keep the later one. Asking for a few more lets the merge, which knows
+    // the order they arrived in, choose between them.
+    let want = match sort_keys.is_empty() {
+        true => page_want.saturating_add(128),
+        false => page_want,
+    };
     // The aggregation rides along with the hit collection so the query is
     // walked once per index rather than twice. Profiling drives the phases
     // itself and keeps its own pass.

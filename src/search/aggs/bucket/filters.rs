@@ -447,7 +447,9 @@ pub(crate) fn run_sampler_agg(
 
     let mut probe = json!({
         "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
-        "size": most.max(1) * per_value.max(1),
+        // more than the sample keeps: the ones a crowded value pushes out have
+        // to come from somewhere
+        "size": (most.max(1) * per_value.max(1)).saturating_mul(10).min(10_000),
         "_source": false,
     });
     if let Some(field) = field.as_deref() {
