@@ -175,7 +175,21 @@ pub(crate) fn settle_by_value(
             };
             let analyse = |t: &str| crate::query::analyze_text(&g.index, t, None);
             let tokens = analyse(&text);
-            !crate::query::interval_spans(&tokens, &rule, &analyse).is_empty()
+            // another field of the same document, read with its own analyzer
+            let elsewhere = |other: &str, words: &str| -> Option<(Vec<String>, Vec<String>)> {
+                let held = src.pointer(&format!("/{}", other.replace('.', "/")))?;
+                let held = match held {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let named = ["search_analyzer", "analyzer"]
+                    .iter()
+                    .find_map(|key| g.mapping.field_option(other, key))
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+                let cut = |t: &str| crate::query::analyze_text(&g.index, t, named.as_deref());
+                Some((cut(&held), cut(words)))
+            };
+            !crate::query::interval_spans(&tokens, &rule, &analyse, &elsewhere).is_empty()
         });
     }
     // `distance_feature` scores by how near a value is to an origin. The

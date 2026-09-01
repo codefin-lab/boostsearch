@@ -109,7 +109,7 @@ pub async fn validate_query(
                         .iter()
                         .map(|n| json!({
                             "index": n, "valid": true,
-                            "explanation": describe_query(&query),
+                            "explanation": describe_query_in(&store, n, &query),
                         }))
                         .collect::<Vec<_>>()
                 );
@@ -122,6 +122,57 @@ pub async fn validate_query(
 
 /// How a query reads once it has been rewritten, in the shape the engine
 /// names its own queries.
+/// The same, read through one index's analyzers: a phrase is written as the
+/// words the field's analyzer makes of it, with the words that stand in one
+/// place -- a synonym beside what it means -- bracketed together.
+pub(crate) fn describe_query_in(store: &Store, index: &str, q: &Value) -> String {
+    let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
+        return describe_query(q);
+    };
+    if !matches!(kind.as_str(), "match_phrase" | "match_phrase_prefix") {
+        return describe_query(q);
+    }
+    let Some((field, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+        return describe_query(q);
+    };
+    let text = match spec {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => {
+            o.get("query").map(|x| x.as_str().unwrap_or_default().to_string()).unwrap_or_default()
+        }
+        other => other.to_string(),
+    };
+    let Some(st) = store.get(index) else { return describe_query(q) };
+    let g = st.read();
+    let chain = ["search_analyzer", "analyzer"]
+        .iter()
+        .find_map(|key| g.mapping.field_option(field, key))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|named| g.analysis.get(&named));
+    let Some(chain) = chain else { return describe_query(q) };
+    // the words in the order of the places they stand in, those sharing a
+    // place bracketed
+    let mut places: Vec<(usize, Vec<String>)> = Vec::new();
+    for (word, at, _, _, _) in chain.tokens(&text) {
+        match places.last_mut() {
+            Some((here, group)) if *here == at => group.push(word),
+            _ => places.push((at, vec![word])),
+        }
+    }
+    let written: Vec<String> = places
+        .into_iter()
+        .map(|(_, group)| match group.len() {
+            1 => group[0].clone(),
+            _ => format!("({})", group.join(" ")),
+        })
+        .collect();
+    match (kind.as_str(), written.len()) {
+        ("match_phrase_prefix", _) => format!("{field}:\"{}*\"", written.join(" ")),
+        (_, 1) => format!("{field}:{}", written[0]),
+        _ => format!("{field}:\"{}\"", written.join(" ")),
+    }
+}
+
 pub(crate) fn describe_query(q: &Value) -> String {
     let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
         return "*:*".to_string();

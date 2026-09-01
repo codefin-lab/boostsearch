@@ -590,10 +590,15 @@ type Span = (usize, usize);
 
 /// Every stretch of the token list that satisfies a rule, one per starting
 /// point, shortest first.
+/// What a rule that reads another field is matched against: that field's
+/// tokens, and the rule's words as that field's analyzer makes them.
+pub type OtherField<'a> = &'a dyn Fn(&str, &str) -> Option<(Vec<String>, Vec<String>)>;
+
 pub fn interval_spans(
     tokens: &[String],
     rule: &Value,
     analyse: &dyn Fn(&str) -> Vec<String>,
+    other: OtherField<'_>,
 ) -> Vec<Span> {
     let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
         return Vec::new();
@@ -607,12 +612,17 @@ pub fn interval_spans(
     let mut spans = match kind.as_str() {
         "match" => {
             let text = spec.get("query").and_then(|v| v.as_str()).unwrap_or_default();
-            let words = analyse(text);
+            // a rule may read another field of the document -- one analysed
+            // differently, standing word for word beside this one
+            let elsewhere =
+                spec.get("use_field").and_then(|v| v.as_str()).and_then(|field| other(field, text));
+            let (held, words) = match elsewhere {
+                Some((held, words)) => (held, words),
+                None => (tokens.to_vec(), analyse(text)),
+            };
             let places: Vec<Vec<usize>> = words
                 .iter()
-                .map(|w| {
-                    tokens.iter().enumerate().filter(|(_, t)| *t == w).map(|(i, _)| i).collect()
-                })
+                .map(|w| held.iter().enumerate().filter(|(_, t)| *t == w).map(|(i, _)| i).collect())
                 .collect();
             combine_spans(
                 &places
@@ -654,7 +664,7 @@ pub fn interval_spans(
             let children: Vec<Vec<Span>> = spec
                 .get("intervals")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().map(|r| interval_spans(tokens, r, analyse)).collect())
+                .map(|a| a.iter().map(|r| interval_spans(tokens, r, analyse, other)).collect())
                 .unwrap_or_default();
             if kind == "any_of" {
                 let mut all: Vec<Span> = children.into_iter().flatten().collect();
@@ -675,7 +685,8 @@ pub fn interval_spans(
     }
     if let Some(filter) = spec.get("filter").and_then(|f| f.as_object()) {
         for (name, inner) in filter {
-            let other = interval_spans(tokens, inner, analyse);
+            let other_spans = interval_spans(tokens, inner, analyse, other);
+            let other = other_spans;
             spans.retain(|s| match name.as_str() {
                 "containing" => other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
                 "not_containing" => !other.iter().any(|o| s.0 <= o.0 && o.1 <= s.1),
