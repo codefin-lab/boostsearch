@@ -166,7 +166,7 @@ dependencies = [
 [[package]]
 name = "boostcore"
 version = "0.26.1"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -218,7 +218,7 @@ dependencies = [
 [[package]]
 name = "boostcore-bitpacker"
 version = "0.10.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "bitpacking",
 ]
@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "boostcore-columnar"
 version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "boostcore-bitpacker",
  "boostcore-common",
@@ -241,7 +241,7 @@ dependencies = [
 [[package]]
 name = "boostcore-common"
 version = "0.11.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -253,7 +253,7 @@ dependencies = [
 [[package]]
 name = "boostcore-query-grammar"
 version = "0.26.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "fnv",
  "nom",
@@ -265,7 +265,7 @@ dependencies = [
 [[package]]
 name = "boostcore-sstable"
 version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "boostcore-bitpacker",
  "boostcore-common",
@@ -278,7 +278,7 @@ dependencies = [
 [[package]]
 name = "boostcore-stacker"
 version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "boostcore-common",
  "murmurhash32",
@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "boostcore-tokenizer-api"
 version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=254faac0c68a9b0db5a110c41c38f3de861731cf#254faac0c68a9b0db5a110c41c38f3de861731cf"
+source = "git+https://github.com/codefin-lab/boostcore?rev=d52cae0ef3c2b4e576e1777bfef86890c0abae02#d52cae0ef3c2b4e576e1777bfef86890c0abae02"
 dependencies = [
  "serde",
 ]

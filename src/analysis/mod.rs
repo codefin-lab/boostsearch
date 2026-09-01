@@ -331,8 +331,10 @@ impl Chain {
     pub fn boostcore_analyzer(&self) -> TextAnalyzer {
         let base = match &self.source {
             Source::Standard => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+            // `letter` keeps runs of letters and nothing else, so it is cut
+            // here rather than by the tokenizer that stands for `standard`
             Source::Letter | Source::LetterLower => {
-                TextAnalyzer::builder(SimpleTokenizer::default()).dynamic()
+                TextAnalyzer::builder(RawTokenizer::default()).dynamic()
             }
             Source::Whitespace => TextAnalyzer::builder(WhitespaceTokenizer::default()).dynamic(),
             Source::Keyword => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
@@ -375,6 +377,11 @@ impl Chain {
             }
             Source::Classic => classic(text),
             Source::Icu => icu_words(text),
+            Source::Letter => runs(text, |c| c.is_alphabetic()),
+            Source::LetterLower => runs(text, |c| c.is_alphabetic())
+                .into_iter()
+                .map(|(t, p, a, b)| (t.to_lowercase(), p, a, b))
+                .collect(),
             Source::Morph { language, drop_grammar, base_form } => {
                 // the dictionary says what each word is while it is reading
                 // the text; asking again about one word on its own would not
@@ -410,12 +417,7 @@ impl Chain {
                 let mut out = Vec::new();
                 while stream.advance() {
                     let t = stream.token();
-                    let text = if matches!(self.source, Source::LetterLower) {
-                        t.text.to_lowercase()
-                    } else {
-                        t.text.clone()
-                    };
-                    out.push((text, t.position, t.offset_from, t.offset_to));
+                    out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
                 }
                 out
             }
