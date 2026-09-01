@@ -212,10 +212,18 @@ pub(crate) fn plan_aggs(
                     .find(|k| BUCKET_PIPELINES.contains(&k.as_str()) || k == "bucket_sort")
             })
             .unwrap_or_default();
+        // the ones that read a series want a histogram over it; the rest only
+        // want somewhere to sit
+        let want = match kind.starts_with("bucket_") {
+            true => "must be declared inside of another aggregation".to_string(),
+            false => "must have a histogram, date_histogram or auto_date_histogram as parent \
+                      but doesn't have a parent"
+                .to_string(),
+        };
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            format!("{kind} aggregation [{name}] must be declared inside of another aggregation"),
+            "action_request_validation_exception",
+            format!("Validation Failed: 1: {kind} aggregation [{name}] {want};"),
         ));
     }
     let mut filters_aggs: Vec<(String, Value)> = Vec::new();

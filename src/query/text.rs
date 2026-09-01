@@ -480,6 +480,28 @@ pub(crate) fn build_span_or(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         .get("clauses")
         .and_then(|c| c.as_array())
         .ok_or_else(|| anyhow!("[span_or] requires [clauses]"))?;
+    // where every clause is one word, the whole thing is a single span over
+    // those words, which is what Lucene scores it as
+    let words: Option<Vec<Term>> = clauses
+        .iter()
+        .map(|clause| {
+            let spec = clause.get("span_term")?;
+            let (field, value, _) = field_and_value(spec).ok()?;
+            let text = match &value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let (f, path, _) = ctx.resolve(&field, true);
+            let mut term = Term::from_field_json_path(f, &path, true);
+            term.append_type_and_str(&text);
+            Some(term)
+        })
+        .collect();
+    if let Some(words) =
+        words.filter(|w| !w.is_empty() && w.iter().all(|t| t.field() == w[0].field()))
+    {
+        return Ok(Box::new(crate::query::SpanUnion::new(words)));
+    }
     let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for clause in clauses {
         parts.push((Occur::Should, build_span(ctx, clause)?));
