@@ -347,6 +347,46 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
 
 /// The attributes this node was started with: the built-in one, and whatever
 /// `BOOSTSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
+/// The OpenSearch modules this server answers for.
+///
+/// A module is not a thing loaded here -- everything is built in -- but the
+/// suites ask which of them a node carries before they test what one does, so
+/// the list names the ones whose behaviour is answered rather than the ones
+/// whose code is present.
+fn modules() -> Value {
+    const NAMED: &[&str] = &[
+        "aggs-matrix-stats",
+        "analysis-common",
+        "geo",
+        "lang-mustache",
+        "mapper-extras",
+        "opensearch-dashboards",
+        "parent-join",
+        "percolator",
+        "rank-eval",
+        "reindex",
+        "transport-netty4",
+    ];
+    Value::Array(
+        NAMED
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "version": "3.9.0",
+                    "opensearch_version": "3.9.0",
+                    "java_version": "11",
+                    "description": format!("the {name} module"),
+                    "classname": "",
+                    "custom_foldername": "",
+                    "extended_plugins": [],
+                    "has_native_controller": false,
+                })
+            })
+            .collect(),
+    )
+}
+
 pub fn node_attrs() -> Vec<(String, String)> {
     let mut out = vec![("shard_indexing_pressure_enabled".to_string(), "true".to_string())];
     if let Ok(spec) = std::env::var("BOOSTSEARCH_NODE_ATTRS") {
@@ -378,7 +418,7 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                        "allocated_processors": num_cpus()},
                 "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
                             "mlockall": false},
-                "plugins": [], "modules": [], "ingest": {"processors": []},
+                "plugins": [], "modules": modules(), "ingest": {"processors": []},
                 "thread_pool": {}, "transport": {},
                 // where a client -- or another cluster reindexing from this
                 // one -- reaches this node
