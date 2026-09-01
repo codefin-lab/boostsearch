@@ -56,10 +56,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
                     "max_unsafe_auto_id_timestamp": -1, "file_sizes": {},
                 },
                 "mappings": {"field_types": []},
-                "analysis": {"char_filter_types": [], "tokenizer_types": [],
-                             "filter_types": [], "analyzer_types": [],
-                             "built_in_char_filters": [], "built_in_tokenizers": [],
-                             "built_in_filters": [], "built_in_analyzers": []},
+                "analysis": analysis_stats(&store),
             },
             "nodes": {
                 "count": {"total": 1, "cluster_manager": 1, "coordinating_only": 0,
@@ -236,4 +233,127 @@ pub async fn cluster_health(
         return (StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response();
     }
     respond(&p, out)
+}
+
+/// What the indices define for analysis, and what they use of what is built
+/// in: each kind counted over every index that defines one, and over how many
+/// indices do.
+fn analysis_stats(store: &Store) -> Value {
+    use std::collections::BTreeMap;
+    // name -> (count, indices holding it)
+    type Tally = BTreeMap<String, (u64, std::collections::BTreeSet<String>)>;
+    let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut note = |kind: &'static str, name: &str, index: &str| {
+        let entry = tallies.entry(kind).or_default().entry(name.to_string()).or_default();
+        entry.0 += 1;
+        entry.1.insert(index.to_string());
+    };
+    for name in store.resolve("*") {
+        let Some(st) = store.get(&name) else { continue };
+        let g = st.read();
+        let analysis = g
+            .settings
+            .pointer("/index/analysis")
+            .or_else(|| g.settings.pointer("/analysis"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let defined = |section: &str| -> Vec<(String, Value)> {
+            analysis
+                .get(section)
+                .and_then(|v| v.as_object())
+                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default()
+        };
+        let named: std::collections::HashSet<String> = ["char_filter", "tokenizer", "filter"]
+            .iter()
+            .flat_map(|section| defined(section).into_iter().map(|(k, _)| k))
+            .collect();
+        for (section, kind) in [
+            ("char_filter", "char_filter_types"),
+            ("tokenizer", "tokenizer_types"),
+            ("filter", "filter_types"),
+        ] {
+            for (_, spec) in defined(section) {
+                if let Some(t) = spec.get("type").and_then(|v| v.as_str()) {
+                    note(kind, t, &name);
+                }
+            }
+        }
+        for (_, spec) in defined("analyzer") {
+            // an analyzer described by its parts is a custom one, whatever it
+            // was or was not called
+            let kind = match spec.get("type").and_then(|v| v.as_str()) {
+                Some(t) if t != "custom" => t.to_string(),
+                _ => "custom".to_string(),
+            };
+            note("analyzer_types", &kind, &name);
+            // the parts it names that nobody defined are the built-in ones
+            for (section, kind) in [
+                ("char_filter", "built_in_char_filters"),
+                ("tokenizer", "built_in_tokenizers"),
+                ("filter", "built_in_filters"),
+            ] {
+                let listed: Vec<String> = match spec.get(section) {
+                    Some(Value::String(one)) => vec![one.clone()],
+                    Some(Value::Array(items)) => {
+                        items.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for part in listed {
+                    if !named.contains(&part) {
+                        note(kind, &part, &name);
+                    }
+                }
+            }
+        }
+        // the analyzers the mapping names that the index never defined
+        let own: std::collections::HashSet<String> =
+            defined("analyzer").into_iter().map(|(k, _)| k).collect();
+        let mut used: Vec<String> = Vec::new();
+        fn walk(node: &Value, out: &mut Vec<String>) {
+            let Some(o) = node.as_object() else { return };
+            for key in ["analyzer", "search_analyzer", "search_quote_analyzer"] {
+                if let Some(v) = o.get(key).and_then(|v| v.as_str()) {
+                    out.push(v.to_string());
+                }
+            }
+            for (key, v) in o {
+                if key == "properties" || key == "fields" {
+                    if let Some(inner) = v.as_object() {
+                        inner.values().for_each(|f| walk(f, out));
+                    }
+                }
+            }
+        }
+        walk(&g.mapping.raw, &mut used);
+        for analyzer in used {
+            if !own.contains(&analyzer) {
+                note("built_in_analyzers", &analyzer, &name);
+            }
+        }
+    }
+    let listed = |kind: &str| -> Value {
+        tallies
+            .get(kind)
+            .map(|t| {
+                t.iter()
+                    .map(|(name, (count, indices))| {
+                        json!({"name": name, "count": count, "index_count": indices.len()})
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map(Value::Array)
+            .unwrap_or_else(|| json!([]))
+    };
+    json!({
+        "char_filter_types": listed("char_filter_types"),
+        "tokenizer_types": listed("tokenizer_types"),
+        "filter_types": listed("filter_types"),
+        "analyzer_types": listed("analyzer_types"),
+        "built_in_char_filters": listed("built_in_char_filters"),
+        "built_in_tokenizers": listed("built_in_tokenizers"),
+        "built_in_filters": listed("built_in_filters"),
+        "built_in_analyzers": listed("built_in_analyzers"),
+    })
 }

@@ -66,6 +66,28 @@ pub async fn termvectors(
 }
 
 /// The terms each field of a document became once analysed.
+/// What the index holds for one field: how many documents each of its terms
+/// is in, added up, and how many documents there are.
+fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64) {
+    let searcher = g.reader.searcher();
+    let dyn_field = g.fields.dynamic;
+    let path = field.replace('.', "\u{1}");
+    let mut start = boostcore::Term::from_field_json_path(dyn_field, &path, true);
+    start.append_type_and_str("");
+    let prefix = start.serialized_value_bytes().to_vec();
+    let mut sum_doc_freq = 0u64;
+    for reader in searcher.segment_readers() {
+        let Ok(inverted) = reader.inverted_index(dyn_field) else { continue };
+        let Ok(mut stream) = inverted.terms().stream() else { continue };
+        while let Some((bytes, info)) = stream.next() {
+            if bytes.starts_with(&prefix) {
+                sum_doc_freq += info.doc_freq as u64;
+            }
+        }
+    }
+    (sum_doc_freq, searcher.num_docs() as u64)
+}
+
 pub(crate) fn term_vectors_of(
     g: &IdxState,
     source: &Value,
@@ -81,6 +103,16 @@ pub(crate) fn term_vectors_of(
         }
         let Some(text) = value.as_str() else { continue };
         let spans = crate::query::analyze_spans(&g.index, text, None);
+        // a chain that hangs the token's kind on it as a payload has it read
+        // back here, and the kind of a word is `<ALPHANUM>`
+        let payload = g
+            .mapping
+            .field_option(name, "analyzer")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .and_then(|named| g.analysis.get(&named))
+            .map(|chain| chain.carries_type_payload())
+            .unwrap_or(false)
+            .then_some("PEFMUEhBTlVNPg==");
         if spans.is_empty() {
             continue;
         }
@@ -97,9 +129,15 @@ pub(crate) fn term_vectors_of(
         for (term, spots) in &terms {
             let mut entry = json!({
                 "term_freq": spots.len(),
-                "tokens": spots.iter().map(|(pos, from, to)| json!({
-                    "position": pos, "start_offset": from, "end_offset": to,
-                })).collect::<Vec<_>>(),
+                "tokens": spots.iter().map(|(pos, from, to)| {
+                    let mut token = json!({
+                        "position": pos, "start_offset": from, "end_offset": to,
+                    });
+                    if let Some(payload) = payload {
+                        token["payload"] = json!(payload);
+                    }
+                    token
+                }).collect::<Vec<_>>(),
             });
             if want_stats {
                 // how many documents hold this term, counted rather than assumed
@@ -128,10 +166,13 @@ pub(crate) fn term_vectors_of(
         }
         let mut field = json!({"terms": Value::Object(out)});
         if want_field_stats {
+            // the field's statistics are the index's, whatever this one
+            // document holds of it
+            let (held_doc_freq, doc_count) = field_statistics_of(g, name);
             field["field_statistics"] = json!({
-                "sum_doc_freq": sum_doc_freq,
-                "doc_count": searcher.num_docs(),
-                "sum_ttf": sum_ttf,
+                "sum_doc_freq": held_doc_freq.max(sum_doc_freq),
+                "doc_count": doc_count,
+                "sum_ttf": sum_ttf.max(held_doc_freq),
             });
         }
         fields.insert(name.clone(), field);

@@ -205,6 +205,9 @@ pub enum Step {
     /// the paths of a graph pressed flat, so that every token stands one
     /// place after the one before it
     FlattenGraph,
+    /// each token carries what kind of token it is, for a term vector to
+    /// read back
+    TypeAsPayload,
     /// a word named here is left alone by the stemmers after it
     KeywordMarker(Vec<String>),
     /// a word named here is stemmed to what it is told, not what the
@@ -388,13 +391,20 @@ impl Chain {
         }
     }
 
+    /// Whether the chain hangs each token's kind on it as a payload.
+    pub fn carries_type_payload(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::TypeAsPayload))
+    }
+
     /// Whether the chain cuts text into pieces of words rather than words.
     ///
     /// A field written that way is matched on the pieces, and a highlighter
     /// marks the pieces inside the words rather than the words.
     pub fn cuts_into_ngrams(&self) -> bool {
+        // an ngram filter after a tokenizer still reports the offsets of the
+        // whole word it cut, so only a tokenizer that cuts pieces places
+        // them inside the words
         matches!(self.source, Source::Ngram { .. })
-            || self.steps.iter().any(|s| matches!(s, Step::NgramTokens { .. }))
     }
 
     /// The tokens this chain makes of a text, with where each came from.
@@ -1296,6 +1306,8 @@ fn apply_step(
                 (word, p, a, b, l)
             })
             .collect(),
+        // the payload is read back by a term vector, not by the stream
+        Step::TypeAsPayload => tokens,
         Step::FlattenGraph => {
             // each node of the graph is placed one after the furthest of the
             // nodes that reach it, and every token is as long as the gap
@@ -2574,6 +2586,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             vec![Step::MinHash { buckets: num("bucket_count", 512), hashes: num("hash_count", 1) }]
         }
         "flatten_graph" => vec![Step::FlattenGraph],
+        "type_as_payload" => vec![Step::TypeAsPayload],
         "remove_duplicates" => vec![],
         other => return filter_of_name(other),
     };

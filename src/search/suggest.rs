@@ -238,8 +238,27 @@ pub(crate) fn completion_suggest(
             if !context_matches(&g, &field, spec, raw, &source) {
                 continue;
             }
+            // an input is completed as its analyzer reads it: a synonym in
+            // the chain is another way the input begins
+            let chain = g
+                .mapping
+                .field_option(&field, "analyzer")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .and_then(|named| g.analysis.get(&named));
+            let begins_with = |v: &str| -> bool {
+                if v.to_lowercase().starts_with(&prefix) {
+                    return true;
+                }
+                let Some(chain) = &chain else { return false };
+                let edges: Vec<crate::query::Edge> = chain
+                    .tokens(v)
+                    .into_iter()
+                    .map(|(t, p, _, _, l)| crate::query::Edge::new(t, p, l))
+                    .collect();
+                crate::query::ways(&edges).iter().any(|way| way.join(" ").starts_with(&prefix))
+            };
             for (v, weight) in weighted {
-                if !v.to_lowercase().starts_with(&prefix) {
+                if !begins_with(&v) {
                     continue;
                 }
                 if skip_duplicates && !seen.insert(v.clone()) {
