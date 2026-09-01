@@ -123,13 +123,24 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // a bound on a field of numbers has to be a number: text that names no
     // number names no place in the order either
     if is_numeric_type(ctx.mapping.type_of(&field)) {
-        for bound in [&lower, &upper] {
-            if let Some((Value::String(text), _)) = bound
-                && text.parse::<f64>().is_err()
-            {
-                return Err(anyhow!(
-                    "failed to parse [{text}] as a number, which is what field [{field}] holds"
-                ));
+        for bound in [&mut lower, &mut upper] {
+            if let Some((Value::String(text), inclusive)) = bound {
+                // a number written as text -- as a template renders one -- is
+                // the number
+                let read = text
+                    .parse::<i64>()
+                    .ok()
+                    .map(|n| serde_json::json!(n))
+                    .or_else(|| text.parse::<f64>().ok().map(|n| serde_json::json!(n)));
+                match read {
+                    Some(number) => *bound = Some((number, *inclusive)),
+                    None => {
+                        return Err(anyhow!(
+                            "failed to parse [{text}] as a number, which is what field [{field}] \
+                             holds"
+                        ));
+                    }
+                }
             }
         }
     }

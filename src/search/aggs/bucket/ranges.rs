@@ -48,8 +48,7 @@ pub(crate) fn run_date_range_agg(
     let mut keyed_out = serde_json::Map::new();
     // AbstractRangeBuilder sorts the ranges it was given by where they start,
     // so the buckets come back in that order however the request listed them
-    let mut asked: Vec<Value> =
-        spec.get("ranges").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let mut asked: Vec<Value> = ranges_of(&spec);
     let edge = |range: &Value, key: &str, open: f64| -> f64 {
         range.get(key).filter(|v| !v.is_null()).and_then(millis).map(|ms| ms as f64).unwrap_or(open)
     };
@@ -225,6 +224,16 @@ pub(crate) fn run_range_field_histogram(
     Ok(json!({"buckets": buckets}))
 }
 
+/// The ranges a request names: a list of them, or one written on its own,
+/// read as a list of one.
+pub(crate) fn ranges_of(spec: &Value) -> Vec<Value> {
+    match spec.get("ranges") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::Object(one)) => vec![Value::Object(one.clone())],
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn run_ip_range_agg(
     store: &Store,
     targets: &[String],
@@ -238,7 +247,7 @@ pub(crate) fn run_ip_range_agg(
 
     let mut buckets = Vec::new();
     let mut keyed_out = serde_json::Map::new();
-    for range in spec.get("ranges").and_then(|r| r.as_array()).into_iter().flatten() {
+    for range in ranges_of(&spec).iter() {
         // a mask names the same span as the addresses at its edges
         let (from, to) = match range.get("mask").and_then(|m| m.as_str()) {
             Some(mask) => match crate::store::cidr_bounds(mask) {
