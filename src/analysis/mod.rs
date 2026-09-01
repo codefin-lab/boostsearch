@@ -73,6 +73,9 @@ enum Source {
     },
     /// the characters that end a token, named one by one
     CharGroup(Vec<char>),
+    /// where one word ends and the next begins, by the Unicode rules and the
+    /// dictionaries for the scripts written without spaces
+    Icu,
     Ngram {
         min: usize,
         max: usize,
@@ -173,19 +176,110 @@ pub enum Step {
     },
     /// the original token kept beside what the filter made of it
     PreserveOriginal(Box<Step>),
+    /// the word written the one way Unicode says it is written, in the case
+    /// it is compared in: `Ruß` is `russ`
+    IcuNormalize,
+    /// the same, and the marks written on the letters dropped as well
+    IcuFold,
 }
 
 /// A named analysis chain.
 #[derive(Clone, Debug)]
 pub struct Chain {
+    /// what is done to the text before a tokenizer sees it
+    pre: Vec<CharFilter>,
     source: Source,
     steps: Vec<Step>,
+}
+
+/// A change made to the text itself, before it is cut into tokens.
+#[derive(Clone, Debug)]
+pub enum CharFilter {
+    /// the tags taken out, and the ones named left where they are
+    HtmlStrip(Vec<String>),
+    /// `ph => f`, applied where it is found
+    Mapping(Vec<(String, String)>),
+    Replace {
+        pattern: String,
+        replacement: String,
+    },
+    IcuNormalize,
+}
+
+impl CharFilter {
+    /// The text this filter makes of the text it is given.
+    pub fn applied(&self, text: &str) -> String {
+        match self {
+            CharFilter::HtmlStrip(kept) => strip_html(text, kept),
+            CharFilter::Mapping(rules) => {
+                let mut out = String::with_capacity(text.len());
+                let bytes: Vec<char> = text.chars().collect();
+                let mut i = 0;
+                'outer: while i < bytes.len() {
+                    for (from, to) in rules {
+                        let width = from.chars().count();
+                        if width > 0 && i + width <= bytes.len() {
+                            let here: String = bytes[i..i + width].iter().collect();
+                            if here == *from {
+                                out.push_str(to);
+                                i += width;
+                                continue 'outer;
+                            }
+                        }
+                    }
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+                out
+            }
+            CharFilter::Replace { pattern, replacement } => match regex::Regex::new(pattern) {
+                Ok(re) => re.replace_all(text, replacement.as_str()).into_owned(),
+                Err(_) => text.to_string(),
+            },
+            CharFilter::IcuNormalize => icu_normalize(text),
+        }
+    }
+}
+
+/// The text of an HTML document, with the tags taken out.
+fn strip_html(text: &str, kept: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '<' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let Some(close) = chars[i..].iter().position(|c| *c == '>').map(|p| i + p) else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        let tag: String = chars[i + 1..close].iter().collect();
+        let name = tag.trim_start_matches('/').split_whitespace().next().unwrap_or("").to_string();
+        // a tag the request asked to keep is left where it stands
+        if kept.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+            out.extend(&chars[i..=close]);
+        } else {
+            // a tag is a break in the text, which is a line of its own
+            out.push('\n');
+        }
+        i = close + 1;
+    }
+    out
 }
 
 impl Chain {
     /// A chain out of a tokenizer and the steps to run over it.
     pub fn of(source: Chain, steps: Vec<Step>) -> Chain {
-        Chain { source: source.source, steps }
+        Chain { pre: source.pre, source: source.source, steps }
+    }
+
+    /// The text as the char filters leave it, before it is cut.
+    pub fn prepared(&self, text: &str) -> String {
+        self.pre.iter().fold(text.to_string(), |held, filter| filter.applied(&held))
     }
 }
 
@@ -222,6 +316,7 @@ impl Chain {
             | Source::Classic
             | Source::UaxUrlEmail
             | Source::PathHierarchy { .. }
+            | Source::Icu
             | Source::CharGroup(_) => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
             Source::Pattern(p) => match RegexTokenizer::new(p) {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
@@ -238,6 +333,13 @@ impl Chain {
 
     /// The tokens the source alone makes, before a filter has seen them.
     pub fn cut(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
+        let prepared;
+        let text = if self.pre.is_empty() {
+            text
+        } else {
+            prepared = self.prepared(text);
+            prepared.as_str()
+        };
         match &self.source {
             Source::PatternSplit(pattern) => split_on(text, pattern),
             Source::CharGroup(chars) => {
@@ -245,6 +347,7 @@ impl Chain {
                 runs(text, |c| !ends.contains(&c))
             }
             Source::Classic => classic(text),
+            Source::Icu => icu_words(text),
             Source::UaxUrlEmail => uax_url_email(text),
             Source::PathHierarchy { delimiter, replacement } => {
                 path_hierarchy(text, *delimiter, *replacement)
@@ -646,6 +749,10 @@ fn apply_step(
         }
         // handled before the match, where the held-back words are recorded
         Step::KeywordMarker(_) => tokens,
+        Step::IcuNormalize => {
+            tokens.into_iter().map(|(t, p, a, b)| (icu_normalize(&t), p, a, b)).collect()
+        }
+        Step::IcuFold => tokens.into_iter().map(|(t, p, a, b)| (icu_fold(&t), p, a, b)).collect(),
         Step::Uppercase => {
             tokens.into_iter().map(|(t, p, a, b)| (t.to_uppercase(), p, a, b)).collect()
         }
@@ -852,6 +959,51 @@ fn apply_step(
             out
         }
     }
+}
+
+/// A word written the one way Unicode says it is written, in the case it is
+/// compared in.
+///
+/// This is what `icu_normalizer` does: NFKC, and then the case a comparison
+/// uses -- which writes the German sharp s as two letters, the way a reader
+/// typing it on a keyboard without one would.
+pub(crate) fn icu_normalize(word: &str) -> String {
+    use icu_normalizer::ComposingNormalizerBorrowed;
+    let folded: String = word
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .collect::<String>()
+        .replace(['\u{00DF}', '\u{1E9E}'], "ss");
+    ComposingNormalizerBorrowed::new_nfkc().normalize(&folded).into_owned()
+}
+
+/// The same, with the marks written on the letters dropped: what
+/// `icu_folding` does.
+pub(crate) fn icu_fold(word: &str) -> String {
+    use icu_normalizer::DecomposingNormalizerBorrowed;
+    let normalized = icu_normalize(word);
+    let decomposed = DecomposingNormalizerBorrowed::new_nfkd().normalize(&normalized);
+    decomposed.chars().filter(|c| !('\u{0300}'..='\u{036F}').contains(c)).collect()
+}
+
+/// Where one word ends and the next begins.
+///
+/// Unicode says where a break may fall, and for Thai, Lao, Khmer, Burmese,
+/// Chinese and Japanese -- written without spaces between words -- a
+/// dictionary says which of those breaks are real ones.
+fn icu_words(text: &str) -> Vec<(String, usize, usize, usize)> {
+    use icu_segmenter::WordSegmenter;
+    use icu_segmenter::options::WordBreakInvariantOptions;
+    let segmenter = WordSegmenter::new_auto(WordBreakInvariantOptions::default());
+    let mut out = Vec::new();
+    let mut last = 0usize;
+    for (at, kind) in segmenter.segment_str(text).iter_with_word_type() {
+        if at > last && kind.is_word_like() {
+            out.push((text[last..at].to_string(), out.len(), last, at));
+        }
+        last = at;
+    }
+    out
 }
 
 /// Where a word changes from letters to digits, or from lower case to upper.
@@ -1183,6 +1335,7 @@ pub struct Registry {
     /// naming one -- `_analyze` does -- can still be answered
     tokenizers: Value,
     filters: Value,
+    char_filters: Value,
 }
 
 impl Registry {
@@ -1196,6 +1349,8 @@ impl Registry {
             .unwrap_or(Value::Null);
         let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
         let tokenizers = analysis.get("tokenizer").cloned().unwrap_or(Value::Null);
+        let chars = analysis.get("char_filter").cloned().unwrap_or(Value::Null);
+        registry.char_filters = chars.clone();
         // a normalizer is an analyzer that does not cut the text: whatever it
         // names is applied to the value whole
         if let Some(defined) = analysis.get("normalizer").and_then(|n| n.as_object()) {
@@ -1205,7 +1360,7 @@ impl Registry {
                     o.insert("tokenizer".into(), Value::String("keyword".into()));
                     o.insert("type".into(), Value::String("custom".into()));
                 }
-                if let Some(chain) = build(&spelled, &tokenizers, &filters) {
+                if let Some(chain) = build_with(&spelled, &tokenizers, &filters, &chars) {
                     registry.named.insert(name.clone(), chain);
                 }
             }
@@ -1216,7 +1371,7 @@ impl Registry {
             return registry;
         };
         for (name, spec) in defined {
-            if let Some(chain) = build(spec, &tokenizers, &filters) {
+            if let Some(chain) = build_with(spec, &tokenizers, &filters, &chars) {
                 registry.named.insert(name.clone(), chain);
             }
         }
@@ -1228,7 +1383,7 @@ impl Registry {
     /// A chain described in a request rather than named: a tokenizer, and the
     /// filters over it. The parts may be ones this index defined.
     pub fn custom(&self, spec: &Value) -> Option<Chain> {
-        build(spec, &self.tokenizers, &self.filters)
+        build_with(spec, &self.tokenizers, &self.filters, &self.char_filters)
     }
 
     /// The tokenizer of a request on its own, with no filter over it: what
@@ -1238,7 +1393,44 @@ impl Registry {
             Value::String(name) => tokenizer_source(name, &self.tokenizers),
             other => source_of_spec(other),
         };
-        Chain { source, steps: Vec::new() }
+        Chain { pre: Vec::new(), source, steps: Vec::new() }
+    }
+
+    /// The char filters a request or a mapping names, ready to be applied.
+    pub fn char_filters(&self, named: &[Value]) -> Vec<CharFilter> {
+        named.iter().filter_map(|one| self.char_filter(one)).collect()
+    }
+
+    /// One char filter, named or described.
+    fn char_filter(&self, spec: &Value) -> Option<CharFilter> {
+        let spec = match spec {
+            Value::String(name) => self.char_filters.get(name).cloned().unwrap_or_else(|| {
+                // a name with nothing behind it is one of the built-ins
+                json!({"type": name})
+            }),
+            other => other.clone(),
+        };
+        let kind = spec.get("type").and_then(|t| t.as_str())?;
+        let text = |k: &str| spec.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        Some(match kind {
+            "html_strip" => {
+                CharFilter::HtmlStrip(spec.get("escaped_tags").map(word_list).unwrap_or_default())
+            }
+            "mapping" => CharFilter::Mapping(
+                spec.get("mappings")
+                    .map(word_list)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|rule| rule.split_once("=>"))
+                    .map(|(from, to)| (unescape(from.trim()), unescape(to.trim())))
+                    .collect(),
+            ),
+            "pattern_replace" => {
+                CharFilter::Replace { pattern: text("pattern"), replacement: text("replacement") }
+            }
+            "icu_normalizer" => CharFilter::IcuNormalize,
+            _ => return None,
+        })
     }
 
     /// One named filter, as the steps it stands for.
@@ -1270,7 +1462,8 @@ impl Registry {
 }
 
 /// An analyzer the index defined, out of the parts it named.
-fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
+/// The same, told about the char filters the index defined.
+fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) -> Option<Chain> {
     // `{"type": "english"}` names a built-in rather than describing a chain
     if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
         && kind != "custom"
@@ -1302,7 +1495,8 @@ fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
             steps.extend(s);
         }
     }
-    Some(Chain { source, steps })
+    let pre = spec.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    Some(Chain { pre: char_filters_of(&pre, chars), source, steps })
 }
 
 /// A tokenizer by name, defined by the index or built in.
@@ -1365,6 +1559,8 @@ fn source_of_name(name: &str) -> Source {
         "keyword" => Source::Keyword,
         "whitespace" => Source::Whitespace,
         "letter" => Source::Letter,
+        // the tokenizers that ask a dictionary where the words are
+        "icu_tokenizer" | "thai" | "smartcn_tokenizer" | "smartcn" => Source::Icu,
         "lowercase" => Source::LetterLower,
         "classic" => Source::Classic,
         "uax_url_email" => Source::UaxUrlEmail,
@@ -1432,6 +1628,8 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "decimal_digit" => vec![Step::DecimalDigits],
         "cjk_width" => vec![Step::CjkWidth],
         "cjk_bigram" => vec![Step::CjkBigram],
+        "icu_normalizer" => vec![Step::IcuNormalize],
+        "icu_folding" => vec![Step::IcuFold],
         "keyword_marker" => {
             vec![Step::KeywordMarker(spec.get("keywords").map(word_list).unwrap_or_default())]
         }
@@ -1534,6 +1732,8 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
             vec![Step::WordDelimiter { catenate: false, on_numerics: true, on_case_change: true }]
         }
         "flatten_graph" | "remove_duplicates" | "min_hash" | "keyword_repeat" => vec![],
+        "icu_normalizer" => vec![Step::IcuNormalize],
+        "icu_folding" => vec![Step::IcuFold],
         "arabic_normalization" => vec![Step::Normalize("arabic")],
         "bengali_normalization" => vec![Step::Normalize("bengali")],
         "german_normalization" => vec![Step::Normalize("german")],
@@ -1563,6 +1763,40 @@ fn word_list(list: &Value) -> Vec<String> {
         Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
         _ => Vec::new(),
     }
+}
+
+/// A rule written with escapes in it -- `\\u0020` for a space -- as the text
+/// it stands for.
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'u') && i + 5 < chars.len() {
+            let code: String = chars[i + 2..i + 6].iter().collect();
+            if let Ok(n) = u32::from_str_radix(&code, 16)
+                && let Some(c) = char::from_u32(n)
+            {
+                out.push(c);
+                i += 6;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The char filters a spec names, read against the ones the index defined.
+fn char_filters_of(named: &[Value], defined: &Value) -> Vec<CharFilter> {
+    let registry = Registry {
+        named: HashMap::new(),
+        tokenizers: Value::Null,
+        filters: Value::Null,
+        char_filters: defined.clone(),
+    };
+    registry.char_filters(named)
 }
 
 /// `"a, b => c"` and `"a, b"`, which is how synonyms are written.
@@ -1603,25 +1837,35 @@ pub fn builtin(name: &str) -> Option<Chain> {
     // what a language analyzer is: cut into words, lowercased, its own stop
     // words dropped, and what is left cut down to its stem
     let lang = |l: &str| Chain {
+        pre: Vec::new(),
         source: Source::Standard,
         steps: vec![Step::Lowercase, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
     };
     // the languages whose stemmer wants the word written one way first
     let normalized = |l: &str, first: Step| Chain {
+        pre: Vec::new(),
         source: Source::Standard,
         steps: vec![Step::Lowercase, first, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
     };
     Some(match name {
-        "standard" | "default" => Chain { source: Source::Standard, steps: vec![Step::Lowercase] },
-        "simple" => Chain { source: Source::Letter, steps: vec![Step::Lowercase] },
-        "whitespace" => Chain { source: Source::Whitespace, steps: vec![] },
+        "standard" | "default" => {
+            Chain { pre: Vec::new(), source: Source::Standard, steps: vec![Step::Lowercase] }
+        }
+        "simple" => Chain { pre: Vec::new(), source: Source::Letter, steps: vec![Step::Lowercase] },
+        "whitespace" => Chain { pre: Vec::new(), source: Source::Whitespace, steps: vec![] },
         "stop" => Chain {
+            pre: Vec::new(),
             source: Source::Letter,
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
         },
-        "keyword" | "raw" => Chain { source: Source::Keyword, steps: vec![] },
-        "pattern" => Chain { source: Source::Pattern(r"\w+".into()), steps: vec![Step::Lowercase] },
+        "keyword" | "raw" => Chain { pre: Vec::new(), source: Source::Keyword, steps: vec![] },
+        "pattern" => Chain {
+            pre: Vec::new(),
+            source: Source::Pattern(r"\w+".into()),
+            steps: vec![Step::Lowercase],
+        },
         "fingerprint" => Chain {
+            pre: Vec::new(),
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint],
         },
@@ -1632,12 +1876,17 @@ pub fn builtin(name: &str) -> Option<Chain> {
         // what OpenSearch keeps for indices made long ago: words and stop
         // words, and no stemming at all
         "chinese" => Chain {
+            pre: Vec::new(),
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
         },
         // Chinese, Japanese and Korean are not written with spaces between
         // words, so a pair of characters stands in for one
-        "cjk" => Chain { source: Source::Standard, steps: vec![Step::Lowercase, Step::CjkBigram] },
+        "cjk" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::CjkBigram],
+        },
         // the languages whose stemmer is a light one, or wants the word
         // written its way first
         "french" => normalized("french", Step::Elision),
@@ -1645,6 +1894,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
         "irish" => normalized("irish", Step::Elision),
         "catalan" => normalized("catalan", Step::Elision),
         "greek" => Chain {
+            pre: Vec::new(),
             source: Source::Standard,
             steps: vec![
                 Step::GreekLowercase,
@@ -1653,13 +1903,17 @@ pub fn builtin(name: &str) -> Option<Chain> {
             ],
         },
         "persian" => Chain {
+            pre: Vec::new(),
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::PersianNormalize, Step::Stop(stop_words("persian"))],
         },
-        "thai" => {
-            Chain { source: Source::Standard, steps: vec![Step::Lowercase, Step::DecimalDigits] }
-        }
+        "thai" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::DecimalDigits],
+        },
         "sorani" => Chain {
+            pre: Vec::new(),
             source: Source::Standard,
             steps: vec![
                 Step::Lowercase,

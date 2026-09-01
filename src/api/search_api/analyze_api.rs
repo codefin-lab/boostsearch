@@ -201,6 +201,7 @@ pub async fn analyze(
             registry.get(name)
         } else if body.get("tokenizer").is_some()
             || body.get("filter").is_some()
+            || body.get("char_filter").is_some()
             || p.contains_key("tokenizer")
         {
             let named = body
@@ -209,7 +210,8 @@ pub async fn analyze(
                 .or_else(|| p.get("tokenizer").map(|t| json!(t)))
                 .unwrap_or_else(|| json!("standard"));
             let filters = body.get("filter").cloned().unwrap_or_else(|| json!([]));
-            registry.custom(&json!({"tokenizer": named, "filter": filters}))
+            let chars = body.get("char_filter").cloned().unwrap_or_else(|| json!([]));
+            registry.custom(&json!({"tokenizer": named, "filter": filters, "char_filter": chars}))
         } else {
             registry.get("standard")
         }
@@ -303,9 +305,31 @@ pub async fn analyze(
                     other.get("type").and_then(|t| t.as_str()).unwrap_or("tokenizer")
                 ),
             };
+            // what the char filters made of the text, before it was cut
+            let asked_chars: Vec<Value> =
+                body.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let prepared: Vec<String> = {
+                let filters = registry.char_filters(&asked_chars);
+                text.iter()
+                    .map(|t| filters.iter().fold(t.clone(), |held, filter| filter.applied(&held)))
+                    .collect()
+            };
+            let charfilters: Vec<Value> = asked_chars
+                .iter()
+                .map(|one| {
+                    let name = match one {
+                        Value::String(s) => s.clone(),
+                        other => format!(
+                            "__anonymous__{}",
+                            other.get("type").and_then(|t| t.as_str()).unwrap_or("char_filter")
+                        ),
+                    };
+                    json!({"name": name, "filtered_text": prepared.clone()})
+                })
+                .collect();
             let base = registry.tokenizer_only(&spec);
             let cut: Vec<(String, usize, usize, usize)> =
-                text.iter().flat_map(|t| base.cut(t)).collect();
+                prepared.iter().flat_map(|t| base.cut(t)).collect();
             let stage = json!({"name": name, "tokens": as_json(cut)});
             // each filter is reported as the tokens standing after it, so the
             // chain is run again one filter longer each time
@@ -325,17 +349,18 @@ pub async fn analyze(
                 let chain =
                     crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
                 let cut: Vec<(String, usize, usize, usize)> =
-                    text.iter().flat_map(|t| chain.tokens(t)).collect();
+                    prepared.iter().flat_map(|t| chain.tokens(t)).collect();
                 filters.push(json!({"name": name, "tokens": as_json(cut)}));
             }
-            return respond(
-                &p,
-                json!({"detail": {
-                    "custom_analyzer": true,
-                    "tokenizer": stage,
-                    "tokenfilters": filters,
-                }}),
-            );
+            let mut detail = json!({
+                "custom_analyzer": true,
+                "tokenizer": stage,
+                "tokenfilters": filters,
+            });
+            if !charfilters.is_empty() {
+                detail["charfilters"] = json!(charfilters);
+            }
+            return respond(&p, json!({ "detail": detail }));
         }
         let name = body
             .get("analyzer")

@@ -44,6 +44,9 @@ mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
 boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "c5570a884d53aaeed82094a77171d03833b370c8" }
+icu_normalizer = "2.3.0"
+icu_segmenter = { version = "2.3.0", features = ["auto"] }
+icu_properties = "2.3.0"
 
 [profile.release]
 opt-level = 3
