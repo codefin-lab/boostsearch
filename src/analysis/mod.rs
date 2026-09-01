@@ -20,7 +20,7 @@ use boostcore::tokenizer::{
     AsciiFoldingFilter, Language, NgramTokenizer, RawTokenizer, RegexTokenizer, RemoveLongFilter,
     SimpleTokenizer, Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer, WhitespaceTokenizer,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The languages OpenSearch names, as BoostCore knows them.
 fn language(name: &str) -> Option<Language> {
@@ -58,6 +58,21 @@ enum Source {
     /// the whole text, as one token
     Keyword,
     Pattern(String),
+    /// the pattern says where a token ends rather than what one looks like
+    PatternSplit(String),
+    /// runs of letters, lowercased as they are read
+    LetterLower,
+    /// a word may hold an apostrophe, a dot or a hyphen inside it
+    Classic,
+    /// what `classic` keeps, and an address or a URL kept whole
+    UaxUrlEmail,
+    /// every prefix of a path: `a`, `a/b`, `a/b/c`
+    PathHierarchy {
+        delimiter: char,
+        replacement: char,
+    },
+    /// the characters that end a token, named one by one
+    CharGroup(Vec<char>),
     Ngram {
         min: usize,
         max: usize,
@@ -67,7 +82,7 @@ enum Source {
 
 /// One step of a chain, in the order OpenSearch writes them.
 #[derive(Clone, Debug)]
-enum Step {
+pub enum Step {
     Lowercase,
     AsciiFolding,
     Stop(Vec<String>),
@@ -109,17 +124,16 @@ pub struct Chain {
 }
 
 impl Chain {
+    /// A chain out of a tokenizer and the steps to run over it.
+    pub fn of(source: Chain, steps: Vec<Step>) -> Chain {
+        Chain { source: source.source, steps }
+    }
+}
+
+impl Chain {
     /// The tokens this chain makes of a text, with where each came from.
     pub fn tokens(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
-        let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
-        // the tokenizer runs inside BoostCore; the steps that it also has run
-        // there too, and the rest are applied here
-        let mut analyzer = self.boostcore_analyzer();
-        let mut stream = analyzer.token_stream(text);
-        while stream.advance() {
-            let t = stream.token();
-            out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
-        }
+        let mut out = self.cut(text);
         for step in &self.steps {
             out = apply_here(step, out);
         }
@@ -135,9 +149,18 @@ impl Chain {
     pub fn boostcore_analyzer(&self) -> TextAnalyzer {
         let base = match &self.source {
             Source::Standard => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
-            Source::Letter => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+            Source::Letter | Source::LetterLower => {
+                TextAnalyzer::builder(SimpleTokenizer::default()).dynamic()
+            }
             Source::Whitespace => TextAnalyzer::builder(WhitespaceTokenizer::default()).dynamic(),
             Source::Keyword => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
+            // the sources below are cut here rather than by BoostCore; the
+            // text arrives whole and `tokens` splits it
+            Source::PatternSplit(_)
+            | Source::Classic
+            | Source::UaxUrlEmail
+            | Source::PathHierarchy { .. }
+            | Source::CharGroup(_) => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
             Source::Pattern(p) => match RegexTokenizer::new(p) {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
                 Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
@@ -149,6 +172,37 @@ impl Chain {
         };
         // a token longer than a term may be is dropped, as it is upstream
         base.filter_dynamic(RemoveLongFilter::limit(255)).build()
+    }
+
+    /// The tokens the source alone makes, before a filter has seen them.
+    pub fn cut(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
+        match &self.source {
+            Source::PatternSplit(pattern) => split_on(text, pattern),
+            Source::CharGroup(chars) => {
+                let ends: Vec<char> = chars.clone();
+                runs(text, |c| !ends.contains(&c))
+            }
+            Source::Classic => classic(text),
+            Source::UaxUrlEmail => uax_url_email(text),
+            Source::PathHierarchy { delimiter, replacement } => {
+                path_hierarchy(text, *delimiter, *replacement)
+            }
+            _ => {
+                let mut analyzer = self.boostcore_analyzer();
+                let mut stream = analyzer.token_stream(text);
+                let mut out = Vec::new();
+                while stream.advance() {
+                    let t = stream.token();
+                    let text = if matches!(self.source, Source::LetterLower) {
+                        t.text.to_lowercase()
+                    } else {
+                        t.text.clone()
+                    };
+                    out.push((text, t.position, t.offset_from, t.offset_to));
+                }
+                out
+            }
+        }
     }
 
     /// The whole chain, as an analyzer the index can be handed.
@@ -208,6 +262,125 @@ impl TokenStream for ChainStream {
     fn token_mut(&mut self) -> &mut Token {
         &mut self.tokens[self.cursor - 1]
     }
+}
+
+/// The runs of characters a predicate keeps, with where each began.
+fn runs(text: &str, keep: impl Fn(char) -> bool) -> Vec<(String, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut from = 0usize;
+    for (offset, c) in text.char_indices() {
+        if keep(c) {
+            if current.is_empty() {
+                from = offset;
+            }
+            current.push(c);
+        } else if !current.is_empty() {
+            out.push((std::mem::take(&mut current), out.len(), from, offset));
+        }
+    }
+    if !current.is_empty() {
+        out.push((current, out.len(), from, text.len()));
+    }
+    out
+}
+
+/// What is between the matches of a pattern.
+fn split_on(text: &str, pattern: &str) -> Vec<(String, usize, usize, usize)> {
+    let Ok(re) = regex::Regex::new(pattern) else {
+        return runs(text, |c| !c.is_whitespace());
+    };
+    let mut out = Vec::new();
+    let mut last = 0usize;
+    for m in re.find_iter(text) {
+        if m.start() > last {
+            out.push((text[last..m.start()].to_string(), out.len(), last, m.start()));
+        }
+        last = m.end();
+    }
+    if last < text.len() {
+        out.push((text[last..].to_string(), out.len(), last, text.len()));
+    }
+    out
+}
+
+/// A word that may hold an apostrophe, a dot or a hyphen between letters,
+/// which is what `classic` keeps whole.
+fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].1.is_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let from = chars[i].0;
+        let mut end = i;
+        while end < chars.len() {
+            let c = chars[end].1;
+            let joins = matches!(c, '\'' | '.' | '_' | '@' | '&')
+                && chars.get(end + 1).map(|(_, n)| n.is_alphanumeric()).unwrap_or(false);
+            if c.is_alphanumeric() || joins {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        let to = chars.get(end).map(|(o, _)| *o).unwrap_or(text.len());
+        let mut word = text[from..to].to_string();
+        // a possessive is not part of the word, the way the classic tokenizer
+        // has always had it
+        if let Some(base) = word.strip_suffix("'s").or_else(|| word.strip_suffix("'S")) {
+            word = base.to_string();
+        }
+        out.push((word, out.len(), from, to));
+        i = end.max(i + 1);
+    }
+    out
+}
+
+/// What `classic` keeps, and an address or a URL kept whole.
+fn uax_url_email(text: &str) -> Vec<(String, usize, usize, usize)> {
+    let whole =
+        regex::Regex::new(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+)|(?:[\w.+-]+@[\w-]+(?:\.[\w-]+)+)");
+    let Ok(whole) = whole else { return classic(text) };
+    let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
+    let mut last = 0usize;
+    for m in whole.find_iter(text) {
+        for (word, _, from, to) in classic(&text[last..m.start()]) {
+            out.push((word, out.len(), last + from, last + to));
+        }
+        out.push((m.as_str().to_string(), out.len(), m.start(), m.end()));
+        last = m.end();
+    }
+    for (word, _, from, to) in classic(&text[last..]) {
+        out.push((word, out.len(), last + from, last + to));
+    }
+    out
+}
+
+/// Every prefix of a path, so that a search for a directory finds what is
+/// under it.
+fn path_hierarchy(
+    text: &str,
+    delimiter: char,
+    replacement: char,
+) -> Vec<(String, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut so_far = String::new();
+    for part in text.split(delimiter) {
+        if part.is_empty() && so_far.is_empty() {
+            so_far.push(replacement);
+            continue;
+        }
+        if !so_far.is_empty() && !so_far.ends_with(replacement) {
+            so_far.push(replacement);
+        }
+        so_far.push_str(part);
+        out.push((so_far.clone(), 0, 0, so_far.len()));
+    }
+    out
 }
 
 /// Steps BoostCore has no filter for, or where OpenSearch's order differs.
@@ -743,6 +916,29 @@ impl Registry {
         build(spec, &self.tokenizers, &self.filters)
     }
 
+    /// The tokenizer of a request on its own, with no filter over it: what
+    /// `_analyze` with `explain` reports before the filters are applied.
+    pub fn tokenizer_only(&self, spec: &Value) -> Chain {
+        let source = match spec {
+            Value::String(name) => tokenizer_source(name, &self.tokenizers),
+            other => source_of_spec(other),
+        };
+        Chain { source, steps: Vec::new() }
+    }
+
+    /// One named filter, as the steps it stands for.
+    pub fn filter_steps(&self, spec: &Value) -> Vec<Step> {
+        match spec {
+            Value::String(name) => token_filter(name, &self.filters).unwrap_or_default(),
+            other => {
+                // a filter described in the request is read the same way one
+                // the index defined would be
+                let named = json!({ "__inline__": other });
+                token_filter("__inline__", &named).unwrap_or_default()
+            }
+        }
+    }
+
     /// The chain a name stands for: the index's own first, then the built-ins.
     pub fn get(&self, name: &str) -> Option<Chain> {
         self.named.get(name).cloned().or_else(|| builtin(name))
@@ -784,31 +980,72 @@ fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
 /// A tokenizer by name, defined by the index or built in.
 fn tokenizer_source(name: &str, defined: &Value) -> Source {
     if let Some(spec) = defined.get(name) {
-        let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("standard");
-        let num = |k: &str, d: usize| {
-            spec.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(d)
-        };
-        return match kind {
-            "pattern" | "simple_pattern" | "simple_pattern_split" => Source::Pattern(
-                spec.get("pattern").and_then(|p| p.as_str()).unwrap_or(r"\w+").to_string(),
-            ),
-            "ngram" => {
-                Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: false }
-            }
-            "edge_ngram" => {
-                Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: true }
-            }
-            "keyword" => Source::Keyword,
-            "whitespace" => Source::Whitespace,
-            "letter" => Source::Letter,
-            _ => Source::Standard,
-        };
+        return source_of_spec(spec);
     }
+    source_of_name(name)
+}
+
+/// A tokenizer described rather than named.
+fn source_of_spec(spec: &Value) -> Source {
+    let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("standard");
+    let num =
+        |k: &str, d: usize| spec.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(d);
+    let text = |k: &str| spec.get(k).and_then(|v| v.as_str());
+    let one = |k: &str, d: char| text(k).and_then(|s| s.chars().next()).unwrap_or(d);
+    match kind {
+        "pattern" => {
+            // `pattern` names what separates the tokens, unless a group is
+            // asked for instead
+            let pattern = text("pattern").unwrap_or(r"\W+").to_string();
+            match spec.get("group").and_then(|g| g.as_i64()) {
+                Some(g) if g >= 0 => Source::Pattern(pattern),
+                _ => Source::PatternSplit(pattern),
+            }
+        }
+        "simple_pattern" => Source::Pattern(text("pattern").unwrap_or("").to_string()),
+        "simple_pattern_split" => Source::PatternSplit(text("pattern").unwrap_or("").to_string()),
+        "char_group" => Source::CharGroup(
+            spec.get("tokenize_on_chars")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .filter_map(|s| match s {
+                            "whitespace" => Some(' '),
+                            "letter" | "digit" | "punctuation" | "symbol" => None,
+                            other => other.chars().next(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        "path_hierarchy" | "PathHierarchy" => Source::PathHierarchy {
+            delimiter: one("delimiter", '/'),
+            replacement: one("replacement", one("delimiter", '/')),
+        },
+        "ngram" => Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: false },
+        "edge_ngram" => {
+            Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: true }
+        }
+        other => source_of_name(other),
+    }
+}
+
+/// A tokenizer named rather than described.
+fn source_of_name(name: &str) -> Source {
     match name {
         "keyword" => Source::Keyword,
         "whitespace" => Source::Whitespace,
-        "letter" | "lowercase" => Source::Letter,
-        "pattern" => Source::Pattern(r"\w+".into()),
+        "letter" => Source::Letter,
+        "lowercase" => Source::LetterLower,
+        "classic" => Source::Classic,
+        "uax_url_email" => Source::UaxUrlEmail,
+        "path_hierarchy" | "PathHierarchy" => {
+            Source::PathHierarchy { delimiter: '/', replacement: '/' }
+        }
+        "pattern" => Source::PatternSplit(r"\W+".into()),
+        "ngram" => Source::Ngram { min: 1, max: 2, edges: false },
+        "edge_ngram" => Source::Ngram { min: 1, max: 2, edges: true },
         _ => Source::Standard,
     }
 }
