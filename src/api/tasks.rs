@@ -102,6 +102,20 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     });
     // `group_by` says how to arrange them: under the node that runs them, or
     // flat when the caller wants to walk parents instead
+    // an action filter names the tasks the caller wants to see; the only task
+    // running is this listing, and a filter that does not name it lists none
+    if let Some(actions) = p.get("actions")
+        && !actions.split(',').any(|a| {
+            let a = a.trim();
+            a == "*" || crate::store::glob_match(a, "cluster:monitor/tasks/lists")
+        })
+    {
+        return match p.get("group_by").map(|v| v.as_str()) {
+            Some("none") => respond(&p, json!({"tasks": []})),
+            Some("parents") => respond(&p, json!({"tasks": {}})),
+            _ => respond(&p, json!({"nodes": {}})),
+        };
+    }
     match p.get("group_by").map(|v| v.as_str()) {
         // `none` asks for them in a plain list, `parents` keyed by their id
         Some("none") => return respond(&p, json!({"tasks": [task]})),

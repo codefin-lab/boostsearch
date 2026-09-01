@@ -37,6 +37,8 @@ mod geo;
 pub(crate) use geo::*;
 mod highlight;
 pub(crate) use highlight::*;
+mod explain;
+pub(crate) use explain::*;
 mod lookup;
 pub(crate) use lookup::*;
 mod nested;

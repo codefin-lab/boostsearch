@@ -1,6 +1,7 @@
 //! What an index says its fields are, and what it infers when it is not told.
 
 use super::*;
+use serde_json::json;
 
 impl Mapping {
     pub fn from_body(body: &Value) -> Mapping {
@@ -117,56 +118,168 @@ impl Mapping {
     /// whether the mapping named it or not, but a date needs its own column,
     /// and nothing downstream can build one without knowing the field is one.
     pub fn learn_dynamic(&mut self, source: &Value) {
-        let mut found = Vec::new();
-        Self::sniff_dates(source, &mut String::new(), &self.types, &mut found);
-        for path in found {
-            self.types.insert(path, "date".into());
+        // an index told not to map what it is not told about keeps its
+        // mapping as it was; the values are still stored and searched
+        let dynamic = self.raw.get("dynamic").cloned().unwrap_or(Value::Bool(true));
+        let off = matches!(
+            dynamic.as_str().map(|s| s.to_ascii_lowercase()).as_deref(),
+            Some("false" | "false_allow_templates" | "strict_allow_templates")
+        ) || dynamic == Value::Bool(false);
+        if off {
+            return;
+        }
+        let Some(obj) = source.as_object() else { return };
+        let mut learned: Vec<(String, Value)> = Vec::new();
+        self.sniff_fields(obj, "", &mut learned);
+        for (path, def) in learned {
+            // a leaf under an object that holds no objects keeps its dotted
+            // name as one key under that object
+            if let Some(leaf) = def.get("__leaf__").and_then(|v| v.as_str()) {
+                let parent = path[..path.len() - leaf.len() - 1].to_string();
+                let def = def.get("def").cloned().unwrap_or(Value::Null);
+                self.insert_flat_leaf(&parent, leaf, def);
+                continue;
+            }
+            self.insert_path(&path, def);
         }
     }
 
-    fn sniff_dates(
-        node: &Value,
-        path: &mut String,
-        known: &HashMap<String, String>,
-        out: &mut Vec<String>,
+    /// One leaf written under an object by its whole dotted name.
+    fn insert_flat_leaf(&mut self, parent: &str, leaf: &str, def: Value) {
+        let Some(node) = self.raw.pointer_mut(&pointer_of(parent)) else { return };
+        let props = entry_of(node, "properties", || json!({}));
+        if let Some(o) = props.as_object_mut()
+            && !o.contains_key(leaf)
+        {
+            o.insert(leaf.to_string(), def.clone());
+        }
+        if let Some(t) = def.get("type").and_then(|t| t.as_str()) {
+            self.types.insert(format!("{parent}.{leaf}"), t.to_string());
+        }
+        self.remember_subfields();
+    }
+
+    /// Every field the document holds that the mapping does not, with the
+    /// mapping OpenSearch would give it: text with a keyword beside it for a
+    /// string, a date where the string reads as one, long or float for a
+    /// number, and an object for an object.
+    fn sniff_fields(
+        &self,
+        node: &Map<String, Value>,
+        prefix: &str,
+        out: &mut Vec<(String, Value)>,
     ) {
-        // nothing under a flat_object is a field of its own: its values keep
-        // the spelling they were sent with, whatever they look like
-        if known.get(path.as_str()).map(|t| t == "flat_object").unwrap_or(false) {
-            return;
-        }
-        match node {
-            Value::Object(o) => {
-                let base = path.len();
-                for (k, v) in o {
-                    if k.starts_with('_') {
-                        continue;
+        for (name, value) in node {
+            if name.starts_with('_') {
+                continue;
+            }
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+            // nothing under a flat_object is a field of its own
+            if self.types.get(&path).map(|t| t == "flat_object").unwrap_or(false) {
+                continue;
+            }
+            let known = self.types.contains_key(&path);
+            // a value that is an object, or a list of them, is looked into
+            // even where the object itself is mapped: its fields may not be
+            let inner: Option<&Map<String, Value>> = match value {
+                Value::Object(o) => Some(o),
+                Value::Array(items) => items.iter().find_map(|v| v.as_object()),
+                _ => None,
+            };
+            if let Some(inner) = inner {
+                // an object told to hold no objects of its own maps what is
+                // under it as leaves named by their whole path
+                let flat = self
+                    .field_option(&path, "disable_objects")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if flat {
+                    let mut leaves: Vec<(String, Value)> = Vec::new();
+                    self.sniff_fields(inner, &path, &mut leaves);
+                    for (leaf, def) in leaves {
+                        if def.get("properties").is_some() {
+                            continue;
+                        }
+                        let under = leaf[path.len() + 1..].to_string();
+                        out.push((
+                            format!("{path}.{under}"),
+                            json!({"__leaf__": under, "def": def}),
+                        ));
                     }
-                    if base > 0 {
-                        path.push('.');
-                    }
-                    path.push_str(k);
-                    Self::sniff_dates(v, path, known, out);
-                    path.truncate(base);
+                    continue;
                 }
-            }
-            Value::Array(a) => {
-                for v in a {
-                    Self::sniff_dates(v, path, known, out);
+                if !known && self.raw.pointer(&pointer_of(&path)).is_none() {
+                    out.push((path.clone(), json!({"properties": {}})));
                 }
-            }
-            Value::String(s) => {
-                // a full calendar date, not a bare year that happens to parse
-                let dated = s.len() >= 10
-                    && s.as_bytes()[4] == b'-'
-                    && s.as_bytes()[7] == b'-'
-                    && parse_date_lenient(s).is_some();
-                if dated && !known.contains_key(path.as_str()) {
-                    out.push(path.clone());
+                let nested = self.types.get(&path).map(|t| t == "nested").unwrap_or(false);
+                if !nested {
+                    self.sniff_fields(inner, &path, out);
                 }
+                continue;
             }
-            _ => {}
+            if known || self.raw.pointer(&pointer_of(&path)).is_some() {
+                continue;
+            }
+            let leaf = match value {
+                Value::Array(items) => match items.iter().find(|v| !v.is_null()) {
+                    Some(first) => first,
+                    None => continue,
+                },
+                Value::Null => continue,
+                other => other,
+            };
+            let def = match json_mapping_type(leaf) {
+                "date" => json!({"type": "date"}),
+                "string" => json!({
+                    "type": "text",
+                    "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                }),
+                "long" => json!({"type": "long"}),
+                // a floating point number nobody mapped is a float, not a double
+                "double" => json!({"type": "float"}),
+                "boolean" => json!({"type": "boolean"}),
+                _ => continue,
+            };
+            out.push((path, def));
         }
+    }
+
+    /// Write one field's mapping in at its path, making the objects above it
+    /// where they are not there yet.
+    fn insert_path(&mut self, path: &str, def: Value) {
+        if !self.raw.is_object() {
+            self.raw = json!({});
+        }
+        let mut node = entry_of(&mut self.raw, "properties", || json!({}));
+        let parts: Vec<&str> = path.split('.').collect();
+        for part in &parts[..parts.len() - 1] {
+            let field = entry_of(node, part, || json!({"properties": {}}));
+            node = entry_of(field, "properties", || json!({}));
+        }
+        let leaf = parts[parts.len() - 1];
+        if let Some(o) = node.as_object_mut()
+            && !o.contains_key(leaf)
+        {
+            o.insert(leaf.to_string(), def.clone());
+        }
+        // what the flat view knows follows the raw mapping
+        let mut one = Map::new();
+        one.insert(leaf.to_string(), def);
+        let parent = match parts.len() {
+            1 => String::new(),
+            n => parts[..n - 1].join("."),
+        };
+        flatten_props(&one, &parent, &mut self.types);
+        if !parent.is_empty() {
+            // every object above the leaf is a field too
+            let mut walked = String::new();
+            for part in &parts[..parts.len() - 1] {
+                walked =
+                    if walked.is_empty() { part.to_string() } else { format!("{walked}.{part}") };
+                self.types.entry(walked.clone()).or_insert_with(|| "object".to_string());
+            }
+        }
+        self.remember_subfields();
     }
 
     /// A knob declared on one field's mapping entry.
@@ -345,6 +458,11 @@ pub(crate) fn flatten_props(
             flatten_props(subs, &path, out);
         }
     }
+}
+
+/// The JSON pointer to a field's own mapping entry.
+fn pointer_of(path: &str) -> String {
+    format!("/properties/{}", path.replace('.', "/properties/"))
 }
 
 /// Walk a mapping's properties, gathering the analyzer each path names.

@@ -107,10 +107,20 @@ pub(crate) fn write_page(
                 } else {
                     "the query matched; the order comes from the sort"
                 };
-                hit["_explanation"] = json!({
-                    "value": h.score,
-                    "description": description,
-                    "details": [],
+                // what BoostCore can say about the score, told Lucene's way;
+                // where it can say nothing, the score itself stands
+                let told = (!rescored && sort_keys.is_empty())
+                    .then(|| {
+                        let g = searchers[h.shard_idx].2.read();
+                        query_json.as_ref().and_then(|q| explain_document(&g, q, &h.id))
+                    })
+                    .flatten();
+                hit["_explanation"] = told.unwrap_or_else(|| {
+                    json!({
+                        "value": h.score,
+                        "description": description,
+                        "details": [],
+                    })
                 });
                 // an explained hit says which shard answered for it, and which
                 // node that shard is on

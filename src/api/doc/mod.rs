@@ -650,15 +650,20 @@ pub async fn explain(
         .map(|o| o.total > 0)
         .unwrap_or(false);
 
+    let told = matched
+        .then(|| {
+            store.get(&name).and_then(|st| crate::search::explain_document(&st.read(), &q, &id))
+        })
+        .flatten();
     let mut out = json!({
         "_index": name,
         "_id": id,
         "matched": matched,
-        "explanation": {
+        "explanation": told.unwrap_or_else(|| json!({
             "value": if matched { 1.0 } else { 0.0 },
             "description": if matched { "match" } else { "no match" },
             "details": []
-        }
+        })),
     });
     let sel = body.get("_source").cloned().or_else(|| source_selector_from_params(&p));
     if let Some(sel) = sel.as_ref().filter(|v| **v != json!(false)) {
