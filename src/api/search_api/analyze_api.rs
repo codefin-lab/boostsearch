@@ -475,8 +475,13 @@ pub async fn analyze(
                     json!({"name": name, "filtered_text": prepared.clone()})
                 })
                 .collect();
-            let base = registry.tokenizer_only(&spec);
-            let cut: Vec<Token> = prepared.iter().flat_map(|t| base.cut(t)).collect();
+            // the tokenizer is run over the text as sent, with the char
+            // filters in front of it, so that each token is reported where
+            // it stood before the filters rewrote the text
+            let filters = registry.char_filters(&asked_chars);
+            let base =
+                crate::analysis::Chain::filtered(filters.clone(), registry.tokenizer_only(&spec));
+            let cut: Vec<Token> = text.iter().flat_map(|t| base.cut(t)).collect();
             let stage = json!({"name": name, "tokens": as_json(cut)});
             // each filter is reported as the tokens standing after it, so the
             // chain is run again one filter longer each time
@@ -486,7 +491,7 @@ pub async fn analyze(
             let mut filters = Vec::new();
             // the tokens as the stage before left them: a filter that reads a
             // frequency off the end of a word reports the frequency it read
-            let mut before: Vec<Token> = prepared.iter().flat_map(|t| base.cut(t)).collect();
+            let mut before: Vec<Token> = text.iter().flat_map(|t| base.cut(t)).collect();
             for one in &asked {
                 steps.extend(registry.filter_steps(one));
                 let name = match one {
@@ -496,9 +501,8 @@ pub async fn analyze(
                         other.get("type").and_then(|t| t.as_str()).unwrap_or("filter")
                     ),
                 };
-                let chain =
-                    crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
-                let cut: Vec<Token> = prepared.iter().flat_map(|t| chain.tokens(t)).collect();
+                let chain = crate::analysis::Chain::of(base.clone(), steps.clone());
+                let cut: Vec<Token> = text.iter().flat_map(|t| chain.tokens(t)).collect();
                 let mut listed = as_json(cut.clone());
                 if steps.iter().any(|s| matches!(s, crate::analysis::Step::DelimitedTermFreq(_))) {
                     for (at, token) in listed.iter_mut().enumerate() {

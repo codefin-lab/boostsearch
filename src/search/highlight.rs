@@ -147,7 +147,26 @@ pub(crate) fn build_highlight(
             Some(width) => mark_runs(text, &terms, width, &pre, &post),
             None if pieces => mark_pieces(text, &terms, &pre, &post),
             None if within_words => mark_words_containing(text, &terms, &pre, &post),
-            None => mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post),
+            None => {
+                // the fields a highlight is told to match through lend their
+                // analyzers: a stop word the field drops is still marked when
+                // a plain copy of the field kept it
+                let mut readers: Vec<Option<String>> = vec![analyzer.clone()];
+                for other in opts
+                    .get("matched_fields")
+                    .and_then(|m| m.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                {
+                    let named = ["search_analyzer", "analyzer"]
+                        .iter()
+                        .find_map(|key| mapping.field_option(other, key))
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    readers.push(named);
+                }
+                mark_terms(index, text, &terms, &readers, analysis, &pre, &post)
+            }
         };
         if let Some(marked) = marked {
             out.insert(name, json!([marked]));
@@ -443,14 +462,24 @@ pub(crate) fn mark_terms(
     index: &boostcore::Index,
     text: &str,
     queries: &[(String, bool)],
-    analyzer: Option<&str>,
+    analyzers: &[Option<String>],
+    analysis: &crate::analysis::Registry,
     pre: &str,
     post: &str,
 ) -> Option<String> {
     let mut whole: std::collections::HashSet<String> = Default::default();
     let mut starts: Vec<String> = Vec::new();
+    // the chain itself reads the query, so that every form it stacks in a
+    // place -- a stem beside its word -- is a form to mark
     for (q, partial) in queries {
-        for tok in crate::query::analyze_text(index, q, analyzer) {
+        let mut forms: Vec<String> = Vec::new();
+        for analyzer in analyzers {
+            forms.extend(match analyzer.as_deref().and_then(|named| analysis.get(named)) {
+                Some(chain) => chain.terms(q),
+                None => crate::query::analyze_text(index, q, analyzer.as_deref()),
+            });
+        }
+        for tok in forms {
             if *partial {
                 starts.push(tok);
             } else {

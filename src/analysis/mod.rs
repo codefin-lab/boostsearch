@@ -281,6 +281,90 @@ pub enum CharFilter {
 }
 
 impl CharFilter {
+    /// The text this filter makes of the text it is given, and where each
+    /// byte of it came from: an entry per byte of the output, and one more
+    /// for its end, each naming the byte of the input it stands for.
+    ///
+    /// A token cut out of the filtered text is reported where it stood in
+    /// the text the caller sent, which is what the map is for.
+    pub fn applied_mapped(&self, text: &str) -> (String, Vec<usize>) {
+        match self {
+            CharFilter::Mapping(rules) => {
+                let mut out = String::with_capacity(text.len());
+                let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+                let chars: Vec<(usize, char)> = text.char_indices().collect();
+                let mut i = 0;
+                'outer: while i < chars.len() {
+                    for (from, to) in rules {
+                        let width = from.chars().count();
+                        if width > 0 && i + width <= chars.len() {
+                            let here: String =
+                                chars[i..i + width].iter().map(|(_, c)| *c).collect();
+                            if here == *from {
+                                // what the rule wrote stands for the whole
+                                // of what it replaced
+                                let at = chars[i].0;
+                                for _ in 0..to.len() {
+                                    map.push(at);
+                                }
+                                out.push_str(to);
+                                i += width;
+                                continue 'outer;
+                            }
+                        }
+                    }
+                    let (at, c) = chars[i];
+                    for _ in 0..c.len_utf8() {
+                        map.push(at);
+                    }
+                    out.push(c);
+                    i += 1;
+                }
+                map.push(text.len());
+                (out, map)
+            }
+            CharFilter::Replace { pattern, replacement } => match regex::Regex::new(pattern) {
+                Ok(re) => {
+                    let mut out = String::with_capacity(text.len());
+                    let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+                    let mut last = 0usize;
+                    for m in re.find_iter(text) {
+                        for b in last..m.start() {
+                            map.push(b);
+                        }
+                        out.push_str(&text[last..m.start()]);
+                        let written = re.replace(m.as_str(), replacement.as_str()).into_owned();
+                        for _ in 0..written.len() {
+                            map.push(m.start());
+                        }
+                        out.push_str(&written);
+                        last = m.end();
+                    }
+                    for b in last..text.len() {
+                        map.push(b);
+                    }
+                    out.push_str(&text[last..]);
+                    map.push(text.len());
+                    (out, map)
+                }
+                Err(_) => (text.to_string(), (0..=text.len()).collect()),
+            },
+            // a filter that rewrites the text wholesale is mapped end to end:
+            // the same byte where the lengths agree, and the last byte of
+            // the input for the end of the output where they do not
+            other => {
+                let out = other.applied(text);
+                let map: Vec<usize> = match out.len() == text.len() {
+                    true => (0..=text.len()).collect(),
+                    false => (0..=out.len())
+                        .map(|b| if out.is_empty() { 0 } else { (b * text.len()) / out.len() })
+                        .collect(),
+                };
+                (out, map)
+            }
+        }
+    }
+
     /// The text this filter makes of the text it is given.
     pub fn applied(&self, text: &str) -> String {
         match self {
@@ -352,8 +436,9 @@ impl Chain {
     }
 
     /// The text as the char filters leave it, before it is cut.
-    pub fn prepared(&self, text: &str) -> String {
-        self.pre.iter().fold(text.to_string(), |held, filter| filter.applied(&held))
+    /// A chain with char filters put in front of it.
+    pub fn filtered(pre: Vec<CharFilter>, chain: Chain) -> Chain {
+        Chain { pre, source: chain.source, steps: chain.steps }
     }
 }
 
@@ -467,13 +552,28 @@ impl Chain {
 
     /// The tokens the source alone makes, before a filter has seen them.
     pub fn cut(&self, text: &str) -> Vec<Token> {
-        let prepared;
-        let text = if self.pre.is_empty() {
-            text
-        } else {
-            prepared = self.prepared(text);
-            prepared.as_str()
-        };
+        if self.pre.is_empty() {
+            return self.cut_prepared(text);
+        }
+        // each filter maps its output back onto its input, and the maps
+        // compose back to the text the caller sent
+        let mut held = text.to_string();
+        let mut back: Vec<usize> = (0..=text.len()).collect();
+        for filter in &self.pre {
+            let (out, map) = filter.applied_mapped(&held);
+            back = map.iter().map(|at| back[(*at).min(back.len() - 1)]).collect();
+            held = out;
+        }
+        let mut tokens = self.cut_prepared(&held);
+        for token in tokens.iter_mut() {
+            token.2 = back[token.2.min(back.len() - 1)];
+            token.3 = back[token.3.min(back.len() - 1)];
+        }
+        tokens
+    }
+
+    /// The tokens of a text the char filters have already been through.
+    fn cut_prepared(&self, text: &str) -> Vec<Token> {
         match &self.source {
             Source::PatternSplit(pattern) => split_on(text, pattern),
             Source::CharGroup(chars) => {
