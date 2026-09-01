@@ -336,22 +336,6 @@ pub async fn delete_script(
     respond(&p, json!({"acknowledged": true}))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_hole_is_filled_with_what_was_passed() {
-        let params = json!({"value": "foo", "list": ["a", "b"], "on": true});
-        assert_eq!(render("{{value}}", &params), "foo");
-        assert_eq!(render("{{#on}}yes{{/on}}", &params), "yes");
-        assert_eq!(render("{{^on}}no{{/on}}", &params), "");
-        assert_eq!(render("{{#list}}[{{.}}]{{/list}}", &params), "[a][b]");
-        assert_eq!(render("{{#join}}list{{/join}}", &params), "a,b");
-        assert_eq!(render("{{#toJson}}list{{/toJson}}", &params), "[\"a\",\"b\"]");
-        assert_eq!(render("{{#url}}a b{{/url}}", &params), "a%20b");
-    }
-}
 
 /// `_msearch/template` -- several templated searches in one request.
 pub async fn msearch_template(
@@ -408,4 +392,21 @@ pub async fn msearch_template(
         }
     }
     respond(&p, json!({"took": 1, "responses": responses}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hole_is_filled_with_what_was_passed() {
+        let params = json!({"value": "foo", "list": ["a", "b"], "on": true});
+        assert_eq!(render("{{value}}", &params), "foo");
+        assert_eq!(render("{{#on}}yes{{/on}}", &params), "yes");
+        assert_eq!(render("{{^on}}no{{/on}}", &params), "");
+        assert_eq!(render("{{#list}}[{{.}}]{{/list}}", &params), "[a][b]");
+        assert_eq!(render("{{#join}}list{{/join}}", &params), "a,b");
+        assert_eq!(render("{{#toJson}}list{{/toJson}}", &params), "[\"a\",\"b\"]");
+        assert_eq!(render("{{#url}}a b{{/url}}", &params), "a%20b");
+    }
 }
