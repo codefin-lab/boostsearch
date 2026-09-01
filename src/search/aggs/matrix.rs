@@ -44,11 +44,11 @@ impl Running {
         let n = self.docs;
         let width = self.width();
         let mut deltas = vec![0.0f64; width];
-        for at in 0..width {
+        for (at, delta) in deltas.iter_mut().enumerate() {
             let value = row[at];
             self.counts[at] += 1.0;
             self.sums[at] += value;
-            deltas[at] = value * n - self.sums[at];
+            *delta = value * n - self.sums[at];
             if n == 1.0 {
                 self.means[at] = value;
                 continue;
@@ -89,7 +89,7 @@ impl Running {
         self.docs += other.docs;
         let total = self.docs;
         let mut deltas = vec![0.0f64; width];
-        for at in 0..width {
+        for (at, delta) in deltas.iter_mut().enumerate() {
             let mean_a = self.means[at];
             let var_a = self.variances[at];
             let skew_a = self.skewness[at];
@@ -101,7 +101,7 @@ impl Running {
 
             self.counts[at] += other.counts[at];
             self.means[at] = (n_a * mean_a + n_b * mean_b) / (n_a + n_b);
-            deltas[at] = other.sums[at] / n_b - self.sums[at] / n_a;
+            *delta = other.sums[at] / n_b - self.sums[at] / n_a;
             self.sums[at] += other.sums[at];
 
             let d = mean_b - mean_a;
@@ -140,9 +140,9 @@ impl Running {
             .collect();
         let variances: Vec<f64> = self.variances.iter().map(|v| v / n_less_one).collect();
         let mut covariances = vec![vec![0.0f64; width]; width];
-        for a in 0..width {
-            for b in 0..width {
-                covariances[a][b] = match a.cmp(&b) {
+        for (a, row) in covariances.iter_mut().enumerate() {
+            for (b, cell) in row.iter_mut().enumerate() {
+                *cell = match a.cmp(&b) {
                     std::cmp::Ordering::Equal => variances[a],
                     std::cmp::Ordering::Less => self.covariances[a][b] / n_less_one,
                     std::cmp::Ordering::Greater => self.covariances[b][a] / n_less_one,
