@@ -136,6 +136,18 @@ pub struct Mapping {
     pub types: HashMap<String, String>,
     /// the mapping body exactly as the user sent it, for GET _mapping
     pub raw: Value,
+    /// The multi-fields with a normalizer, worked out once when the mapping
+    /// changes: every document would otherwise walk the whole mapping looking
+    /// for them, and most mappings have none.
+    subs: Vec<(String, String, String)>,
+    /// A field declared as an `alias` and the field it stands for. Asking the
+    /// mapping what type a path holds is done once per node of every document
+    /// written, and reading that out of the mapping tree -- a formatted string
+    /// and a walk -- was the single most expensive thing about indexing a
+    /// mapped document.
+    aliases: HashMap<String, String>,
+    /// The `format` a date path declares, for the same reason.
+    formats: HashMap<String, String>,
 }
 
 impl Mapping {}

@@ -371,7 +371,7 @@ impl Store {
         let mapping = body
             .get("mappings")
             .map(Mapping::from_body)
-            .unwrap_or_else(|| Mapping { types: HashMap::new(), raw: serde_json::json!({}) });
+            .unwrap_or_else(|| Mapping::from_body(&serde_json::json!({})));
         let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
         let aliases: HashMap<String, Value> = body
             .get("aliases")

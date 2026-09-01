@@ -10,7 +10,15 @@ impl Mapping {
         if let Some(props) = body.get("properties").and_then(|p| p.as_object()) {
             flatten_props(props, "", &mut types);
         }
-        Mapping { types, raw: body }
+        let mut m = Mapping {
+            types,
+            raw: body,
+            subs: Vec::new(),
+            aliases: HashMap::new(),
+            formats: HashMap::new(),
+        };
+        m.remember_subfields();
+        m
     }
 
     /// Multi-fields declared with a normalizer, as (parent path, sub name).
@@ -176,12 +184,25 @@ impl Mapping {
         node.get("fields")?.get(sub)?.get("normalizer")?.as_str().map(|s| s.to_string())
     }
 
-    pub fn normalized_subfields(&self) -> Vec<(String, String, String)> {
-        let mut out = Vec::new();
+    pub fn normalized_subfields(&self) -> &[(String, String, String)] {
+        &self.subs
+    }
+
+    /// Work out again what the mapping says, after it changed: the normalized
+    /// multi-fields, the aliases, and the formats dates are written in.
+    pub(crate) fn remember_subfields(&mut self) {
+        self.subs.clear();
+        self.aliases.clear();
+        self.formats.clear();
         if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
-            collect_normalizers(props, "", &mut out);
+            collect_normalizers(props, "", &mut self.subs);
+            collect_indirections(props, "", &mut self.aliases, &mut self.formats);
         }
-        out
+    }
+
+    /// The format a date path declares, if it declares one.
+    pub fn date_format(&self, field: &str) -> Option<&str> {
+        self.formats.get(field).map(|s| s.as_str())
     }
 
     /// Types the mapping treats as a single value rather than a container.
@@ -193,19 +214,20 @@ impl Mapping {
     }
 
     pub fn type_of(&self, field: &str) -> Option<&str> {
-        let field = self.target_of(field).unwrap_or(field);
+        // the aliases are known ahead of a write, so the common path is one
+        // lookup in a map rather than a walk of the mapping tree
+        if !self.aliases.is_empty()
+            && let Some(target) = self.aliases.get(field)
+        {
+            return self.types.get(target.as_str()).map(|s| s.as_str());
+        }
         self.types.get(field).map(|s| s.as_str())
     }
 
     /// A field declared as an `alias` is another name for a field that is
     /// really there; this is the name behind it.
     pub fn target_of(&self, field: &str) -> Option<&str> {
-        let path =
-            self.raw.pointer(&format!("/properties/{}", field.replace('.', "/properties/")))?;
-        if path.get("type").and_then(|t| t.as_str()) != Some("alias") {
-            return None;
-        }
-        path.get("path").and_then(|p| p.as_str())
+        self.aliases.get(field).map(|s| s.as_str())
     }
 
     /// PUT _mapping is additive: new properties layer onto the old ones, and
@@ -251,6 +273,7 @@ impl Mapping {
                 o.insert(key.clone(), val.clone());
             }
         }
+        self.remember_subfields();
     }
 }
 
@@ -318,6 +341,38 @@ fn collect_analyzers(
         }
         if let Some(sub) = spec.get("fields").and_then(|p| p.as_object()) {
             collect_analyzers(sub, &path, out);
+        }
+    }
+}
+
+/// Walk a mapping's properties for the two things a write asks about at every
+/// node: which paths are aliases, and which dates name a format.
+fn collect_indirections(
+    props: &serde_json::Map<String, Value>,
+    prefix: &str,
+    aliases: &mut HashMap<String, String>,
+    formats: &mut HashMap<String, String>,
+) {
+    for (name, spec) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        match spec.get("type").and_then(|t| t.as_str()) {
+            Some("alias") => {
+                if let Some(target) = spec.get("path").and_then(|p| p.as_str()) {
+                    aliases.insert(path.clone(), target.to_string());
+                }
+            }
+            Some("date") | Some("date_nanos") => {
+                if let Some(f) = spec.get("format").and_then(|f| f.as_str()) {
+                    formats.insert(path.clone(), f.to_string());
+                }
+            }
+            _ => {}
+        }
+        if let Some(sub) = spec.get("properties").and_then(|p| p.as_object()) {
+            collect_indirections(sub, &path, aliases, formats);
+        }
+        if let Some(sub) = spec.get("fields").and_then(|p| p.as_object()) {
+            collect_indirections(sub, &path, aliases, formats);
         }
     }
 }

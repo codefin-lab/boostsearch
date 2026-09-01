@@ -168,7 +168,7 @@ pub fn write_doc_versioned(
     }
     st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
-    let mut indexed = crate::store::expand_for_indexing(&source, &st.mapping);
+    let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);
     // the kinds a query narrows against have to be the kinds actually indexed,
     // which is the coerced view rather than what the client wrote
     st.observe(&indexed);

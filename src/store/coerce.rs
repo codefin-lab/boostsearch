@@ -174,8 +174,7 @@ pub(crate) fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mappi
         leaf => {
             let ty = mapping.type_of(path);
             if matches!(ty, Some("date") | Some("date_nanos")) {
-                let fmt = mapping.field_option(path, "format");
-                let fmt = fmt.as_ref().and_then(|v| v.as_str());
+                let fmt = mapping.date_format(path);
                 // a date is a number in the index, the way OpenSearch stores
                 // one; `_source` still says whatever the client sent
                 if let Some(n) = date_number(leaf, fmt, ty == Some("date_nanos")) {
@@ -382,9 +381,11 @@ pub(crate) fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
 /// The copy is added as a dotted top-level key, which the JSON fields expand
 /// into the same path a nested object would produce -- and unlike nesting, it
 /// does not collide with the parent being a scalar.
-pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
+pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
-    let mut out = source.clone();
+    // the document is coerced where it stands: it was cloned for this once per
+    // write, which for a bulk of large documents is a copy of the whole body
+    let mut out = source;
     coerce_leaves(&mut out, &mut String::new(), mapping);
     fill_open_ranges(&mut out, mapping);
     gather_flat_objects(&mut out, mapping);
@@ -393,10 +394,11 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
     }
     let source = &out.clone();
     let Some(obj) = out.as_object_mut() else { return out };
-    for (parent, sub, normalizer) in subs {
+    for (parent, sub, normalizer) in subs.iter() {
         let Some(v) = source.pointer(&format!("/{}", parent.replace('.', "/"))).cloned() else {
             continue;
         };
+        let normalizer = normalizer.clone();
         let normalized = match &v {
             Value::Array(items) => {
                 let mapped: Vec<Value> =
@@ -415,7 +417,7 @@ pub fn expand_for_indexing(source: &Value, mapping: &Mapping) -> Value {
         // milliseconds and a date_nanos is nanoseconds, and the copy carries
         // the number the parent was coerced to
         let mut normalized = normalized;
-        let step = match (mapping.type_of(&parent), mapping.type_of(&format!("{parent}.{sub}"))) {
+        let step = match (mapping.type_of(parent), mapping.type_of(&format!("{parent}.{sub}"))) {
             (Some("date"), Some("date_nanos")) => 1_000_000i64,
             (Some("date_nanos"), Some("date")) => -1_000_000,
             _ => 0,
@@ -444,8 +446,10 @@ pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -
     if let Value::Object(obj) = source {
         let converted: BTreeMap<String, OwnedValue> =
             obj.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect();
-        d.add_object(fields.dynamic, converted.clone());
-        d.add_object(fields.raw, converted);
+        // The two views hold the same document, one tokenized and one not.
+        // Converting it into the form BoostCore keeps is most of what writing
+        // a document costs, so it is done once and both fields point at it.
+        d.add_object_to(&[fields.dynamic, fields.raw], converted);
     }
     d
 }

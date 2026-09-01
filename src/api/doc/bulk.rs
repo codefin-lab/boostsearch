@@ -9,6 +9,7 @@ pub async fn bulk(
     _headers: HeaderMap,
     body: String,
 ) -> Response {
+    let started = std::time::Instant::now();
     let default_index = index.map(|Path(i)| i);
     let mut items = Vec::new();
     let mut errors = false;
@@ -417,5 +418,10 @@ pub async fn bulk(
             g.sync_translog();
         }
     }
-    axum::Json(json!({"took": 0, "errors": errors, "items": items})).into_response()
+    axum::Json(json!({
+        "took": started.elapsed().as_millis() as u64,
+        "errors": errors,
+        "items": items,
+    }))
+    .into_response()
 }
