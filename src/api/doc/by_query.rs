@@ -7,6 +7,15 @@
 
 use super::*;
 
+/// One document, as the walk saw it.
+pub(crate) struct Seen {
+    index: String,
+    id: String,
+    source: Value,
+    /// where the document stood when the walk read it
+    seq_no: Option<u64>,
+}
+
 /// What a walk over a query's results did.
 #[derive(Default)]
 pub(crate) struct Tally {
@@ -20,6 +29,23 @@ pub(crate) struct Tally {
 }
 
 impl Tally {
+    /// A document that was written to since the walk read it.
+    fn note_conflict(&mut self, seen: &Seen) {
+        self.version_conflicts += 1;
+        let id = &seen.id;
+        let seq = seen.seq_no.unwrap_or(0);
+        self.failures.push(json!({
+            "index": seen.index, "id": id, "status": 409,
+            "cause": {
+                "type": "version_conflict_engine_exception",
+                "reason": format!(
+                    "[{id}]: version conflict, required seqNo [{seq}], primary term [1]"
+                ),
+                "index": seen.index, "shard": "0", "index_uuid": "_na_",
+            },
+        }));
+    }
+
     /// The answer OpenSearch gives for a walk of this kind.
     fn answer(&self, took: u128, batches: usize) -> Value {
         json!({
@@ -50,7 +76,7 @@ fn found(
     expr: &str,
     body: &Value,
     p: &Params,
-) -> std::result::Result<Vec<(String, String, Value)>, Response> {
+) -> std::result::Result<Vec<Seen>, Response> {
     let limit = p
         .get("max_docs")
         .or_else(|| p.get("size"))
@@ -58,7 +84,10 @@ fn found(
         .or_else(|| body.get("max_docs").and_then(|v| v.as_u64()).map(|v| v as usize))
         .unwrap_or(10_000);
     let query = body.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
-    let mut request = json!({"query": query, "size": limit, "_source": true});
+    // the sequence number each document stood at is what makes a write
+    // conditional: one written since is a conflict, not a document to write
+    let mut request =
+        json!({"query": query, "size": limit, "_source": true, "seq_no_primary_term": true});
     if let Some(sort) = body.get("sort") {
         request["sort"] = sort.clone();
     }
@@ -67,16 +96,38 @@ fn found(
         .hits
         .into_iter()
         .filter_map(|hit| {
-            let index = hit.get("_index")?.as_str()?.to_string();
-            let id = hit.get("_id")?.as_str()?.to_string();
-            let source = hit.get("_source").cloned().unwrap_or_else(|| json!({}));
-            Some((index, id, source))
+            Some(Seen {
+                index: hit.get("_index")?.as_str()?.to_string(),
+                id: hit.get("_id")?.as_str()?.to_string(),
+                source: hit.get("_source").cloned().unwrap_or_else(|| json!({})),
+                seq_no: hit.get("_seq_no").and_then(|v| v.as_u64()),
+            })
         })
         .collect())
 }
 
 /// What the request gets wrong before any index is looked at.
-fn complaint(p: &Params) -> Option<Response> {
+fn complaint(p: &Params, body: &Value) -> Option<Response> {
+    // the body may say it too, and the two have to agree
+    if let (Some(named), Some(asked)) =
+        (p.get("max_docs").or_else(|| p.get("size")), body.get("max_docs").and_then(|v| v.as_i64()))
+        && named.parse::<i64>().map(|n| n != asked).unwrap_or(false)
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] set to two different values [{named}] and [{asked}]"),
+        ));
+    }
+    if let Some(asked) = body.get("max_docs").and_then(|v| v.as_i64())
+        && asked < 0
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] parameter cannot be negative, found [{asked}]"),
+        ));
+    }
     if let Some(rate) = p.get("requests_per_second") {
         let asked = rate.parse::<f64>().ok();
         let allowed = matches!(asked, Some(r) if r > 0.0 || r == -1.0);
@@ -99,6 +150,15 @@ fn complaint(p: &Params) -> Option<Response> {
             "[slices] must be a positive integer or the string \"auto\"",
         ));
     }
+    if let (Some(a), Some(b)) = (p.get("max_docs"), p.get("size"))
+        && a != b
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] set to two different values [{b}] and [{a}]"),
+        ));
+    }
     for named in ["max_docs", "size"] {
         if let Some(asked) = p.get(named)
             && asked.parse::<i64>().map(|n| n < 0).unwrap_or(false)
@@ -109,6 +169,17 @@ fn complaint(p: &Params) -> Option<Response> {
                 format!("[max_docs] parameter cannot be negative, found [{asked}]"),
             ));
         }
+    }
+    if let (Some(docs), Some(slices)) = (
+        p.get("max_docs").or_else(|| p.get("size")).and_then(|v| v.parse::<u64>().ok()),
+        p.get("slices").and_then(|v| v.parse::<u64>().ok()),
+    ) && docs < slices
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] should be >= [slices]"),
+        ));
     }
     if let Some(size) = p.get("scroll_size")
         && size.parse::<i64>().map(|n| n < 0).unwrap_or(true)
@@ -142,20 +213,30 @@ pub async fn delete_by_query(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if let Some(complaint) = complaint(&p) {
-        return complaint;
-    }
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    if let Some(complaint) = complaint(&p, &body) {
+        return complaint;
+    }
     let hits = match found(&store, &index, &body, &p) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
     let mut tally = Tally { total: hits.len(), ..Default::default() };
-    for (index, id, _) in hits {
-        let Some(st) = store.get(&index) else { continue };
+    let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
+        || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
+    for seen in hits {
+        let Some(st) = store.get(&seen.index) else { continue };
         let mut g = st.write();
-        let (_, status) = delete_doc(&mut g, &id);
+        if moved_on(&g, &seen) {
+            tally.version_conflicts += 1;
+            if !proceed {
+                tally.note_conflict(&seen);
+                break;
+            }
+            continue;
+        }
+        let (_, status) = delete_doc(&mut g, &seen.id);
         if status == StatusCode::OK {
             tally.deleted += 1;
         } else {
@@ -176,11 +257,11 @@ pub async fn update_by_query(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if let Some(complaint) = complaint(&p) {
-        return complaint;
-    }
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    if let Some(complaint) = complaint(&p, &body) {
+        return complaint;
+    }
     // a script would say what to change; without one the walk rewrites each
     // document as it stands, which is what gives it a new version
     if body.get("script").is_some() {
@@ -195,12 +276,28 @@ pub async fn update_by_query(
         Err(e) => return e,
     };
     let mut tally = Tally { total: hits.len(), ..Default::default() };
-    for (index, id, source) in hits {
-        let Some(st) = store.get(&index) else { continue };
+    let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
+        || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
+    for seen in hits {
+        let Some(st) = store.get(&seen.index) else { continue };
         let mut g = st.write();
-        match write_doc_raw(&mut g, &id, source, "index", None) {
+        if moved_on(&g, &seen) {
+            tally.version_conflicts += 1;
+            if !proceed {
+                tally.note_conflict(&seen);
+                break;
+            }
+            continue;
+        }
+        match write_doc_raw(&mut g, &seen.id, seen.source.clone(), "index", None) {
             Ok(_) => tally.updated += 1,
-            Err(_) => tally.version_conflicts += 1,
+            Err(_) => {
+                tally.version_conflicts += 1;
+                if !proceed {
+                    tally.note_conflict(&seen);
+                    break;
+                }
+            }
         }
     }
     for name in store.resolve(&index) {
@@ -216,11 +313,11 @@ pub async fn reindex(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if let Some(complaint) = complaint(&p) {
-        return complaint;
-    }
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    if let Some(complaint) = complaint(&p, &body) {
+        return complaint;
+    }
     if body.get("script").is_some() {
         return err(
             StatusCode::BAD_REQUEST,
@@ -268,26 +365,32 @@ pub async fn reindex(
         return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "cannot open dest");
     }
     let mut tally = Tally { total: hits.len(), ..Default::default() };
-    for (_, id, mut document) in hits {
+    for seen in hits {
+        let mut document = seen.source.clone();
         if let Some(fields) = kept.as_ref() {
             document = only_these(&document, fields);
         }
         let Some(st) = store.get(&to) else { continue };
         let mut g = st.write();
-        let existed = crate::api::doc::exists_doc(&g, &id);
+        let existed = crate::api::doc::exists_doc(&g, &seen.id);
         let op = if create_only { "create" } else { "index" };
-        match write_doc_raw(&mut g, &id, document, op, None) {
+        match write_doc_raw(&mut g, &seen.id, document, op, None) {
             Ok(_) if existed => tally.updated += 1,
             Ok(_) => tally.created += 1,
             Err(_) => {
                 tally.version_conflicts += 1;
                 if !conflicts_proceed {
                     tally.failures.push(json!({
-                        "index": to, "id": id, "cause": {
+                        "index": to, "id": seen.id, "status": 409,
+                        "cause": {
                             "type": "version_conflict_engine_exception",
-                            "reason": format!("[{id}]: version conflict, document already exists"),
+                            "reason": format!(
+                                "[{}]: version conflict, document already exists (solved by \
+                                 specifying op_type=index)",
+                                seen.id
+                            ),
+                            "index": to, "shard": "0", "index_uuid": "_na_",
                         },
-                        "status": 409,
                     }));
                     break;
                 }
@@ -298,6 +401,14 @@ pub async fn reindex(
         let _ = st.write().refresh();
     }
     finish(&store, tally, started, &p)
+}
+
+/// Whether the document has been written to since the walk read it.
+fn moved_on(g: &IdxState, seen: &Seen) -> bool {
+    match (seen.seq_no, read_seq(g, &seen.id)) {
+        (Some(saw), Some(now)) => saw != now,
+        _ => false,
+    }
 }
 
 /// The source index a request names, which may be written as a list.
@@ -338,13 +449,29 @@ fn finish(store: &Store, tally: Tally, started: std::time::Instant, p: &Params) 
         .filter(|n| *n > 0)
         .unwrap_or(1000);
     let batches = tally.total.div_ceil(per_batch).max(1);
-    let answer = tally.answer(started.elapsed().as_millis(), batches);
+    let mut answer = tally.answer(started.elapsed().as_millis(), batches);
+    // a walk asked to be sliced is one walk here, and says so slice by slice
+    if let Some(slices) = p.get("slices").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1) {
+        let each: Vec<Value> = (0..slices)
+            .map(|slice| {
+                json!({
+                    "slice_id": slice, "total": 0, "updated": 0, "created": 0, "deleted": 0,
+                    "batches": 0, "version_conflicts": 0, "noops": 0,
+                    "retries": {"bulk": 0, "search": 0}, "throttled_millis": 0,
+                    "requests_per_second": -1.0, "throttled_until_millis": 0, "failures": [],
+                })
+            })
+            .collect();
+        answer["slices"] = json!(each);
+    }
     if as_task(p) {
         let name = task_name(store);
         store.remember_task(&name, answer);
         return axum::Json(json!({ "task": name })).into_response();
     }
-    axum::Json(answer).into_response()
+    // a walk that could not write what it found says so in its status
+    let status = if tally.failures.is_empty() { StatusCode::OK } else { StatusCode::CONFLICT };
+    (status, axum::Json(answer)).into_response()
 }
 
 /// `_rethrottle` -- nothing here is throttled, so there is nothing to change.

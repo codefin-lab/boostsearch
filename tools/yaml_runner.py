@@ -243,8 +243,16 @@ class Runner:
             # a `catch` must match the error OpenSearch documents, not just any
             # error -- otherwise a blanket 501 would pass every negative test
             if isinstance(catch, str) and catch.startswith("/") and catch.endswith("/"):
+                # the message itself is what the test names; the whole body is
+                # the fallback for the tests that name a field inside it
+                error = parsed.get("error") if isinstance(parsed, dict) else None
+                reason = error.get("reason") if isinstance(error, dict) else None
                 blob = json.dumps(parsed)
-                if not re.search(catch[1:-1], blob):
+                pattern = catch[1:-1]
+                if not (
+                    (reason and re.search(pattern, reason))
+                    or re.search(pattern, blob)
+                ):
                     raise Failure(f"catch {catch} did not match {blob[:200]}")
             else:
                 want = CATCH_CODES.get(catch)
