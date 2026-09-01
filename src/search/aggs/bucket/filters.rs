@@ -162,6 +162,8 @@ pub(crate) fn run_peeled_agg(
         run_geo_distance_agg(store, targets, query_json, def, weighted)
     } else if def.get("percentile_ranks").is_some() {
         run_percentile_ranks(store, targets, query_json, def)
+    } else if def.get("children").is_some() || def.get("parent").is_some() {
+        run_join_agg(store, targets, query_json, def, weighted)
     } else if def.get("sampler").is_some() || def.get("diversified_sampler").is_some() {
         run_sampler_agg(store, targets, query_json, def, weighted)
     } else if def.get("nested").is_some() || def.get("reverse_nested").is_some() {
@@ -481,6 +483,48 @@ pub(crate) fn run_sampler_agg(
     }
     // what the sample holds is what the sub-aggregations are asked about
     let narrowed = json!({"ids": {"values": kept}});
+    let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
+    let mut out = json!({ "doc_count": count });
+    if let Some(Value::Object(map)) = subs {
+        for (name, value) in map {
+            out[name] = value;
+        }
+    }
+    Ok(out)
+}
+
+/// `children` and `parent` -- the documents on the other side of a join.
+///
+/// A `children` aggregation aggregates over the children of the documents its
+/// bucket holds, and `parent` over their parents. Documents are stored whole
+/// here, so each is a query for the other side and then the ordinary walk.
+pub(crate) fn run_join_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let children = def.get("children");
+    let spec = children.or_else(|| def.get("parent")).cloned().unwrap_or(json!({}));
+    let named = spec.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let here = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // whichever side the aggregation names, the other side is what its bucket
+    // is asked about
+    let mut narrowed = if children.is_some() {
+        json!({"bool": {"must": [
+            {"has_parent": {"parent_type": "", "query": here}},
+            {"term": {"join_field.name": named}},
+        ]}})
+    } else {
+        json!({"bool": {"must": [
+            {"has_child": {"type": named, "query": here}},
+        ]}})
+    };
+    // the join is read here: the search never sees this query as the one it
+    // was asked, so nothing else would expand it
+    crate::search::expand_joins(store, targets, &mut narrowed);
     let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
     let mut out = json!({ "doc_count": count });
     if let Some(Value::Object(map)) = subs {

@@ -249,6 +249,8 @@ pub(crate) fn plan_aggs(
                     || def.get("nested").is_some()
                     || def.get("reverse_nested").is_some()
                     || def.get("sampler").is_some()
+                    || def.get("children").is_some()
+                    || def.get("parent").is_some()
                     || def.get("geo_bounds").is_some()
                     || def.get("geo_centroid").is_some()
                     || def.get("matrix_stats").is_some()
@@ -368,6 +370,11 @@ pub(crate) fn peelable_here(def: &Value) -> bool {
         "reverse_nested",
         "geo_distance",
         "percentile_ranks",
+        "children",
+        "parent",
+        "geo_bounds",
+        "geo_centroid",
+        "matrix_stats",
         "sampler",
         "diversified_sampler",
     ];

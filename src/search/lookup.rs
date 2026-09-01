@@ -448,3 +448,113 @@ pub(crate) fn resolve_terms_lookups(
         _ => Ok(()),
     }
 }
+
+/// Rewrite the queries that join a document to its parent or its children.
+///
+/// A join field says which side of a relation a document is on and, for a
+/// child, which document is its parent. Documents are stored whole here, so
+/// `has_child` and `has_parent` are two passes: find the documents on one
+/// side, then ask for the documents on the other side that name them.
+pub(crate) fn expand_joins(store: &Store, targets: &[String], node: &mut Value) {
+    let Some(o) = node.as_object_mut() else { return };
+    for (_, v) in o.iter_mut() {
+        match v {
+            Value::Object(_) => expand_joins(store, targets, v),
+            Value::Array(a) => a.iter_mut().for_each(|x| expand_joins(store, targets, x)),
+            _ => {}
+        }
+    }
+    let joins = ["has_child", "has_parent", "parent_id"];
+    let Some(kind) = joins.iter().find(|k| o.contains_key(**k)).map(|k| k.to_string()) else {
+        return;
+    };
+    let spec = o.get(&kind).cloned().unwrap_or(Value::Null);
+    let field = join_field(store, targets);
+    let Some(field) = field else { return };
+
+    let rewritten = match kind.as_str() {
+        // the documents whose children answer the inner query
+        "has_child" => {
+            let child = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let inner = spec.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
+            let of_that_kind = json!({
+                "bool": {"must": [inner, {"term": {format!("{field}.name"): child}}]}
+            });
+            let parents = ids_of_field(store, targets, &of_that_kind, &format!("{field}.parent"));
+            json!({"ids": {"values": parents}})
+        }
+        // the documents whose parent answers the inner query
+        "has_parent" => {
+            let parent = spec.get("parent_type").and_then(|v| v.as_str()).unwrap_or("");
+            let inner = spec.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
+            let of_that_kind = json!({
+                "bool": {"must": [inner, {"term": {format!("{field}.name"): parent}}]}
+            });
+            let parents = matching_ids_here(store, targets, &of_that_kind);
+            json!({"terms": {format!("{field}.parent"): parents}})
+        }
+        // the children of one named document
+        _ => {
+            let parent = spec
+                .get("id")
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
+            let child = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            json!({
+                "bool": {"must": [
+                    {"term": {format!("{field}.parent"): parent}},
+                    {"term": {format!("{field}.name"): child}},
+                ]}
+            })
+        }
+    };
+    o.remove(&kind);
+    *node = rewritten;
+}
+
+/// The join field an index declares, if it declares one.
+fn join_field(store: &Store, targets: &[String]) -> Option<String> {
+    for name in targets {
+        let st = store.get(name)?;
+        let g = st.read();
+        if let Some((path, _)) = g.mapping.types.iter().find(|(_, kind)| *kind == "join") {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// The ids of the documents a query finds.
+fn matching_ids_here(store: &Store, targets: &[String], query: &Value) -> Vec<String> {
+    let probe = json!({"query": query, "size": 10_000, "_source": false});
+    match run(store, &targets.join(","), &probe, &Params::new()) {
+        Ok(found) => found
+            .hits
+            .iter()
+            .filter_map(|hit| hit.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// What the documents a query finds hold at one path.
+fn ids_of_field(store: &Store, targets: &[String], query: &Value, path: &str) -> Vec<String> {
+    let probe = json!({"query": query, "size": 10_000, "_source": [path]});
+    let pointer = format!("/_source/{}", path.replace('.', "/"));
+    match run(store, &targets.join(","), &probe, &Params::new()) {
+        Ok(found) => found
+            .hits
+            .iter()
+            .filter_map(|hit| {
+                hit.pointer(&pointer).map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}

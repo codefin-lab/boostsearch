@@ -443,6 +443,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                               [index_prefixes].",
             ),
             "fuzzy" | "regexp" | "wildcard" => Some(""),
+            "has_child" | "has_parent" | "parent_id" => Some(""),
             _ => None,
         };
         if let Some(tail) = tail {

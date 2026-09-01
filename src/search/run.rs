@@ -501,6 +501,7 @@ pub fn run(
         resolve_terms_lookups(store, q)?;
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
+        expand_joins(store, &targets, q);
     }
 
     // a field cannot be both kept and dropped: naming it in both lists asks
