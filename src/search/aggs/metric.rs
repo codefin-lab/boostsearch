@@ -272,7 +272,18 @@ pub(crate) fn run_top_hits(
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("top_hits").cloned().unwrap_or(json!({}));
-    let mut body = json!({"query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}}))});
+    // the documents are scored the way the search scores them: a bucket that
+    // narrows by a filter alone would otherwise score everything at nought
+    let narrowed = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let scored = match narrowed.get("bool").and_then(|b| b.as_object()) {
+        Some(clauses) if !clauses.contains_key("must") && !clauses.contains_key("should") => {
+            let mut with = narrowed.clone();
+            with["bool"]["must"] = json!([{"match_all": {}}]);
+            with
+        }
+        _ => narrowed,
+    };
+    let mut body = json!({ "query": scored });
     for key in [
         "size",
         "from",

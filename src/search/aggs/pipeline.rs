@@ -98,6 +98,66 @@ pub(crate) fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str,
         }
         node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
     };
+    // `bucket_sort` and `bucket_selector` do not add a value to each bucket:
+    // they say which buckets are kept, and in what order
+    if kind == "bucket_sort" {
+        let spec = def.get("bucket_sort").cloned().unwrap_or(json!({}));
+        let by: Vec<(String, bool)> = spec
+            .get("sort")
+            .and_then(|s| s.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|one| match one {
+                        Value::String(field) => Some((field.clone(), true)),
+                        Value::Object(o) => {
+                            let (field, how) = o.iter().next()?;
+                            let ascending = how
+                                .get("order")
+                                .or(Some(how))
+                                .and_then(|v| v.as_str())
+                                .map(|o| o != "desc")
+                                .unwrap_or(true);
+                            Some((field.clone(), ascending))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let value_of = |b: &Value, field: &str| -> Option<f64> {
+            if field == "_count" {
+                return b.get("doc_count").and_then(|v| v.as_f64());
+            }
+            if field == "_key" {
+                return b.get("key").and_then(|v| v.as_f64());
+            }
+            let mut node = b;
+            for step in field.split(['.', '>']) {
+                node = node.get(step)?;
+            }
+            node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
+        };
+        buckets.sort_by(|a, b| {
+            for (field, ascending) in &by {
+                let (left, right) = (value_of(a, field), value_of(b, field));
+                let ordering = left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal);
+                let ordering = if *ascending { ordering } else { ordering.reverse() };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let from = spec.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        if from > 0 {
+            buckets.drain(..from.min(buckets.len()));
+        }
+        if let Some(size) = spec.get("size").and_then(|v| v.as_u64()) {
+            buckets.truncate(size as usize);
+        }
+        return;
+    }
+
     let mut running = 0.0f64;
     let mut previous: Option<f64> = None;
     for b in buckets.iter_mut() {
@@ -148,8 +208,16 @@ pub(crate) fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result
     let value = match kind.as_str() {
         "avg_bucket" => sum / n,
         "sum_bucket" => sum,
-        "min_bucket" => values.iter().copied().fold(f64::INFINITY, f64::min),
-        "max_bucket" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "min_bucket" | "max_bucket" => {
+            let picked = if kind == "min_bucket" {
+                values.iter().copied().fold(f64::INFINITY, f64::min)
+            } else {
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            };
+            // the answer names the buckets it was found in, not only the value
+            let keys = keys_at(aggs, path, picked);
+            return Ok(json!({"value": picked, "keys": keys}));
+        }
         "stats_bucket" => {
             return Ok(json!({
                 "count": values.len(),
@@ -230,6 +298,39 @@ pub(crate) fn buckets_path_problem(aggs: &Value, path: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The buckets along this path whose value is the one that was picked.
+pub(crate) fn keys_at(aggs: &Value, path: &str, wanted: f64) -> Vec<String> {
+    let mut segs = path.split('>').flat_map(|s| s.split('.'));
+    let Some(first) = segs.next() else { return Vec::new() };
+    let rest: Vec<&str> = segs.collect();
+    let Some(buckets) = aggs.get(first).and_then(|n| n.get("buckets")).and_then(|b| b.as_array())
+    else {
+        return Vec::new();
+    };
+    buckets
+        .iter()
+        .filter(|b| {
+            let mut cur = *b;
+            for seg in &rest {
+                match cur.get(seg) {
+                    Some(next) => cur = next,
+                    None => return false,
+                }
+            }
+            cur.get("value")
+                .and_then(|v| v.as_f64())
+                .or_else(|| cur.as_f64())
+                .map(|v| v == wanted)
+                .unwrap_or(false)
+        })
+        .filter_map(|b| match b.get("key") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(other) => Some(other.to_string()),
+            None => None,
+        })
+        .collect()
 }
 
 pub(crate) fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {

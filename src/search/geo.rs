@@ -305,8 +305,10 @@ pub(crate) fn run_geo_distance_agg(
                 }
             });
         let mut b = json!({"key": key.clone(), "doc_count": ids.len()});
-        if let Some(f) = from {
-            b["from"] = json!(f);
+        // a range with no lower edge begins at nought, and says so
+        b["from"] = json!(from.unwrap_or(0.0));
+        if from.is_none() && to.is_none() {
+            b.as_object_mut().map(|o| o.remove("from"));
         }
         if let Some(t) = to {
             b["to"] = json!(t);
