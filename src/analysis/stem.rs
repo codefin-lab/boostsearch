@@ -49,27 +49,212 @@ fn strip(word: &str, min_len: usize, endings: &[&str]) -> Option<String> {
     None
 }
 
-/// French, as `FrenchLightStemmer` cuts it: the accents go, then the ending.
+/// French, as `FrenchLightStemmer` cuts it.
 pub(crate) fn french_light(word: &str) -> String {
-    let word = strip_accents(word);
-    if len(&word) > 5 && word.ends_with('x') {
-        let base = cut(&word, 1);
-        if base.ends_with("au") {
-            return format!("{}l", cut(&base, 1));
-        }
-        return base;
-    }
-    let word = if len(&word) > 3 && (word.ends_with('x') || word.ends_with('s')) {
-        cut(&word, 1)
-    } else {
-        word
+    let mut w: Vec<char> = word.chars().collect();
+    let set = |w: &mut Vec<char>, back: usize, c: char| {
+        let at = w.len() - back;
+        w[at] = c;
     };
-    let word = strip(&word, 5, &["issement", "issant", "issem"]).unwrap_or(word);
-    let word = strip(&word, 6, &["ement"]).unwrap_or(word);
-    let word = strip(&word, 5, &["ations", "ation", "ition", "ateur", "atrice"]).unwrap_or(word);
-    let word = strip(&word, 5, &["ives", "ive", "logie", "logue"]).unwrap_or(word);
-    let word = strip(&word, 6, &["aires", "aire"]).map(|w| format!("{w}air")).unwrap_or(word);
-    strip(&word, 4, &["ance", "ence", "ique", "isme", "iste"]).unwrap_or(word)
+    if w.len() > 5 && w[w.len() - 1] == 'x' {
+        if w[w.len() - 3] == 'a' && w[w.len() - 2] == 'u' && w[w.len() - 4] != 'e' {
+            set(&mut w, 2, 'l');
+        }
+        w.pop();
+    }
+    if w.len() > 3 && w[w.len() - 1] == 'x' {
+        w.pop();
+    }
+    if w.len() > 3 && w[w.len() - 1] == 's' {
+        w.pop();
+    }
+    // each ending is cut, and what is left of the word is written the way the
+    // stem is written
+    if w.len() > 9 && tail(&w, "issement") {
+        w.truncate(w.len() - 6);
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "issant") {
+        w.truncate(w.len() - 4);
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 6 && tail(&w, "ement") {
+        w.truncate(w.len() - 4);
+        if w.len() > 3 && tail(&w, "ive") {
+            w.pop();
+            set(&mut w, 1, 'f');
+        }
+        return french_norm(w);
+    }
+    if w.len() > 11 && tail(&w, "ficatrice") {
+        w.truncate(w.len() - 5);
+        set(&mut w, 2, 'e');
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 10 && tail(&w, "ficateur") {
+        w.truncate(w.len() - 4);
+        set(&mut w, 2, 'e');
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 9 && tail(&w, "catrice") {
+        w.truncate(w.len() - 3);
+        set(&mut w, 4, 'q');
+        set(&mut w, 3, 'u');
+        set(&mut w, 2, 'e');
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "cateur") {
+        w.truncate(w.len() - 2);
+        set(&mut w, 4, 'q');
+        set(&mut w, 3, 'u');
+        set(&mut w, 2, 'e');
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "atrice") {
+        w.truncate(w.len() - 4);
+        set(&mut w, 2, 'e');
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 7 && tail(&w, "ateur") {
+        w.truncate(w.len() - 3);
+        set(&mut w, 2, 'e');
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 6 && tail(&w, "trice") {
+        w.pop();
+        set(&mut w, 3, 'e');
+        set(&mut w, 2, 'u');
+        set(&mut w, 1, 'r');
+    }
+    if w.len() > 5 && tail(&w, "i\u{00E8}me") {
+        w.truncate(w.len() - 4);
+        return french_norm(w);
+    }
+    if w.len() > 7 && tail(&w, "teuse") {
+        w.truncate(w.len() - 2);
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 6 && tail(&w, "teur") {
+        w.pop();
+        set(&mut w, 1, 'r');
+        return french_norm(w);
+    }
+    if w.len() > 5 && tail(&w, "euse") {
+        w.truncate(w.len() - 2);
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "\u{00E8}re") {
+        w.pop();
+        set(&mut w, 2, 'e');
+        return french_norm(w);
+    }
+    if w.len() > 7 && tail(&w, "ive") {
+        w.pop();
+        set(&mut w, 1, 'f');
+        return french_norm(w);
+    }
+    if w.len() > 4 && (tail(&w, "folle") || tail(&w, "molle")) {
+        w.truncate(w.len() - 2);
+        set(&mut w, 1, 'u');
+        return french_norm(w);
+    }
+    if w.len() > 9 && tail(&w, "nnelle") {
+        w.truncate(w.len() - 5);
+        return french_norm(w);
+    }
+    if w.len() > 9 && tail(&w, "nnel") {
+        w.truncate(w.len() - 3);
+        return french_norm(w);
+    }
+    if w.len() > 4 && tail(&w, "\u{00E8}te") {
+        w.pop();
+        set(&mut w, 2, 'e');
+    }
+    if w.len() > 8 && tail(&w, "ique") {
+        w.truncate(w.len() - 4);
+    }
+    if w.len() > 8 && tail(&w, "esse") {
+        w.truncate(w.len() - 3);
+        return french_norm(w);
+    }
+    if w.len() > 7 && tail(&w, "inage") {
+        w.truncate(w.len() - 3);
+        return french_norm(w);
+    }
+    if w.len() > 9 && tail(&w, "isation") {
+        w.truncate(w.len() - 7);
+        if w.len() > 5 && tail(&w, "ual") {
+            set(&mut w, 2, 'e');
+        }
+        return french_norm(w);
+    }
+    if w.len() > 9 && tail(&w, "isateur") {
+        w.truncate(w.len() - 7);
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "ation") {
+        w.truncate(w.len() - 5);
+        return french_norm(w);
+    }
+    if w.len() > 8 && tail(&w, "ition") {
+        w.truncate(w.len() - 5);
+        return french_norm(w);
+    }
+    french_norm(w)
+}
+
+/// What is left of a French word once its ending is gone: the accents go, a
+/// doubled letter is written once, and the endings that say nothing follow.
+fn french_norm(mut w: Vec<char>) -> String {
+    if w.len() > 4 {
+        for c in w.iter_mut() {
+            *c = match *c {
+                '\u{00E0}' | '\u{00E1}' | '\u{00E2}' => 'a',
+                '\u{00F4}' => 'o',
+                '\u{00E8}' | '\u{00E9}' | '\u{00EA}' => 'e',
+                '\u{00F9}' | '\u{00FB}' => 'u',
+                '\u{00EE}' => 'i',
+                '\u{00E7}' => 'c',
+                other => other,
+            };
+        }
+        let mut ch = w[0];
+        let mut i = 1;
+        while i < w.len() {
+            if w[i] == ch && ch.is_alphabetic() {
+                w.remove(i);
+            } else {
+                ch = w[i];
+                i += 1;
+            }
+        }
+    }
+    if w.len() > 4 && tail(&w, "ie") {
+        w.truncate(w.len() - 2);
+    }
+    if w.len() > 4 {
+        if w[w.len() - 1] == 'r' {
+            w.pop();
+        }
+        if w[w.len() - 1] == 'e' {
+            w.pop();
+        }
+        if w[w.len() - 1] == 'e' {
+            w.pop();
+        }
+        if w.len() > 1 && w[w.len() - 1] == w[w.len() - 2] && w[w.len() - 1].is_alphabetic() {
+            w.pop();
+        }
+    }
+    w.into_iter().collect()
 }
 
 /// Portuguese, as `PortugueseLightStemmer` cuts it.
@@ -90,15 +275,70 @@ pub(crate) fn portuguese_light(word: &str) -> String {
     strip(&word, 4, &["ismo", "ista", "osa", "oso", "ona", "ao"]).unwrap_or(word)
 }
 
-/// Italian, as `ItalianLightStemmer` cuts it: only the plural and the gender.
+/// Italian, as `ItalianLightStemmer` cuts it: the accents go, and then the
+/// ending that says the gender and the number.
 pub(crate) fn italian_light(word: &str) -> String {
-    let word = strip_accents(word);
-    if len(&word) < 6 {
-        return word;
+    let mut w: Vec<char> = word.chars().collect();
+    if w.len() < 6 {
+        return w.into_iter().collect();
     }
-    match word.chars().last() {
-        Some('a') | Some('e') | Some('i') | Some('o') => cut(&word, 1),
-        _ => word,
+    flatten_vowels(&mut w);
+    let last = w[w.len() - 1];
+    let before = w[w.len() - 2];
+    let cut = match last {
+        'e' if before == 'i' || before == 'h' => 2,
+        'e' => 1,
+        'i' if before == 'h' || before == 'i' => 2,
+        'i' => 1,
+        'a' if before == 'i' => 2,
+        'a' => 1,
+        'o' if before == 'i' => 2,
+        'o' => 1,
+        _ => 0,
+    };
+    w.truncate(w.len() - cut);
+    w.into_iter().collect()
+}
+
+/// Spanish, as `SpanishLightStemmer` cuts it.
+pub(crate) fn spanish_light(word: &str) -> String {
+    let mut w: Vec<char> = word.chars().collect();
+    if w.len() < 5 {
+        return w.into_iter().collect();
+    }
+    flatten_vowels(&mut w);
+    let len = w.len();
+    match w[len - 1] {
+        'o' | 'a' | 'e' => {
+            w.truncate(len - 1);
+        }
+        's' => {
+            if len >= 4 && w[len - 2] == 'e' && w[len - 3] == 's' && w[len - 4] == 'e' {
+                w.truncate(len - 2);
+            } else if len >= 3 && w[len - 2] == 'e' && w[len - 3] == 'c' {
+                w[len - 3] = 'z';
+                w.truncate(len - 2);
+            } else if matches!(w[len - 2], 'o' | 'a' | 'e') {
+                w.truncate(len - 2);
+            }
+        }
+        _ => {}
+    }
+    w.into_iter().collect()
+}
+
+/// A vowel with a mark on it, written without one -- which is where several
+/// of the light stemmers begin.
+fn flatten_vowels(w: &mut [char]) {
+    for c in w.iter_mut() {
+        *c = match *c {
+            '\u{00E0}' | '\u{00E1}' | '\u{00E2}' | '\u{00E4}' => 'a',
+            '\u{00F2}' | '\u{00F3}' | '\u{00F4}' | '\u{00F6}' => 'o',
+            '\u{00E8}' | '\u{00E9}' | '\u{00EA}' | '\u{00EB}' => 'e',
+            '\u{00F9}' | '\u{00FA}' | '\u{00FB}' | '\u{00FC}' => 'u',
+            '\u{00EC}' | '\u{00ED}' | '\u{00EE}' | '\u{00EF}' => 'i',
+            other => other,
+        };
     }
 }
 
@@ -186,34 +426,161 @@ pub(crate) fn indonesian(word: &str) -> String {
     word
 }
 
-/// Czech, as `CzechStemmer` cuts it: the case ending, then what is left of
-/// the possessive.
+/// Czech, as `CzechStemmer` cuts it: the case ending, then the possessive,
+/// and then the consonant the ending left behind written as it is spoken.
 pub(crate) fn czech(word: &str) -> String {
-    if len(word) < 5 {
-        return word.to_string();
+    let mut w: Vec<char> = word.chars().collect();
+    remove_case(&mut w);
+    remove_possessives(&mut w);
+    if !w.is_empty() {
+        czech_normalize(&mut w);
     }
-    let word = strip(
-        word,
-        4,
-        &[
-            "atech", "etem", "atum", "ech", "ich", "ich", "eho", "emi", "emu", "ete", "eti", "iho",
-            "imi", "imu", "ach", "ata", "aty", "ych", "ama", "ami", "ove", "ovi", "ymi", "em",
-            "es", "im", "um", "at", "am", "os", "us", "ym", "mi", "ou", "a", "e", "i", "u", "y",
-            "o",
-        ],
-    )
-    .unwrap_or_else(|| word.to_string());
-    // and the ending that marks a possessive or a diminutive
-    let word = strip(&word, 5, &["ov", "in", "uv"]).unwrap_or(word);
-    strip(
-        &word,
-        4,
-        &[
-            "ak", "ec", "en", "ic", "in", "it", "iv", "ob", "ot", "ov", "ul", "yn", "ck", "dl",
-            "nk", "tv", "tk", "vk",
-        ],
-    )
-    .unwrap_or(word)
+    w.into_iter().collect()
+}
+
+/// Whether a word ends with these characters.
+fn tail(w: &[char], ending: &str) -> bool {
+    let ending: Vec<char> = ending.chars().collect();
+    w.len() >= ending.len() && w[w.len() - ending.len()..] == ending[..]
+}
+
+fn any_tail(w: &[char], endings: &[&str]) -> bool {
+    endings.iter().any(|e| tail(w, e))
+}
+
+/// A Czech consonant softened by the ending that followed it is written the
+/// way it is spoken once the ending is gone.
+fn palatalise(w: &mut Vec<char>) {
+    if any_tail(w, &["ci", "ce", "\u{010D}i", "\u{010D}e"]) {
+        let at = w.len() - 2;
+        w[at] = 'k';
+    } else if any_tail(w, &["zi", "ze", "\u{017E}i", "\u{017E}e"]) {
+        let at = w.len() - 2;
+        w[at] = 'h';
+    } else if any_tail(w, &["\u{010D}t\u{011B}", "\u{010D}ti", "\u{010D}t\u{00ED}"]) {
+        let at = w.len() - 3;
+        w[at] = 'c';
+        w[at + 1] = 'k';
+    } else if any_tail(w, &["\u{0161}t\u{011B}", "\u{0161}ti", "\u{0161}t\u{00ED}"]) {
+        let at = w.len() - 3;
+        w[at] = 's';
+        w[at + 1] = 'k';
+    }
+    w.pop();
+}
+
+/// The ending a Czech noun takes for its case.
+fn remove_case(w: &mut Vec<char>) {
+    let len = w.len();
+    if len > 7 && tail(w, "atech") {
+        w.truncate(len - 5);
+        return;
+    }
+    if len > 6 && any_tail(w, &["\u{011B}tem", "etem", "at\u{016F}m"]) {
+        w.truncate(len - 4);
+        return;
+    }
+    if len > 5
+        && any_tail(
+            w,
+            &[
+                "ech",
+                "ich",
+                "\u{00ED}ch",
+                "\u{00E9}ho",
+                "\u{011B}mi",
+                "emi",
+                "\u{00E9}mu",
+                "ete",
+                "eti",
+                "iho",
+                "\u{00ED}ho",
+                "\u{00ED}mi",
+                "imu",
+                "\u{00E1}ch",
+                "ata",
+                "aty",
+                "\u{00FD}ch",
+                "ama",
+                "ami",
+                "ov\u{00E9}",
+                "ovi",
+                "\u{00FD}mi",
+            ],
+        )
+    {
+        w.truncate(len - 3);
+        return;
+    }
+    if len > 4 && any_tail(w, &["em", "es", "\u{00E9}m", "\u{00ED}m"]) {
+        w.truncate(len - 1);
+        palatalise(w);
+        return;
+    }
+    if len > 4
+        && any_tail(w, &["\u{016F}m", "at", "\u{00E1}m", "os", "us", "\u{00FD}m", "mi", "ou"])
+    {
+        w.truncate(len - 2);
+        return;
+    }
+    if len > 3 && any_tail(w, &["e", "i", "\u{00ED}", "\u{011B}"]) {
+        palatalise(w);
+        return;
+    }
+    if len > 3 && any_tail(w, &["u", "y", "\u{016F}", "a", "o", "\u{00E1}", "\u{00E9}", "\u{00FD}"])
+    {
+        w.truncate(len - 1);
+    }
+}
+
+/// What is left of a possessive or a diminutive.
+fn remove_possessives(w: &mut Vec<char>) {
+    let len = w.len();
+    if len > 5 && any_tail(w, &["ov", "in", "\u{016F}v"]) {
+        w.truncate(len - 2);
+    }
+}
+
+/// The consonant an ending left behind, written the way it is spoken.
+fn czech_normalize(w: &mut Vec<char>) {
+    if tail(w, "\u{010D}t") {
+        let at = w.len() - 2;
+        w[at] = 'c';
+        w[at + 1] = 'k';
+        return;
+    }
+    if tail(w, "\u{0161}t") {
+        let at = w.len() - 2;
+        w[at] = 's';
+        w[at + 1] = 'k';
+        return;
+    }
+    match w.last() {
+        Some('c') | Some('\u{010D}') => {
+            let at = w.len() - 1;
+            w[at] = 'k';
+            return;
+        }
+        Some('z') | Some('\u{017E}') => {
+            let at = w.len() - 1;
+            w[at] = 'h';
+            return;
+        }
+        _ => {}
+    }
+    if w.len() > 1 && w[w.len() - 2] == 'e' {
+        let last = w[w.len() - 1];
+        let at = w.len() - 2;
+        w[at] = last;
+        w.pop();
+        return;
+    }
+    if w.len() > 2 && w[w.len() - 2] == '\u{016F}' {
+        let last = w[w.len() - 1];
+        let at = w.len() - 2;
+        w[at] = 'o';
+        w[at + 1] = last;
+    }
 }
 
 /// Persian, as `PersianNormalizer` treats it: the Arabic letters are written
@@ -826,6 +1193,156 @@ fn sorani_normalize(word: &str) -> String {
             other => Some(other),
         })
         .collect()
+}
+
+/// German, as `GermanStemmer` cuts it.
+///
+/// The word is first written in a shorthand -- the umlauts as plain vowels, a
+/// repeated letter as a star, and the combinations German writes constantly
+/// (`sch`, `ch`, `ei`, `ie`, `ig`, `st`) each as one character -- so that the
+/// endings can be stripped without the length rules being fooled by them.
+/// Then the seven endings every regular one is built from are taken off, and
+/// the shorthand is written back out.
+pub(crate) fn german(word: &str) -> String {
+    let mut w: Vec<char> = word.to_lowercase().chars().collect();
+    if w.iter().any(|c| !c.is_alphabetic()) {
+        return w.into_iter().collect();
+    }
+    let substituted = german_substitute(&mut w);
+    german_strip(&mut w, substituted);
+    german_optimize(&mut w, substituted);
+    german_resubstitute(&mut w);
+    german_remove_particle(&mut w);
+    w.into_iter().collect()
+}
+
+/// The shorthand, and how many characters it saved.
+fn german_substitute(w: &mut Vec<char>) -> usize {
+    let mut saved = 0usize;
+    let mut c = 0usize;
+    while c < w.len() {
+        if c > 0 && w[c] == w[c - 1] {
+            w[c] = '*';
+        } else if w[c] == '\u{00E4}' {
+            w[c] = 'a';
+        } else if w[c] == '\u{00F6}' {
+            w[c] = 'o';
+        } else if w[c] == '\u{00FC}' {
+            w[c] = 'u';
+        } else if w[c] == '\u{00DF}' {
+            w[c] = 's';
+            w.insert(c + 1, 's');
+            saved += 1;
+        }
+        if c < w.len() - 1 {
+            if c < w.len() - 2 && w[c] == 's' && w[c + 1] == 'c' && w[c + 2] == 'h' {
+                w[c] = '$';
+                w.drain(c + 1..c + 3);
+                saved += 2;
+            } else if w[c] == 'c' && w[c + 1] == 'h' {
+                w[c] = '\u{00A7}';
+                w.remove(c + 1);
+                saved += 1;
+            } else if w[c] == 'e' && w[c + 1] == 'i' {
+                w[c] = '%';
+                w.remove(c + 1);
+                saved += 1;
+            } else if w[c] == 'i' && w[c + 1] == 'e' {
+                w[c] = '&';
+                w.remove(c + 1);
+                saved += 1;
+            } else if w[c] == 'i' && w[c + 1] == 'g' {
+                w[c] = '#';
+                w.remove(c + 1);
+                saved += 1;
+            } else if w[c] == 's' && w[c + 1] == 't' {
+                w[c] = '!';
+                w.remove(c + 1);
+                saved += 1;
+            }
+        }
+        c += 1;
+    }
+    saved
+}
+
+/// The seven endings every regular German one is built from.
+fn german_strip(w: &mut Vec<char>, saved: usize) {
+    while w.len() > 3 {
+        let len = w.len();
+        let ends = |w: &Vec<char>, e: &str| tail(w, e);
+        if len + saved > 5 && ends(w, "nd") {
+            w.truncate(len - 2);
+        } else if len + saved > 4 && (ends(w, "em") || ends(w, "er")) {
+            w.truncate(len - 2);
+        } else if matches!(w[len - 1], 'e' | 's' | 'n' | 't') {
+            w.pop();
+        } else {
+            return;
+        }
+    }
+}
+
+/// What the endings left behind, where German says it is written otherwise.
+fn german_optimize(w: &mut Vec<char>, saved: usize) {
+    if w.len() > 5 && tail(w, "erin*") {
+        w.pop();
+        german_strip(w, saved);
+    }
+    if let Some(last) = w.last_mut()
+        && *last == 'z'
+    {
+        *last = 'x';
+    }
+}
+
+/// The shorthand, written back out.
+fn german_resubstitute(w: &mut Vec<char>) {
+    let mut c = 0usize;
+    while c < w.len() {
+        match w[c] {
+            '*' if c > 0 => w[c] = w[c - 1],
+            '$' => {
+                w[c] = 's';
+                w.insert(c + 1, 'c');
+                w.insert(c + 2, 'h');
+            }
+            '\u{00A7}' => {
+                w[c] = 'c';
+                w.insert(c + 1, 'h');
+            }
+            '%' => {
+                w[c] = 'e';
+                w.insert(c + 1, 'i');
+            }
+            '&' => {
+                w[c] = 'i';
+                w.insert(c + 1, 'e');
+            }
+            '#' => {
+                w[c] = 'i';
+                w.insert(c + 1, 'g');
+            }
+            '!' => {
+                w[c] = 's';
+                w.insert(c + 1, 't');
+            }
+            _ => {}
+        }
+        c += 1;
+    }
+}
+
+/// The mark a German past participle carries in the middle of itself.
+fn german_remove_particle(w: &mut Vec<char>) {
+    if w.len() > 4 {
+        for c in 0..w.len().saturating_sub(3) {
+            if w[c..c + 4].iter().collect::<String>() == "gege" {
+                w.drain(c..c + 2);
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -643,17 +643,19 @@ fn apply_step(
             };
             // the languages whose analyzer uses a light stemmer rather than
             // the full algorithm, which is what OpenSearch ships
+            // an analyzer stems its language lightly, where OpenSearch does;
+            // the filter named `<language>_stem` runs the full algorithm
             match lang.to_ascii_lowercase().as_str() {
-                "french" | "french_light" | "light_french" => {
-                    return word_by_word(&stem::french_light);
-                }
-                "portuguese" | "portuguese_light" | "light_portuguese" => {
+                "french_light" | "light_french" => return word_by_word(&stem::french_light),
+                "portuguese_light" | "light_portuguese" => {
                     return word_by_word(&stem::portuguese_light);
                 }
-                "italian" | "italian_light" | "light_italian" => {
-                    return word_by_word(&stem::italian_light);
-                }
+                "italian_light" | "light_italian" => return word_by_word(&stem::italian_light),
+                "spanish_light" | "light_spanish" => return word_by_word(&stem::spanish_light),
                 "greek" => return word_by_word(&stem::greek),
+                "german" | "german_light" | "light_german" => {
+                    return word_by_word(&stem::german);
+                }
                 _ => {}
             }
             // the eighteen languages BoostCore carries an algorithm for
@@ -2163,8 +2165,44 @@ pub fn builtin(name: &str) -> Option<Chain> {
         },
         // the languages whose stemmer is a light one, or wants the word
         // written its way first
-        "french" => normalized("french", Step::Elision),
-        "italian" => normalized("italian", Step::Elision),
+        "french" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Elision,
+                Step::Lowercase,
+                Step::Stop(stop_words("french")),
+                Step::Stem("french_light".into()),
+            ],
+        },
+        "italian" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Elision,
+                Step::Lowercase,
+                Step::Stop(stop_words("italian")),
+                Step::Stem("italian_light".into()),
+            ],
+        },
+        "spanish" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Lowercase,
+                Step::Stop(stop_words("spanish")),
+                Step::Stem("spanish_light".into()),
+            ],
+        },
+        "portuguese" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![
+                Step::Lowercase,
+                Step::Stop(stop_words("portuguese")),
+                Step::Stem("portuguese_light".into()),
+            ],
+        },
         "irish" => normalized("irish", Step::Elision),
         "catalan" => normalized("catalan", Step::Elision),
         "greek" => Chain {
