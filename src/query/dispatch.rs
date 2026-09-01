@@ -364,6 +364,13 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let Some((field, rule)) = body.as_object().and_then(|o| o.iter().next()) else {
                 return Err(anyhow!("[intervals] requires a field"));
             };
+            // where the words stand is not kept for a field that keeps only
+            // that they are there
+            if ctx.mapping.type_of(field) == Some("match_only_text") {
+                return Err(anyhow!(
+                    "Cannot create intervals over field [{field}] with no positions indexed"
+                ));
+            }
             build_interval_rule(ctx, field, rule)?
         }
         // `terms_set` asks for a number of the listed terms rather than all

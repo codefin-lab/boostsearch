@@ -159,15 +159,25 @@ pub(crate) fn describe_query_in(store: &Store, index: &str, q: &Value) -> String
             _ => places.push((at, vec![word])),
         }
     }
+    let last = places.len().saturating_sub(1);
+    let prefix = kind == "match_phrase_prefix";
     let written: Vec<String> = places
         .into_iter()
-        .map(|(_, group)| match group.len() {
-            1 => group[0].clone(),
-            _ => format!("({})", group.join(" ")),
+        .enumerate()
+        .map(|(at, (_, group))| {
+            // a prefix is a prefix of each of the words it could end with
+            let star = if prefix && at == last { "*" } else { "" };
+            match group.len() {
+                1 => format!("{}{star}", group[0]),
+                _ => format!(
+                    "({})",
+                    group.iter().map(|w| format!("{w}{star}")).collect::<Vec<_>>().join(" ")
+                ),
+            }
         })
         .collect();
-    match (kind.as_str(), written.len()) {
-        ("match_phrase_prefix", _) => format!("{field}:\"{}*\"", written.join(" ")),
+    match (prefix, written.len()) {
+        (true, _) => format!("{field}:\"{}\"", written.join(" ")),
         (_, 1) => format!("{field}:{}", written[0]),
         _ => format!("{field}:\"{}\"", written.join(" ")),
     }
@@ -225,7 +235,7 @@ pub(crate) fn describe_query(q: &Value) -> String {
 /// `_analyze` runs text through the tokenizer the query path would use.
 /// How many times a term counts, when the text said so: `foo^3` is three.
 fn frequency_of(token: &str) -> u64 {
-    token.rsplit_once('^').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
+    token.rsplit_once(['^', '|']).and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
 }
 
 pub async fn analyze(

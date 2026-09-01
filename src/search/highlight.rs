@@ -124,13 +124,21 @@ pub(crate) fn build_highlight(
         if terms.is_empty() {
             continue;
         }
-        let analyzer =
+        // the query's words are read the way a search reads them -- a stem
+        // stacked on its word finds the word's other forms in the text
+        let analyzer = ["search_analyzer", "analyzer"]
+            .iter()
+            .find_map(|key| mapping.field_option(&name, key))
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        // how the text was cut is the index analyzer's doing, and decides
+        // whether pieces or words are marked
+        let indexed_with =
             mapping.field_option(&name, "analyzer").and_then(|v| v.as_str().map(|s| s.to_string()));
         // a shingle sub-field holds runs of words rather than words, so what
         // is marked in the text is the run
         // a field cut into pieces of words matches on the pieces, so what is
         // marked is each piece wherever it stands inside a word
-        let chain = analyzer.as_deref().and_then(|named| analysis.get(named));
+        let chain = indexed_with.as_deref().and_then(|named| analysis.get(named));
         let pieces = chain.as_ref().map(|c| c.cuts_into_ngrams()).unwrap_or(false);
         // pieces cut out of whole words keep the word's offsets, so a match
         // on a piece marks the word it came from
