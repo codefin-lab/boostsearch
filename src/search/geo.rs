@@ -335,3 +335,90 @@ pub(crate) fn run_geo_distance_agg(
         Ok(json!({"buckets": buckets}))
     }
 }
+
+/// `geo_bounds` -- the smallest box that holds every point the query found.
+pub(crate) fn run_geo_bounds_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("geo_bounds").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let points = points_found(store, targets, main_query, &field)?;
+    if points.is_empty() {
+        return Ok(json!({}));
+    }
+    let (mut north, mut south) = (f64::MIN, f64::MAX);
+    let (mut west, mut east) = (f64::MAX, f64::MIN);
+    for (lat, lon) in &points {
+        north = north.max(*lat);
+        south = south.min(*lat);
+        west = west.min(*lon);
+        east = east.max(*lon);
+    }
+    Ok(json!({
+        "bounds": {
+            "top_left": {"lat": north, "lon": west},
+            "bottom_right": {"lat": south, "lon": east},
+        }
+    }))
+}
+
+/// `geo_centroid` -- where the points the query found sit, on average.
+pub(crate) fn run_geo_centroid_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("geo_centroid").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let points = points_found(store, targets, main_query, &field)?;
+    if points.is_empty() {
+        return Ok(json!({"count": 0}));
+    }
+    let count = points.len() as f64;
+    let lat = points.iter().map(|(lat, _)| lat).sum::<f64>() / count;
+    let lon = points.iter().map(|(_, lon)| lon).sum::<f64>() / count;
+    Ok(json!({"location": {"lat": lat, "lon": lon}, "count": points.len()}))
+}
+
+/// The points a query found, as latitude and longitude.
+fn points_found(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    field: &str,
+) -> std::result::Result<Vec<(f64, f64)>, Response> {
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": [field],
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let path = format!("/_source/{}", field.replace('.', "/"));
+    Ok(answer
+        .hits
+        .iter()
+        .filter_map(|hit| {
+            let here = hit.pointer(&path)?;
+            let (lat, lon) = lat_lon_of(here)?;
+            Some((lat, lon))
+        })
+        .collect())
+}
+
+/// A point, however it was written.
+fn lat_lon_of(value: &Value) -> Option<(f64, f64)> {
+    match value {
+        Value::Object(o) => Some((o.get("lat")?.as_f64()?, o.get("lon")?.as_f64()?)),
+        // `[lon, lat]`, which is the order GeoJSON writes them in
+        Value::Array(a) if a.len() == 2 => Some((a[1].as_f64()?, a[0].as_f64()?)),
+        Value::String(s) => {
+            let (lat, lon) = s.split_once(',')?;
+            Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
+        }
+        _ => None,
+    }
+}

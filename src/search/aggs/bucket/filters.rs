@@ -152,6 +152,12 @@ pub(crate) fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geo_bounds").is_some() {
+        crate::search::run_geo_bounds_agg(store, targets, query_json, def)
+    } else if def.get("geo_centroid").is_some() {
+        crate::search::run_geo_centroid_agg(store, targets, query_json, def)
+    } else if def.get("matrix_stats").is_some() {
+        run_matrix_stats_agg(store, targets, query_json, def)
     } else if def.get("geo_distance").is_some() {
         run_geo_distance_agg(store, targets, query_json, def, weighted)
     } else if def.get("percentile_ranks").is_some() {
@@ -326,4 +332,98 @@ pub(crate) fn run_adjacency_matrix_agg(
         k(a).cmp(&k(b))
     });
     Ok(json!({"buckets": buckets}))
+}
+
+/// `matrix_stats` -- how a set of numeric fields move, together and apart.
+pub(crate) fn run_matrix_stats_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("matrix_stats").cloned().unwrap_or(json!({}));
+    let fields: Vec<String> = spec
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let probe = json!({
+        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+        "_source": fields.clone(),
+    });
+    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    // only the documents that hold every field count, which is what makes a
+    // covariance a covariance
+    let rows: Vec<Vec<f64>> = answer
+        .hits
+        .iter()
+        .filter_map(|hit| {
+            fields
+                .iter()
+                .map(|field| {
+                    hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
+                        .and_then(|v| v.as_f64())
+                })
+                .collect::<Option<Vec<f64>>>()
+        })
+        .collect();
+    let count = rows.len();
+    if count == 0 {
+        return Ok(json!({"doc_count": 0}));
+    }
+    let mean: Vec<f64> = (0..fields.len())
+        .map(|at| rows.iter().map(|row| row[at]).sum::<f64>() / count as f64)
+        .collect();
+    let moment = |at: usize, power: i32| -> f64 {
+        rows.iter().map(|row| (row[at] - mean[at]).powi(power)).sum::<f64>()
+    };
+    let covariance = |a: usize, b: usize| -> f64 {
+        if count < 2 {
+            return 0.0;
+        }
+        rows.iter().map(|row| (row[a] - mean[a]) * (row[b] - mean[b])).sum::<f64>()
+            / (count - 1) as f64
+    };
+    let mut described = Vec::new();
+    for (at, field) in fields.iter().enumerate() {
+        let variance = covariance(at, at);
+        // the shape of the spread is measured against the spread of these
+        // documents rather than of the population they stand for, which is
+        // the denominator OpenSearch uses here
+        let spread = moment(at, 2) / count as f64;
+        let skewness =
+            if spread == 0.0 { 0.0 } else { moment(at, 3) / count as f64 / spread.powf(1.5) };
+        let kurtosis =
+            if spread == 0.0 { 0.0 } else { moment(at, 4) / count as f64 / (spread * spread) };
+        let with: serde_json::Map<String, Value> = fields
+            .iter()
+            .enumerate()
+            .map(|(other, name)| (name.clone(), json!(covariance(at, other))))
+            .collect();
+        let correlation: serde_json::Map<String, Value> = fields
+            .iter()
+            .enumerate()
+            .map(|(other, name)| {
+                let spread = (covariance(at, at) * covariance(other, other)).sqrt();
+                let r = if spread == 0.0 { 0.0 } else { covariance(at, other) / spread };
+                (name.clone(), json!(r))
+            })
+            .collect();
+        described.push(json!({
+            "name": field,
+            "count": count,
+            "mean": mean[at],
+            "variance": variance,
+            "skewness": skewness,
+            "kurtosis": kurtosis,
+            "covariance": with,
+            "correlation": correlation,
+        }));
+    }
+    // the fields are named back in the order OpenSearch names them
+    described.sort_by(|a, b| {
+        b.get("name").and_then(|v| v.as_str()).cmp(&a.get("name").and_then(|v| v.as_str()))
+    });
+    Ok(json!({"doc_count": count, "fields": described}))
 }
