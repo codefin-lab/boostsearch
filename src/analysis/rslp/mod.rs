@@ -83,7 +83,7 @@ fn steps(text: &'static str) -> Vec<(String, Step)> {
             }
             continue;
         }
-        let mut end_token = |token: &mut String, pieces: &mut Vec<String>| {
+        let end_token = |token: &mut String, pieces: &mut Vec<String>| {
             if !token.trim().is_empty() {
                 pieces.push(token.trim().to_string());
             }

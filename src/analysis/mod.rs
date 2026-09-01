@@ -547,7 +547,7 @@ fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
         let mut end = i;
         while end < chars.len() {
             let c = chars[end].1;
-            let joins = matches!(c, '\'' | '.' | '_' | '@' | '&')
+            let joins = matches!(c, '\'' | '.' | '@' | '&')
                 && chars.get(end + 1).map(|(_, n)| n.is_alphanumeric()).unwrap_or(false);
             if c.is_alphanumeric() || joins {
                 end += 1;
@@ -935,9 +935,24 @@ fn apply_step(
             tokens.into_iter().map(|(t, p, a, b)| (icu_normalize(&t), p, a, b)).collect()
         }
         Step::IcuFold => tokens.into_iter().map(|(t, p, a, b)| (icu_fold(&t), p, a, b)).collect(),
-        Step::Uppercase => {
-            tokens.into_iter().map(|(t, p, a, b)| (t.to_uppercase(), p, a, b)).collect()
-        }
+        Step::Uppercase => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                // a letter with no upper case of its own is left as it is,
+                // which is what a filter written in Java does with `ß`
+                let written: String = t
+                    .chars()
+                    .map(|c| {
+                        let mut upper = c.to_uppercase();
+                        match (upper.len(), upper.next()) {
+                            (1, Some(one)) => one,
+                            _ => c,
+                        }
+                    })
+                    .collect();
+                (written, p, a, b)
+            })
+            .collect(),
         Step::KStem => tokens.into_iter().map(|(t, p, a, b)| (stem::kstem(&t), p, a, b)).collect(),
         Step::Apostrophe => tokens
             .into_iter()

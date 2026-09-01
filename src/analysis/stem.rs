@@ -1244,24 +1244,10 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
             })
             .collect::<String>()
             .replace('\u{00DF}', "ss"),
-        // Danish, Norwegian and Swedish write the same sounds three ways
-        "scandinavian" => word
-            .chars()
-            .map(|c| match c {
-                '\u{00E6}' | '\u{00E4}' => '\u{00E6}',
-                '\u{00F8}' | '\u{00F6}' => '\u{00F8}',
-                other => other,
-            })
-            .collect(),
-        "scandinavian_folding" => word
-            .chars()
-            .map(|c| match c {
-                '\u{00E6}' | '\u{00E4}' => 'a',
-                '\u{00F8}' | '\u{00F6}' => 'o',
-                '\u{00E5}' => 'a',
-                other => other,
-            })
-            .collect(),
+        // Danish, Norwegian and Swedish write the same sounds three ways, and
+        // a doubled vowel stands for the one written with a ring or a slash
+        "scandinavian" => scandinavian(word, false),
+        "scandinavian_folding" => scandinavian(word, true),
         "serbian" => word
             .chars()
             .map(|c| -> String {
@@ -1303,6 +1289,50 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
             .collect::<String>(),
         _ => word.to_string(),
     }
+}
+
+/// The Scandinavian letters, written the one way all three languages read.
+///
+/// Folding writes them as the plain vowel; normalising keeps the letter and
+/// only settles which of the three spellings it is. A doubled vowel stands
+/// for the letter as well: `aa` is `å`, and `oo` is `ø`.
+fn scandinavian(word: &str, fold: bool) -> String {
+    let chars: Vec<char> = word.chars().collect();
+    let mut out = String::with_capacity(word.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let doubled = |b: char| next.map(|n| n.eq_ignore_ascii_case(&b)).unwrap_or(false);
+        let upper = c.is_uppercase();
+        let written = match c.to_lowercase().next().unwrap_or(c) {
+            '\u{00E6}' | '\u{00E4}' => Some(if fold { 'a' } else { '\u{00E6}' }),
+            '\u{00F8}' | '\u{00F6}' => Some(if fold { 'o' } else { '\u{00F8}' }),
+            '\u{00E5}' => Some(if fold { 'a' } else { '\u{00E5}' }),
+            'a' if doubled('a') || doubled('o') => {
+                i += 1;
+                Some(if fold { 'a' } else { '\u{00E5}' })
+            }
+            'o' if doubled('o') || doubled('e') => {
+                i += 1;
+                Some(if fold { 'o' } else { '\u{00F8}' })
+            }
+            'a' if doubled('e') => {
+                i += 1;
+                Some(if fold { 'a' } else { '\u{00E6}' })
+            }
+            _ => None,
+        };
+        match written {
+            Some(letter) if upper => {
+                out.extend(letter.to_uppercase());
+            }
+            Some(letter) => out.push(letter),
+            None => out.push(c),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The Bengali letters that are written two ways, written one way.
