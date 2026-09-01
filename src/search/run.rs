@@ -2,6 +2,79 @@
 
 use super::*;
 
+/// Every `rank_feature` clause a query holds, wherever it stands in it.
+fn collect_rank_features(node: &Value, out: &mut Vec<Value>) {
+    match node {
+        Value::Object(o) => {
+            for (key, value) in o {
+                if key == "rank_feature" {
+                    out.push(value.clone());
+                } else {
+                    collect_rank_features(value, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_rank_features(item, out)),
+        _ => {}
+    }
+}
+
+/// The score a rank feature asks for: the value of a field, curved.
+///
+/// A feature says how much a document is worth on its own -- how many people
+/// link to it, how short its address is -- and the curve says how quickly that
+/// worth stops mattering.
+fn rescore_by_rank_features(
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    cands: &mut [Cand],
+    features: &[Value],
+) {
+    for cand in cands.iter_mut() {
+        let (_, searcher, st) = &searchers[cand.shard];
+        let g = st.read();
+        let Some((_, source)) = source_of(searcher, &g, cand.addr) else { continue };
+        let mut total = 0.0f32;
+        for spec in features {
+            let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            let held = source
+                .pointer(&format!("/{}", field.replace('.', "/")))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            let boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let positive =
+                spec.get("positive_score_impact").and_then(|v| v.as_bool()).unwrap_or(true);
+            // a feature the query says is worth less when it is larger is
+            // read the other way round
+            let value = if positive { held } else { 1.0 / held.max(f32::MIN_POSITIVE) };
+            let curved = if let Some(log) = spec.get("log") {
+                let scaling =
+                    log.get("scaling_factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                (scaling + value).ln()
+            } else if let Some(saturation) = spec.get("saturation") {
+                let pivot = saturation
+                    .get("pivot")
+                    .and_then(|v| v.as_f64())
+                    .map(|p| p as f32)
+                    .unwrap_or(value.max(1.0));
+                value / (value + pivot)
+            } else if let Some(sigmoid) = spec.get("sigmoid") {
+                let pivot = sigmoid.get("pivot").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                let exponent =
+                    sigmoid.get("exponent").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                value.powf(exponent) / (value.powf(exponent) + pivot.powf(exponent))
+            } else if spec.get("linear").is_some() {
+                value
+            } else {
+                // without a curve named, saturation with the value as its own
+                // pivot is what OpenSearch settles on
+                value / (value + 1.0)
+            };
+            total += boost * curved;
+        }
+        cand.score = total;
+    }
+}
+
 /// The score `function_score` asks for, in place of the one the query gave.
 ///
 /// A function may name a filter -- it counts only for the documents that
@@ -681,6 +754,15 @@ pub fn run(
     // query scored it and what the document itself holds
     if let Some(spec) = body.pointer("/query/function_score") {
         rescore_by_functions(&searchers, &mut cands, spec);
+    }
+    // a rank feature scores by the value of a field, curved the way the query
+    // asks for
+    if let Some(query) = body.get("query") {
+        let mut features = Vec::new();
+        collect_rank_features(query, &mut features);
+        if !features.is_empty() {
+            rescore_by_rank_features(&searchers, &mut cands, &features);
+        }
     }
 
     cands.sort_by(|a, b| cmp_cands(a, b, &sort_keys));

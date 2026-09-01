@@ -389,6 +389,7 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     coerce_leaves(&mut out, &mut String::new(), mapping);
     fill_open_ranges(&mut out, mapping);
     gather_flat_objects(&mut out, mapping);
+    add_shingles(&mut out, mapping);
     if subs.is_empty() {
         return out;
     }
@@ -452,4 +453,37 @@ pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -
         d.add_object_to(&[fields.dynamic, fields.raw], converted);
     }
     d
+}
+
+/// The runs of words a `search_as_you_type` field is also written as.
+///
+/// A field declared that way is searched while it is being typed, so beside
+/// the words themselves the index holds every pair, triple and quadruple of
+/// neighbouring words. OpenSearch calls them `_2gram`, `_3gram` and `_4gram`,
+/// and a query may name them.
+fn add_shingles(document: &mut Value, mapping: &Mapping) {
+    let typed: Vec<String> = mapping
+        .types
+        .iter()
+        .filter(|(_, kind)| *kind == "search_as_you_type")
+        .map(|(path, _)| path.clone())
+        .collect();
+    if typed.is_empty() {
+        return;
+    }
+    let Some(obj) = document.as_object_mut() else { return };
+    for path in typed {
+        let Some(text) = obj.get(&path).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            continue;
+        };
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for size in 2..=4usize {
+            if words.len() < size {
+                continue;
+            }
+            let runs: Vec<Value> =
+                words.windows(size).map(|run| Value::String(run.join(" "))).collect();
+            obj.insert(format!("{path}._{size}gram"), Value::Array(runs));
+        }
+    }
 }

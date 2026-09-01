@@ -289,6 +289,12 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 body.get("query").cloned().unwrap_or_else(|| serde_json::json!({"match_all": {}}));
             super::build(ctx, &inner)?
         }
+        // a rank feature scores by what a field holds; which documents answer
+        // is simply which of them hold it
+        "rank_feature" => {
+            let field = body.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            super::build(ctx, &serde_json::json!({"exists": {"field": field}}))?
+        }
         "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"
         | "span_multi" => build_span(ctx, q)?,
         "multi_match" => build_multi_match(ctx, &body)?,
