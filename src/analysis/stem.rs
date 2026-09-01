@@ -220,12 +220,14 @@ pub(crate) fn czech(word: &str) -> String {
 pub(crate) fn persian_normalize(word: &str) -> String {
     word.chars()
         .filter_map(|c| match c {
-            '\u{0643}' => Some('\u{06A9}'),
-            '\u{064A}' | '\u{0649}' => Some('\u{06CC}'),
-            '\u{06C0}' | '\u{0629}' => Some('\u{0647}'),
+            // the Persian letters are written as the Arabic ones they stand for
+            '\u{06A9}' => Some('\u{0643}'),
+            '\u{06CC}' | '\u{0649}' | '\u{06D2}' => Some('\u{064A}'),
+            '\u{06C0}' | '\u{06D5}' | '\u{0629}' => Some('\u{0647}'),
             '\u{0624}' => Some('\u{0648}'),
             '\u{0625}' | '\u{0623}' | '\u{0622}' => Some('\u{0627}'),
-            '\u{200C}' => None,
+            // the joiner and the marks are not part of the word
+            '\u{200C}' | '\u{0640}' => None,
             '\u{064B}'..='\u{065F}' => None,
             other => Some(other),
         })
@@ -650,7 +652,9 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
             })
             .collect(),
         "bengali" => bengali_normalize(word),
-        "hindi" | "indic" => hindi_normalize(word),
+        "hindi" => hindi_normalize(word),
+        // every Indic script, which is what `indic_normalization` answers for
+        "indic" => indic_join(&hindi_normalize(word)),
         "persian" => persian_normalize(word),
         "sorani" => sorani_normalize(word),
         "german" => word
@@ -684,42 +688,51 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
         "serbian" => word
             .chars()
             .map(|c| match c {
-                // Cyrillic written in Latin letters
-                '\u{0430}' => 'a',
-                '\u{0431}' => 'b',
-                '\u{0432}' => 'v',
-                '\u{0433}' => 'g',
-                '\u{0434}' => 'd',
-                '\u{0435}' => 'e',
-                '\u{0437}' => 'z',
-                '\u{0438}' => 'i',
-                '\u{043A}' => 'k',
-                '\u{043B}' => 'l',
-                '\u{043C}' => 'm',
-                '\u{043D}' => 'n',
-                '\u{043E}' => 'o',
-                '\u{043F}' => 'p',
-                '\u{0440}' => 'r',
-                '\u{0441}' => 's',
-                '\u{0442}' => 't',
-                '\u{0443}' => 'u',
-                '\u{0444}' => 'f',
-                '\u{0445}' => 'h',
-                '\u{0446}' => 'c',
-                other => other,
+                '\u{0430}' => "a",
+                '\u{0431}' => "b",
+                '\u{0432}' => "v",
+                '\u{0433}' => "g",
+                '\u{0434}' => "d",
+                '\u{0452}' => "dj",
+                '\u{0435}' => "e",
+                '\u{0436}' => "z",
+                '\u{0437}' => "z",
+                '\u{0438}' => "i",
+                '\u{0458}' => "j",
+                '\u{043A}' => "k",
+                '\u{043B}' => "l",
+                '\u{0459}' => "lj",
+                '\u{043C}' => "m",
+                '\u{043D}' => "n",
+                '\u{045A}' => "nj",
+                '\u{043E}' => "o",
+                '\u{043F}' => "p",
+                '\u{0440}' => "r",
+                '\u{0441}' => "s",
+                '\u{0442}' => "t",
+                '\u{045B}' => "c",
+                '\u{0443}' => "u",
+                '\u{0444}' => "f",
+                '\u{0445}' => "h",
+                '\u{0446}' => "c",
+                '\u{0447}' => "c",
+                '\u{045F}' => "dz",
+                '\u{0448}' => "s",
+                _ => "",
             })
-            .collect(),
+            .collect::<String>(),
         _ => word.to_string(),
     }
 }
 
 /// The Bengali letters that are written two ways, written one way.
+///
+/// Bengali writes the standalone "ত" as a letter of its own; the Bengali
+/// normalizer writes it back as the letter it stands for, and the Indic one
+/// leaves it as it is.
 fn bengali_normalize(word: &str) -> String {
-    // "ত" joined to nothing is the letter that stands for it
-    let word = word
-        .replace("\u{09A4}\u{09CD}\u{200D}", "\u{09CE}")
-        .replace("\u{09A4}\u{09CD}\u{200C}", "\u{09CE}");
-    word.chars()
+    indic_join(word)
+        .chars()
         .filter(|c| *c != '\u{0981}')
         .map(|c| match c {
             '\u{09DC}' | '\u{09DD}' => '\u{09B0}',
@@ -730,6 +743,12 @@ fn bengali_normalize(word: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+/// A consonant joined to nothing is the letter that stands for it.
+fn indic_join(word: &str) -> String {
+    word.replace("\u{09A4}\u{09CD}\u{200D}", "\u{09CE}")
+        .replace("\u{09A4}\u{09CD}\u{200C}", "\u{09CE}")
 }
 
 /// The Devanagari nasal written as the mark for it.

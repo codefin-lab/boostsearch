@@ -904,26 +904,7 @@ fn apply_step(
                 (cut, p, a, b)
             })
             .collect(),
-        Step::CjkWidth => tokens
-            .into_iter()
-            .map(|(t, p, a, b)| {
-                let narrow: String = t
-                    .chars()
-                    .map(|c| {
-                        let n = c as u32;
-                        // the fullwidth letters and digits sit one block up
-                        if (0xFF01..=0xFF5E).contains(&n) {
-                            char::from_u32(n - 0xFEE0).unwrap_or(c)
-                        } else if n == 0x3000 {
-                            ' '
-                        } else {
-                            c
-                        }
-                    })
-                    .collect();
-                (narrow, p, a, b)
-            })
-            .collect(),
+        Step::CjkWidth => tokens.into_iter().map(|(t, p, a, b)| (widened(&t), p, a, b)).collect(),
         Step::Normalize(script) => tokens
             .into_iter()
             .map(|(t, p, a, b)| (stem::normalize(script, &t), p, a, b))
@@ -1156,6 +1137,41 @@ fn icu_words(text: &str) -> Vec<(String, usize, usize, usize)> {
     out
 }
 
+/// The letters written narrow, written the width the index keeps them at.
+///
+/// The fullwidth Latin letters are the plain ones, and the halfwidth katakana
+/// are the ordinary katakana -- with the mark for a voiced sound joined back
+/// onto the letter it belongs to.
+fn widened(text: &str) -> String {
+    const HALFWIDTH_KATAKANA: &str = concat!(
+        "\u{3002}\u{300C}\u{300D}\u{3001}\u{30FB}\u{30F2}\u{30A1}\u{30A3}\u{30A5}\u{30A7}",
+        "\u{30A9}\u{30E3}\u{30E5}\u{30E7}\u{30C3}\u{30FC}\u{30A2}\u{30A4}\u{30A6}\u{30A8}",
+        "\u{30AA}\u{30AB}\u{30AD}\u{30AF}\u{30B1}\u{30B3}\u{30B5}\u{30B7}\u{30B9}\u{30BB}",
+        "\u{30BD}\u{30BF}\u{30C1}\u{30C4}\u{30C6}\u{30C8}\u{30CA}\u{30CB}\u{30CC}\u{30CD}",
+        "\u{30CE}\u{30CF}\u{30D2}\u{30D5}\u{30D8}\u{30DB}\u{30DE}\u{30DF}\u{30E0}\u{30E1}",
+        "\u{30E2}\u{30E4}\u{30E6}\u{30E8}\u{30E9}\u{30EA}\u{30EB}\u{30EC}\u{30ED}\u{30EF}",
+        "\u{30F3}\u{309B}\u{309C}"
+    );
+    let wide: Vec<char> = HALFWIDTH_KATAKANA.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let n = c as u32;
+        if (0xFF01..=0xFF5E).contains(&n) {
+            out.push(char::from_u32(n - 0xFEE0).unwrap_or(c));
+        } else if n == 0x3000 {
+            out.push(' ');
+        } else if (0xFF61..=0xFF9F).contains(&n) {
+            match wide.get((n - 0xFF61) as usize) {
+                Some(w) => out.push(*w),
+                None => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Where a word changes from letters to digits, or from lower case to upper.
 fn split_where_writing_changes(word: &str, on_numerics: bool, on_case: bool) -> Vec<String> {
     let mut parts = Vec::new();
@@ -1341,6 +1357,17 @@ fn stop_words(language: &str) -> Vec<String> {
             "эти",
             "это",
             "я",
+        ],
+        "_dutch_" | "dutch" => &[
+            "de", "en", "van", "ik", "te", "dat", "die", "in", "een", "hij", "het", "niet", "zijn",
+            "is", "was", "op", "aan", "met", "als", "voor", "had", "er", "maar", "om", "hem",
+            "dan", "zou", "of", "wat", "mijn", "men", "dit", "zo", "door", "over", "ze", "zich",
+            "bij", "ook", "tot", "je", "mij", "uit", "der", "daar", "haar", "naar", "heb", "hoe",
+            "heeft", "hebben", "deze", "u", "want", "nog", "zal", "me", "zij", "nu", "ge", "geen",
+            "omdat", "iets", "worden", "toch", "al", "waren", "veel", "meer", "doen", "toen",
+            "moet", "ben", "zonder", "kan", "hun", "dus", "alles", "onder", "ja", "eens", "hier",
+            "wie", "werd", "altijd", "doch", "wordt", "wezen", "kunnen", "ons", "zelf", "tegen",
+            "na", "reeds", "wil", "kon", "niets", "uw", "iemand", "geweest", "andere",
         ],
         "_czech_" | "czech" => &[
             "a",
@@ -1834,7 +1861,9 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             let mut told = HashMap::new();
             for rule in spec.get("rules").and_then(|r| r.as_array()).cloned().unwrap_or_default() {
                 if let Some((from, to)) = rule.as_str().and_then(|r| r.split_once("=>")) {
-                    told.insert(from.trim().to_lowercase(), to.trim().to_string());
+                    for word in from.split(',') {
+                        told.insert(word.trim().to_lowercase(), to.trim().to_string());
+                    }
                 }
             }
             vec![Step::StemmerOverride(told)]
