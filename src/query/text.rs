@@ -126,12 +126,14 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
             let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
             if crate::query::branches(&arcs) {
                 let mut clauses: Vec<Box<dyn Query>> = Vec::new();
+                let mut every: Vec<Term> = Vec::new();
                 for way in crate::query::ways(&arcs) {
                     let Some((last, head)) = way.split_last() else { continue };
                     let head: Vec<Term> = head.iter().map(|w| term_of(w)).collect();
                     for ending in prefix_terms(ctx, f, &path, last)? {
                         let mut phrase = head.clone();
                         phrase.push(ending);
+                        every.extend(phrase.iter().cloned());
                         clauses.push(match phrase.len() {
                             1 => Box::new(TermQuery::new(
                                 phrase.remove(0),
@@ -144,7 +146,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                 if clauses.is_empty() {
                     return Ok(Box::new(EmptyQuery));
                 }
-                return Ok(Box::new(BooleanQuery::union(clauses)));
+                return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
             }
             let mut head = terms.clone();
             let Some(last) = head.pop() else {
@@ -184,10 +186,12 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         // phrase for each way through
         let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
         if crate::query::branches(&arcs) {
+            let mut every: Vec<Term> = Vec::new();
             let clauses: Vec<Box<dyn Query>> = crate::query::ways(&arcs)
                 .into_iter()
                 .map(|way| {
                     let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
+                    every.extend(walked.iter().cloned());
                     match walked.len() {
                         1 => {
                             Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
@@ -198,7 +202,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                 })
                 .collect();
             if !clauses.is_empty() {
-                return Ok(Box::new(BooleanQuery::union(clauses)));
+                return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
             }
         }
         return Ok(Box::new(PhraseQuery::new(terms)));
@@ -675,9 +679,12 @@ pub(crate) fn prefix_terms(ctx: &Ctx, field: Field, path: &str, stem: &str) -> R
         let mut stream = inverted.terms().stream()?;
         while let Some((bytes, _)) = stream.next() {
             if bytes.starts_with(&prefix) {
-                let mut term = Term::from_field_json_path(field, path, true);
-                term.append_bytes(&bytes[term.serialized_value_bytes().len()..]);
-                out.push(Term::from_field_bytes(field, bytes));
+                // every segment holds its own dictionary, and a word two of
+                // them hold is still one word
+                let found = Term::from_field_bytes(field, bytes);
+                if !out.contains(&found) {
+                    out.push(found);
+                }
                 if out.len() >= MOST {
                     return Ok(out);
                 }
