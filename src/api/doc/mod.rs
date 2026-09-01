@@ -168,6 +168,11 @@ pub fn write_doc_versioned(
             ),
         ));
     }
+    // a query stored to be percolated is checked now for what it would fail
+    // on later
+    if let Some(why) = crate::search::percolator_complaint(st, &source) {
+        return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
+    }
     st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);

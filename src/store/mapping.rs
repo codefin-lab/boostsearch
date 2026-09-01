@@ -174,8 +174,14 @@ impl Mapping {
                 continue;
             }
             let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
-            // nothing under a flat_object is a field of its own
-            if self.types.get(&path).map(|t| t == "flat_object").unwrap_or(false) {
+            // nothing under a flat_object is a field of its own, and a query
+            // stored in a percolator field is a query, not a set of fields
+            if self
+                .types
+                .get(&path)
+                .map(|t| t == "flat_object" || t == "percolator")
+                .unwrap_or(false)
+            {
                 continue;
             }
             let known = self.types.contains_key(&path);

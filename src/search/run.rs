@@ -522,6 +522,9 @@ pub fn run(
         }
         collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
+        if names_a_percolate(q) {
+            expand_percolate(store, &targets, q);
+        }
     }
 
     // a field cannot be both kept and dropped: naming it in both lists asks
