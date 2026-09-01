@@ -257,6 +257,14 @@ fn closed_up(text: &str) -> Option<Value> {
     serde_json::from_str(&closed).ok()
 }
 
+/// A template filled in with the parameters it names, where it can be.
+///
+/// Used where a template stands for a query rather than for a whole request,
+/// as `_rank_eval` writes them.
+pub(crate) fn render_query_template(template: &Value, params: &Value) -> Option<Value> {
+    rendered(template, params).ok()
+}
+
 fn rendered(template: &Value, params: &Value) -> std::result::Result<Value, String> {
     // a template may be written as a string or as the body itself
     let text = match template {
