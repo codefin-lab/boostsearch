@@ -355,6 +355,48 @@ impl Chain {
 }
 
 impl Chain {
+    /// The synonym rules written the way the chain in front of them would
+    /// write them.
+    ///
+    /// A rule is text, and Lucene reads it with the tokenizer and the filters
+    /// that stand before the synonym filter: a rule over `foobar` in a chain
+    /// that cuts into trigrams is a rule over `foo oob oba bar`.
+    fn cut_synonyms(&mut self) {
+        for at in 0..self.steps.len() {
+            let Step::Synonym(rules) = &self.steps[at] else { continue };
+            let before = Chain {
+                pre: self.pre.clone(),
+                source: self.source.clone(),
+                steps: self.steps[..at].to_vec(),
+            };
+            let cut = |words: &[String]| -> Vec<String> {
+                let text = words.join(" ");
+                let terms = before.terms(&text);
+                if terms.is_empty() { words.to_vec() } else { terms }
+            };
+            let rewritten: Vec<SynonymRule> = rules
+                .iter()
+                .map(|rule| SynonymRule {
+                    phrase: cut(&rule.phrase),
+                    alternatives: rule.alternatives.iter().map(|a| cut(a)).collect(),
+                    keep_original: rule.keep_original,
+                    alternatives_first: rule.alternatives_first,
+                    graph: rule.graph,
+                })
+                .collect();
+            self.steps[at] = Step::Synonym(rewritten);
+        }
+    }
+
+    /// Whether the chain cuts text into pieces of words rather than words.
+    ///
+    /// A field written that way is matched on the pieces, and a highlighter
+    /// marks the pieces inside the words rather than the words.
+    pub fn cuts_into_ngrams(&self) -> bool {
+        matches!(self.source, Source::Ngram { .. })
+            || self.steps.iter().any(|s| matches!(s, Step::NgramTokens { .. }))
+    }
+
     /// The tokens this chain makes of a text, with where each came from.
     pub fn tokens(&self, text: &str) -> Vec<Token> {
         let mut out = self.cut(text);
@@ -1281,7 +1323,10 @@ fn apply_step(
             out
         }
         Step::Multiplexer(branches) => {
-            let mut out = Vec::new();
+            // every branch is applied to the whole stream, and the results
+            // are read back token by token: each word, in each of its forms,
+            // before the next word
+            let mut out: Vec<Token> = Vec::new();
             for branch in branches {
                 let mut here = tokens.clone();
                 for step in branch {
@@ -1289,6 +1334,7 @@ fn apply_step(
                 }
                 out.extend(here);
             }
+            out.sort_by_key(|t| t.1);
             out
         }
         Step::StemmerOverride(map) => tokens
@@ -2019,6 +2065,9 @@ impl Registry {
     /// Read the `analysis` an index's settings define, on top of the built-ins.
     pub fn from_settings(settings: &Value) -> Registry {
         let mut registry = Registry::default();
+        // a setting may be written as one dotted key rather than as nested
+        // objects; both spell the same thing
+        let settings = &unflattened(settings);
         let analysis = settings
             .pointer("/index/analysis")
             .or_else(|| settings.pointer("/analysis"))
@@ -2198,7 +2247,9 @@ fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) 
     }
     let steps = stacked(steps);
     let pre = spec.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-    Some(Chain { pre: char_filters_of(&pre, chars), source, steps })
+    let mut chain = Chain { pre: char_filters_of(&pre, chars), source, steps };
+    chain.cut_synonyms();
+    Some(chain)
 }
 
 /// The steps that follow a `keyword_repeat`, each keeping the word it was
@@ -2221,6 +2272,38 @@ fn stacked(steps: Vec<Step>) -> Vec<Step> {
                 out.push(Step::PreserveOriginal(Box::new(other)));
             }
             other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Settings with every dotted key opened out into the objects it names.
+fn unflattened(settings: &Value) -> Value {
+    let Some(map) = settings.as_object() else { return settings.clone() };
+    let mut out = Value::Object(serde_json::Map::new());
+    for (key, value) in map {
+        let value = match value {
+            Value::Object(_) => unflattened(value),
+            other => other.clone(),
+        };
+        let mut node = &mut out;
+        let parts: Vec<&str> = key.split('.').collect();
+        for part in &parts[..parts.len() - 1] {
+            let o = node.as_object_mut().unwrap();
+            node =
+                o.entry(part.to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !node.is_object() {
+                *node = Value::Object(serde_json::Map::new());
+            }
+        }
+        if let Some(o) = node.as_object_mut() {
+            let last = parts[parts.len() - 1].to_string();
+            match (o.get_mut(&last), value) {
+                (Some(Value::Object(held)), Value::Object(more)) => held.extend(more),
+                (_, value) => {
+                    o.insert(last, value);
+                }
+            }
         }
     }
     out

@@ -14,6 +14,7 @@ pub(crate) fn build_highlight(
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
     index: &boostcore::Index,
+    analysis: &crate::analysis::Registry,
 ) -> Option<Value> {
     let fields = spec.get("fields")?;
     // where the document itself is not kept, only a field stored in its own
@@ -127,8 +128,16 @@ pub(crate) fn build_highlight(
             mapping.field_option(&name, "analyzer").and_then(|v| v.as_str().map(|s| s.to_string()));
         // a shingle sub-field holds runs of words rather than words, so what
         // is marked in the text is the run
+        // a field cut into pieces of words matches on the pieces, so what is
+        // marked is each piece wherever it stands inside a word
+        let pieces = analyzer
+            .as_deref()
+            .and_then(|named| analysis.get(named))
+            .map(|chain| chain.cuts_into_ngrams())
+            .unwrap_or(false);
         let marked = match shingle_width(&name) {
             Some(width) => mark_runs(text, &terms, width, &pre, &post),
+            None if pieces => mark_pieces(text, &terms, &pre, &post),
             None => mark_terms(index, text, &terms, analyzer.as_deref(), &pre, &post),
         };
         if let Some(marked) = marked {
@@ -326,6 +335,51 @@ fn mark_runs(
     let mut out = String::with_capacity(text.len() + 16);
     let mut cursor = 0usize;
     for (from, to) in merged {
+        out.push_str(&text[cursor..from]);
+        out.push_str(pre);
+        out.push_str(&text[from..to]);
+        out.push_str(post);
+        cursor = to;
+    }
+    out.push_str(&text[cursor..]);
+    Some(out)
+}
+
+/// Mark every place a query word stands inside the text, whole word or not.
+fn mark_pieces(text: &str, queries: &[(String, bool)], pre: &str, post: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (q, _) in queries {
+        for word in q.split_whitespace() {
+            let word = word.to_lowercase();
+            if word.is_empty() {
+                continue;
+            }
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(&word) {
+                let start = from + at;
+                spans.push((start, start + word.len()));
+                from = start + word.len();
+            }
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    spans.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in spans {
+        match merged.last_mut() {
+            Some((_, before)) if *before >= from => *before = (*before).max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut cursor = 0usize;
+    for (from, to) in merged {
+        if !text.is_char_boundary(from) || !text.is_char_boundary(to) {
+            continue;
+        }
         out.push_str(&text[cursor..from]);
         out.push_str(pre);
         out.push_str(&text[from..to]);

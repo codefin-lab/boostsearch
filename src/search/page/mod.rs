@@ -248,7 +248,15 @@ pub(crate) fn write_page(
                     let g = searchers[h.shard_idx].2.read();
                     let kept = g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
                     let groups = nested_inner_hits(
-                        &h, &h.source, "", &clauses, kept, query_json, &g.mapping, &g.index,
+                        &h,
+                        &h.source,
+                        "",
+                        &clauses,
+                        kept,
+                        query_json,
+                        &g.mapping,
+                        &g.index,
+                        &g.analysis,
                     );
                     if !groups.is_empty() {
                         hit["inner_hits"] = Value::Object(groups);
@@ -321,7 +329,8 @@ pub(crate) fn write_page(
             }
             if let Some(spec) = body.get("highlight") {
                 let g = searchers[h.shard_idx].2.read();
-                if let Some(hl) = build_highlight(spec, &h.source, query_json, &g.mapping, &g.index)
+                if let Some(hl) =
+                    build_highlight(spec, &h.source, query_json, &g.mapping, &g.index, &g.analysis)
                 {
                     hit["highlight"] = hl;
                 }

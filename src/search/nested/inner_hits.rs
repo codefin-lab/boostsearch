@@ -39,6 +39,7 @@ pub(crate) fn nested_inner_hits(
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
     index: &boostcore::Index,
+    analysis: &crate::analysis::Registry,
 ) -> serde_json::Map<String, Value> {
     let mut groups = serde_json::Map::new();
     for (path, inner, inner_query) in clauses {
@@ -121,12 +122,13 @@ pub(crate) fn nested_inner_hits(
                     node = &mut node[*step];
                 }
                 node[steps[steps.len() - 1]] = object.clone();
-                if let Some(hl) = build_highlight(spec, &here, query, mapping, index) {
+                if let Some(hl) = build_highlight(spec, &here, query, mapping, index, analysis) {
                     one["highlight"] = hl;
                 }
             }
             // whatever was asked of the objects under this one
-            let deeper = nested_inner_hits(h, object, path, clauses, kept, query, mapping, index);
+            let deeper =
+                nested_inner_hits(h, object, path, clauses, kept, query, mapping, index, analysis);
             if !deeper.is_empty() {
                 one["inner_hits"] = Value::Object(deeper);
             }

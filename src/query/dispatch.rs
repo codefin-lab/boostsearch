@@ -392,6 +392,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             build(ctx, &inner)?
         }
         "bool" => build_bool(ctx, &body)?,
+        // `common` sorts the words by how many documents hold them: the rare
+        // ones are what the query is about, and the common ones only help
+        // rank what the rare ones found
+        "common" => build_common(ctx, &body)?,
         "constant_score" => {
             let f = body.get("filter").ok_or_else(|| anyhow!("constant_score needs filter"))?;
             let boost = body.get("boost").and_then(|b| b.as_f64()).unwrap_or(1.0) as f32;
@@ -518,6 +522,7 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
         "bool",
         "boosting",
         "combined_fields",
+        "common",
         "constant_score",
         "dis_max",
         "distance_feature",
