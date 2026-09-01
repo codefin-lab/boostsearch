@@ -110,6 +110,12 @@ pub enum Step {
     Trim,
     Reverse,
     Unique,
+    /// the same word twice in one place is one word; the same word in two
+    /// places is two
+    UniqueAtPosition,
+    /// every token that follows is applied to what the word became as well as
+    /// to the word itself
+    KeywordRepeat,
     Truncate(usize),
     Limit(usize),
     /// each token replaced by, or joined with, what it also means
@@ -168,6 +174,17 @@ pub enum Step {
     /// each word and the one after it, joined, for the words that are too
     /// common to search for on their own
     CommonGrams(Vec<String>),
+    /// every run of neighbouring words joined into one token: `the quick fox`
+    /// also holds `the quick` and `quick fox`
+    Shingle {
+        min: usize,
+        max: usize,
+        unigrams: bool,
+        /// where nothing was shingled, the words themselves are the answer
+        unigrams_if_none: bool,
+        separator: String,
+        filler: String,
+    },
     /// `John's` is `John`
     Apostrophe,
     /// the `'s` at the end of an English word is not part of it
@@ -217,6 +234,18 @@ pub enum Step {
     PartOfSpeech(morph::Language),
     /// how the word is read, rather than how it is written
     Reading(morph::Language),
+}
+
+impl Step {
+    /// Whether this step cuts a word down to its stem.
+    ///
+    /// A `keyword_repeat` before it means the word itself is kept as well.
+    fn stems(&self) -> bool {
+        matches!(
+            self,
+            Step::Stem(_) | Step::KStem | Step::StemmerOverride(_) | Step::Decompound(_)
+        )
+    }
 }
 
 /// A named analysis chain.
@@ -685,6 +714,7 @@ fn apply_step(
                         .collect();
                 }
                 "german_light" | "light_german" => return word_by_word(&stem::german_light),
+                "persian" => return word_by_word(&stem::persian),
                 "german" => return word_by_word(&stem::german),
                 _ => {}
             }
@@ -759,6 +789,13 @@ fn apply_step(
             let mut seen = std::collections::HashSet::new();
             tokens.into_iter().filter(|(t, _, _, _)| seen.insert(t.clone())).collect()
         }
+        Step::UniqueAtPosition => {
+            let mut seen = std::collections::HashSet::new();
+            tokens.into_iter().filter(|(t, p, _, _)| seen.insert((*p, t.clone()))).collect()
+        }
+        // the marker itself does nothing: what it means is written into the
+        // steps that follow it when the chain is built
+        Step::KeywordRepeat => tokens,
         Step::Truncate(n) => {
             tokens.into_iter().map(|(t, p, a, b)| (t.chars().take(*n).collect(), p, a, b)).collect()
         }
@@ -1098,6 +1135,42 @@ fn apply_step(
                 }
             }
             out
+        }
+        Step::Shingle { min, max, unigrams, unigrams_if_none, separator, filler } => {
+            let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
+            let mut shingled = false;
+            for (i, (t, p, a, b)) in tokens.iter().enumerate() {
+                if *unigrams {
+                    out.push((t.clone(), *p, *a, *b));
+                }
+                for width in *min..=*max {
+                    if width < 2 {
+                        continue;
+                    }
+                    // a run that runs off the end is written with the filler
+                    // standing in for the words that are not there
+                    let mut words: Vec<String> = Vec::new();
+                    let mut end = *b;
+                    for step in 0..width {
+                        match tokens.get(i + step) {
+                            Some((word, _, _, to)) => {
+                                words.push(word.clone());
+                                end = *to;
+                            }
+                            None => words.push(filler.clone()),
+                        }
+                    }
+                    if i + width > tokens.len() {
+                        continue;
+                    }
+                    out.push((words.join(separator), *p, *a, end));
+                    shingled = true;
+                }
+            }
+            match !shingled && !*unigrams && *unigrams_if_none {
+                true => tokens,
+                false => out,
+            }
         }
         Step::DelimitedTermFreq(sep) => tokens
             .into_iter()
@@ -2028,8 +2101,34 @@ fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) 
             steps.extend(s);
         }
     }
+    let steps = stacked(steps);
     let pre = spec.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
     Some(Chain { pre: char_filters_of(&pre, chars), source, steps })
+}
+
+/// The steps that follow a `keyword_repeat`, each keeping the word it was
+/// given beside what it made of it.
+///
+/// Lucene writes the repeat as a second copy of the token marked as a keyword,
+/// which the stemmers then leave alone; the two forms end up stacked in one
+/// place. Keeping the original beside the stem says the same thing, and says
+/// it without a mark that every filter would have to carry.
+fn stacked(steps: Vec<Step>) -> Vec<Step> {
+    if !steps.iter().any(|s| matches!(s, Step::KeywordRepeat)) {
+        return steps;
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    let mut repeating = false;
+    for step in steps {
+        match step {
+            Step::KeywordRepeat => repeating = true,
+            other if repeating && other.stems() => {
+                out.push(Step::PreserveOriginal(Box::new(other)));
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// A tokenizer by name, defined by the index or built in.
@@ -2166,7 +2265,10 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         }
         "trim" => vec![Step::Trim],
         "reverse" => vec![Step::Reverse],
-        "unique" => vec![Step::Unique],
+        "unique" => match flag("only_on_same_position") {
+            true => vec![Step::UniqueAtPosition],
+            false => vec![Step::Unique],
+        },
         "elision" => {
             if spec.get("articles").is_none() && spec.get("articles_path").is_none() {
                 return None;
@@ -2235,6 +2337,30 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         }],
         "common_grams" => {
             vec![Step::CommonGrams(spec.get("common_words").map(word_list).unwrap_or_default())]
+        }
+        "shingle" => {
+            let min = num("min_shingle_size", 2);
+            let max = num("max_shingle_size", 2);
+            let text = |key: &str, fallback: &str| {
+                spec.get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| fallback.to_string())
+            };
+            vec![Step::Shingle {
+                min,
+                max,
+                unigrams: spec
+                    .get("output_unigrams")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                unigrams_if_none: spec
+                    .get("output_unigrams_if_no_shingles")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                separator: text("token_separator", " "),
+                filler: text("filler_token", "_"),
+            }]
         }
         "delimited_term_freq" => vec![Step::DelimitedTermFreq(one("delimiter", '^'))],
         "delimited_payload" => vec![Step::DelimitedPayload(one("delimiter", '|'))],
@@ -2305,7 +2431,16 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
             }]
         }
         "min_hash" => vec![Step::MinHash { buckets: 512, hashes: 1 }],
-        "flatten_graph" | "remove_duplicates" | "keyword_repeat" => vec![],
+        "shingle" => vec![Step::Shingle {
+            min: 2,
+            max: 2,
+            unigrams: true,
+            unigrams_if_none: false,
+            separator: " ".to_string(),
+            filler: "_".to_string(),
+        }],
+        "flatten_graph" | "remove_duplicates" => vec![],
+        "keyword_repeat" => vec![Step::KeywordRepeat],
         "icu_normalizer" => vec![Step::IcuNormalize],
         "icu_folding" => vec![Step::IcuFold],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],

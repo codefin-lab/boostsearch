@@ -116,3 +116,30 @@ pub(crate) fn analyze_with(
     }
     out
 }
+
+/// The same, keeping the place each token stands in.
+///
+/// Two tokens in one place are two ways of writing the same word -- a stem
+/// stacked on the word it came from, or a synonym -- and a query matches
+/// either of them rather than requiring both.
+pub(crate) fn analyze_positions(
+    ctx: &Ctx,
+    view: View,
+    field: &str,
+    text: &str,
+    analyzer: Option<&str>,
+) -> Vec<(String, usize)> {
+    if let Some(name) = named_for(ctx, field, analyzer)
+        && let Some(chain) = ctx.analysis.get(&name)
+    {
+        let tokens = chain.tokens(text);
+        if !tokens.is_empty() || text.is_empty() {
+            return tokens.into_iter().map(|(t, p, _, _)| (t, p)).collect();
+        }
+    }
+    analyze_with(ctx, view, field, text, analyzer)
+        .into_iter()
+        .enumerate()
+        .map(|(at, t)| (t, at))
+        .collect()
+}

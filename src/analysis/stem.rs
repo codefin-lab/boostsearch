@@ -1028,50 +1028,43 @@ pub(crate) fn decimal_digits(text: &str) -> String {
 
 /// Bengali, as `BengaliNormalizer` and `BengaliStemmer` treat it: the letters
 /// written two ways are written one way, and then the ending goes.
+/// Bengali, stemmed the way Lucene stems it.
+///
+/// A table of verb and noun endings, longest first, each with the length a
+/// word has to keep for the ending to be worth taking off.
 pub(crate) fn bengali(word: &str) -> String {
-    let normalized: String = word
-        .chars()
-        .map(|c| match c {
-            '\u{09DC}' | '\u{09DD}' => '\u{09B0}', // the letters with a dot below
-            '\u{09DF}' => '\u{09AF}',
-            '\u{09CE}' => '\u{09A4}',
-            '\u{09C0}' => '\u{09BF}', // long vowels are written short
-            '\u{09C2}' => '\u{09C1}',
-            '\u{0988}' => '\u{0987}',
-            '\u{098A}' => '\u{0989}',
-            other => other,
-        })
-        .collect();
-    let word = normalized;
-    let word = strip(
-        &word,
-        3,
-        &[
-            "\u{09BF}\u{09AF}\u{09BC}\u{09BE}",
-            "\u{09C7}\u{09B0}\u{09BE}",
-            "\u{09A6}\u{09C7}\u{09B0}",
-            "\u{0997}\u{09C1}\u{09B2}\u{09BF}",
-        ],
-    )
-    .unwrap_or(word);
-    strip(
-        &word,
-        2,
-        &[
-            "\u{09C7}\u{09B0}",
-            "\u{09B0}\u{09BE}",
-            "\u{0995}\u{09C7}",
-            "\u{09A4}\u{09C7}",
-            "\u{09BF}\u{09B0}",
-            "\u{099F}\u{09BE}",
-            "\u{099F}\u{09BF}",
-            "\u{09C7}",
-            "\u{09BF}",
-            "\u{09BE}",
-            "\u{09C1}",
-        ],
-    )
-    .unwrap_or(word)
+    let word = bengali_normalize(word);
+    let chars: Vec<char> = word.chars().collect();
+    let len = chars.len();
+    let ends = |suffix: &str| {
+        let s: Vec<char> = suffix.chars().collect();
+        len >= s.len() && chars[len - s.len()..] == s[..]
+    };
+    if len > 9 && (ends("ইতেছিলেন") || ends("ইয়াছিলেন") || ends("িতেছিলাম") || ends("িতেছিলেন") || ends("িয়াছিলাম") || ends("িয়াছিলেন")) {
+        return chars[..len - 8].iter().collect();
+    }
+    if len > 8 && (ends("িতেছিলা") || ends("িতেছিলি") || ends("িতেছিলে") || ends("িয়াছিলা") || ends("িয়াছিলি") || ends("িয়াছিলে") || ends("য়েদেরকে")) {
+        return chars[..len - 7].iter().collect();
+    }
+    if len > 7 && (ends("িতেছিস") || ends("িতেছেন") || ends("িয়াছিস") || ends("িয়াছেন") || ends("েছিলাম") || ends("েছিলেন") || ends("েদেরকে")) {
+        return chars[..len - 6].iter().collect();
+    }
+    if len > 6 && (ends("ছিলাম") || ends("ছিলেন") || ends("দেরকে") || ends("িতেছা") || ends("িতেছি") || ends("িতেছে") || ends("িয়াছা") || ends("িয়াছি") || ends("িয়াছে") || ends("েছিলা") || ends("েছিলে") || ends("য়েদের")) {
+        return chars[..len - 5].iter().collect();
+    }
+    if len > 5 && (ends("খানা") || ends("খানি") || ends("গুলি") || ends("গুলো") || ends("ছিলা") || ends("ছিলি") || ends("ছিলে") || ends("তেছে") || ends("িতাম") || ends("িতেছ") || ends("িতেন") || ends("িবেন") || ends("িলাম") || ends("িলেন") || ends("েদের") || ends("য়েরা")) {
+        return chars[..len - 4].iter().collect();
+    }
+    if len > 4 && (ends("ইতি") || ends("ইতে") || ends("ইবা") || ends("ইবি") || ends("ইবে") || ends("ইলা") || ends("ইলি") || ends("ইলে") || ends("ছেন") || ends("তাম") || ends("তেন") || ends("দের") || ends("বেন") || ends("লাম") || ends("লেন") || ends("িতা") || ends("িতি") || ends("িতে") || ends("িবা") || ends("িবি") || ends("িবে") || ends("িলা") || ends("িলি") || ends("িলে") || ends("েরা") || ends("য়ের") || ends("য়োন")) {
+        return chars[..len - 3].iter().collect();
+    }
+    if len > 3 && (ends("কে") || ends("ছা") || ends("ছি") || ends("ছে") || ends("টা") || ends("টি") || ends("তা") || ends("তি") || ends("তে") || ends("নি") || ends("বা") || ends("বি") || ends("বে") || ends("রা") || ends("লা") || ends("লি") || ends("লে") || ends("িস") || ends("ুক") || ends("ুন") || ends("েন") || ends("ের")) {
+        return chars[..len - 2].iter().collect();
+    }
+    if len > 2 && (ends("ত") || ends("ব") || ends("া") || ends("ি") || ends("ী") || ends("ে") || ends("ো")) {
+        return chars[..len - 1].iter().collect();
+    }
+    word
 }
 
 /// Hindi, as `HindiNormalizer` and `HindiStemmer` treat it: a nasal written
@@ -1660,4 +1653,35 @@ mod tests {
         assert_eq!(greek("\u{039C}\u{03AF}\u{03B1}"), "\u{03BC}\u{03B9}\u{03B1}");
         assert_eq!(decimal_digits("\u{0E51}\u{0E52}\u{0E53}\u{0E54}"), "1234");
     }
+}
+
+/// Persian, stemmed the way Lucene stems it.
+///
+/// The endings are taken off in turn, and only where the word is left with at
+/// least two letters of its own.
+pub(crate) fn persian(word: &str) -> String {
+    const ALEF: char = '\u{0627}';
+    const HEH: char = '\u{0647}';
+    const TEH: char = '\u{062A}';
+    const REH: char = '\u{0631}';
+    const NOON: char = '\u{0646}';
+    const YEH: char = '\u{064A}';
+    const ZWNJ: char = '\u{200c}';
+    let suffixes: [Vec<char>; 8] = [
+        vec![ALEF, TEH],
+        vec![ALEF, NOON],
+        vec![TEH, REH, YEH, NOON],
+        vec![TEH, REH],
+        vec![YEH, YEH],
+        vec![YEH],
+        vec![HEH, ALEF],
+        vec![ZWNJ],
+    ];
+    let mut chars: Vec<char> = word.chars().collect();
+    for suffix in suffixes {
+        if chars.len() >= suffix.len() + 2 && chars[chars.len() - suffix.len()..] == suffix[..] {
+            chars.truncate(chars.len() - suffix.len());
+        }
+    }
+    chars.into_iter().collect()
 }

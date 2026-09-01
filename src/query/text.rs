@@ -188,11 +188,39 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     let operator =
         opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
-    let n = terms.len();
-    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+    // words standing in one place are one word written several ways: a match
+    // wants any of them, not all of them
+    let places = analyze_positions(ctx, view, &field, &text, analyzer);
+    let stacked = places.len() == terms.len()
+        && places.windows(2).any(|pair| pair[0].1 == pair[1].1);
+    let groups: Vec<Vec<Term>> = match stacked {
+        false => terms.iter().map(|t| vec![t.clone()]).collect(),
+        true => {
+            let mut groups: Vec<Vec<Term>> = Vec::new();
+            let mut last: Option<usize> = None;
+            for (term, (_, at)) in terms.iter().zip(places.iter()) {
+                match last {
+                    Some(before) if before == *at => {
+                        if let Some(group) = groups.last_mut() {
+                            group.push(term.clone());
+                        }
+                    }
+                    _ => groups.push(vec![term.clone()]),
+                }
+                last = Some(*at);
+            }
+            groups
+        }
+    };
+    let n = groups.len();
+    let clauses: Vec<(Occur, Box<dyn Query>)> = groups
         .into_iter()
-        .map(|t| {
-            (occur, Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
+        .map(|mut group| {
+            let one: Box<dyn Query> = match group.len() {
+                1 => Box::new(TermQuery::new(group.remove(0), IndexRecordOption::WithFreqs)),
+                _ => any_of(group),
+            };
+            (occur, one)
         })
         .collect();
     let required = if occur == Occur::Should {
