@@ -44,8 +44,9 @@ impl Metric {
         self.number("k", 10.0) as usize
     }
 
-    /// The score for one query, and the documents that went into it.
-    fn score(&self, found: &[(String, String)], ratings: &[Value]) -> (f64, Vec<Value>) {
+    /// The score for one query, the documents that went into it, and the
+    /// numbers behind the score.
+    fn score(&self, found: &[(String, String)], ratings: &[Value]) -> (f64, Vec<Value>, Value) {
         let relevant_at = self.number("relevant_rating_threshold", 1.0);
         let mut detail = Vec::new();
         let mut rated: Vec<Option<f64>> = Vec::new();
@@ -126,7 +127,52 @@ impl Metric {
             }
             _ => 0.0,
         };
-        (score, detail)
+        // what the score was worked out from, which the caller may want to
+        // read rather than trust
+        let unrated = rated.iter().filter(|r| r.is_none()).count();
+        let relevant_here = rated.iter().filter(|r| is_relevant(r)).count();
+        let details = match self.name.as_str() {
+            "precision" => {
+                let looked_at = match self.flag("ignore_unlabeled") {
+                    true => rated.iter().filter(|r| r.is_some()).count(),
+                    false => rated.len(),
+                };
+                json!({"precision": {
+                    "relevant_docs_retrieved": relevant_here,
+                    "docs_retrieved": looked_at,
+                }})
+            }
+            "recall" => {
+                let all = ratings
+                    .iter()
+                    .filter(|r| {
+                        r.get("rating").and_then(|v| v.as_f64()).unwrap_or(0.0) >= relevant_at
+                    })
+                    .count();
+                json!({"recall": {
+                    "relevant_docs_retrieved": relevant_here,
+                    "relevant_docs": all,
+                }})
+            }
+            "mean_reciprocal_rank" => json!({"mean_reciprocal_rank": {
+                "first_relevant": rated
+                    .iter()
+                    .position(is_relevant)
+                    .map(|at| at as i64 + 1)
+                    .unwrap_or(-1),
+            }}),
+            "expected_reciprocal_rank" => {
+                json!({"expected_reciprocal_rank": {"unrated_docs": unrated}})
+            }
+            "dcg" => json!({"dcg": {
+                "dcg": score,
+                "ideal_dcg": 0.0,
+                "normalized_dcg": score,
+                "unrated_docs": unrated,
+            }}),
+            _ => json!({}),
+        };
+        (score, detail, details)
     }
 }
 
@@ -150,14 +196,51 @@ pub async fn rank_eval(
     let mut details = serde_json::Map::new();
     let mut failures = serde_json::Map::new();
     let mut total = 0.0;
+    // only the queries that ran count towards the score over all of them
+    let mut scored = 0.0;
     for one in &asked {
         let id = one.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let ratings = one.get("ratings").and_then(|r| r.as_array()).cloned().unwrap_or_default();
-        let mut request = one
-            .get("request")
-            .cloned()
-            .or_else(|| body.get("template_id").map(|_| json!({})))
-            .unwrap_or_else(|| json!({}));
+        // a request may be written out, or named as a template the body
+        // carries with the parameters to fill it with
+        let templated = one.get("template_id").and_then(|v| v.as_str()).and_then(|named| {
+            let template = body
+                .get("templates")
+                .and_then(|t| t.as_array())?
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(named))?
+                .get("template")?
+                .clone();
+            let source = template.get("source").cloned().unwrap_or(template);
+            let params = one.get("params").cloned().unwrap_or_else(|| json!({}));
+            crate::api::render_query_template(&source, &params)
+        });
+        let mut request = one.get("request").cloned().or(templated).unwrap_or_else(|| json!({}));
+        // a rated request is about which documents come back and in what
+        // order, so the parts of a search that answer something else have no
+        // place in it
+        for (part, why) in [
+            ("aggs", "aggregations"),
+            ("aggregations", "aggregations"),
+            ("suggest", "a suggest section"),
+            ("highlight", "a highlighter section"),
+            ("rescore", "a rescorer"),
+            ("profile", "profile"),
+            ("explain", "explain"),
+        ] {
+            if request.get(part).is_some() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "parsing_exception",
+                    match why {
+                        "profile" | "explain" => {
+                            format!("Query in rated requests should not use {why}.")
+                        }
+                        _ => format!("Query in rated requests should not contain {why}."),
+                    },
+                );
+            }
+        }
         if request.get("size").is_none() {
             request["size"] = json!(metric.window());
         }
@@ -173,16 +256,15 @@ pub async fn rank_eval(
                         ))
                     })
                     .collect();
-                let (score, hits) = metric.score(&found, &ratings);
+                let (score, hits, metric_details) = metric.score(&found, &ratings);
                 total += score;
-                // the documents a person judged that never came back
-                let unrated: Vec<Value> = ratings
+                scored += 1.0;
+                // the documents that came back that nobody had judged
+                let unrated: Vec<Value> = found
                     .iter()
-                    .filter(|r| {
-                        let id = r.get("_id").and_then(|v| v.as_str()).unwrap_or("");
-                        !found.iter().any(|(_, found_id)| found_id == id)
-                    })
-                    .map(|r| json!({"_index": r.get("_index"), "_id": r.get("_id")}))
+                    .take(metric.window())
+                    .filter(|(index, id)| rating_of(&ratings, index, id).is_none())
+                    .map(|(index, id)| json!({"_index": index, "_id": id}))
                     .collect();
                 details.insert(
                     id,
@@ -195,7 +277,7 @@ pub async fn rank_eval(
                             },
                             "rating": hit.get("rating"),
                         })).collect::<Vec<_>>(),
-                        "metric_details": {},
+                        "metric_details": metric_details,
                     }),
                 );
             }
@@ -204,11 +286,10 @@ pub async fn rank_eval(
             }
         }
     }
-    let count = asked.len() as f64;
     respond(
         &p,
         json!({
-            "metric_score": if count == 0.0 { 0.0 } else { total / count },
+            "metric_score": if scored == 0.0 { 0.0 } else { total / scored },
             "details": details,
             "failures": failures,
         }),

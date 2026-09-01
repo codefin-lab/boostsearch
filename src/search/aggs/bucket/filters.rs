@@ -152,6 +152,10 @@ pub(crate) fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_field_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("geohash_grid").is_some() {
+        crate::search::run_geo_grid_agg(store, targets, query_json, def, "geohash_grid")
+    } else if def.get("geotile_grid").is_some() {
+        crate::search::run_geo_grid_agg(store, targets, query_json, def, "geotile_grid")
     } else if def.get("geo_bounds").is_some() {
         crate::search::run_geo_bounds_agg(store, targets, query_json, def)
     } else if def.get("geo_centroid").is_some() {
@@ -333,6 +337,36 @@ pub(crate) fn run_adjacency_matrix_agg(
 }
 
 /// `matrix_stats` -- how a set of numeric fields move, together and apart.
+/// The one number a field's values stand for.
+fn reduce_values(held: &Value, mode: &str, narrow: bool) -> Option<f64> {
+    let kept = |v: f64| match narrow {
+        true => v as f32 as f64,
+        false => v,
+    };
+    let numbers: Vec<f64> = match held {
+        Value::Array(items) => items.iter().filter_map(|v| v.as_f64()).map(kept).collect(),
+        other => return other.as_f64().map(kept),
+    };
+    if numbers.is_empty() {
+        return None;
+    }
+    Some(match mode {
+        "min" => numbers.iter().cloned().fold(f64::INFINITY, f64::min),
+        "max" => numbers.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        "sum" => numbers.iter().sum(),
+        "median" => {
+            let mut sorted = numbers.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let middle = sorted.len() / 2;
+            match sorted.len() % 2 {
+                0 => (sorted[middle - 1] + sorted[middle]) / 2.0,
+                _ => sorted[middle],
+            }
+        }
+        _ => numbers.iter().sum::<f64>() / numbers.len() as f64,
+    })
+}
+
 pub(crate) fn run_matrix_stats_agg(
     store: &Store,
     targets: &[String],
@@ -345,6 +379,19 @@ pub(crate) fn run_matrix_stats_agg(
         .and_then(|f| f.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    // a matrix is worked out over the values a document holds, which a script
+    // does not stand for
+    if spec.get("script").is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "parsing_exception",
+            "[matrix_stats] unknown field [script]",
+        ));
+    }
+    // where a field holds several values, one of them stands for the document
+    let mode = spec.get("mode").and_then(|v| v.as_str()).unwrap_or("avg").to_string();
+    // a document with no value for a field may be counted as holding one
+    let missing = spec.get("missing").cloned().unwrap_or_else(|| json!({}));
     let probe = json!({
         "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
         "size": 10_000,
@@ -353,77 +400,111 @@ pub(crate) fn run_matrix_stats_agg(
     let answer = run(store, &targets.join(","), &probe, &Params::new())?;
     // only the documents that hold every field count, which is what makes a
     // covariance a covariance
+    // which of the fields are kept at single precision: the ones no mapping
+    // widened to a double
+    let narrow: std::collections::HashSet<String> = fields
+        .iter()
+        .filter(|field| {
+            targets.iter().all(|name| {
+                store
+                    .get(name)
+                    .map(|st| {
+                        !matches!(
+                            st.read().mapping.type_of(field),
+                            Some("double" | "long" | "integer" | "short" | "byte" | "scaled_float")
+                        )
+                    })
+                    .unwrap_or(true)
+            })
+        })
+        .cloned()
+        .collect();
+    let mut shards: Vec<usize> = Vec::new();
     let rows: Vec<Vec<f64>> = answer
         .hits
         .iter()
         .filter_map(|hit| {
+            // which shard held this document, which is where its moments were
+            // worked out
+            let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or_default();
+            let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let over = store.get(index).map(|st| st.read().shard_count().max(1)).unwrap_or(1);
+            let shard = crate::search::routing_shard(id, over) as usize;
             fields
                 .iter()
                 .map(|field| {
-                    hit.pointer(&format!("/_source/{}", field.replace('.', "/")))
-                        .and_then(|v| v.as_f64())
+                    let held = hit.pointer(&format!("/_source/{}", field.replace('.', "/")));
+                    // a field nobody mapped holds a floating point number as
+                    // a `float`, which is the width each of its values is kept
+                    // at before they are reduced to one
+                    let width = narrow.contains(field);
+                    match held {
+                        Some(v) => reduce_values(v, &mode, width),
+                        None => missing.get(field).and_then(|v| v.as_f64()),
+                    }
                 })
                 .collect::<Option<Vec<f64>>>()
+                .inspect(|_| shards.push(shard))
         })
         .collect();
     let count = rows.len();
     if count == 0 {
         return Ok(json!({"doc_count": 0}));
     }
-    let mean: Vec<f64> = (0..fields.len())
-        .map(|at| rows.iter().map(|row| row[at]).sum::<f64>() / count as f64)
-        .collect();
-    let moment = |at: usize, power: i32| -> f64 {
-        rows.iter().map(|row| (row[at] - mean[at]).powi(power)).sum::<f64>()
-    };
-    let covariance = |a: usize, b: usize| -> f64 {
-        if count < 2 {
-            return 0.0;
+    // each shard works out its own moments and the shard results are merged,
+    // which is the order the arithmetic happens in on a real cluster and the
+    // order the numbers are pinned to
+    let width = fields.len();
+    let mut per_shard: Vec<crate::search::Running> = Vec::new();
+    for (shard, row) in shards.iter().zip(rows.iter()) {
+        while per_shard.len() <= *shard {
+            per_shard.push(crate::search::Running::new(width));
         }
-        rows.iter().map(|row| (row[a] - mean[a]) * (row[b] - mean[b])).sum::<f64>()
-            / (count - 1) as f64
-    };
-    let mut described = Vec::new();
+        per_shard[*shard].add(row);
+    }
+    let mut running = crate::search::Running::new(width);
+    for shard in &per_shard {
+        running.merge(shard);
+    }
+    let described = running.described();
+    let count = described.count;
+    let mut fields_out = Vec::new();
     for (at, field) in fields.iter().enumerate() {
-        let variance = covariance(at, at);
-        // the shape of the spread is measured against the spread of these
-        // documents rather than of the population they stand for, which is
-        // the denominator OpenSearch uses here
-        let spread = moment(at, 2) / count as f64;
-        let skewness =
-            if spread == 0.0 { 0.0 } else { moment(at, 3) / count as f64 / spread.powf(1.5) };
-        let kurtosis =
-            if spread == 0.0 { 0.0 } else { moment(at, 4) / count as f64 / (spread * spread) };
         let with: serde_json::Map<String, Value> = fields
             .iter()
             .enumerate()
-            .map(|(other, name)| (name.clone(), json!(covariance(at, other))))
+            .map(|(other, name)| (name.clone(), json!(described.covariances[at][other])))
             .collect();
         let correlation: serde_json::Map<String, Value> = fields
             .iter()
             .enumerate()
             .map(|(other, name)| {
-                let spread = (covariance(at, at) * covariance(other, other)).sqrt();
-                let r = if spread == 0.0 { 0.0 } else { covariance(at, other) / spread };
+                let r = match at == other {
+                    true => 1.0,
+                    false => {
+                        described.covariances[at][other]
+                            / (described.variances[at].sqrt() * described.variances[other].sqrt())
+                    }
+                };
                 (name.clone(), json!(r))
             })
             .collect();
-        described.push(json!({
+        fields_out.push(json!({
             "name": field,
             "count": count,
-            "mean": mean[at],
-            "variance": variance,
-            "skewness": skewness,
-            "kurtosis": kurtosis,
+            "mean": described.means[at],
+            "variance": described.variances[at],
+            "skewness": described.skewness[at],
+            "kurtosis": described.kurtosis[at],
             "covariance": with,
             "correlation": correlation,
         }));
     }
     // the fields are named back in the order OpenSearch names them
-    described.sort_by(|a, b| {
+    fields_out.sort_by(|a, b| {
         b.get("name").and_then(|v| v.as_str()).cmp(&a.get("name").and_then(|v| v.as_str()))
     });
-    Ok(json!({"doc_count": count, "fields": described}))
+    Ok(json!({"doc_count": count, "fields": fields_out}))
 }
 
 /// `sampler` -- the best few documents rather than all of them.
@@ -510,21 +591,43 @@ pub(crate) fn run_join_agg(
     let named = spec.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let here = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // an index with no join field has no other side to look at
+    let Some(field) = crate::search::join_field(store, targets) else {
+        let mut out = json!({"doc_count": 0});
+        if let Some(Value::Object(map)) =
+            count_with_sub_aggs(store, targets, &json!({"match_none": {}}), &sub_aggs, weighted)?.1
+        {
+            for (name, value) in map {
+                out[name] = value;
+            }
+        }
+        return Ok(out);
+    };
     // whichever side the aggregation names, the other side is what its bucket
     // is asked about
-    let mut narrowed = if children.is_some() {
-        json!({"bool": {"must": [
-            {"has_parent": {"parent_type": "", "query": here}},
-            {"term": {"join_field.name": named}},
-        ]}})
-    } else {
-        json!({"bool": {"must": [
-            {"has_child": {"type": named, "query": here}},
-        ]}})
+    let narrowed = match children.is_some() {
+        // the documents of that kind whose parent the query found
+        true => {
+            let parents = crate::search::matching_ids_here(store, targets, &here);
+            json!({"bool": {"must": [
+                {"term": {format!("{field}.name"): named}},
+                {"terms": {format!("{field}.parent"): parents}},
+            ]}})
+        }
+        // the parents of the documents of that kind the query found
+        false => {
+            let of_that_kind = json!({
+                "bool": {"must": [here.clone(), {"term": {format!("{field}.name"): named}}]}
+            });
+            let parents = crate::search::ids_of_field(
+                store,
+                targets,
+                &of_that_kind,
+                &format!("{field}.parent"),
+            );
+            json!({"ids": {"values": parents}})
+        }
     };
-    // the join is read here: the search never sees this query as the one it
-    // was asked, so nothing else would expand it
-    crate::search::expand_joins(store, targets, &mut narrowed);
     let (count, subs) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
     let mut out = json!({ "doc_count": count });
     if let Some(Value::Object(map)) = subs {

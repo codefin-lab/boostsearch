@@ -18,6 +18,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 missing_last: true,
                 nested: None,
                 nested_filter: None,
+                numeric_type: None,
             }),
             Value::Object(o) => {
                 for (field, opts) in o {
@@ -51,7 +52,21 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .pointer("/nested/filter")
                         .or_else(|| opts.get("nested_filter"))
                         .cloned();
-                    out.push(SortKey { field, desc, mode, missing_last, nested, nested_filter });
+                    // a sort may ask for the values to be read as a width
+                    // other than the one the field holds them in
+                    let numeric_type = opts
+                        .get("numeric_type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_ascii_lowercase());
+                    out.push(SortKey {
+                        field,
+                        desc,
+                        mode,
+                        missing_last,
+                        nested,
+                        nested_filter,
+                        numeric_type,
+                    });
                 }
             }
             _ => {}

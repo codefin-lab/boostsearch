@@ -22,7 +22,8 @@ use std::collections::HashMap;
 
 use boostcore::tokenizer::{
     AsciiFoldingFilter, Language, NgramTokenizer, RawTokenizer, RegexTokenizer, RemoveLongFilter,
-    SimpleTokenizer, Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer, WhitespaceTokenizer,
+    SimpleTokenizer, Stemmer, TextAnalyzer, Token as CoreToken, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 use serde_json::{Value, json};
 
@@ -110,6 +111,12 @@ pub enum Step {
     Trim,
     Reverse,
     Unique,
+    /// the same word twice in one place is one word; the same word in two
+    /// places is two
+    UniqueAtPosition,
+    /// every token that follows is applied to what the word became as well as
+    /// to the word itself
+    KeywordRepeat,
     Truncate(usize),
     Limit(usize),
     /// each token replaced by, or joined with, what it also means
@@ -168,6 +175,17 @@ pub enum Step {
     /// each word and the one after it, joined, for the words that are too
     /// common to search for on their own
     CommonGrams(Vec<String>),
+    /// every run of neighbouring words joined into one token: `the quick fox`
+    /// also holds `the quick` and `quick fox`
+    Shingle {
+        min: usize,
+        max: usize,
+        unigrams: bool,
+        /// where nothing was shingled, the words themselves are the answer
+        unigrams_if_none: bool,
+        separator: String,
+        filler: String,
+    },
     /// `John's` is `John`
     Apostrophe,
     /// the `'s` at the end of an English word is not part of it
@@ -184,6 +202,12 @@ pub enum Step {
     DelimitedPayload(char),
     /// the same token, put through several filters at once
     Multiplexer(Vec<Vec<Step>>),
+    /// the paths of a graph pressed flat, so that every token stands one
+    /// place after the one before it
+    FlattenGraph,
+    /// each token carries what kind of token it is, for a term vector to
+    /// read back
+    TypeAsPayload,
     /// a word named here is left alone by the stemmers after it
     KeywordMarker(Vec<String>),
     /// a word named here is stemmed to what it is told, not what the
@@ -219,6 +243,20 @@ pub enum Step {
     Reading(morph::Language),
 }
 
+impl Step {
+    /// Whether this step cuts a word down to its stem.
+    ///
+    /// A `keyword_repeat` before it means the word itself is kept as well.
+    fn stems(&self) -> bool {
+        matches!(self, Step::Stem(_) | Step::KStem | Step::StemmerOverride(_) | Step::Decompound(_))
+    }
+}
+
+/// One token: its text, the place it stands in, where it came from in the
+/// text, and how many places it spans -- a word that stands for two words,
+/// as a synonym may, spans two.
+pub type Token = (String, usize, usize, usize, usize);
+
 /// A named analysis chain.
 #[derive(Clone, Debug)]
 pub struct Chain {
@@ -243,6 +281,90 @@ pub enum CharFilter {
 }
 
 impl CharFilter {
+    /// The text this filter makes of the text it is given, and where each
+    /// byte of it came from: an entry per byte of the output, and one more
+    /// for its end, each naming the byte of the input it stands for.
+    ///
+    /// A token cut out of the filtered text is reported where it stood in
+    /// the text the caller sent, which is what the map is for.
+    pub fn applied_mapped(&self, text: &str) -> (String, Vec<usize>) {
+        match self {
+            CharFilter::Mapping(rules) => {
+                let mut out = String::with_capacity(text.len());
+                let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+                let chars: Vec<(usize, char)> = text.char_indices().collect();
+                let mut i = 0;
+                'outer: while i < chars.len() {
+                    for (from, to) in rules {
+                        let width = from.chars().count();
+                        if width > 0 && i + width <= chars.len() {
+                            let here: String =
+                                chars[i..i + width].iter().map(|(_, c)| *c).collect();
+                            if here == *from {
+                                // what the rule wrote stands for the whole
+                                // of what it replaced
+                                let at = chars[i].0;
+                                for _ in 0..to.len() {
+                                    map.push(at);
+                                }
+                                out.push_str(to);
+                                i += width;
+                                continue 'outer;
+                            }
+                        }
+                    }
+                    let (at, c) = chars[i];
+                    for _ in 0..c.len_utf8() {
+                        map.push(at);
+                    }
+                    out.push(c);
+                    i += 1;
+                }
+                map.push(text.len());
+                (out, map)
+            }
+            CharFilter::Replace { pattern, replacement } => match regex::Regex::new(pattern) {
+                Ok(re) => {
+                    let mut out = String::with_capacity(text.len());
+                    let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+                    let mut last = 0usize;
+                    for m in re.find_iter(text) {
+                        for b in last..m.start() {
+                            map.push(b);
+                        }
+                        out.push_str(&text[last..m.start()]);
+                        let written = re.replace(m.as_str(), replacement.as_str()).into_owned();
+                        for _ in 0..written.len() {
+                            map.push(m.start());
+                        }
+                        out.push_str(&written);
+                        last = m.end();
+                    }
+                    for b in last..text.len() {
+                        map.push(b);
+                    }
+                    out.push_str(&text[last..]);
+                    map.push(text.len());
+                    (out, map)
+                }
+                Err(_) => (text.to_string(), (0..=text.len()).collect()),
+            },
+            // a filter that rewrites the text wholesale is mapped end to end:
+            // the same byte where the lengths agree, and the last byte of
+            // the input for the end of the output where they do not
+            other => {
+                let out = other.applied(text);
+                let map: Vec<usize> = match out.len() == text.len() {
+                    true => (0..=text.len()).collect(),
+                    false => (0..=out.len())
+                        .map(|b| if out.is_empty() { 0 } else { (b * text.len()) / out.len() })
+                        .collect(),
+                };
+                (out, map)
+            }
+        }
+    }
+
     /// The text this filter makes of the text it is given.
     pub fn applied(&self, text: &str) -> String {
         match self {
@@ -314,14 +436,72 @@ impl Chain {
     }
 
     /// The text as the char filters leave it, before it is cut.
-    pub fn prepared(&self, text: &str) -> String {
-        self.pre.iter().fold(text.to_string(), |held, filter| filter.applied(&held))
+    /// A chain with char filters put in front of it.
+    pub fn filtered(pre: Vec<CharFilter>, chain: Chain) -> Chain {
+        Chain { pre, source: chain.source, steps: chain.steps }
     }
 }
 
 impl Chain {
+    /// The synonym rules written the way the chain in front of them would
+    /// write them.
+    ///
+    /// A rule is text, and Lucene reads it with the tokenizer and the filters
+    /// that stand before the synonym filter: a rule over `foobar` in a chain
+    /// that cuts into trigrams is a rule over `foo oob oba bar`.
+    fn cut_synonyms(&mut self) {
+        for at in 0..self.steps.len() {
+            let Step::Synonym(rules) = &self.steps[at] else { continue };
+            let before = Chain {
+                pre: self.pre.clone(),
+                source: self.source.clone(),
+                steps: self.steps[..at].to_vec(),
+            };
+            let cut = |words: &[String]| -> Vec<String> {
+                let text = words.join(" ");
+                let terms = before.terms(&text);
+                if terms.is_empty() { words.to_vec() } else { terms }
+            };
+            let rewritten: Vec<SynonymRule> = rules
+                .iter()
+                .map(|rule| SynonymRule {
+                    phrase: cut(&rule.phrase),
+                    alternatives: rule.alternatives.iter().map(|a| cut(a)).collect(),
+                    keep_original: rule.keep_original,
+                    alternatives_first: rule.alternatives_first,
+                    graph: rule.graph,
+                })
+                .collect();
+            self.steps[at] = Step::Synonym(rewritten);
+        }
+    }
+
+    /// Whether the chain hangs each token's kind on it as a payload.
+    pub fn carries_type_payload(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::TypeAsPayload))
+    }
+
+    /// Whether the chain cuts each word into pieces after cutting the words.
+    ///
+    /// The pieces carry the offsets of the word they came from, so a match on
+    /// a piece is a match on the whole word.
+    pub fn filters_into_ngrams(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::NgramTokens { .. }))
+    }
+
+    /// Whether the chain cuts text into pieces of words rather than words.
+    ///
+    /// A field written that way is matched on the pieces, and a highlighter
+    /// marks the pieces inside the words rather than the words.
+    pub fn cuts_into_ngrams(&self) -> bool {
+        // an ngram filter after a tokenizer still reports the offsets of the
+        // whole word it cut, so only a tokenizer that cuts pieces places
+        // them inside the words
+        matches!(self.source, Source::Ngram { .. })
+    }
+
     /// The tokens this chain makes of a text, with where each came from.
-    pub fn tokens(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
+    pub fn tokens(&self, text: &str) -> Vec<Token> {
         let mut out = self.cut(text);
         // a word a `keyword_marker` names is left as it was written, whatever
         // the stemmers after it would have done to it
@@ -334,7 +514,7 @@ impl Chain {
 
     /// The tokens alone, which is what a query needs.
     pub fn terms(&self, text: &str) -> Vec<String> {
-        self.tokens(text).into_iter().map(|(t, _, _, _)| t).collect()
+        self.tokens(text).into_iter().map(|(t, _, _, _, _)| t).collect()
     }
 
     /// The part of the chain BoostCore can run itself.
@@ -371,14 +551,29 @@ impl Chain {
     }
 
     /// The tokens the source alone makes, before a filter has seen them.
-    pub fn cut(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
-        let prepared;
-        let text = if self.pre.is_empty() {
-            text
-        } else {
-            prepared = self.prepared(text);
-            prepared.as_str()
-        };
+    pub fn cut(&self, text: &str) -> Vec<Token> {
+        if self.pre.is_empty() {
+            return self.cut_prepared(text);
+        }
+        // each filter maps its output back onto its input, and the maps
+        // compose back to the text the caller sent
+        let mut held = text.to_string();
+        let mut back: Vec<usize> = (0..=text.len()).collect();
+        for filter in &self.pre {
+            let (out, map) = filter.applied_mapped(&held);
+            back = map.iter().map(|at| back[(*at).min(back.len() - 1)]).collect();
+            held = out;
+        }
+        let mut tokens = self.cut_prepared(&held);
+        for token in tokens.iter_mut() {
+            token.2 = back[token.2.min(back.len() - 1)];
+            token.3 = back[token.3.min(back.len() - 1)];
+        }
+        tokens
+    }
+
+    /// The tokens of a text the char filters have already been through.
+    fn cut_prepared(&self, text: &str) -> Vec<Token> {
         match &self.source {
             Source::PatternSplit(pattern) => split_on(text, pattern),
             Source::CharGroup(chars) => {
@@ -390,7 +585,7 @@ impl Chain {
             Source::Letter => runs(text, |c| c.is_alphabetic()),
             Source::LetterLower => runs(text, |c| c.is_alphabetic())
                 .into_iter()
-                .map(|(t, p, a, b)| (t.to_lowercase(), p, a, b))
+                .map(|(t, p, a, b, l)| (t.to_lowercase(), p, a, b, l))
                 .collect(),
             Source::Morph { language, drop_grammar, base_form } => {
                 // the dictionary says what each word is while it is reading
@@ -413,7 +608,7 @@ impl Chain {
                             true => w.base.clone().unwrap_or(w.text),
                             false => w.text,
                         };
-                        (text, i, w.from, w.to)
+                        (text, i, w.from, w.to, 1)
                     })
                     .collect()
             }
@@ -427,7 +622,7 @@ impl Chain {
                 let mut out = Vec::new();
                 while stream.advance() {
                     let t = stream.token();
-                    out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
+                    out.push((t.text.clone(), t.position, t.offset_from, t.offset_to, 1));
                 }
                 out
             }
@@ -458,12 +653,12 @@ impl Tokenizer for ChainTokenizer {
             .chain
             .tokens(text)
             .into_iter()
-            .map(|(text, position, offset_from, offset_to)| Token {
+            .map(|(text, position, offset_from, offset_to, length)| CoreToken {
                 offset_from,
                 offset_to,
                 position,
                 text,
-                position_length: 1,
+                position_length: length,
             })
             .collect();
         ChainStream { tokens, cursor: 0 }
@@ -472,7 +667,7 @@ impl Tokenizer for ChainTokenizer {
 
 /// The tokens of one text, already cut.
 pub struct ChainStream {
-    tokens: Vec<Token>,
+    tokens: Vec<CoreToken>,
     /// one past the token `token()` returns, so that the first `advance()`
     /// lands on the first token
     cursor: usize,
@@ -484,17 +679,17 @@ impl TokenStream for ChainStream {
         self.cursor <= self.tokens.len()
     }
 
-    fn token(&self) -> &Token {
+    fn token(&self) -> &CoreToken {
         &self.tokens[self.cursor - 1]
     }
 
-    fn token_mut(&mut self) -> &mut Token {
+    fn token_mut(&mut self) -> &mut CoreToken {
         &mut self.tokens[self.cursor - 1]
     }
 }
 
 /// The runs of characters a predicate keeps, with where each began.
-fn runs(text: &str, keep: impl Fn(char) -> bool) -> Vec<(String, usize, usize, usize)> {
+fn runs(text: &str, keep: impl Fn(char) -> bool) -> Vec<Token> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut from = 0usize;
@@ -505,17 +700,17 @@ fn runs(text: &str, keep: impl Fn(char) -> bool) -> Vec<(String, usize, usize, u
             }
             current.push(c);
         } else if !current.is_empty() {
-            out.push((std::mem::take(&mut current), out.len(), from, offset));
+            out.push((std::mem::take(&mut current), out.len(), from, offset, 1));
         }
     }
     if !current.is_empty() {
-        out.push((current, out.len(), from, text.len()));
+        out.push((current, out.len(), from, text.len(), 1));
     }
     out
 }
 
 /// What is between the matches of a pattern.
-fn split_on(text: &str, pattern: &str) -> Vec<(String, usize, usize, usize)> {
+fn split_on(text: &str, pattern: &str) -> Vec<Token> {
     let Ok(re) = regex::Regex::new(pattern) else {
         return runs(text, |c| !c.is_whitespace());
     };
@@ -523,24 +718,24 @@ fn split_on(text: &str, pattern: &str) -> Vec<(String, usize, usize, usize)> {
     let mut last = 0usize;
     for m in re.find_iter(text) {
         if m.start() > last {
-            out.push((text[last..m.start()].to_string(), out.len(), last, m.start()));
+            out.push((text[last..m.start()].to_string(), out.len(), last, m.start(), 1));
         }
         last = m.end();
     }
     if last < text.len() {
-        out.push((text[last..].to_string(), out.len(), last, text.len()));
+        out.push((text[last..].to_string(), out.len(), last, text.len(), 1));
     }
     out
 }
 
 /// A word that may hold an apostrophe, a dot or a hyphen between letters,
 /// which is what `classic` keeps whole.
-fn classic(text: &str) -> Vec<(String, usize, usize, usize)> {
+fn classic(text: &str) -> Vec<Token> {
     classic_with(text, false)
 }
 
 /// The same, told whether an underscore is inside a word.
-fn classic_with(text: &str, underscore_joins: bool) -> Vec<(String, usize, usize, usize)> {
+fn classic_with(text: &str, underscore_joins: bool) -> Vec<Token> {
     let mut out = Vec::new();
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut i = 0;
@@ -568,39 +763,35 @@ fn classic_with(text: &str, underscore_joins: bool) -> Vec<(String, usize, usize
         if let Some(base) = word.strip_suffix("'s").or_else(|| word.strip_suffix("'S")) {
             word = base.to_string();
         }
-        out.push((word, out.len(), from, to));
+        out.push((word, out.len(), from, to, 1));
         i = end.max(i + 1);
     }
     out
 }
 
 /// What `classic` keeps, and an address or a URL kept whole.
-fn uax_url_email(text: &str) -> Vec<(String, usize, usize, usize)> {
+fn uax_url_email(text: &str) -> Vec<Token> {
     let whole =
         regex::Regex::new(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+)|(?:[\w.+-]+@[\w-]+(?:\.[\w-]+)+)");
     let Ok(whole) = whole else { return classic_with(text, true) };
-    let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
+    let mut out: Vec<Token> = Vec::new();
     let mut last = 0usize;
     for m in whole.find_iter(text) {
-        for (word, _, from, to) in classic_with(&text[last..m.start()], true) {
-            out.push((word, out.len(), last + from, last + to));
+        for (word, _, from, to, _) in classic_with(&text[last..m.start()], true) {
+            out.push((word, out.len(), last + from, last + to, 1));
         }
-        out.push((m.as_str().to_string(), out.len(), m.start(), m.end()));
+        out.push((m.as_str().to_string(), out.len(), m.start(), m.end(), 1));
         last = m.end();
     }
-    for (word, _, from, to) in classic_with(&text[last..], true) {
-        out.push((word, out.len(), last + from, last + to));
+    for (word, _, from, to, _) in classic_with(&text[last..], true) {
+        out.push((word, out.len(), last + from, last + to, 1));
     }
     out
 }
 
 /// Every prefix of a path, so that a search for a directory finds what is
 /// under it.
-fn path_hierarchy(
-    text: &str,
-    delimiter: char,
-    replacement: char,
-) -> Vec<(String, usize, usize, usize)> {
+fn path_hierarchy(text: &str, delimiter: char, replacement: char) -> Vec<Token> {
     let mut out = Vec::new();
     let mut so_far = String::new();
     for part in text.split(delimiter) {
@@ -612,7 +803,7 @@ fn path_hierarchy(
             so_far.push(replacement);
         }
         so_far.push_str(part);
-        out.push((so_far.clone(), 0, 0, so_far.len()));
+        out.push((so_far.clone(), 0, 0, so_far.len(), 1));
     }
     out
 }
@@ -620,9 +811,9 @@ fn path_hierarchy(
 /// Steps BoostCore has no filter for, or where OpenSearch's order differs.
 fn apply_step(
     step: &Step,
-    tokens: Vec<(String, usize, usize, usize)>,
+    tokens: Vec<Token>,
     protected: &mut std::collections::HashSet<String>,
-) -> Vec<(String, usize, usize, usize)> {
+) -> Vec<Token> {
     // the words held back keep the spelling they were written with
     if let Step::KeywordMarker(words) = step {
         protected.extend(words.iter().map(|w| w.to_lowercase()));
@@ -634,28 +825,28 @@ fn apply_step(
     }
     if matches!(step, Step::Stem(_) | Step::KStem) && !protected.is_empty() {
         let (held, rest): (Vec<_>, Vec<_>) =
-            tokens.into_iter().partition(|(t, _, _, _)| protected.contains(&t.to_lowercase()));
+            tokens.into_iter().partition(|(t, _, _, _, _)| protected.contains(&t.to_lowercase()));
         let mut out = apply_step(step, rest, &mut std::collections::HashSet::new());
         out.extend(held);
-        out.sort_by_key(|(_, position, _, _)| *position);
+        out.sort_by_key(|(_, position, _, _, _)| *position);
         return out;
     }
     match step {
         Step::Lowercase => {
-            tokens.into_iter().map(|(t, p, a, b)| (t.to_lowercase(), p, a, b)).collect()
+            tokens.into_iter().map(|(t, p, a, b, l)| (t.to_lowercase(), p, a, b, l)).collect()
         }
         Step::AsciiFolding => {
-            tokens.into_iter().map(|(t, p, a, b)| (fold_to_ascii(&t), p, a, b)).collect()
+            tokens.into_iter().map(|(t, p, a, b, l)| (fold_to_ascii(&t), p, a, b, l)).collect()
         }
         Step::Stop(words) => {
             // the words are compared as they are written: `The` is not the
             // stop word `the`, which is how OpenSearch reads them
             let set: std::collections::HashSet<&String> = words.iter().collect();
-            tokens.into_iter().filter(|(t, _, _, _)| !set.contains(t)).collect()
+            tokens.into_iter().filter(|(t, _, _, _, _)| !set.contains(t)).collect()
         }
         Step::Stem(lang) => {
             let word_by_word = |f: &dyn Fn(&str) -> String| {
-                tokens.iter().map(|(t, p, a, b)| (f(t), *p, *a, *b)).collect::<Vec<_>>()
+                tokens.iter().map(|(t, p, a, b, l)| (f(t), *p, *a, *b, *l)).collect::<Vec<_>>()
             };
             // the languages whose analyzer uses a light stemmer rather than
             // the full algorithm, which is what OpenSearch ships
@@ -677,14 +868,15 @@ fn apply_step(
                     let language = other.to_string();
                     return tokens
                         .into_iter()
-                        .map(|(t, p, a, b)| {
+                        .map(|(t, p, a, b, l)| {
                             let stemmed =
                                 snowball::stem(&language, &t).unwrap_or_else(|| t.clone());
-                            (stemmed, p, a, b)
+                            (stemmed, p, a, b, l)
                         })
                         .collect();
                 }
                 "german_light" | "light_german" => return word_by_word(&stem::german_light),
+                "persian" => return word_by_word(&stem::persian),
                 "german" => return word_by_word(&stem::german),
                 _ => {}
             }
@@ -707,17 +899,17 @@ fn apply_step(
                     TextAnalyzer::builder(RawTokenizer::default()).filter(Stemmer::new(l)).build();
                 return tokens
                     .into_iter()
-                    .map(|(t, p, a, b)| {
+                    .map(|(t, p, a, b, l)| {
                         if let Some(written_in) = its_own
                             && !t.chars().any(written_in)
                         {
-                            return (t, p, a, b);
+                            return (t, p, a, b, l);
                         }
                         let stemmed = {
                             let mut s = analyzer.token_stream(&t);
                             if s.advance() { s.token().text.clone() } else { t.clone() }
                         };
-                        (stemmed, p, a, b)
+                        (stemmed, p, a, b, l)
                     })
                     .collect();
             }
@@ -745,27 +937,39 @@ fn apply_step(
         }
         Step::Length { min, max } => tokens
             .into_iter()
-            .filter(|(t, _, _, _)| t.chars().count() >= *min && t.chars().count() <= *max)
+            .filter(|(t, _, _, _, _)| t.chars().count() >= *min && t.chars().count() <= *max)
             .collect(),
         Step::Trim => tokens
             .into_iter()
-            .map(|(t, p, a, b)| (t.trim().to_string(), p, a, b))
-            .filter(|(t, _, _, _)| !t.is_empty())
+            .map(|(t, p, a, b, l)| (t.trim().to_string(), p, a, b, l))
+            .filter(|(t, _, _, _, _)| !t.is_empty())
             .collect(),
-        Step::Reverse => {
-            tokens.into_iter().map(|(t, p, a, b)| (t.chars().rev().collect(), p, a, b)).collect()
-        }
+        Step::Reverse => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| (t.chars().rev().collect(), p, a, b, l))
+            .collect(),
         Step::Unique => {
             let mut seen = std::collections::HashSet::new();
-            tokens.into_iter().filter(|(t, _, _, _)| seen.insert(t.clone())).collect()
+            tokens.into_iter().filter(|(t, _, _, _, _)| seen.insert(t.clone())).collect()
         }
-        Step::Truncate(n) => {
-            tokens.into_iter().map(|(t, p, a, b)| (t.chars().take(*n).collect(), p, a, b)).collect()
+        Step::UniqueAtPosition => {
+            let mut seen = std::collections::HashSet::new();
+            tokens.into_iter().filter(|(t, p, _, _, _)| seen.insert((*p, t.clone()))).collect()
         }
+        // the marker itself does nothing: what it means is written into the
+        // steps that follow it when the chain is built
+        Step::KeywordRepeat => tokens,
+        Step::Truncate(n) => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| (t.chars().take(*n).collect(), p, a, b, l))
+            .collect(),
         Step::Limit(n) => tokens.into_iter().take(*n).collect(),
         Step::Synonym(rules) => {
-            let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
+            let mut out: Vec<Token> = Vec::new();
             let mut i = 0;
+            // a graph lays the ways of reading a span out side by side, and
+            // what comes after the span stands that much further along
+            let mut shift = 0usize;
             while i < tokens.len() {
                 // the longest rule that fits here is the one that stands
                 let matched = rules
@@ -781,25 +985,77 @@ fn apply_step(
                     })
                     .max_by_key(|rule| rule.phrase.len());
                 let Some(rule) = matched else {
-                    out.push(tokens[i].clone());
+                    let (t, p, a, b, l) = tokens[i].clone();
+                    out.push((t, p + shift, a, b, l));
                     i += 1;
                     continue;
                 };
-                let (_, position, from, _) = tokens[i].clone();
+                let (_, position, from, _, _) = tokens[i].clone();
+                let position = position + shift;
                 let to = tokens[i + rule.phrase.len() - 1].3;
+                if rule.graph {
+                    // every way of reading the span is a path: the first word
+                    // of each stands where the span starts, the rest take the
+                    // next places nobody has taken, and the last word of each
+                    // reaches to where the span ends
+                    let mut paths: Vec<Vec<(String, usize, usize)>> = Vec::new();
+                    for alternative in &rule.alternatives {
+                        paths.push(alternative.iter().map(|w| (w.clone(), from, to)).collect());
+                    }
+                    if rule.keep_original || rule.alternatives.is_empty() {
+                        paths.push(
+                            (0..rule.phrase.len())
+                                .map(|at| {
+                                    let (text, _, a, b, _) = tokens[i + at].clone();
+                                    (text, a, b)
+                                })
+                                .collect(),
+                        );
+                    }
+                    let span = 1 + paths.iter().map(|p| p.len() - 1).sum::<usize>();
+                    let mut next = position + 1;
+                    let mut laid: Vec<Token> = Vec::new();
+                    for path in &paths {
+                        let mut places: Vec<usize> = vec![position];
+                        for _ in 1..path.len() {
+                            places.push(next);
+                            next += 1;
+                        }
+                        for (k, (text, a, b)) in path.iter().enumerate() {
+                            let here = places[k];
+                            let reach = match places.get(k + 1) {
+                                Some(after) => after - here,
+                                None => position + span - here,
+                            };
+                            laid.push((text.clone(), here, *a, *b, reach));
+                        }
+                    }
+                    laid.sort_by_key(|t| t.1);
+                    out.extend(laid);
+                    shift += span - rule.phrase.len();
+                    i += rule.phrase.len();
+                    continue;
+                }
                 let mut written = Vec::new();
                 if rule.keep_original || rule.alternatives.is_empty() {
                     for at in 0..rule.phrase.len() {
-                        let (text, _, from, to) = tokens[i + at].clone();
-                        written.push((text, position + at, from, to));
+                        let (text, _, from, to, _) = tokens[i + at].clone();
+                        written.push((text, position + at, from, to, 1));
                     }
                 }
                 let mut meant = Vec::new();
                 for alternative in &rule.alternatives {
+                    // stacked in place, the last word of what is meant reaches
+                    // to where the words it stands for end
+                    let reach = (rule.phrase.len() + 1).saturating_sub(alternative.len()).max(1);
                     for (at, word) in alternative.iter().enumerate() {
-                        meant.push((word.clone(), position + at, from, to));
+                        let length = if at + 1 == alternative.len() { reach } else { 1 };
+                        meant.push((word.clone(), position + at, from, to, length));
                     }
                 }
+                // stacked in place, the words are read in the order of the
+                // places they stand in, the written word before what it means
+                let start = out.len();
                 if rule.alternatives_first {
                     out.extend(meant);
                     out.extend(written);
@@ -807,23 +1063,24 @@ fn apply_step(
                     out.extend(written);
                     out.extend(meant);
                 }
+                out[start..].sort_by_key(|t| t.1);
                 i += rule.phrase.len();
             }
             out
         }
         Step::Fingerprint(separator) => {
-            let mut words: Vec<String> = tokens.iter().map(|(t, _, _, _)| t.clone()).collect();
+            let mut words: Vec<String> = tokens.iter().map(|(t, _, _, _, _)| t.clone()).collect();
             words.sort();
             words.dedup();
             if words.is_empty() {
                 return Vec::new();
             }
-            let end = tokens.last().map(|(_, _, _, b)| *b).unwrap_or(0);
-            vec![(words.join(&separator.to_string()), 0, 0, end)]
+            let end = tokens.last().map(|(_, _, _, b, _)| *b).unwrap_or(0);
+            vec![(words.join(&separator.to_string()), 0, 0, end, 1)]
         }
         Step::Elision => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let cut = t
                     .split_once('\'')
                     .or_else(|| t.split_once('\u{2019}'))
@@ -854,13 +1111,13 @@ fn apply_step(
                     })
                     .map(|(_, rest)| rest.to_string())
                     .unwrap_or(t);
-                (cut, p, a, b)
+                (cut, p, a, b, l)
             })
-            .filter(|(t, _, _, _)| !t.is_empty())
+            .filter(|(t, _, _, _, _)| !t.is_empty())
             .collect(),
         Step::IrishLowercase => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let chars: Vec<char> = t.chars().collect();
                 // a prefix of one letter, and the word it stands in front of
                 let written: String = match chars.first() {
@@ -869,20 +1126,21 @@ fn apply_step(
                     }
                     _ => t.to_lowercase(),
                 };
-                (written.to_lowercase(), p, a, b)
+                (written.to_lowercase(), p, a, b, l)
             })
             .collect(),
-        Step::GreekLowercase => {
-            tokens.into_iter().map(|(t, p, a, b)| (stem::greek_lowercase(&t), p, a, b)).collect()
-        }
+        Step::GreekLowercase => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| (stem::greek_lowercase(&t), p, a, b, l))
+            .collect(),
         Step::PersianNormalize => tokens
             .into_iter()
-            .map(|(t, p, a, b)| (stem::persian_normalize(&t), p, a, b))
-            .filter(|(t, _, _, _)| !t.is_empty())
+            .map(|(t, p, a, b, l)| (stem::persian_normalize(&t), p, a, b, l))
+            .filter(|(t, _, _, _, _)| !t.is_empty())
             .collect(),
         Step::RomanianNormalize => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let written: String = t
                     .chars()
                     .map(|c| match c {
@@ -893,28 +1151,29 @@ fn apply_step(
                         other => other,
                     })
                     .collect();
-                (written, p, a, b)
+                (written, p, a, b, l)
             })
             .collect(),
-        Step::DecimalDigits => {
-            tokens.into_iter().map(|(t, p, a, b)| (stem::decimal_digits(&t), p, a, b)).collect()
-        }
+        Step::DecimalDigits => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| (stem::decimal_digits(&t), p, a, b, l))
+            .collect(),
         // handled before the match, where the held-back words are recorded
         Step::KeywordMarker(_) => tokens,
         Step::BaseForm(language) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let base = morph::words(*language, &t)
                     .into_iter()
                     .next()
                     .and_then(|w| w.base)
                     .unwrap_or_else(|| t.clone());
-                (base, p, a, b)
+                (base, p, a, b, l)
             })
             .collect(),
         Step::PartOfSpeech(language) => tokens
             .into_iter()
-            .filter(|(t, _, _, _)| {
+            .filter(|(t, _, _, _, _)| {
                 morph::words(*language, t)
                     .into_iter()
                     .next()
@@ -925,20 +1184,20 @@ fn apply_step(
             .collect(),
         Step::Reading(language) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let reading = morph::words(*language, &t)
                     .into_iter()
                     .next()
                     .and_then(|w| w.reading)
                     .unwrap_or_else(|| t.clone());
-                (reading, p, a, b)
+                (reading, p, a, b, l)
             })
             .collect(),
         Step::MinHash { buckets, hashes } => {
             let mut out = Vec::with_capacity(*buckets);
             for bucket in 0..*buckets {
                 let mut smallest = u64::MAX;
-                for (t, _, _, _) in &tokens {
+                for (t, _, _, _, _) in &tokens {
                     for hash in 0..(*hashes).max(1) {
                         let mut seed = (bucket as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                             ^ (hash as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -951,17 +1210,19 @@ fn apply_step(
                 if smallest == u64::MAX {
                     smallest = 0;
                 }
-                out.push((format!("{smallest:016x}"), bucket, 0, 0));
+                out.push((format!("{smallest:016x}"), bucket, 0, 0, 1));
             }
             out
         }
         Step::IcuNormalize => {
-            tokens.into_iter().map(|(t, p, a, b)| (icu_normalize(&t), p, a, b)).collect()
+            tokens.into_iter().map(|(t, p, a, b, l)| (icu_normalize(&t), p, a, b, l)).collect()
         }
-        Step::IcuFold => tokens.into_iter().map(|(t, p, a, b)| (icu_fold(&t), p, a, b)).collect(),
+        Step::IcuFold => {
+            tokens.into_iter().map(|(t, p, a, b, l)| (icu_fold(&t), p, a, b, l)).collect()
+        }
         Step::Uppercase => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 // a letter with no upper case of its own is left as it is,
                 // which is what a filter written in Java does with `ß`
                 let written: String = t
@@ -974,43 +1235,47 @@ fn apply_step(
                         }
                     })
                     .collect();
-                (written, p, a, b)
+                (written, p, a, b, l)
             })
             .collect(),
-        Step::KStem => tokens.into_iter().map(|(t, p, a, b)| (kstem::stem(&t), p, a, b)).collect(),
+        Step::KStem => {
+            tokens.into_iter().map(|(t, p, a, b, l)| (kstem::stem(&t), p, a, b, l)).collect()
+        }
         Step::Apostrophe => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let cut = t.split_once('\'').map(|(head, _)| head.to_string()).unwrap_or(t);
-                (cut, p, a, b)
+                (cut, p, a, b, l)
             })
             .collect(),
         Step::Possessive => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let base = t
                     .strip_suffix("'s")
                     .or_else(|| t.strip_suffix("'S"))
                     .or_else(|| t.strip_suffix("\u{2019}s"))
                     .map(|w| w.to_string())
                     .unwrap_or(t);
-                (base, p, a, b)
+                (base, p, a, b, l)
             })
             .collect(),
         Step::Classic => {
-            tokens.into_iter().map(|(t, p, a, b)| (stem::classic(&t), p, a, b)).collect()
+            tokens.into_iter().map(|(t, p, a, b, l)| (stem::classic(&t), p, a, b, l)).collect()
         }
-        Step::CjkWidth => tokens.into_iter().map(|(t, p, a, b)| (widened(&t), p, a, b)).collect(),
+        Step::CjkWidth => {
+            tokens.into_iter().map(|(t, p, a, b, l)| (widened(&t), p, a, b, l)).collect()
+        }
         Step::Normalize(script) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| (stem::normalize(script, &t), p, a, b))
-            .filter(|(t, _, _, _)| !t.is_empty())
+            .map(|(t, p, a, b, l)| (stem::normalize(script, &t), p, a, b, l))
+            .filter(|(t, _, _, _, _)| !t.is_empty())
             .collect(),
         Step::PatternCapture { patterns, preserve_original } => {
             let mut out = Vec::new();
-            for (t, p, a, b) in tokens {
+            for (t, p, a, b, l) in tokens {
                 if *preserve_original {
-                    out.push((t.clone(), p, a, b));
+                    out.push((t.clone(), p, a, b, l));
                 }
                 for pattern in patterns {
                     let Ok(re) = regex::Regex::new(pattern) else { continue };
@@ -1021,11 +1286,11 @@ fn apply_step(
                             caps.iter().skip(1).flatten().map(|m| m.as_str()).collect();
                         if named.is_empty() {
                             if let Some(all) = caps.get(0) {
-                                out.push((all.as_str().to_string(), p, a, b));
+                                out.push((all.as_str().to_string(), p, a, b, l));
                             }
                         } else {
                             for group in named {
-                                out.push((group.to_string(), p, a, b));
+                                out.push((group.to_string(), p, a, b, l));
                             }
                         }
                     }
@@ -1037,10 +1302,10 @@ fn apply_step(
             let Ok(re) = regex::Regex::new(pattern) else { return tokens };
             tokens
                 .into_iter()
-                .map(|(t, p, a, b)| {
-                    (re.replace_all(&t, replacement.as_str()).into_owned(), p, a, b)
+                .map(|(t, p, a, b, l)| {
+                    (re.replace_all(&t, replacement.as_str()).into_owned(), p, a, b, l)
                 })
-                .filter(|(t, _, _, _)| !t.is_empty())
+                .filter(|(t, _, _, _, _)| !t.is_empty())
                 .collect()
         }
         Step::Keep { words, keep } => {
@@ -1048,22 +1313,22 @@ fn apply_step(
                 words.iter().map(|w| w.to_lowercase()).collect();
             tokens
                 .into_iter()
-                .filter(|(t, _, _, _)| set.contains(&t.to_lowercase()) == *keep)
+                .filter(|(t, _, _, _, _)| set.contains(&t.to_lowercase()) == *keep)
                 .collect()
         }
         Step::KeepTypes { types, keep } => tokens
             .into_iter()
-            .filter(|(t, _, _, _)| {
+            .filter(|(t, _, _, _, _)| {
                 let kind = if t.chars().all(|c| c.is_numeric()) { "<NUM>" } else { "<ALPHANUM>" };
                 types.iter().any(|named| named == kind) == *keep
             })
             .collect(),
         Step::WordDelimiter { catenate, on_numerics, on_case_change, adjust_offsets } => {
-            let mut out: Vec<(String, usize, usize, usize)> = Vec::new();
-            for (t, p, a, b) in tokens {
+            let mut out: Vec<Token> = Vec::new();
+            for (t, p, a, b, l) in tokens {
                 let parts = split_where_writing_changes(&t, *on_numerics, *on_case_change);
                 if parts.len() < 2 {
-                    out.push((t, p, a, b));
+                    out.push((t, p, a, b, l));
                     continue;
                 }
                 // each part stands where it was written, unless the request
@@ -1071,11 +1336,11 @@ fn apply_step(
                 let mut at = a;
                 for part in &parts {
                     let (from, to) = if *adjust_offsets { (at, at + part.len()) } else { (a, b) };
-                    out.push((part.clone(), p, from, to));
+                    out.push((part.clone(), p, from, to, 1));
                     at += part.len();
                 }
                 if *catenate {
-                    out.push((parts.concat(), p, a, b));
+                    out.push((parts.concat(), p, a, b, 1));
                 }
             }
             // splitting a word makes new positions, and what follows it stands
@@ -1089,32 +1354,103 @@ fn apply_step(
             let common: std::collections::HashSet<String> =
                 words.iter().map(|w| w.to_lowercase()).collect();
             let mut out = Vec::new();
-            for (i, (t, p, a, b)) in tokens.iter().enumerate() {
-                out.push((t.clone(), *p, *a, *b));
-                if let Some((next, _, _, nb)) = tokens.get(i + 1)
+            for (i, (t, p, a, b, l)) in tokens.iter().enumerate() {
+                out.push((t.clone(), *p, *a, *b, *l));
+                if let Some((next, _, _, nb, _)) = tokens.get(i + 1)
                     && (common.contains(&t.to_lowercase()) || common.contains(&next.to_lowercase()))
                 {
-                    out.push((format!("{t}_{next}"), *p, *a, *nb));
+                    out.push((format!("{t}_{next}"), *p, *a, *nb, 2));
                 }
             }
             out
         }
+        Step::Shingle { min, max, unigrams, unigrams_if_none, separator, filler } => {
+            let mut out: Vec<Token> = Vec::new();
+            let mut shingled = false;
+            for (i, (t, p, a, b, l)) in tokens.iter().enumerate() {
+                if *unigrams {
+                    out.push((t.clone(), *p, *a, *b, *l));
+                }
+                for width in *min..=*max {
+                    if width < 2 {
+                        continue;
+                    }
+                    // a run that runs off the end is written with the filler
+                    // standing in for the words that are not there
+                    let mut words: Vec<String> = Vec::new();
+                    let mut end = *b;
+                    for step in 0..width {
+                        match tokens.get(i + step) {
+                            Some((word, _, _, to, _)) => {
+                                words.push(word.clone());
+                                end = *to;
+                            }
+                            None => words.push(filler.clone()),
+                        }
+                    }
+                    if i + width > tokens.len() {
+                        continue;
+                    }
+                    out.push((words.join(separator), *p, *a, end, width));
+                    shingled = true;
+                }
+            }
+            match !shingled && !*unigrams && *unigrams_if_none {
+                true => tokens,
+                false => out,
+            }
+        }
         Step::DelimitedTermFreq(sep) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let word = t.split(*sep).next().unwrap_or(&t).to_string();
-                (word, p, a, b)
+                (word, p, a, b, l)
             })
             .collect(),
         Step::DelimitedPayload(sep) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| {
+            .map(|(t, p, a, b, l)| {
                 let word = t.split(*sep).next().unwrap_or(&t).to_string();
-                (word, p, a, b)
+                (word, p, a, b, l)
             })
             .collect(),
+        // the payload is read back by a term vector, not by the stream
+        Step::TypeAsPayload => tokens,
+        Step::FlattenGraph => {
+            // each node of the graph is placed one after the furthest of the
+            // nodes that reach it, and every token is as long as the gap
+            // between the nodes it joins
+            let mut nodes: Vec<usize> =
+                tokens.iter().flat_map(|(_, p, _, _, l)| [*p, *p + *l]).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            let mut placed: std::collections::HashMap<usize, usize> = Default::default();
+            for node in &nodes {
+                let reached = tokens
+                    .iter()
+                    .filter(|(_, p, _, _, l)| p + l == *node)
+                    .filter_map(|(_, p, _, _, _)| placed.get(p).map(|at| at + 1))
+                    .max();
+                let at =
+                    reached.unwrap_or(placed.values().copied().max().map(|m| m + 1).unwrap_or(0));
+                placed.insert(*node, at);
+            }
+            let mut out: Vec<Token> = tokens
+                .into_iter()
+                .map(|(t, p, a, b, l)| {
+                    let from = placed.get(&p).copied().unwrap_or(p);
+                    let to = placed.get(&(p + l)).copied().unwrap_or(from + 1);
+                    (t, from, a, b, to.saturating_sub(from).max(1))
+                })
+                .collect();
+            out.sort_by_key(|t| t.1);
+            out
+        }
         Step::Multiplexer(branches) => {
-            let mut out = Vec::new();
+            // every branch is applied to the whole stream, and the results
+            // are read back token by token: each word, in each of its forms,
+            // before the next word
+            let mut out: Vec<Token> = Vec::new();
             for branch in branches {
                 let mut here = tokens.clone();
                 for step in branch {
@@ -1122,22 +1458,23 @@ fn apply_step(
                 }
                 out.extend(here);
             }
+            out.sort_by_key(|t| t.1);
             out
         }
         Step::StemmerOverride(map) => tokens
             .into_iter()
-            .map(|(t, p, a, b)| match map.get(&t.to_lowercase()) {
-                Some(told) => (told.clone(), p, a, b),
-                None => (t, p, a, b),
+            .map(|(t, p, a, b, l)| match map.get(&t.to_lowercase()) {
+                Some(told) => (told.clone(), p, a, b, l),
+                None => (t, p, a, b, l),
             })
             .collect(),
         Step::Decompound(parts) => {
             let mut out = Vec::new();
-            for (t, p, a, b) in tokens {
-                out.push((t.clone(), p, a, b));
+            for (t, p, a, b, l) in tokens {
+                out.push((t.clone(), p, a, b, l));
                 for part in parts {
                     if t.len() > part.len() && t.to_lowercase().contains(&part.to_lowercase()) {
-                        out.push((part.clone(), p, a, b));
+                        out.push((part.clone(), p, a, b, 1));
                     }
                 }
             }
@@ -1145,7 +1482,7 @@ fn apply_step(
         }
         Step::NgramTokens { min, max, edges } => {
             let mut out = Vec::new();
-            for (t, p, a, b) in tokens {
+            for (t, p, a, b, _) in tokens {
                 let chars: Vec<char> = t.chars().collect();
                 for start in 0..chars.len() {
                     if *edges && start > 0 {
@@ -1158,6 +1495,7 @@ fn apply_step(
                                 p,
                                 a,
                                 b,
+                                1,
                             ));
                         }
                     }
@@ -1172,15 +1510,15 @@ fn apply_step(
         }
         Step::CjkBigram => {
             let mut out = Vec::new();
-            for (t, p, a, b) in tokens {
+            for (t, p, a, b, l) in tokens {
                 let chars: Vec<char> = t.chars().collect();
                 // a word written in an alphabet is left as it is
                 if chars.len() < 2 || !chars.iter().any(|c| is_cjk(*c)) {
-                    out.push((t, p, a, b));
+                    out.push((t, p, a, b, l));
                     continue;
                 }
                 for (i, pair) in chars.windows(2).enumerate() {
-                    out.push((pair.iter().collect::<String>(), p + i, a + i, a + i + 2));
+                    out.push((pair.iter().collect::<String>(), p + i, a + i, a + i + 2, 1));
                 }
             }
             out
@@ -1218,7 +1556,7 @@ pub(crate) fn icu_fold(word: &str) -> String {
 /// Unicode says where a break may fall, and for Thai, Lao, Khmer, Burmese,
 /// Chinese and Japanese -- written without spaces between words -- a
 /// dictionary says which of those breaks are real ones.
-fn icu_words(text: &str) -> Vec<(String, usize, usize, usize)> {
+fn icu_words(text: &str) -> Vec<Token> {
     use icu_segmenter::WordSegmenter;
     use icu_segmenter::options::WordBreakInvariantOptions;
     let segmenter = WordSegmenter::new_auto(WordBreakInvariantOptions::default());
@@ -1226,7 +1564,7 @@ fn icu_words(text: &str) -> Vec<(String, usize, usize, usize)> {
     let mut last = 0usize;
     for (at, kind) in segmenter.segment_str(text).iter_with_word_type() {
         if at > last && kind.is_word_like() {
-            out.push((text[last..at].to_string(), out.len(), last, at));
+            out.push((text[last..at].to_string(), out.len(), last, at, 1));
         }
         last = at;
     }
@@ -1851,6 +2189,9 @@ impl Registry {
     /// Read the `analysis` an index's settings define, on top of the built-ins.
     pub fn from_settings(settings: &Value) -> Registry {
         let mut registry = Registry::default();
+        // a setting may be written as one dotted key rather than as nested
+        // objects; both spell the same thing
+        let settings = &unflattened(settings);
         let analysis = settings
             .pointer("/index/analysis")
             .or_else(|| settings.pointer("/analysis"))
@@ -2028,8 +2369,68 @@ fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) 
             steps.extend(s);
         }
     }
+    let steps = stacked(steps);
     let pre = spec.get("char_filter").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-    Some(Chain { pre: char_filters_of(&pre, chars), source, steps })
+    let mut chain = Chain { pre: char_filters_of(&pre, chars), source, steps };
+    chain.cut_synonyms();
+    Some(chain)
+}
+
+/// The steps that follow a `keyword_repeat`, each keeping the word it was
+/// given beside what it made of it.
+///
+/// Lucene writes the repeat as a second copy of the token marked as a keyword,
+/// which the stemmers then leave alone; the two forms end up stacked in one
+/// place. Keeping the original beside the stem says the same thing, and says
+/// it without a mark that every filter would have to carry.
+fn stacked(steps: Vec<Step>) -> Vec<Step> {
+    if !steps.iter().any(|s| matches!(s, Step::KeywordRepeat)) {
+        return steps;
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    let mut repeating = false;
+    for step in steps {
+        match step {
+            Step::KeywordRepeat => repeating = true,
+            other if repeating && other.stems() => {
+                out.push(Step::PreserveOriginal(Box::new(other)));
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Settings with every dotted key opened out into the objects it names.
+fn unflattened(settings: &Value) -> Value {
+    let Some(map) = settings.as_object() else { return settings.clone() };
+    let mut out = Value::Object(serde_json::Map::new());
+    for (key, value) in map {
+        let value = match value {
+            Value::Object(_) => unflattened(value),
+            other => other.clone(),
+        };
+        let mut node = &mut out;
+        let parts: Vec<&str> = key.split('.').collect();
+        for part in &parts[..parts.len() - 1] {
+            let o = node.as_object_mut().unwrap();
+            node =
+                o.entry(part.to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !node.is_object() {
+                *node = Value::Object(serde_json::Map::new());
+            }
+        }
+        if let Some(o) = node.as_object_mut() {
+            let last = parts[parts.len() - 1].to_string();
+            match (o.get_mut(&last), value) {
+                (Some(Value::Object(held)), Value::Object(more)) => held.extend(more),
+                (_, value) => {
+                    o.insert(last, value);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A tokenizer by name, defined by the index or built in.
@@ -2166,7 +2567,10 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         }
         "trim" => vec![Step::Trim],
         "reverse" => vec![Step::Reverse],
-        "unique" => vec![Step::Unique],
+        "unique" => match flag("only_on_same_position") {
+            true => vec![Step::UniqueAtPosition],
+            false => vec![Step::Unique],
+        },
         "elision" => {
             if spec.get("articles").is_none() && spec.get("articles_path").is_none() {
                 return None;
@@ -2236,7 +2640,28 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "common_grams" => {
             vec![Step::CommonGrams(spec.get("common_words").map(word_list).unwrap_or_default())]
         }
-        "delimited_term_freq" => vec![Step::DelimitedTermFreq(one("delimiter", '^'))],
+        "shingle" => {
+            let min = num("min_shingle_size", 2);
+            let max = num("max_shingle_size", 2);
+            let text = |key: &str, fallback: &str| {
+                spec.get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| fallback.to_string())
+            };
+            vec![Step::Shingle {
+                min,
+                max,
+                unigrams: spec.get("output_unigrams").and_then(|v| v.as_bool()).unwrap_or(true),
+                unigrams_if_none: spec
+                    .get("output_unigrams_if_no_shingles")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                separator: text("token_separator", " "),
+                filler: text("filler_token", "_"),
+            }]
+        }
+        "delimited_term_freq" => vec![Step::DelimitedTermFreq(one("delimiter", '|'))],
         "delimited_payload" => vec![Step::DelimitedPayload(one("delimiter", '|'))],
         "ngram" => vec![Step::NgramTokens {
             min: num("min_gram", 1),
@@ -2268,7 +2693,9 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "min_hash" => {
             vec![Step::MinHash { buckets: num("bucket_count", 512), hashes: num("hash_count", 1) }]
         }
-        "flatten_graph" | "remove_duplicates" => vec![],
+        "flatten_graph" => vec![Step::FlattenGraph],
+        "type_as_payload" => vec![Step::TypeAsPayload],
+        "remove_duplicates" => vec![],
         other => return filter_of_name(other),
     };
     Some(steps)
@@ -2290,7 +2717,7 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "cjk_width" => vec![Step::CjkWidth],
         "cjk_bigram" => vec![Step::CjkBigram],
         "delimited_payload" => vec![Step::DelimitedPayload('|')],
-        "delimited_term_freq" => vec![Step::DelimitedTermFreq('^')],
+        "delimited_term_freq" => vec![Step::DelimitedTermFreq('|')],
         "stop" => vec![Step::Stop(stop_words("_english_"))],
         "kstem" => vec![Step::KStem],
         "porter_stem" | "porterStem" => vec![Step::Stem("porter".into())],
@@ -2305,7 +2732,18 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
             }]
         }
         "min_hash" => vec![Step::MinHash { buckets: 512, hashes: 1 }],
-        "flatten_graph" | "remove_duplicates" | "keyword_repeat" => vec![],
+        "shingle" => vec![Step::Shingle {
+            min: 2,
+            max: 2,
+            unigrams: true,
+            unigrams_if_none: false,
+            separator: " ".to_string(),
+            filler: "_".to_string(),
+        }],
+        "type_as_payload" => vec![Step::TypeAsPayload],
+        "flatten_graph" => vec![Step::FlattenGraph],
+        "remove_duplicates" => vec![],
+        "keyword_repeat" => vec![Step::KeywordRepeat],
         "icu_normalizer" => vec![Step::IcuNormalize],
         "icu_folding" => vec![Step::IcuFold],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
@@ -2403,6 +2841,7 @@ fn synonyms(spec: &Value, graph: bool) -> Vec<SynonymRule> {
                         alternatives: targets.clone(),
                         keep_original: false,
                         alternatives_first: true,
+                        graph,
                     });
                 }
             }
@@ -2420,6 +2859,7 @@ fn synonyms(spec: &Value, graph: bool) -> Vec<SynonymRule> {
                         // a graph filter reads what the word also means before
                         // the word itself; the plain one reads it after
                         alternatives_first: graph,
+                        graph,
                     });
                 }
             }
@@ -2438,6 +2878,9 @@ pub struct SynonymRule {
     keep_original: bool,
     /// whether what they also mean is read first
     alternatives_first: bool,
+    /// whether the ways of reading it are laid out as paths through a graph
+    /// rather than stacked in place
+    graph: bool,
 }
 
 /// The analyzers OpenSearch has without being told about them.
@@ -2582,9 +3025,25 @@ pub fn builtin(name: &str) -> Option<Chain> {
             ],
         },
         "persian" => Chain {
-            pre: Vec::new(),
+            // the joiner Persian writes inside a word is not part of any word:
+            // what stands either side of it is two words
+            pre: vec![CharFilter::Mapping(vec![("\u{200c}".to_string(), " ".to_string())])],
             source: Source::Standard,
-            steps: vec![Step::Lowercase, Step::PersianNormalize, Step::Stop(stop_words("persian"))],
+            steps: vec![
+                Step::Lowercase,
+                Step::DecimalDigits,
+                Step::Normalize("arabic"),
+                Step::PersianNormalize,
+                // the words to drop are compared with words that have been
+                // written the one way, so they are written that way too
+                Step::Stop(
+                    stop_words("persian")
+                        .iter()
+                        .map(|w| stem::persian_normalize(&stem::normalize("arabic", w)))
+                        .collect(),
+                ),
+                Step::Stem("persian".into()),
+            ],
         },
         "thai" => Chain {
             pre: Vec::new(),

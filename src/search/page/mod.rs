@@ -107,10 +107,20 @@ pub(crate) fn write_page(
                 } else {
                     "the query matched; the order comes from the sort"
                 };
-                hit["_explanation"] = json!({
-                    "value": h.score,
-                    "description": description,
-                    "details": [],
+                // what BoostCore can say about the score, told Lucene's way;
+                // where it can say nothing, the score itself stands
+                let told = (!rescored && sort_keys.is_empty())
+                    .then(|| {
+                        let g = searchers[h.shard_idx].2.read();
+                        query_json.as_ref().and_then(|q| explain_document(&g, q, &h.id))
+                    })
+                    .flatten();
+                hit["_explanation"] = told.unwrap_or_else(|| {
+                    json!({
+                        "value": h.score,
+                        "description": description,
+                        "details": [],
+                    })
                 });
                 // an explained hit says which shard answered for it, and which
                 // node that shard is on
@@ -121,7 +131,26 @@ pub(crate) fn write_page(
                 // the column holds the number the field reports -- a date is
                 // milliseconds, a date_nanos is nanoseconds -- so a sort value
                 // goes out as it was read
-                hit["sort"] = Value::Array(h.sort.iter().map(|s| s.to_json()).collect());
+                hit["sort"] = Value::Array(
+                    h.sort
+                        .iter()
+                        .enumerate()
+                        .map(|(at, s)| {
+                            // a sort asked to read a field as another width
+                            // reports its values at that width
+                            match sort_keys.get(at).and_then(|k| k.numeric_type.as_deref()) {
+                                Some("long" | "int" | "date" | "date_nanos") => match s.to_json() {
+                                    Value::Number(n) => match n.as_f64() {
+                                        Some(v) => json!(v as i64),
+                                        None => Value::Number(n),
+                                    },
+                                    other => other,
+                                },
+                                _ => s.to_json(),
+                            }
+                        })
+                        .collect(),
+                );
             }
             if let Some(specs) = field_specs.as_ref() {
                 let g = searchers[h.shard_idx].2.read();
@@ -174,6 +203,19 @@ pub(crate) fn write_page(
                         }
                     }
                 }
+                // a shape is reported as the GeoJSON it stands for, or as the
+                // well-known text a `wkt` format asks for
+                for (name, fmt) in specs.iter() {
+                    if g.mapping.type_of(name) != Some("geo_shape") {
+                        continue;
+                    }
+                    let Some(Value::Array(items)) = f.get_mut(name.as_str()) else { continue };
+                    for value in items.iter_mut() {
+                        if let Some(written) = crate::search::shape_as(value, fmt.as_deref()) {
+                            *value = written;
+                        }
+                    }
+                }
                 // a token_count field stores the text but reports the count
                 for (name, vals) in f.iter_mut() {
                     if g.mapping.type_of(name) != Some("token_count") {
@@ -216,7 +258,15 @@ pub(crate) fn write_page(
                     let g = searchers[h.shard_idx].2.read();
                     let kept = g.mapping.raw.pointer("/_source/enabled") != Some(&json!(false));
                     let groups = nested_inner_hits(
-                        &h, &h.source, "", &clauses, kept, query_json, &g.mapping, &g.index,
+                        &h,
+                        &h.source,
+                        "",
+                        &clauses,
+                        kept,
+                        query_json,
+                        &g.mapping,
+                        &g.index,
+                        &g.analysis,
                     );
                     if !groups.is_empty() {
                         hit["inner_hits"] = Value::Object(groups);
@@ -289,7 +339,8 @@ pub(crate) fn write_page(
             }
             if let Some(spec) = body.get("highlight") {
                 let g = searchers[h.shard_idx].2.read();
-                if let Some(hl) = build_highlight(spec, &h.source, query_json, &g.mapping, &g.index)
+                if let Some(hl) =
+                    build_highlight(spec, &h.source, query_json, &g.mapping, &g.index, &g.analysis)
                 {
                     hit["highlight"] = hl;
                 }
@@ -340,9 +391,26 @@ pub(crate) fn output_specs(
                 else {
                     continue;
                 };
+                // a shape names its own formats, and a number the pattern its
+                // digits are written with; the rest have only dates to format
                 if !matches!(
                     g.mapping.type_of(f),
-                    None | Some("date" | "date_nanos" | "date_range")
+                    None | Some(
+                        "date"
+                            | "date_nanos"
+                            | "date_range"
+                            | "geo_shape"
+                            | "geo_point"
+                            | "long"
+                            | "integer"
+                            | "short"
+                            | "byte"
+                            | "double"
+                            | "float"
+                            | "half_float"
+                            | "scaled_float"
+                            | "unsigned_long"
+                    )
                 ) {
                     return Err(err(
                         StatusCode::BAD_REQUEST,

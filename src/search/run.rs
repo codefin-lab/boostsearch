@@ -47,11 +47,20 @@ fn rescore_by_rank_features(
                 .mapping
                 .field_option(field, "positive_score_impact")
                 .and_then(|v| v.as_bool())
+                // a `rank_features` field is a map of features, so the option
+                // stands on the field the feature is written under
+                .or_else(|| {
+                    let (parent, _) = field.rsplit_once('.')?;
+                    g.mapping.field_option(parent, "positive_score_impact")?.as_bool()
+                })
                 .or_else(|| spec.get("positive_score_impact").and_then(|v| v.as_bool()))
                 .unwrap_or(true);
-            // a feature the query says is worth less when it is larger is
-            // read the other way round
-            let value = held;
+            // a feature whose larger values are worth less is held as its own
+            // reciprocal, so every curve below is written the one way round
+            let value = match positive {
+                true => held,
+                false => 1.0 / held.max(f32::MIN_POSITIVE),
+            };
             let curved = if let Some(log) = spec.get("log") {
                 let scaling =
                     log.get("scaling_factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
@@ -62,20 +71,18 @@ fn rescore_by_rank_features(
                     .and_then(|v| v.as_f64())
                     .map(|p| p as f32)
                     .unwrap_or(value.max(1.0));
-                // a feature worth less when it is larger saturates the other
-                // way about
-                if positive { value / (value + pivot) } else { pivot / (value + pivot) }
+                value / (value + pivot)
             } else if let Some(sigmoid) = spec.get("sigmoid") {
                 let pivot = sigmoid.get("pivot").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                 let exponent =
                     sigmoid.get("exponent").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                 value.powf(exponent) / (value.powf(exponent) + pivot.powf(exponent))
             } else if spec.get("linear").is_some() {
-                if positive { value } else { 1.0 / value.max(f32::MIN_POSITIVE) }
+                value
             } else {
                 // without a curve named, saturation with the value as its own
                 // pivot is what OpenSearch settles on
-                if positive { value / (value + 1.0) } else { 1.0 / (value + 1.0) }
+                value / (value + 1.0)
             };
             total += boost * curved;
         }
@@ -497,11 +504,27 @@ pub fn run(
             .collect();
         replace_routing_exists(q, &ids);
     }
+    // what a join asked to list is read before the join is rewritten away
+    let mut join_inner_hits: Vec<(String, String, Value, Value)> = Vec::new();
     if let Some(q) = query_json.as_mut() {
         resolve_terms_lookups(store, q)?;
         expand_bitmap_terms(q);
         expand_more_like_this(store, &targets, q);
+        // a joining query walks one set of documents to answer about another,
+        // which is one of the costs a cluster may have turned off
+        if !expensive_allowed(store) && names_a_join(q) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "[joining] queries cannot be executed when 'search.allow_expensive_queries' is \
+                 set to false.",
+            ));
+        }
+        collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
+        if names_a_percolate(q) {
+            expand_percolate(store, &targets, q);
+        }
     }
 
     // a field cannot be both kept and dropped: naming it in both lists asks
@@ -551,6 +574,15 @@ pub fn run(
         if k.field == "_shard_doc" {
             k.field = "_seq".to_string();
         }
+        // a join field is sorted by the relation each document stands in,
+        // which is what the field's own value is
+        let joined = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .any(|st| st.read().mapping.type_of(&k.field) == Some("join"));
+        if joined {
+            k.field = format!("{}.name", k.field);
+        }
     }
     // `_doc` is the order the index holds its documents in, and an index that
     // was told to sort itself holds them in that order
@@ -574,6 +606,7 @@ pub fn run(
                     missing_last: true,
                     nested: None,
                     nested_filter: None,
+                    numeric_type: None,
                 })
                 .collect();
             (!keys.is_empty()).then_some(keys)
@@ -1097,6 +1130,10 @@ pub fn run(
         fetch_profiles(&mut shard_profiles, body, &extras, &named, size, page.len() as u64, nanos);
     }
 
+    let mut page = page;
+    if !join_inner_hits.is_empty() {
+        attach_join_inner_hits(store, &targets, &mut page, &join_inner_hits);
+    }
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,

@@ -168,6 +168,11 @@ pub fn write_doc_versioned(
             ),
         ));
     }
+    // a query stored to be percolated is checked now for what it would fail
+    // on later
+    if let Some(why) = crate::search::percolator_complaint(st, &source) {
+        return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
+    }
     st.mapping.learn_dynamic(&source);
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);
@@ -635,6 +640,10 @@ pub async fn explain(
                 if p.get("lenient").map(|v| v != "false").unwrap_or(false) {
                     qs["lenient"] = json!(true);
                 }
+                // the query may be cut with an analyzer the caller names
+                if let Some(named) = p.get("analyzer") {
+                    qs["analyzer"] = json!(named);
+                }
                 json!({"query_string": qs})
             }
             None => json!({"match_all": {}}),
@@ -646,15 +655,20 @@ pub async fn explain(
         .map(|o| o.total > 0)
         .unwrap_or(false);
 
+    let told = matched
+        .then(|| {
+            store.get(&name).and_then(|st| crate::search::explain_document(&st.read(), &q, &id))
+        })
+        .flatten();
     let mut out = json!({
         "_index": name,
         "_id": id,
         "matched": matched,
-        "explanation": {
+        "explanation": told.unwrap_or_else(|| json!({
             "value": if matched { 1.0 } else { 0.0 },
             "description": if matched { "match" } else { "no match" },
             "details": []
-        }
+        })),
     });
     let sel = body.get("_source").cloned().or_else(|| source_selector_from_params(&p));
     if let Some(sel) = sel.as_ref().filter(|v| **v != json!(false)) {

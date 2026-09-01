@@ -103,7 +103,17 @@ pub(crate) fn search_one_shard(
         Some(qj) => match crate::query::build(&ctx, qj) {
             Ok(q) => q,
             Err(e) => {
-                return Err(err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()));
+                let why = e.to_string();
+                // a query that reads well but cannot be run over the field it
+                // names fails on the shard rather than in the parser
+                if why.starts_with("Cannot create intervals") {
+                    return Err(err_caused_by(
+                        "search_phase_execution_exception",
+                        "all shards failed",
+                        &why,
+                    ));
+                }
+                return Err(err(StatusCode::BAD_REQUEST, "parsing_exception", why));
             }
         },
         None => Box::new(boostcore::query::AllQuery),

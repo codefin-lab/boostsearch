@@ -1,6 +1,7 @@
 //! Asking what a query means, and what an analyzer does to a text.
 
 use super::*;
+use crate::analysis::Token;
 
 /// A filter written the short way, spelled out.
 ///
@@ -108,7 +109,7 @@ pub async fn validate_query(
                         .iter()
                         .map(|n| json!({
                             "index": n, "valid": true,
-                            "explanation": describe_query(&query),
+                            "explanation": describe_query_in(&store, n, &query),
                         }))
                         .collect::<Vec<_>>()
                 );
@@ -121,6 +122,67 @@ pub async fn validate_query(
 
 /// How a query reads once it has been rewritten, in the shape the engine
 /// names its own queries.
+/// The same, read through one index's analyzers: a phrase is written as the
+/// words the field's analyzer makes of it, with the words that stand in one
+/// place -- a synonym beside what it means -- bracketed together.
+pub(crate) fn describe_query_in(store: &Store, index: &str, q: &Value) -> String {
+    let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
+        return describe_query(q);
+    };
+    if !matches!(kind.as_str(), "match_phrase" | "match_phrase_prefix") {
+        return describe_query(q);
+    }
+    let Some((field, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
+        return describe_query(q);
+    };
+    let text = match spec {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => {
+            o.get("query").map(|x| x.as_str().unwrap_or_default().to_string()).unwrap_or_default()
+        }
+        other => other.to_string(),
+    };
+    let Some(st) = store.get(index) else { return describe_query(q) };
+    let g = st.read();
+    let chain = ["search_analyzer", "analyzer"]
+        .iter()
+        .find_map(|key| g.mapping.field_option(field, key))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|named| g.analysis.get(&named));
+    let Some(chain) = chain else { return describe_query(q) };
+    // the words in the order of the places they stand in, those sharing a
+    // place bracketed
+    let mut places: Vec<(usize, Vec<String>)> = Vec::new();
+    for (word, at, _, _, _) in chain.tokens(&text) {
+        match places.last_mut() {
+            Some((here, group)) if *here == at => group.push(word),
+            _ => places.push((at, vec![word])),
+        }
+    }
+    let last = places.len().saturating_sub(1);
+    let prefix = kind == "match_phrase_prefix";
+    let written: Vec<String> = places
+        .into_iter()
+        .enumerate()
+        .map(|(at, (_, group))| {
+            // a prefix is a prefix of each of the words it could end with
+            let star = if prefix && at == last { "*" } else { "" };
+            match group.len() {
+                1 => format!("{}{star}", group[0]),
+                _ => format!(
+                    "({})",
+                    group.iter().map(|w| format!("{w}{star}")).collect::<Vec<_>>().join(" ")
+                ),
+            }
+        })
+        .collect();
+    match (prefix, written.len()) {
+        (true, _) => format!("{field}:\"{}\"", written.join(" ")),
+        (_, 1) => format!("{field}:{}", written[0]),
+        _ => format!("{field}:\"{}\"", written.join(" ")),
+    }
+}
+
 pub(crate) fn describe_query(q: &Value) -> String {
     let Some((kind, body)) = q.as_object().and_then(|o| o.iter().next()) else {
         return "*:*".to_string();
@@ -130,6 +192,26 @@ pub(crate) fn describe_query(q: &Value) -> String {
             "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
                 .to_string()
         }
+        "match_phrase" | "match_phrase_prefix" => body
+            .as_object()
+            .and_then(|o| o.iter().next())
+            .map(|(f, v)| {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Object(o) => o
+                        .get("query")
+                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                        .unwrap_or_default(),
+                    other => other.to_string(),
+                };
+                let words: Vec<&str> = text.split_whitespace().collect();
+                match (kind.as_str(), words.len()) {
+                    ("match_phrase_prefix", _) => format!("{f}:\"{}*\"", words.join(" ")),
+                    (_, 1) => format!("{f}:{}", words[0]),
+                    _ => format!("{f}:\"{}\"", words.join(" ")),
+                }
+            })
+            .unwrap_or_else(|| "*:*".to_string()),
         "term" | "match" => body
             .as_object()
             .and_then(|o| o.iter().next())
@@ -153,7 +235,7 @@ pub(crate) fn describe_query(q: &Value) -> String {
 /// `_analyze` runs text through the tokenizer the query path would use.
 /// How many times a term counts, when the text said so: `foo^3` is three.
 fn frequency_of(token: &str) -> u64 {
-    token.rsplit_once('^').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
+    token.rsplit_once(['^', '|']).and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(1)
 }
 
 pub async fn analyze(
@@ -194,6 +276,27 @@ pub async fn analyze(
                     StatusCode::BAD_REQUEST,
                     "illegal_argument_exception",
                     format!("Custom normalizer may not use filter [{kind}]"),
+                );
+            }
+        }
+    }
+    // an ngram tokenizer that spans more widths than the index allows makes
+    // more tokens than anyone asked for
+    if let Some(spec) = body.get("tokenizer").filter(|t| t.is_object()) {
+        let kind = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let read =
+            |key: &str, fallback: u64| spec.get(key).and_then(|v| v.as_u64()).unwrap_or(fallback);
+        if kind == "ngram" {
+            let span = read("max_gram", 2).saturating_sub(read("min_gram", 1));
+            if span > 1 {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "The difference between max_gram and min_gram in NGram Tokenizer must \
+                         be less than or equal to: [1] but was [{span}]. This limit can be set \
+                         by changing the [index.max_ngram_diff] index level setting."
+                    ),
                 );
             }
         }
@@ -254,34 +357,40 @@ pub async fn analyze(
     for t in &text {
         // where a token came from is part of the answer: a highlighter and a
         // caller reading `_analyze` both ask for it
-        let parts: Vec<(String, usize, usize, usize)> = if let Some(chain) = &chain {
+        let parts: Vec<Token> = if let Some(chain) = &chain {
             chain.tokens(t)
         } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
                 .enumerate()
-                .map(|(i, w)| (w.to_string(), i, 0, 0))
+                .map(|(i, w)| (w.to_string(), i, 0, 0, 1))
                 .collect()
         } else {
             match &st {
                 Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer)
                     .into_iter()
                     .enumerate()
-                    .map(|(i, w)| (w, i, 0, 0))
+                    .map(|(i, w)| (w, i, 0, 0, 1))
                     .collect(),
                 None => t
                     .split_whitespace()
                     .enumerate()
-                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0))
+                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0, 1))
                     .collect(),
             }
         };
-        let parts_len = parts.iter().map(|(_, at, _, _)| *at + 1).max().unwrap_or(0);
-        for (tok, at, from, to) in parts {
+        let parts_len = parts.iter().map(|(_, at, _, _, _)| *at + 1).max().unwrap_or(0);
+        for (tok, at, from, to, length) in parts {
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
                 "type": "<ALPHANUM>", "position": pos + at,
             }));
+            // a token standing for more than one word says so
+            if length > 1
+                && let Some(last) = tokens.last_mut()
+            {
+                last["positionLength"] = json!(length);
+            }
         }
         pos += parts_len;
     }
@@ -305,9 +414,9 @@ pub async fn analyze(
     if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false)
         || p.get("explain").map(|v| v == "true").unwrap_or(false)
     {
-        let as_json = |cut: Vec<(String, usize, usize, usize)>| -> Vec<Value> {
+        let as_json = |cut: Vec<Token>| -> Vec<Value> {
             cut.into_iter()
-                .map(|(token, at, from, to)| {
+                .map(|(token, at, from, to, _)| {
                     json!({
                         "token": token, "start_offset": from, "end_offset": to,
                         "type": "<ALPHANUM>", "position": at,
@@ -322,8 +431,17 @@ pub async fn analyze(
                 })
                 .collect()
         };
-        let named_tokenizer =
-            body.get("tokenizer").cloned().or_else(|| p.get("tokenizer").map(|t| json!(t)));
+        // filters asked for on their own stand on the text whole: that is a
+        // normalizer, and a normalizer's tokenizer is `keyword`
+        let named_tokenizer = body
+            .get("tokenizer")
+            .cloned()
+            .or_else(|| p.get("tokenizer").map(|t| json!(t)))
+            .or_else(|| {
+                (analyzer.is_none()
+                    && (body.get("filter").is_some() || body.get("char_filter").is_some()))
+                .then(|| json!("keyword"))
+            });
         if let Some(spec) = named_tokenizer {
             // a tokenizer named as a string is reported under that name; one
             // described in the request has no name of its own, and is
@@ -357,9 +475,13 @@ pub async fn analyze(
                     json!({"name": name, "filtered_text": prepared.clone()})
                 })
                 .collect();
-            let base = registry.tokenizer_only(&spec);
-            let cut: Vec<(String, usize, usize, usize)> =
-                prepared.iter().flat_map(|t| base.cut(t)).collect();
+            // the tokenizer is run over the text as sent, with the char
+            // filters in front of it, so that each token is reported where
+            // it stood before the filters rewrote the text
+            let filters = registry.char_filters(&asked_chars);
+            let base =
+                crate::analysis::Chain::filtered(filters.clone(), registry.tokenizer_only(&spec));
+            let cut: Vec<Token> = text.iter().flat_map(|t| base.cut(t)).collect();
             let stage = json!({"name": name, "tokens": as_json(cut)});
             // each filter is reported as the tokens standing after it, so the
             // chain is run again one filter longer each time
@@ -367,6 +489,9 @@ pub async fn analyze(
                 body.get("filter").and_then(|f| f.as_array()).cloned().unwrap_or_default();
             let mut steps = Vec::new();
             let mut filters = Vec::new();
+            // the tokens as the stage before left them: a filter that reads a
+            // frequency off the end of a word reports the frequency it read
+            let mut before: Vec<Token> = text.iter().flat_map(|t| base.cut(t)).collect();
             for one in &asked {
                 steps.extend(registry.filter_steps(one));
                 let name = match one {
@@ -376,11 +501,18 @@ pub async fn analyze(
                         other.get("type").and_then(|t| t.as_str()).unwrap_or("filter")
                     ),
                 };
-                let chain =
-                    crate::analysis::Chain::of(registry.tokenizer_only(&spec), steps.clone());
-                let cut: Vec<(String, usize, usize, usize)> =
-                    prepared.iter().flat_map(|t| chain.tokens(t)).collect();
-                filters.push(json!({"name": name, "tokens": as_json(cut)}));
+                let chain = crate::analysis::Chain::of(base.clone(), steps.clone());
+                let cut: Vec<Token> = text.iter().flat_map(|t| chain.tokens(t)).collect();
+                let mut listed = as_json(cut.clone());
+                if steps.iter().any(|s| matches!(s, crate::analysis::Step::DelimitedTermFreq(_))) {
+                    for (at, token) in listed.iter_mut().enumerate() {
+                        if let Some((was, _, _, _, _)) = before.get(at) {
+                            token["termFrequency"] = json!(frequency_of(was));
+                        }
+                    }
+                }
+                before = cut;
+                filters.push(json!({"name": name, "tokens": listed}));
             }
             let mut detail = json!({
                 "custom_analyzer": true,

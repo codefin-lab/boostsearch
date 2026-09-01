@@ -111,11 +111,20 @@ impl boostcore::DocSet for KeptDocs {
 /// ranks the short field first.
 pub(crate) struct SpanUnion {
     terms: Vec<Term>,
+    /// whether the words are scored as merely there: once, in a field of no
+    /// particular length, which is how a field that keeps neither
+    /// frequencies nor norms scores
+    flat: bool,
 }
 
 impl SpanUnion {
     pub(crate) fn new(terms: Vec<Term>) -> SpanUnion {
-        SpanUnion { terms }
+        SpanUnion { terms, flat: false }
+    }
+
+    /// A word that is either there or not, scored the same wherever it is.
+    pub(crate) fn flat(term: Term) -> SpanUnion {
+        SpanUnion { terms: vec![term], flat: true }
     }
 }
 
@@ -127,7 +136,7 @@ impl std::fmt::Debug for SpanUnion {
 
 impl Clone for SpanUnion {
     fn clone(&self) -> Self {
-        SpanUnion { terms: self.terms.clone() }
+        SpanUnion { terms: self.terms.clone(), flat: self.flat }
     }
 }
 
@@ -139,13 +148,14 @@ impl Query for SpanUnion {
             }
             EnableScoring::Disabled { .. } => None,
         };
-        Ok(Box::new(SpanUnionWeight { terms: self.terms.clone(), bm25 }))
+        Ok(Box::new(SpanUnionWeight { terms: self.terms.clone(), bm25, flat: self.flat }))
     }
 }
 
 struct SpanUnionWeight {
     terms: Vec<Term>,
     bm25: Option<boostcore::query::Bm25Weight>,
+    flat: bool,
 }
 
 impl SpanUnionWeight {
@@ -192,9 +202,16 @@ impl Weight for SpanUnionWeight {
             Some(norms) => norms,
             None => reader.get_fieldnorms_reader(first.field())?,
         };
+        // a flat score reads every document as one word long holding the
+        // term once
+        let one = boostcore::fieldnorm::FieldNormReader::fieldnorm_to_id(1);
+        let flat = self.flat;
         let scored = found
             .into_iter()
-            .map(|(doc, freq)| (doc, boost * bm25.score(norms.fieldnorm_id(doc), freq)))
+            .map(|(doc, freq)| match flat {
+                true => (doc, boost * bm25.score(one, 1)),
+                false => (doc, boost * bm25.score(norms.fieldnorm_id(doc), freq)),
+            })
             .collect();
         Ok(Box::new(ScoredDocs { docs: scored, at: 0 }))
     }
@@ -250,5 +267,133 @@ impl boostcore::DocSet for ScoredDocs {
 impl boostcore::query::Scorer for ScoredDocs {
     fn score(&mut self) -> boostcore::Score {
         self.docs.get(self.at).map(|(_, score)| *score).unwrap_or(0.0)
+    }
+}
+
+/// Several ways of reading a phrase, scored as one span query.
+///
+/// Lucene reads a phrase over a token graph as one span query -- an `or` of
+/// the ways through it -- and weighs it once: the idf of every word in every
+/// way added together, and the frequency being how often any way stands in
+/// the document. Scored as a bool of phrases instead, a way through rare
+/// words would outrank a short document that holds a common one, which is
+/// the opposite of what OpenSearch answers.
+pub(crate) struct SpanPaths {
+    terms: Vec<Term>,
+    ways: Vec<Box<dyn Query>>,
+}
+
+impl SpanPaths {
+    pub(crate) fn new(terms: Vec<Term>, ways: Vec<Box<dyn Query>>) -> SpanPaths {
+        let mut distinct: Vec<Term> = Vec::new();
+        for term in terms {
+            if !distinct.contains(&term) {
+                distinct.push(term);
+            }
+        }
+        SpanPaths { terms: distinct, ways }
+    }
+}
+
+impl std::fmt::Debug for SpanPaths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpanPaths({} ways over {} terms)", self.ways.len(), self.terms.len())
+    }
+}
+
+impl Clone for SpanPaths {
+    fn clone(&self) -> Self {
+        SpanPaths {
+            terms: self.terms.clone(),
+            ways: self.ways.iter().map(|w| w.box_clone()).collect(),
+        }
+    }
+}
+
+impl Query for SpanPaths {
+    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+        let bm25 = match scoring {
+            EnableScoring::Enabled { statistics_provider, .. } if !self.terms.is_empty() => {
+                Some(boostcore::query::Bm25Weight::for_terms(statistics_provider, &self.terms)?)
+            }
+            _ => None,
+        };
+        let ways: boostcore::Result<Vec<Box<dyn Weight>>> =
+            self.ways.iter().map(|way| way.weight(scoring)).collect();
+        Ok(Box::new(SpanPathsWeight { first: self.terms.first().cloned(), ways: ways?, bm25 }))
+    }
+}
+
+struct SpanPathsWeight {
+    first: Option<Term>,
+    ways: Vec<Box<dyn Weight>>,
+    bm25: Option<boostcore::query::Bm25Weight>,
+}
+
+impl SpanPathsWeight {
+    /// How many of the ways stand in each document of this segment.
+    fn frequencies(
+        &self,
+        reader: &boostcore::SegmentReader,
+    ) -> boostcore::Result<Vec<(boostcore::DocId, u32)>> {
+        let mut totals: std::collections::BTreeMap<boostcore::DocId, u32> =
+            std::collections::BTreeMap::new();
+        for way in &self.ways {
+            let mut scorer = way.scorer(reader, 1.0)?;
+            while scorer.doc() != boostcore::TERMINATED {
+                *totals.entry(scorer.doc()).or_default() += 1;
+                scorer.advance();
+            }
+        }
+        Ok(totals.into_iter().collect())
+    }
+}
+
+impl Weight for SpanPathsWeight {
+    fn scorer(
+        &self,
+        reader: &boostcore::SegmentReader,
+        boost: boostcore::Score,
+    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        let found = self.frequencies(reader)?;
+        let (Some(bm25), Some(first)) = (self.bm25.clone(), self.first.as_ref()) else {
+            let docs = found.into_iter().map(|(doc, _)| doc).collect();
+            return Ok(Box::new(boostcore::query::ConstScorer::new(
+                KeptDocs { docs, at: 0 },
+                boost,
+            )));
+        };
+        let norms = match reader.fieldnorms_reader_for_term(first)? {
+            Some(norms) => norms,
+            None => reader.get_fieldnorms_reader(first.field())?,
+        };
+        let scored = found
+            .into_iter()
+            .map(|(doc, freq)| (doc, boost * bm25.score(norms.fieldnorm_id(doc), freq)))
+            .collect();
+        Ok(Box::new(ScoredDocs { docs: scored, at: 0 }))
+    }
+
+    fn explain(
+        &self,
+        reader: &boostcore::SegmentReader,
+        doc: boostcore::DocId,
+    ) -> boostcore::Result<boostcore::query::Explanation> {
+        let freq = self.frequencies(reader)?.into_iter().find(|(at, _)| *at == doc).map(|(_, f)| f);
+        let Some(freq) = freq else {
+            return Err(boostcore::TantivyError::InvalidArgument(
+                "document does not match the span query".to_string(),
+            ));
+        };
+        match (&self.bm25, self.first.as_ref()) {
+            (Some(bm25), Some(term)) => {
+                let norms = match reader.fieldnorms_reader_for_term(term)? {
+                    Some(norms) => norms,
+                    None => reader.get_fieldnorms_reader(term.field())?,
+                };
+                Ok(bm25.explain(norms.fieldnorm_id(doc), freq))
+            }
+            _ => Ok(boostcore::query::Explanation::new("span", 1.0)),
+        }
     }
 }

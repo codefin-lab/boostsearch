@@ -1,6 +1,7 @@
 //! Cutting text into the tokens a query is matched by.
 
 use super::*;
+use crate::analysis::Token;
 
 /// Put a query term through the same normalizer the field was indexed with,
 /// so `ABCD` finds what `lowercase` stored as `abcd`.
@@ -37,18 +38,14 @@ pub fn analyze_text(index: &Index, text: &str, analyzer: Option<&str>) -> Vec<St
 }
 
 /// The same analysis, keeping where each token came from.
-pub fn analyze_spans(
-    index: &Index,
-    text: &str,
-    analyzer: Option<&str>,
-) -> Vec<(String, usize, usize, usize)> {
+pub fn analyze_spans(index: &Index, text: &str, analyzer: Option<&str>) -> Vec<Token> {
     let name = tokenizer_name(analyzer);
     let mut out = Vec::new();
     if let Some(mut tk) = index.tokenizers().get(name) {
         let mut stream = tk.token_stream(text);
         while stream.advance() {
             let t = stream.token();
-            out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
+            out.push((t.text.clone(), t.position, t.offset_from, t.offset_to, t.position_length));
         }
     }
     out
@@ -115,4 +112,28 @@ pub(crate) fn analyze_with(
         out.push(text.to_lowercase());
     }
     out
+}
+
+/// The tokens as arcs of a graph: each with the place it starts at and how
+/// many places it spans.
+pub(crate) fn analyze_graph(
+    ctx: &Ctx,
+    view: View,
+    field: &str,
+    text: &str,
+    analyzer: Option<&str>,
+) -> Vec<Edge> {
+    if let Some(name) = named_for(ctx, field, analyzer)
+        && let Some(chain) = ctx.analysis.get(&name)
+    {
+        let tokens = chain.tokens(text);
+        if !tokens.is_empty() || text.is_empty() {
+            return tokens.into_iter().map(|(t, p, _, _, l)| Edge::new(t, p, l)).collect();
+        }
+    }
+    analyze_with(ctx, view, field, text, analyzer)
+        .into_iter()
+        .enumerate()
+        .map(|(at, t)| Edge::new(t, at, 1))
+        .collect()
 }

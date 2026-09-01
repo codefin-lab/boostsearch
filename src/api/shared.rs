@@ -204,6 +204,17 @@ pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
         if let Some(op) = p.get("default_operator") {
             qs["default_operator"] = json!(op.to_lowercase());
         }
+        // the caller may name the analyzer the query itself is cut with
+        for named in ["analyzer", "quote_analyzer", "minimum_should_match"] {
+            if let Some(v) = p.get(named) {
+                qs[named] = json!(v);
+            }
+        }
+        for named in ["lenient", "analyze_wildcard", "allow_leading_wildcard"] {
+            if let Some(v) = p.get(named) {
+                qs[named] = json!(v == "true");
+            }
+        }
         body["query"] = json!({ "query_string": qs });
     }
     for key in ["from", "size", "track_total_hits"] {
@@ -404,4 +415,23 @@ pub fn max_content_bytes() -> u64 {
         .unwrap_or(100)
         * 1024
         * 1024
+}
+
+/// What a failed request answered with, as one entry of a list of answers.
+///
+/// A multi-search reports each search's own complaint rather than a single
+/// verdict over all of them, so the answer a handler already built is read
+/// back rather than replaced.
+pub(crate) async fn as_error_body(response: Response) -> Value {
+    let status = response.status().as_u16();
+    let read = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    let parsed: Value = read
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+    let mut out = json!({ "status": status });
+    if let Some(error) = parsed.get("error") {
+        out["error"] = error.clone();
+    }
+    out
 }

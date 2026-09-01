@@ -110,19 +110,44 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     if tokens.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
-    let terms: Vec<Term> = tokens
-        .iter()
-        .map(|t| {
-            let mut term = Term::from_field_json_path(f, &path, true);
-            term.append_type_and_str(t);
-            term
-        })
-        .collect();
+    let term_of = |t: &str| -> Term {
+        let mut term = Term::from_field_json_path(f, &path, true);
+        term.append_type_and_str(t);
+        term
+    };
+    let terms: Vec<Term> = tokens.iter().map(|t| term_of(t)).collect();
 
     if kind == "match_phrase" || kind == "match_phrase_prefix" {
         // the last word of a phrase prefix is the beginning of a word, not a
         // whole one: `lazy d` finds `lazy dog`
         if kind == "match_phrase_prefix" {
+            // more than one way through the text: each way is a phrase whose
+            // last word is only the beginning of one
+            let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+            if crate::query::branches(&arcs) {
+                let mut clauses: Vec<Box<dyn Query>> = Vec::new();
+                let mut every: Vec<Term> = Vec::new();
+                for way in crate::query::ways(&arcs) {
+                    let Some((last, head)) = way.split_last() else { continue };
+                    let head: Vec<Term> = head.iter().map(|w| term_of(w)).collect();
+                    for ending in prefix_terms(ctx, f, &path, last)? {
+                        let mut phrase = head.clone();
+                        phrase.push(ending);
+                        every.extend(phrase.iter().cloned());
+                        clauses.push(match phrase.len() {
+                            1 => Box::new(TermQuery::new(
+                                phrase.remove(0),
+                                IndexRecordOption::WithFreqs,
+                            )),
+                            _ => Box::new(PhraseQuery::new(phrase)),
+                        });
+                    }
+                }
+                if clauses.is_empty() {
+                    return Ok(Box::new(EmptyQuery));
+                }
+                return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
+            }
             let mut head = terms.clone();
             let Some(last) = head.pop() else {
                 return Ok(Box::new(EmptyQuery));
@@ -156,11 +181,41 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         if terms.len() == 1 {
             return Ok(Box::new(TermQuery::new(terms[0].clone(), IndexRecordOption::WithFreqs)));
         }
+        // where the analyzer left more than one way through the text -- a
+        // synonym beside what it means, a stem on its word -- a phrase is a
+        // phrase for each way through
+        let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+        if crate::query::branches(&arcs) {
+            let mut every: Vec<Term> = Vec::new();
+            let clauses: Vec<Box<dyn Query>> = crate::query::ways(&arcs)
+                .into_iter()
+                .map(|way| {
+                    let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
+                    every.extend(walked.iter().cloned());
+                    match walked.len() {
+                        1 => {
+                            Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>
+                        }
+                        _ => Box::new(PhraseQuery::new(walked)),
+                    }
+                })
+                .collect();
+            if !clauses.is_empty() {
+                return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
+            }
+        }
         return Ok(Box::new(PhraseQuery::new(terms)));
     }
 
+    // a field holding text holds the number as text: `1234` written into a
+    // field cut into ngrams is found by the ngrams of `1234`
+    let is_text = matches!(
+        ctx.mapping.type_of(&field),
+        Some("text" | "match_only_text" | "search_as_you_type")
+    );
     // non-string match on a numeric/keyword field falls back to an exact term
-    if view == View::Raw || !matches!(val, Value::String(_)) {
+    if (view == View::Raw || !matches!(val, Value::String(_))) && !is_text {
         let mut exact = term_for(f, &path, &val);
         if exact.is_empty() {
             exact = terms.clone();
@@ -174,23 +229,86 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         return Ok(any_of(exact));
     }
 
+    // a number or a flag written as text matches the value itself: `order:1`
+    // finds a document whose `order` is 1, whether the field was written as
+    // text or as a number, and `"true"` finds a flag that is set
+    let as_number = text
+        .parse::<i64>()
+        .ok()
+        .map(|n| serde_json::json!(n))
+        .or_else(|| text.parse::<f64>().ok().map(|n| serde_json::json!(n)))
+        .or_else(|| text.parse::<bool>().ok().map(|b| serde_json::json!(b)))
+        .map(|n| term_for(f, &path, &n))
+        .filter(|exact| !exact.is_empty());
+
     let operator =
         opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
-    let n = terms.len();
-    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+    // words standing in one place are one word written several ways, and a
+    // word spanning several places is one way of reading them: the text is
+    // cut where nothing crosses, and a match wants every stretch, each by any
+    // of the ways through it
+    let arcs = analyze_graph(ctx, view, &field, &text, analyzer);
+    let stretches: Vec<Vec<Vec<String>>> = match crate::query::branches(&arcs) {
+        true => crate::query::stretches(&arcs),
+        false => tokens.iter().map(|t| vec![vec![t.clone()]]).collect(),
+    };
+    let n = stretches.len();
+    // a way of several words is read as a phrase, unless the request asked
+    // for the words alone, in any order and at any distance
+    let as_phrase =
+        opts.get("auto_generate_synonyms_phrase_query").and_then(|v| v.as_bool()).unwrap_or(true);
+    // a field that keeps neither frequencies nor norms scores a word as
+    // merely there, once, in a field of no particular length
+    let flat = ctx.mapping.type_of(&field) == Some("match_only_text");
+    let clauses: Vec<(Occur, Box<dyn Query>)> = stretches
         .into_iter()
-        .map(|t| {
-            (occur, Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
+        .map(|ways| {
+            let mut alternatives: Vec<Box<dyn Query>> = ways
+                .into_iter()
+                .map(|way| {
+                    let mut walked: Vec<Term> = way.iter().map(|w| term_of(w)).collect();
+                    match walked.len() {
+                        1 if flat => Box::new(crate::query::SpanUnion::flat(walked.remove(0)))
+                            as Box<dyn Query>,
+                        1 => {
+                            Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>
+                        }
+                        _ if as_phrase => Box::new(PhraseQuery::new(walked)),
+                        _ => Box::new(BooleanQuery::new(
+                            walked
+                                .into_iter()
+                                .map(|t| {
+                                    (
+                                        Occur::Must,
+                                        Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                            as Box<dyn Query>,
+                                    )
+                                })
+                                .collect(),
+                        )),
+                    }
+                })
+                .collect();
+            let one: Box<dyn Query> = match alternatives.len() {
+                1 => alternatives.remove(0),
+                _ => Box::new(BooleanQuery::union(alternatives)),
+            };
+            (occur, one)
         })
         .collect();
     let required = if occur == Occur::Should {
-        let msm = opts.get("minimum_should_match").and_then(parse_msm).unwrap_or(1);
-        resolve_msm(msm, n)
+        msm_required(opts.get("minimum_should_match"), n).unwrap_or_else(|| resolve_msm(1, n))
     } else {
         0
     };
-    Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+    let words: Box<dyn Query> =
+        Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required));
+    match as_number {
+        Some(exact) => Ok(Box::new(BooleanQuery::union(vec![words, any_of(exact)]))),
+        None => Ok(words),
+    }
 }
 
 pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
@@ -426,8 +544,7 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
         clauses.push((occur, sub));
     }
     let required = if occur == Occur::Should {
-        let msm = opts.get("minimum_should_match").and_then(parse_msm).unwrap_or(1);
-        resolve_msm(msm, n)
+        msm_required(opts.get("minimum_should_match"), n).unwrap_or_else(|| resolve_msm(1, n))
     } else {
         0
     };
@@ -567,9 +684,12 @@ pub(crate) fn prefix_terms(ctx: &Ctx, field: Field, path: &str, stem: &str) -> R
         let mut stream = inverted.terms().stream()?;
         while let Some((bytes, _)) = stream.next() {
             if bytes.starts_with(&prefix) {
-                let mut term = Term::from_field_json_path(field, path, true);
-                term.append_bytes(&bytes[term.serialized_value_bytes().len()..]);
-                out.push(Term::from_field_bytes(field, bytes));
+                // every segment holds its own dictionary, and a word two of
+                // them hold is still one word
+                let found = Term::from_field_bytes(field, bytes);
+                if !out.contains(&found) {
+                    out.push(found);
+                }
                 if out.len() >= MOST {
                     return Ok(out);
                 }
@@ -577,4 +697,72 @@ pub(crate) fn prefix_terms(ctx: &Ctx, field: Field, path: &str, stem: &str) -> R
         }
     }
     Ok(out)
+}
+
+/// `common` -- the words split by how many documents hold them.
+///
+/// A word held by more documents than `cutoff_frequency` names is a common
+/// word; the rest are the rare ones. The rare ones are joined by
+/// `low_freq_operator` and the common ones by `high_freq_operator`, and where
+/// the rare ones are wanted together the common ones may only add to the
+/// score of what the rare ones found.
+pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
+    let (field, val, opts) = field_and_value(body)?;
+    let text = match &val {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let (f, path, view) = ctx.resolve(&field, true);
+    let tokens = analyze_with(ctx, view, &field, &text, None);
+    if tokens.is_empty() {
+        return Ok(Box::new(EmptyQuery));
+    }
+    let searcher = ctx.index.reader()?.searcher();
+    let cutoff = opts.get("cutoff_frequency").and_then(|v| v.as_f64()).unwrap_or(0.01);
+    let most = match cutoff < 1.0 {
+        true => (cutoff * searcher.num_docs() as f64).ceil() as u64,
+        false => cutoff as u64,
+    };
+    let operator = |key: &str| -> Occur {
+        match opts.get(key).and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase()) {
+            Some(op) if op == "and" => Occur::Must,
+            _ => Occur::Should,
+        }
+    };
+    let (mut rare, mut common): (Vec<Term>, Vec<Term>) = (Vec::new(), Vec::new());
+    for t in &tokens {
+        let mut term = Term::from_field_json_path(f, &path, true);
+        term.append_type_and_str(t);
+        let held = searcher.doc_freq(&term).unwrap_or(0);
+        match held >= most {
+            true => common.push(term),
+            false => rare.push(term),
+        }
+    }
+    let clauses_of = |terms: Vec<Term>, occur: Occur| -> Box<dyn Query> {
+        let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+            .into_iter()
+            .map(|t| {
+                (occur, Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
+            })
+            .collect();
+        Box::new(BooleanQuery::new(clauses))
+    };
+    let low = operator("low_freq_operator");
+    let high = operator("high_freq_operator");
+    Ok(match (rare.is_empty(), common.is_empty()) {
+        (true, _) => clauses_of(common, high),
+        (_, true) => clauses_of(rare, low),
+        _ => {
+            // the rare words are what is asked for; where they are wanted
+            // together, the common ones only add to the score
+            let rare_query = clauses_of(rare, low);
+            let common_query = clauses_of(common, high);
+            let want = match low {
+                Occur::Must => Occur::Must,
+                _ => Occur::Should,
+            };
+            Box::new(BooleanQuery::new(vec![(want, rare_query), (Occur::Should, common_query)]))
+        }
+    })
 }
