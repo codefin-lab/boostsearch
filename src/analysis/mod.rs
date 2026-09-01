@@ -12,6 +12,8 @@
 //! alike -- so that a document and a query are cut by the same code, and the
 //! index can be told which analyzer a path is written with.
 
+mod stem;
+
 use std::collections::HashMap;
 
 use boostcore::tokenizer::{
@@ -83,6 +85,20 @@ enum Step {
     Synonym(HashMap<String, Vec<String>>),
     /// sorted, deduplicated and joined back into one token
     Fingerprint,
+    /// `l'avion` is the word `avion`: the article written onto the front of it
+    /// is not part of it
+    Elision,
+    /// Greek is lowercased with its accents dropped and its final sigma
+    /// written as the letter it is
+    GreekLowercase,
+    PersianNormalize,
+    /// Romanian writes the comma below as a cedilla in older text
+    RomanianNormalize,
+    /// a digit is a digit, whichever script wrote it
+    DecimalDigits,
+    /// Chinese, Japanese and Korean are written without spaces, so each pair
+    /// of neighbouring characters stands in for a word
+    CjkBigram,
 }
 
 /// A named analysis chain.
@@ -211,11 +227,30 @@ fn apply_here(
                 words.iter().map(|w| w.to_lowercase()).collect();
             tokens.into_iter().filter(|(t, _, _, _)| !set.contains(&t.to_lowercase())).collect()
         }
-        Step::Stem(lang) => match language(lang) {
-            Some(l) => {
+        Step::Stem(lang) => {
+            let word_by_word = |f: &dyn Fn(&str) -> String| {
+                tokens.iter().map(|(t, p, a, b)| (f(t), *p, *a, *b)).collect::<Vec<_>>()
+            };
+            // the languages whose analyzer uses a light stemmer rather than
+            // the full algorithm, which is what OpenSearch ships
+            match lang.to_ascii_lowercase().as_str() {
+                "french" | "french_light" | "light_french" => {
+                    return word_by_word(&stem::french_light);
+                }
+                "portuguese" | "portuguese_light" | "light_portuguese" => {
+                    return word_by_word(&stem::portuguese_light);
+                }
+                "italian" | "italian_light" | "light_italian" => {
+                    return word_by_word(&stem::italian_light);
+                }
+                "greek" => return word_by_word(&stem::greek),
+                _ => {}
+            }
+            // the eighteen languages BoostCore carries an algorithm for
+            if let Some(l) = language(lang) {
                 let mut analyzer =
                     TextAnalyzer::builder(RawTokenizer::default()).filter(Stemmer::new(l)).build();
-                tokens
+                return tokens
                     .into_iter()
                     .map(|(t, p, a, b)| {
                         let stemmed = {
@@ -224,10 +259,30 @@ fn apply_here(
                         };
                         (stemmed, p, a, b)
                     })
-                    .collect()
+                    .collect();
             }
-            None => tokens,
-        },
+            match lang.to_ascii_lowercase().as_str() {
+                "french_light" | "light_french" => word_by_word(&stem::french_light),
+                "portuguese_light" | "light_portuguese" => word_by_word(&stem::portuguese_light),
+                "italian_light" | "light_italian" => word_by_word(&stem::italian_light),
+                "galician" => word_by_word(&stem::galician),
+                "brazilian" => word_by_word(&stem::brazilian),
+                "bulgarian" => word_by_word(&stem::bulgarian),
+                "latvian" => word_by_word(&stem::latvian),
+                "indonesian" => word_by_word(&stem::indonesian),
+                "czech" => word_by_word(&stem::czech),
+                "bengali" => word_by_word(&stem::bengali),
+                "hindi" => word_by_word(&stem::hindi),
+                "sorani" => word_by_word(&stem::sorani),
+                "armenian" => word_by_word(&stem::armenian),
+                "basque" => word_by_word(&stem::basque),
+                "catalan" => word_by_word(&stem::catalan),
+                "irish" => word_by_word(&stem::irish),
+                "lithuanian" => word_by_word(&stem::lithuanian),
+                "estonian" => word_by_word(&stem::estonian),
+                _ => tokens,
+            }
+        }
         Step::Length { min, max } => tokens
             .into_iter()
             .filter(|(t, _, _, _)| t.chars().count() >= *min && t.chars().count() <= *max)
@@ -272,7 +327,98 @@ fn apply_here(
             let end = tokens.last().map(|(_, _, _, b)| *b).unwrap_or(0);
             vec![(words.join(" "), 0, 0, end)]
         }
+        Step::Elision => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let cut = t
+                    .split_once('\'')
+                    .or_else(|| t.split_once('\u{2019}'))
+                    .filter(|(head, _)| {
+                        matches!(
+                            head.to_lowercase().as_str(),
+                            "l" | "d"
+                                | "j"
+                                | "m"
+                                | "n"
+                                | "s"
+                                | "t"
+                                | "c"
+                                | "qu"
+                                | "jusqu"
+                                | "lorsqu"
+                                | "puisqu"
+                                | "quoiqu"
+                                | "dell"
+                                | "nell"
+                                | "sull"
+                                | "all"
+                                | "un"
+                                | "dall"
+                                | "b"
+                                | "h"
+                        )
+                    })
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or(t);
+                (cut, p, a, b)
+            })
+            .filter(|(t, _, _, _)| !t.is_empty())
+            .collect(),
+        Step::GreekLowercase => {
+            tokens.into_iter().map(|(t, p, a, b)| (stem::greek_lowercase(&t), p, a, b)).collect()
+        }
+        Step::PersianNormalize => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| (stem::persian_normalize(&t), p, a, b))
+            .filter(|(t, _, _, _)| !t.is_empty())
+            .collect(),
+        Step::RomanianNormalize => tokens
+            .into_iter()
+            .map(|(t, p, a, b)| {
+                let written: String = t
+                    .chars()
+                    .map(|c| match c {
+                        '\u{015F}' => '\u{0219}',
+                        '\u{015E}' => '\u{0218}',
+                        '\u{0163}' => '\u{021B}',
+                        '\u{0162}' => '\u{021A}',
+                        other => other,
+                    })
+                    .collect();
+                (written, p, a, b)
+            })
+            .collect(),
+        Step::DecimalDigits => {
+            tokens.into_iter().map(|(t, p, a, b)| (stem::decimal_digits(&t), p, a, b)).collect()
+        }
+        Step::CjkBigram => {
+            let mut out = Vec::new();
+            for (t, p, a, b) in tokens {
+                let chars: Vec<char> = t.chars().collect();
+                // a word written in an alphabet is left as it is
+                if chars.len() < 2 || !chars.iter().any(|c| is_cjk(*c)) {
+                    out.push((t, p, a, b));
+                    continue;
+                }
+                for (i, pair) in chars.windows(2).enumerate() {
+                    out.push((pair.iter().collect::<String>(), p + i, a + i, a + i + 2));
+                }
+            }
+            out
+        }
     }
+}
+
+/// Whether a character is written in a script that has no spaces between its
+/// words.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}'   // kana
+        | '\u{3400}'..='\u{4DBF}' // the rarer Han
+        | '\u{4E00}'..='\u{9FFF}' // Han
+        | '\u{AC00}'..='\u{D7AF}' // Hangul
+        | '\u{F900}'..='\u{FAFF}'
+    )
 }
 
 /// Latin letters with a mark, written without it.
@@ -419,6 +565,133 @@ fn stop_words(language: &str) -> Vec<String> {
             "эти",
             "это",
             "я",
+        ],
+        "_czech_" | "czech" => &[
+            "a",
+            "s",
+            "k",
+            "o",
+            "i",
+            "u",
+            "v",
+            "z",
+            "dnes",
+            "cz",
+            "t\u{00ED}mto",
+            "bude\u{0161}",
+            "budem",
+            "byli",
+            "jse\u{0161}",
+            "m\u{016F}j",
+            "sv\u{00FD}m",
+            "ta",
+            "tomto",
+            "tohle",
+            "tuto",
+            "tyto",
+            "jej",
+            "zda",
+            "pro\u{010D}",
+            "m\u{00E1}te",
+            "tato",
+            "kam",
+            "tohoto",
+            "kdo",
+            "kte\u{0159}\u{00ED}",
+            "mi",
+            "n\u{00E1}m",
+            "tom",
+            "tomuto",
+            "m\u{00ED}t",
+            "nic",
+            "proto",
+            "kterou",
+            "byla",
+            "toho",
+            "proto\u{017E}e",
+            "asi",
+            "ho",
+            "na\u{0161}i",
+            "napi\u{0161}te",
+            "re",
+            "co\u{017E}",
+            "t\u{00ED}m",
+            "tak\u{017E}e",
+            "sv\u{00FD}ch",
+            "jej\u{00ED}",
+            "svsval",
+            "jeho",
+            "sv\u{00E9}",
+            "pokud",
+            "ji\u{017E}",
+            "ne\u{017E}",
+            "kter\u{00FD}",
+            "by",
+            "kter\u{00E9}",
+            "co",
+            "nebo",
+            "ten",
+            "tak",
+            "m\u{00E1}",
+            "p\u{0159}i",
+            "od",
+            "po",
+            "jsou",
+            "jak",
+            "dal\u{0161}\u{00ED}",
+            "ale",
+            "si",
+            "se",
+            "ve",
+            "to",
+            "jako",
+            "za",
+            "zp\u{011B}t",
+            "ze",
+            "do",
+            "pro",
+            "je",
+            "na",
+            "atd",
+            "atp",
+            "jakmile",
+        ],
+        "_persian_" | "persian" => &[
+            "\u{0645}\u{06CC}",
+            "\u{0648}",
+            "\u{062F}\u{0631}",
+            "\u{0628}\u{0647}",
+            "\u{0627}\u{0632}",
+            "\u{06A9}\u{0647}",
+            "\u{0627}\u{06CC}\u{0646}",
+            "\u{0631}\u{0627}",
+            "\u{0628}\u{0627}",
+            "\u{0627}\u{0633}\u{062A}",
+            "\u{0628}\u{0631}\u{0627}\u{06CC}",
+            "\u{06CC}\u{06A9}",
+            "\u{062A}\u{0627}",
+            "\u{0647}\u{0645}",
+            "\u{0622}\u{0646}",
+        ],
+        "_sorani_" | "sorani" => &[
+            "\u{0648}",
+            "\u{0644}\u{06D5}",
+            "\u{0628}\u{06D5}",
+            "\u{0628}\u{06C6}",
+            "\u{0644}\u{06D5}\u{06AF}\u{06D5}\u{06B5}",
+            "\u{06A9}\u{06D5}",
+        ],
+        "_greek_" | "greek" => &[
+            "\u{03BF}",
+            "\u{03B7}",
+            "\u{03C4}\u{03BF}",
+            "\u{03BA}\u{03B1}\u{03B9}",
+            "\u{03BC}\u{03B5}",
+            "\u{03C3}\u{03B5}",
+            "\u{03B3}\u{03B9}\u{03B1}",
+            "\u{03C4}\u{03B7}",
+            "\u{03C4}\u{03C9}\u{03BD}",
+            "\u{03B1}\u{03C0}\u{03BF}",
         ],
         "_arabic_" | "arabic" => {
             &["من", "في", "على", "و", "أن", "إلى", "عن", "ما", "هذا", "هذه", "التي", "الذي"]
@@ -628,9 +901,16 @@ fn synonyms(spec: &Value) -> HashMap<String, Vec<String>> {
 
 /// The analyzers OpenSearch has without being told about them.
 pub fn builtin(name: &str) -> Option<Chain> {
+    // what a language analyzer is: cut into words, lowercased, its own stop
+    // words dropped, and what is left cut down to its stem
     let lang = |l: &str| Chain {
         source: Source::Standard,
         steps: vec![Step::Lowercase, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
+    };
+    // the languages whose stemmer wants the word written one way first
+    let normalized = |l: &str, first: Step| Chain {
+        source: Source::Standard,
+        steps: vec![Step::Lowercase, first, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
     };
     Some(match name {
         "standard" | "default" => Chain { source: Source::Standard, steps: vec![Step::Lowercase] },
@@ -647,9 +927,74 @@ pub fn builtin(name: &str) -> Option<Chain> {
             steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint],
         },
         "en_stem" => lang("english"),
+        // a Snowball analyzer is the English one under the name of the
+        // algorithm it runs
+        "snowball" => lang("english"),
+        // what OpenSearch keeps for indices made long ago: words and stop
+        // words, and no stemming at all
+        "chinese" => Chain {
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
+        },
+        // Chinese, Japanese and Korean are not written with spaces between
+        // words, so a pair of characters stands in for one
+        "cjk" => Chain { source: Source::Standard, steps: vec![Step::Lowercase, Step::CjkBigram] },
+        // the languages whose stemmer is a light one, or wants the word
+        // written its way first
+        "french" => normalized("french", Step::Elision),
+        "italian" => normalized("italian", Step::Elision),
+        "irish" => normalized("irish", Step::Elision),
+        "catalan" => normalized("catalan", Step::Elision),
+        "greek" => Chain {
+            source: Source::Standard,
+            steps: vec![
+                Step::GreekLowercase,
+                Step::Stop(stop_words("greek")),
+                Step::Stem("greek".into()),
+            ],
+        },
+        "persian" => Chain {
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::PersianNormalize, Step::Stop(stop_words("persian"))],
+        },
+        "thai" => {
+            Chain { source: Source::Standard, steps: vec![Step::Lowercase, Step::DecimalDigits] }
+        }
+        "sorani" => Chain {
+            source: Source::Standard,
+            steps: vec![
+                Step::Lowercase,
+                Step::Stop(stop_words("sorani")),
+                Step::Stem("sorani".into()),
+            ],
+        },
+        "romanian" => normalized("romanian", Step::RomanianNormalize),
         other => {
-            language(other)?;
+            // a language with a light stemmer of its own, or one BoostCore has
+            // an algorithm for
+            if !KNOWN_LANGUAGES.contains(&other) && language(other).is_none() {
+                return None;
+            }
             lang(other)
         }
     })
 }
+
+/// The languages named by an analyzer, beyond the ones BoostCore stems.
+const KNOWN_LANGUAGES: &[&str] = &[
+    "armenian",
+    "basque",
+    "bengali",
+    "brazilian",
+    "bulgarian",
+    "catalan",
+    "czech",
+    "estonian",
+    "galician",
+    "hindi",
+    "indonesian",
+    "irish",
+    "latvian",
+    "lithuanian",
+    "sorani",
+];

@@ -28,7 +28,7 @@ path = "src/main.rs"
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "9784c12bc0f06f129350bc4b3d8f0558f221d22b" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "c5570a884d53aaeed82094a77171d03833b370c8" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -43,8 +43,9 @@ libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "9784c12bc0f06f129350bc4b3d8f0558f221d22b" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "c5570a884d53aaeed82094a77171d03833b370c8" }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
+
