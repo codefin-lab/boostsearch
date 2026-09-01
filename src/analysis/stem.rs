@@ -115,13 +115,14 @@ pub(crate) fn galician(word: &str) -> String {
 
 /// Brazilian Portuguese, as `BrazilianStemmer` cuts it.
 pub(crate) fn brazilian(word: &str) -> String {
-    let word = strip_accents(word);
+    let word = strip_accents(&word.to_lowercase());
     if len(&word) < 4 {
         return word;
     }
     let word = strip(&word, 3, &["aria", "eria", "oria", "aro", "ario"]).unwrap_or(word);
     let word = strip(&word, 3, &["adora", "ador", "acao", "acoes"]).unwrap_or(word);
     let word = strip(&word, 3, &["mente", "idade", "ismo", "ista", "eza"]).unwrap_or(word);
+    let word = strip(&word, 3, &["inho", "inha", "ito", "ita", "ia", "io"]).unwrap_or(word);
     strip(&word, 3, &["as", "os", "es", "a", "o", "e", "s"]).unwrap_or(word)
 }
 

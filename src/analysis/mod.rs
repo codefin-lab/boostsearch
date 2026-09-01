@@ -112,7 +112,7 @@ pub enum Step {
     /// each token replaced by, or joined with, what it also means
     Synonym(Vec<SynonymRule>),
     /// sorted, deduplicated and joined back into one token
-    Fingerprint,
+    Fingerprint(char),
     /// `l'avion` is the word `avion`: the article written onto the front of it
     /// is not part of it
     Elision,
@@ -759,7 +759,7 @@ fn apply_step(
             }
             out
         }
-        Step::Fingerprint => {
+        Step::Fingerprint(separator) => {
             let mut words: Vec<String> = tokens.iter().map(|(t, _, _, _)| t.clone()).collect();
             words.sort();
             words.dedup();
@@ -767,7 +767,7 @@ fn apply_step(
                 return Vec::new();
             }
             let end = tokens.last().map(|(_, _, _, b)| *b).unwrap_or(0);
-            vec![(words.join(" "), 0, 0, end)]
+            vec![(words.join(&separator.to_string()), 0, 0, end)]
         }
         Step::Elision => tokens
             .into_iter()
@@ -1841,7 +1841,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         }
         "kstem" => vec![Step::KStem],
         "porter_stem" => vec![Step::Stem("english".into())],
-        "fingerprint" => vec![Step::Fingerprint],
+        "fingerprint" => vec![Step::Fingerprint(one("separator", ' '))],
         "apostrophe" => vec![Step::Apostrophe],
         "classic" => vec![Step::Apostrophe],
         "decimal_digit" => vec![Step::DecimalDigits],
@@ -1954,10 +1954,12 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "decimal_digit" => vec![Step::DecimalDigits],
         "cjk_width" => vec![Step::CjkWidth],
         "cjk_bigram" => vec![Step::CjkBigram],
+        "delimited_payload" => vec![Step::DelimitedPayload('|')],
+        "delimited_term_freq" => vec![Step::DelimitedTermFreq('^')],
         "stop" => vec![Step::Stop(stop_words("_english_"))],
         "kstem" => vec![Step::KStem],
         "porter_stem" | "porterStem" | "snowball" => vec![Step::Stem("english".into())],
-        "fingerprint" => vec![Step::Fingerprint],
+        "fingerprint" => vec![Step::Fingerprint(' ')],
         "word_delimiter" | "word_delimiter_graph" => {
             vec![Step::WordDelimiter {
                 catenate: false,
@@ -2137,7 +2139,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
         "fingerprint" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
-            steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint],
+            steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint(' ')],
         },
         "en_stem" => lang("english"),
         // a Snowball analyzer is the English one under the name of the

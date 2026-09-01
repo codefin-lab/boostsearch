@@ -170,6 +170,34 @@ pub async fn analyze(
         }
         _ => p.get("text").map(|t| vec![t.clone()]).unwrap_or_default(),
     };
+    // a normalizer does not cut its text, so a filter that splits a token has
+    // no place in one: asked for without a tokenizer, those are refused
+    if body.get("tokenizer").is_none()
+        && !p.contains_key("tokenizer")
+        && let Some(filters) = body.get("filter").and_then(|f| f.as_array())
+    {
+        const SPLITS: &[&str] = &[
+            "word_delimiter",
+            "word_delimiter_graph",
+            "ngram",
+            "edge_ngram",
+            "shingle",
+            "synonym_graph",
+        ];
+        for named in filters {
+            let kind = match named {
+                Value::String(s) => s.as_str(),
+                other => other.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+            };
+            if SPLITS.contains(&kind) {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("Custom normalizer may not use filter [{kind}]"),
+                );
+            }
+        }
+    }
     let analyzer = body
         .get("analyzer")
         .and_then(|v| v.as_str())
