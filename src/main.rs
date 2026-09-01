@@ -48,6 +48,21 @@ fn app(store: Store) -> Router {
     Router::new()
         .route("/", any(root))
         // --- bulk (static paths must be declared before `/{index}`) ---
+        .route("/_rank_eval", post(api::rank_eval).get(api::rank_eval))
+        .route("/{index}/_rank_eval", post(api::rank_eval).get(api::rank_eval))
+        .route("/_render/template", post(api::render_template).get(api::render_template))
+        .route("/_render/template/{id}", post(api::render_template).get(api::render_template))
+        .route("/_search/template", post(api::search_template).get(api::search_template))
+        .route("/_msearch/template", post(api::msearch_template).get(api::msearch_template))
+        .route("/{index}/_msearch/template", post(api::msearch_template).get(api::msearch_template))
+        .route("/{index}/_search/template", post(api::search_template).get(api::search_template))
+        .route(
+            "/_scripts/{id}",
+            axum::routing::put(api::put_script)
+                .post(api::put_script)
+                .get(api::get_script)
+                .delete(api::delete_script),
+        )
         .route("/_reindex", post(api::reindex))
         .route("/_reindex/{id}/_rethrottle", post(api::rethrottle))
         .route("/_delete_by_query/{id}/_rethrottle", post(api::rethrottle))

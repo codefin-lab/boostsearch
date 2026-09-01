@@ -210,3 +210,20 @@ impl Store {
         self.tasks.read().get(name).cloned()
     }
 }
+
+impl Store {
+    /// Keep a script under the name a request will ask for it by.
+    pub fn remember_script(&self, id: &str, script: Value) {
+        self.scripts.write().insert(id.to_string(), script);
+    }
+
+    /// The script stored under this name.
+    pub fn stored_script(&self, id: &str) -> Option<Value> {
+        self.scripts.read().get(id).cloned()
+    }
+
+    /// Forget a stored script.
+    pub fn forget_script(&self, id: &str) {
+        self.scripts.write().remove(id);
+    }
+}

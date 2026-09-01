@@ -58,6 +58,7 @@ impl Store {
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             task_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            scripts: Arc::new(RwLock::new(HashMap::new())),
         };
         store.start_writer_reaper();
         store
@@ -90,6 +91,7 @@ impl Store {
             scroll_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             task_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            scripts: Arc::new(RwLock::new(HashMap::new())),
         };
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;

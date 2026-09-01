@@ -372,6 +372,8 @@ pub struct Store {
     /// answer is ready before the task's name is handed out.
     tasks: Arc<RwLock<HashMap<String, Value>>>,
     task_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// the scripts and templates stored under a name
+    scripts: Arc<RwLock<HashMap<String, Value>>>,
     scroll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
