@@ -132,9 +132,16 @@ pub enum Step {
         words: Vec<String>,
         keep: bool,
     },
-    /// a word split where the writing changes: `qu1ck` is `qu` and `1ck`
+    /// a token is of a kind -- a word, a number -- and only some are kept
+    KeepTypes {
+        types: Vec<String>,
+        keep: bool,
+    },
+    /// a word split where the writing changes: `qu1ck` is `qu`, `1` and `ck`
     WordDelimiter {
         catenate: bool,
+        on_numerics: bool,
+        on_case_change: bool,
     },
     /// each word and the one after it, joined, for the words that are too
     /// common to search for on their own
@@ -449,6 +456,10 @@ fn apply_step(
         protected.extend(words.iter().map(|w| w.to_lowercase()));
         return tokens;
     }
+    if let Step::StemmerOverride(told) = step {
+        // the word it was told to become is the word it stays
+        protected.extend(told.values().map(|t| t.to_lowercase()));
+    }
     if matches!(step, Step::Stem(_) | Step::KStem) && !protected.is_empty() {
         let (held, rest): (Vec<_>, Vec<_>) =
             tokens.into_iter().partition(|(t, _, _, _)| protected.contains(&t.to_lowercase()));
@@ -716,10 +727,17 @@ fn apply_step(
                 .filter(|(t, _, _, _)| set.contains(&t.to_lowercase()) == *keep)
                 .collect()
         }
-        Step::WordDelimiter { catenate } => {
+        Step::KeepTypes { types, keep } => tokens
+            .into_iter()
+            .filter(|(t, _, _, _)| {
+                let kind = if t.chars().all(|c| c.is_numeric()) { "<NUM>" } else { "<ALPHANUM>" };
+                types.iter().any(|named| named == kind) == *keep
+            })
+            .collect(),
+        Step::WordDelimiter { catenate, on_numerics, on_case_change } => {
             let mut out = Vec::new();
             for (t, p, a, b) in tokens {
-                let parts = split_where_writing_changes(&t);
+                let parts = split_where_writing_changes(&t, *on_numerics, *on_case_change);
                 if parts.len() < 2 {
                     out.push((t, p, a, b));
                     continue;
@@ -814,8 +832,8 @@ fn apply_step(
             out
         }
         Step::PreserveOriginal(inner) => {
-            let mut out = tokens.clone();
-            out.extend(apply_step(inner, tokens, protected));
+            let mut out = apply_step(inner, tokens.clone(), protected);
+            out.extend(tokens);
             out
         }
         Step::CjkBigram => {
@@ -837,7 +855,7 @@ fn apply_step(
 }
 
 /// Where a word changes from letters to digits, or from lower case to upper.
-fn split_where_writing_changes(word: &str) -> Vec<String> {
+fn split_where_writing_changes(word: &str, on_numerics: bool, on_case: bool) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut last: Option<char> = None;
@@ -850,8 +868,8 @@ fn split_where_writing_changes(word: &str) -> Vec<String> {
             continue;
         }
         if let Some(previous) = last {
-            let changed = previous.is_numeric() != c.is_numeric()
-                || (previous.is_lowercase() && c.is_uppercase());
+            let changed = (on_numerics && previous.is_numeric() != c.is_numeric())
+                || (on_case && previous.is_lowercase() && c.is_uppercase());
             if changed && !current.is_empty() {
                 parts.push(std::mem::take(&mut current));
             }
@@ -1178,6 +1196,20 @@ impl Registry {
             .unwrap_or(Value::Null);
         let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
         let tokenizers = analysis.get("tokenizer").cloned().unwrap_or(Value::Null);
+        // a normalizer is an analyzer that does not cut the text: whatever it
+        // names is applied to the value whole
+        if let Some(defined) = analysis.get("normalizer").and_then(|n| n.as_object()) {
+            for (name, spec) in defined {
+                let mut spelled = spec.clone();
+                if let Some(o) = spelled.as_object_mut() {
+                    o.insert("tokenizer".into(), Value::String("keyword".into()));
+                    o.insert("type".into(), Value::String("custom".into()));
+                }
+                if let Some(chain) = build(&spelled, &tokenizers, &filters) {
+                    registry.named.insert(name.clone(), chain);
+                }
+            }
+        }
         let Some(defined) = analysis.get("analyzer").and_then(|a| a.as_object()) else {
             registry.tokenizers = tokenizers;
             registry.filters = filters;
@@ -1222,6 +1254,11 @@ impl Registry {
         }
     }
 
+    /// Whether the index defined an analyzer under this name itself.
+    pub fn knows_named(&self, name: &str) -> bool {
+        self.named.contains_key(name)
+    }
+
     /// The chain a name stands for: the index's own first, then the built-ins.
     pub fn get(&self, name: &str) -> Option<Chain> {
         self.named.get(name).cloned().or_else(|| builtin(name))
@@ -1237,7 +1274,11 @@ fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
     // `{"type": "english"}` names a built-in rather than describing a chain
     if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
         && kind != "custom"
-        && let Some(mut chain) = builtin(kind)
+        && let Some(mut chain) = spec
+            .get("language")
+            .and_then(|l| l.as_str())
+            .and_then(|l| builtin(&l.to_ascii_lowercase()))
+            .or_else(|| builtin(kind))
     {
         if let Some(list) = spec.get("stopwords") {
             let words = word_list(list);
@@ -1252,8 +1293,12 @@ fn build(spec: &Value, tokenizers: &Value, filters: &Value) -> Option<Chain> {
     for step in
         spec.get("filter").into_iter().flat_map(|f| f.as_array().cloned().unwrap_or_default())
     {
-        let Some(name) = step.as_str() else { continue };
-        if let Some(s) = token_filter(name, filters) {
+        // a filter is named, or described where it is used
+        let found = match &step {
+            Value::String(name) => token_filter(name, filters),
+            other => filter_of_spec(other, filters),
+        };
+        if let Some(s) = found {
             steps.extend(s);
         }
     }
@@ -1373,7 +1418,12 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "trim" => vec![Step::Trim],
         "reverse" => vec![Step::Reverse],
         "unique" => vec![Step::Unique],
-        "elision" => vec![Step::Elision],
+        "elision" => {
+            if spec.get("articles").is_none() && spec.get("articles_path").is_none() {
+                return None;
+            }
+            vec![Step::Elision]
+        }
         "kstem" => vec![Step::KStem],
         "porter_stem" => vec![Step::Stem("english".into())],
         "fingerprint" => vec![Step::Fingerprint],
@@ -1412,10 +1462,18 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             words: spec.get("keep_words").map(word_list).unwrap_or_default(),
             keep: true,
         }],
-        "keep_types" => vec![],
-        "word_delimiter" | "word_delimiter_graph" => {
-            vec![Step::WordDelimiter { catenate: flag("catenate_all") || flag("catenate_words") }]
-        }
+        "keep_types" => vec![Step::KeepTypes {
+            types: spec.get("types").map(word_list).unwrap_or_default(),
+            keep: text("mode").map(|m| m != "exclude").unwrap_or(true),
+        }],
+        "word_delimiter" | "word_delimiter_graph" => vec![Step::WordDelimiter {
+            catenate: flag("catenate_all") || flag("catenate_words"),
+            on_numerics: spec.get("split_on_numerics").and_then(|v| v.as_bool()).unwrap_or(true),
+            on_case_change: spec
+                .get("split_on_case_change")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+        }],
         "common_grams" => {
             vec![Step::CommonGrams(spec.get("common_words").map(word_list).unwrap_or_default())]
         }
@@ -1473,7 +1531,7 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "porter_stem" | "porterStem" | "snowball" => vec![Step::Stem("english".into())],
         "fingerprint" => vec![Step::Fingerprint],
         "word_delimiter" | "word_delimiter_graph" => {
-            vec![Step::WordDelimiter { catenate: false }]
+            vec![Step::WordDelimiter { catenate: false, on_numerics: true, on_case_change: true }]
         }
         "flatten_graph" | "remove_duplicates" | "min_hash" | "keyword_repeat" => vec![],
         "arabic_normalization" => vec![Step::Normalize("arabic")],
@@ -1496,7 +1554,12 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
 
 fn word_list(list: &Value) -> Vec<String> {
     match list {
-        Value::String(s) => stop_words(s),
+        // `_english_` names a list OpenSearch keeps; anything else is the
+        // words themselves, written out
+        Value::String(s) if s.starts_with('_') && s.ends_with('_') => stop_words(s),
+        Value::String(s) => {
+            s.split(',').map(|w| w.trim().to_string()).filter(|w| !w.is_empty()).collect()
+        }
         Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
         _ => Vec::new(),
     }

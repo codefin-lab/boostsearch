@@ -219,29 +219,42 @@ pub async fn analyze(
     for t in &text {
         // where a token came from is part of the answer: a highlighter and a
         // caller reading `_analyze` both ask for it
-        let parts: Vec<(String, usize, usize)> = if let Some(chain) = &chain {
-            chain.tokens(t).into_iter().map(|(tok, _, from, to)| (tok, from, to)).collect()
+        let parts: Vec<(String, usize, usize, usize)> = if let Some(chain) = &chain {
+            chain.tokens(t).into_iter().map(|(tok, at, from, to)| (tok, at, from, to)).collect()
         } else if tokenizer_only {
             t.split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
-                .map(|w| (w.to_string(), 0, 0))
+                .enumerate()
+                .map(|(i, w)| (w.to_string(), i, 0, 0))
                 .collect()
         } else {
             match &st {
                 Some(s) => crate::query::analyze_text(&s.read().index, t, analyzer)
                     .into_iter()
-                    .map(|w| (w, 0, 0))
+                    .enumerate()
+                    .map(|(i, w)| (w, i, 0, 0))
                     .collect(),
-                None => t.split_whitespace().map(|w| (w.to_lowercase(), 0, 0)).collect(),
+                None => t
+                    .split_whitespace()
+                    .enumerate()
+                    .map(|(i, w)| (w.to_lowercase(), i, 0, 0))
+                    .collect(),
             }
         };
-        for (tok, from, to) in parts {
+        let parts_len = parts.iter().map(|(_, at, _, _)| *at + 1).max().unwrap_or(0);
+        for (tok, at, from, to) in parts {
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
-                "type": "<ALPHANUM>", "position": pos
+                "type": "<ALPHANUM>", "position": pos + at,
+                // what the term looks like in the index, which a caller
+                // reading `explain` asks to see
+                "bytes": format!("[{}]", tok.as_bytes().iter().map(|b| format!("{b:x}"))
+                    .collect::<Vec<_>>().join(" ")),
+                "positionLength": 1,
+                "termFrequency": 1,
             }));
-            pos += 1;
         }
+        pos += parts_len;
     }
     let cap = st
         .as_ref()
@@ -265,11 +278,14 @@ pub async fn analyze(
     {
         let as_json = |cut: Vec<(String, usize, usize, usize)>| -> Vec<Value> {
             cut.into_iter()
-                .enumerate()
-                .map(|(i, (token, _, from, to))| {
+                .map(|(token, at, from, to)| {
                     json!({
                         "token": token, "start_offset": from, "end_offset": to,
-                        "type": "<ALPHANUM>", "position": i
+                        "type": "<ALPHANUM>", "position": at,
+                        "bytes": format!("[{}]", token.as_bytes().iter().map(|b| format!("{b:x}"))
+                            .collect::<Vec<_>>().join(" ")),
+                        "positionLength": 1,
+                        "termFrequency": 1,
                     })
                 })
                 .collect()

@@ -716,6 +716,7 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
 /// The Bengali letters that are written two ways, written one way.
 fn bengali_normalize(word: &str) -> String {
     word.chars()
+        .filter(|c| *c != '\u{0981}')
         .map(|c| match c {
             '\u{09DC}' | '\u{09DD}' => '\u{09B0}',
             '\u{09DF}' => '\u{09AF}',
