@@ -604,6 +604,163 @@ pub(crate) fn greek(word: &str) -> String {
     .unwrap_or(word)
 }
 
+/// English, as `KStemmer` cuts it: gently, and only where what is left is
+/// still a word.
+pub(crate) fn kstem(word: &str) -> String {
+    if len(word) < 4 {
+        return word.to_string();
+    }
+    // the plural, the participle and the comparative, in that order
+    if let Some(base) = word.strip_suffix("ies").filter(|b| len(b) >= 3) {
+        return format!("{base}y");
+    }
+    if let Some(base) = word.strip_suffix("es").filter(|b| len(b) >= 3) {
+        if base.ends_with('s')
+            || base.ends_with("ch")
+            || base.ends_with("sh")
+            || base.ends_with('x')
+        {
+            return base.to_string();
+        }
+        return format!("{base}e");
+    }
+    if let Some(base) = word.strip_suffix('s').filter(|b| len(b) >= 3 && !b.ends_with('s')) {
+        return base.to_string();
+    }
+    if let Some(base) = word.strip_suffix("ing").filter(|b| len(b) >= 3) {
+        return base.to_string();
+    }
+    if let Some(base) = word.strip_suffix("ed").filter(|b| len(b) >= 3) {
+        return base.to_string();
+    }
+    word.to_string()
+}
+
+/// The letters of a script, written the one way the index keeps them.
+pub(crate) fn normalize(script: &str, word: &str) -> String {
+    match script {
+        "arabic" => word
+            .chars()
+            .filter_map(|c| match c {
+                '\u{0622}' | '\u{0623}' | '\u{0625}' | '\u{0671}' => Some('\u{0627}'),
+                '\u{0649}' => Some('\u{064A}'),
+                '\u{0629}' => Some('\u{0647}'),
+                '\u{064B}'..='\u{0652}' | '\u{0640}' => None,
+                other => Some(other),
+            })
+            .collect(),
+        "bengali" => bengali_normalize(word),
+        "hindi" | "indic" => hindi_normalize(word),
+        "persian" => persian_normalize(word),
+        "sorani" => sorani_normalize(word),
+        "german" => word
+            .chars()
+            .map(|c| match c {
+                '\u{00E4}' => 'a',
+                '\u{00F6}' => 'o',
+                '\u{00FC}' => 'u',
+                other => other,
+            })
+            .collect::<String>()
+            .replace('\u{00DF}', "ss"),
+        // Danish, Norwegian and Swedish write the same sounds three ways
+        "scandinavian" => word
+            .chars()
+            .map(|c| match c {
+                '\u{00E6}' | '\u{00E4}' => '\u{00E6}',
+                '\u{00F8}' | '\u{00F6}' => '\u{00F8}',
+                other => other,
+            })
+            .collect(),
+        "scandinavian_folding" => word
+            .chars()
+            .map(|c| match c {
+                '\u{00E6}' | '\u{00E4}' => 'a',
+                '\u{00F8}' | '\u{00F6}' => 'o',
+                '\u{00E5}' => 'a',
+                other => other,
+            })
+            .collect(),
+        "serbian" => word
+            .chars()
+            .map(|c| match c {
+                // Cyrillic written in Latin letters
+                '\u{0430}' => 'a',
+                '\u{0431}' => 'b',
+                '\u{0432}' => 'v',
+                '\u{0433}' => 'g',
+                '\u{0434}' => 'd',
+                '\u{0435}' => 'e',
+                '\u{0437}' => 'z',
+                '\u{0438}' => 'i',
+                '\u{043A}' => 'k',
+                '\u{043B}' => 'l',
+                '\u{043C}' => 'm',
+                '\u{043D}' => 'n',
+                '\u{043E}' => 'o',
+                '\u{043F}' => 'p',
+                '\u{0440}' => 'r',
+                '\u{0441}' => 's',
+                '\u{0442}' => 't',
+                '\u{0443}' => 'u',
+                '\u{0444}' => 'f',
+                '\u{0445}' => 'h',
+                '\u{0446}' => 'c',
+                other => other,
+            })
+            .collect(),
+        _ => word.to_string(),
+    }
+}
+
+/// The Bengali letters that are written two ways, written one way.
+fn bengali_normalize(word: &str) -> String {
+    word.chars()
+        .map(|c| match c {
+            '\u{09DC}' | '\u{09DD}' => '\u{09B0}',
+            '\u{09DF}' => '\u{09AF}',
+            '\u{09CE}' => '\u{09A4}',
+            '\u{09C0}' => '\u{09BF}',
+            '\u{09C2}' => '\u{09C1}',
+            other => other,
+        })
+        .collect()
+}
+
+/// The Devanagari nasal written as the mark for it.
+fn hindi_normalize(word: &str) -> String {
+    let chars: Vec<char> = word.chars().collect();
+    let mut out = String::with_capacity(word.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let nasal = matches!(c, '\u{0919}' | '\u{091E}' | '\u{0923}' | '\u{0928}' | '\u{092E}');
+        if nasal && chars.get(i + 1) == Some(&'\u{094D}') && i + 2 < chars.len() {
+            out.push('\u{0902}');
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// The Sorani letters that are written two ways, written one way.
+fn sorani_normalize(word: &str) -> String {
+    word.chars()
+        .filter_map(|c| match c {
+            '\u{064A}' | '\u{0649}' => Some('\u{06CC}'),
+            '\u{0643}' => Some('\u{06A9}'),
+            '\u{0629}' => Some('\u{06D5}'),
+            '\u{06BE}' => Some('\u{0647}'),
+            '\u{200C}' => None,
+            '\u{064B}'..='\u{0652}' => None,
+            other => Some(other),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
