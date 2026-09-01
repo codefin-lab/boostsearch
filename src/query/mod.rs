@@ -362,7 +362,12 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 None => serde_json::json!({ name.clone(): value.clone() }),
             };
             if let Ok(q) = build_match(ctx, "match", &clause) {
-                per_field.push(q);
+                // a word looked for in a field that is not analysed is either
+                // there or not, and scores one either way
+                per_field.push(match view {
+                    View::Raw => Box::new(ConstScore::new(q, 1.0)),
+                    _ => q,
+                });
             }
         }
         if per_field.is_empty() {
