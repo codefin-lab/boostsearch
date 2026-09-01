@@ -178,7 +178,7 @@ fn complaint(p: &Params, body: &Value) -> Option<Response> {
         return Some(err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
-            format!("[max_docs] should be >= [slices]"),
+            "[max_docs] should be >= [slices]",
         ));
     }
     if let Some(size) = p.get("scroll_size")
