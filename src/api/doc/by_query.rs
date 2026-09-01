@@ -31,7 +31,6 @@ pub(crate) struct Tally {
 impl Tally {
     /// A document that was written to since the walk read it.
     fn note_conflict(&mut self, seen: &Seen) {
-        self.version_conflicts += 1;
         let id = &seen.id;
         let seq = seen.seq_no.unwrap_or(0);
         self.failures.push(json!({
@@ -75,14 +74,8 @@ fn found(
     store: &Store,
     expr: &str,
     body: &Value,
-    p: &Params,
+    limit: usize,
 ) -> std::result::Result<Vec<Seen>, Response> {
-    let limit = p
-        .get("max_docs")
-        .or_else(|| p.get("size"))
-        .and_then(|v| v.parse::<usize>().ok())
-        .or_else(|| body.get("max_docs").and_then(|v| v.as_u64()).map(|v| v as usize))
-        .unwrap_or(10_000);
     let query = body.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
     // the sequence number each document stood at is what makes a write
     // conditional: one written since is a conflict, not a document to write
@@ -92,6 +85,19 @@ fn found(
         request["sort"] = sort.clone();
     }
     let answer = crate::search::run(store, expr, &request, &Params::new())?;
+    // a walk rewrites what it reads, so a document whose source was never
+    // stored is one it cannot carry over
+    for hit in &answer.hits {
+        if hit.get("_source").is_none() {
+            let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or_default();
+            let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or_default();
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("[{index}][{id}] didn't store _source"),
+            ));
+        }
+    }
     Ok(answer
         .hits
         .into_iter()
@@ -106,17 +112,76 @@ fn found(
         .collect())
 }
 
+/// How many documents the walk may write.
+///
+/// The request may say it in the URL or in the body, and the body may spell
+/// it `size`, which is the older name for the same thing.
+fn max_docs(p: &Params, body: &Value) -> usize {
+    p.get("max_docs")
+        .or_else(|| p.get("size"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            body.get("max_docs")
+                .or_else(|| body.get("size"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+        })
+        .unwrap_or(10_000)
+}
+
+/// How many documents the walk reads before it writes them.
+///
+/// `_reindex` names it inside the search it reads with; the other two name it
+/// in the URL. It decides how many batches the walk reports, and how long a
+/// throttled walk waits between them.
+fn batch_size(p: &Params, source: &Value) -> usize {
+    p.get("scroll_size")
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| source.get("size").and_then(|v| v.as_u64()).map(|v| v as usize))
+        .filter(|n| *n > 0)
+        .unwrap_or(1000)
+}
+
 /// What the request gets wrong before any index is looked at.
 fn complaint(p: &Params, body: &Value) -> Option<Response> {
-    // the body may say it too, and the two have to agree
-    if let (Some(named), Some(asked)) =
-        (p.get("max_docs").or_else(|| p.get("size")), body.get("max_docs").and_then(|v| v.as_i64()))
-        && named.parse::<i64>().map(|n| n != asked).unwrap_or(false)
+    if let Some(complaint) = conflicts_complaint(
+        p.get("conflicts")
+            .map(|v| v.to_string())
+            .or_else(|| body.get("conflicts").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .as_deref(),
+    ) {
+        return Some(complaint);
+    }
+    // the body may say it in two spellings, and they have to agree
+    if let (Some(a), Some(b)) =
+        (body.get("size").and_then(|v| v.as_i64()), body.get("max_docs").and_then(|v| v.as_i64()))
+        && a != b
     {
         return Some(err(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
-            format!("[max_docs] set to two different values [{named}] and [{asked}]"),
+            format!("[max_docs] set to two different values [{a}] and [{b}]"),
+        ));
+    }
+    if let Some(asked) = body.get("size").and_then(|v| v.as_i64())
+        && asked < 0
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] parameter cannot be negative, found [{asked}]"),
+        ));
+    }
+    // the body may say it too, and the two have to agree
+    if let (Some(named), Some(asked)) = (
+        p.get("max_docs").or_else(|| p.get("size")),
+        body.get("max_docs").or_else(|| body.get("size")).and_then(|v| v.as_i64()),
+    ) && named.parse::<i64>().map(|n| n != asked).unwrap_or(false)
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("[max_docs] set to two different values [{asked}] and [{named}]"),
         ));
     }
     if let Some(asked) = body.get("max_docs").and_then(|v| v.as_i64())
@@ -193,6 +258,189 @@ fn complaint(p: &Params, body: &Value) -> Option<Response> {
     None
 }
 
+/// What the search half of the request gets wrong.
+///
+/// A walk reads with a search, but not every search option means anything
+/// when the reader is going to write what it finds: paging past the first
+/// page would skip documents, and a walk needs the whole document, not the
+/// fields a search would carry back.
+fn search_complaint(source: &Value) -> Option<Response> {
+    let refused = [
+        ("from", "from is not supported in this context"),
+        ("stored_fields", "stored_fields is not supported in this context"),
+    ];
+    for (named, why) in refused {
+        if source.get(named).is_some() {
+            return Some(err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why));
+        }
+    }
+    if source.get("_source").and_then(|v| v.as_bool()) == Some(false) {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "_source:false is not supported in this context",
+        ));
+    }
+    // `size` names how many documents to walk, so it has to be a number
+    if let Some(size) = source.get("size")
+        && !size.is_number()
+    {
+        let written = size.as_str().map(|s| s.to_string()).unwrap_or_else(|| size.to_string());
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "number_format_exception",
+            format!("For input string: \"{written}\""),
+        ));
+    }
+    None
+}
+
+/// How a walk was told to deal with a document written since it was read.
+fn conflicts_complaint(named: Option<&str>) -> Option<Response> {
+    match named {
+        None | Some("proceed") | Some("abort") => None,
+        Some(other) => Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("conflicts may only be \"proceed\" or \"abort\" but was [{other}]"),
+        )),
+    }
+}
+
+/// What a `_reindex` body gets wrong before any index is looked at.
+///
+/// The order the complaints come in is the order OpenSearch reads the body:
+/// what it cannot parse at all, then the destination, then how the walk was
+/// asked to run, then the search it reads with.
+fn reindex_complaint(body: &Value) -> Option<Response> {
+    const BODY_FIELDS: &[&str] =
+        &["source", "dest", "conflicts", "size", "max_docs", "script", "slices"];
+    const DEST_FIELDS: &[&str] =
+        &["index", "op_type", "routing", "pipeline", "version_type", "type"];
+    const SOURCE_FIELDS: &[&str] = &[
+        "index",
+        "query",
+        "sort",
+        "size",
+        "from",
+        "_source",
+        "stored_fields",
+        "remote",
+        "slice",
+        "search_after",
+        "type",
+        "scroll_size",
+        "runtime_mappings",
+    ];
+    let named = |field: &str| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "x_content_parse_exception",
+            format!("[reindex] unknown field [{field}]"),
+        )
+    };
+    for key in body.as_object().into_iter().flatten().map(|(k, _)| k) {
+        if !BODY_FIELDS.contains(&key.as_str()) {
+            return Some(named(key));
+        }
+    }
+    if let Some(dest) = body.get("dest").and_then(|v| v.as_object()) {
+        for key in dest.keys() {
+            if !DEST_FIELDS.contains(&key.as_str()) {
+                return Some(err(
+                    StatusCode::BAD_REQUEST,
+                    "x_content_parse_exception",
+                    format!("[dest] unknown field [{key}]"),
+                ));
+            }
+        }
+    }
+    if let Some(source) = body.get("source").and_then(|v| v.as_object()) {
+        for (key, value) in source {
+            if !SOURCE_FIELDS.contains(&key.as_str()) {
+                let start = match value.is_object() {
+                    true => format!("Unknown key for a START_OBJECT in [{key}]."),
+                    false => format!("Unknown key for a VALUE_STRING in [{key}]."),
+                };
+                return Some(err(StatusCode::BAD_REQUEST, "parsing_exception", start));
+            }
+        }
+    }
+    if let Some(complaint) = conflicts_complaint(body.get("conflicts").and_then(|v| v.as_str())) {
+        return Some(complaint);
+    }
+    if body.get("dest").is_some_and(|d| d.get("index").is_none()) {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: index must be specified;",
+        ));
+    }
+    if let Some(source) = body.get("source")
+        && let Some(complaint) = search_complaint(source)
+    {
+        return Some(complaint);
+    }
+    if let Some(remote) = body.pointer("/source/remote")
+        && let Some(complaint) = remote_complaint(remote)
+    {
+        return Some(complaint);
+    }
+    None
+}
+
+/// What a `remote` block gets wrong.
+///
+/// Nothing here reads from another cluster yet, but a body that could never
+/// name one is refused for the reason it could not, which is what a caller
+/// has to fix first either way.
+fn remote_complaint(remote: &Value) -> Option<Response> {
+    const REMOTE_FIELDS: &[&str] =
+        &["host", "username", "password", "headers", "socket_timeout", "connect_timeout"];
+    let host = remote.get("host").and_then(|v| v.as_str()).unwrap_or_default();
+    let shaped = host.starts_with("http://") || host.starts_with("https://");
+    if !shaped {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[host] must be of the form [scheme]://[host]:[port]",
+        ));
+    }
+    let unknown: Vec<&str> = remote
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k.as_str())
+        .filter(|k| !REMOTE_FIELDS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("Unsupported fields in [remote]. [{}]", unknown.join(",")),
+        ));
+    }
+    for named in ["socket_timeout", "connect_timeout"] {
+        if let Some(written) = remote.get(named).and_then(|v| v.as_str())
+            && crate::search::extras::parse_time_amount(written).is_none()
+        {
+            return Some(err(
+                StatusCode::BAD_REQUEST,
+                "number_format_exception",
+                format!("failed to parse setting [{named}] with value [{written}] as a time value"),
+            ));
+        }
+    }
+    // a host that could be read is still not one this node was told it may
+    // read from
+    let named = host.trim_start_matches("http://").trim_start_matches("https://");
+    Some(err(
+        StatusCode::BAD_REQUEST,
+        "illegal_argument_exception",
+        format!("[{named}] not allowlisted in reindex.remote.allowlist"),
+    ))
+}
+
 /// Whether the request asked for the walk to be done in the background.
 ///
 /// Nothing here takes long enough to need it, so the walk is done and the
@@ -215,13 +463,25 @@ pub async fn delete_by_query(
 ) -> Response {
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    if let Some(complaint) = complaint(&p, &body) {
+    if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
     }
-    let hits = match found(&store, &index, &body, &p) {
+    // a walk that deletes has to be told what to delete
+    if body.get("query").is_none() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: query is missing;",
+        );
+    }
+    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
+    if let Some(failure) = too_few_copies(&store, &index, &p) {
+        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
+    }
     let mut tally = Tally { total: hits.len(), ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
@@ -248,7 +508,7 @@ pub async fn delete_by_query(
             let _ = st.write().refresh();
         }
     }
-    finish(&store, tally, started, &p)
+    finish(&store, tally, started, &p, &index, batch_size(&p, &body)).await
 }
 
 pub async fn update_by_query(
@@ -259,7 +519,7 @@ pub async fn update_by_query(
 ) -> Response {
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    if let Some(complaint) = complaint(&p, &body) {
+    if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
     }
     // a script would say what to change; without one the walk rewrites each
@@ -271,10 +531,14 @@ pub async fn update_by_query(
             "scripts are not supported yet",
         );
     }
-    let hits = match found(&store, &index, &body, &p) {
+    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
+    if let Some(failure) = too_few_copies(&store, &index, &p) {
+        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
+    }
     let mut tally = Tally { total: hits.len(), ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
@@ -305,7 +569,7 @@ pub async fn update_by_query(
             let _ = st.write().refresh();
         }
     }
-    finish(&store, tally, started, &p)
+    finish(&store, tally, started, &p, &index, batch_size(&p, &body)).await
 }
 
 pub async fn reindex(
@@ -315,6 +579,9 @@ pub async fn reindex(
 ) -> Response {
     let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    if let Some(complaint) = reindex_complaint(&body) {
+        return complaint;
+    }
     if let Some(complaint) = complaint(&p, &body) {
         return complaint;
     }
@@ -353,7 +620,7 @@ pub async fn reindex(
             ),
         );
     }
-    let hits = match found(&store, &from, &source, &p) {
+    let hits = match found(&store, &from, &source, max_docs(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
@@ -361,10 +628,25 @@ pub async fn reindex(
     let create_only = dest.get("op_type").and_then(|v| v.as_str()) == Some("create");
     let conflicts_proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed");
     let kept = source.get("_source").cloned();
+    // a destination that is not there yet is created, unless the cluster was
+    // told which names may be created on the fly
+    if store.get(&to).is_none()
+        && let Some(complaint) = auto_create_complaint(&store, &to)
+    {
+        return complaint;
+    }
     if store.ensure(&to).is_err() {
         return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "cannot open dest");
     }
+    if let Some(failure) = too_few_copies(&store, &to, &p) {
+        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
+    }
     let mut tally = Tally { total: hits.len(), ..Default::default() };
+    // where a destination names a routing, it decides which shard each
+    // document lands on: `=value` writes them all under one, `discard` drops
+    // the one the source carried, and `keep` leaves it as it stands
+    let routing = dest.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
     for seen in hits {
         let mut document = seen.source.clone();
         if let Some(fields) = kept.as_ref() {
@@ -372,6 +654,15 @@ pub async fn reindex(
         }
         let Some(st) = store.get(&to) else { continue };
         let mut g = st.write();
+        match routing.as_deref() {
+            Some("discard") => {
+                g.routing.remove(&seen.id);
+            }
+            Some(named) if named.starts_with('=') => {
+                g.routing.insert(seen.id.clone(), named[1..].to_string());
+            }
+            _ => {}
+        }
         let existed = crate::api::doc::exists_doc(&g, &seen.id);
         let op = if create_only { "create" } else { "index" };
         match write_doc_raw(&mut g, &seen.id, document, op, None) {
@@ -385,9 +676,10 @@ pub async fn reindex(
                         "cause": {
                             "type": "version_conflict_engine_exception",
                             "reason": format!(
-                                "[{}]: version conflict, document already exists (solved by \
-                                 specifying op_type=index)",
-                                seen.id
+                                "[{}]: version conflict, document already exists (current \
+                                 version [{}])",
+                                seen.id,
+                                g.version_of(&seen.id)
                             ),
                             "index": to, "shard": "0", "index_uuid": "_na_",
                         },
@@ -400,7 +692,78 @@ pub async fn reindex(
     if let Some(st) = store.get(&to) {
         let _ = st.write().refresh();
     }
-    finish(&store, tally, started, &p)
+    finish(&store, tally, started, &p, &from, batch_size(&p, &source)).await
+}
+
+/// Whether the write can meet the number of copies the caller asked for.
+///
+/// One node holds one copy of each shard, so a request that wants more than
+/// one active copy waits for replicas that will never be assigned. It is told
+/// so rather than left waiting, and the answer carries the timeout it named.
+fn too_few_copies(store: &Store, name: &str, p: &Params) -> Option<Value> {
+    let asked = match p.get("wait_for_active_shards").map(|v| v.to_string()) {
+        Some(written) if written == "all" => store
+            .get(name)
+            .map(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) + 1)
+            .unwrap_or(1),
+        Some(written) => written.parse::<u64>().ok()?,
+        None => return None,
+    };
+    if asked <= 1 {
+        return None;
+    }
+    let timeout = p.get("timeout").map(|v| v.to_string()).unwrap_or_else(|| "1m".to_string());
+    Some(json!({
+        "index": name, "id": "", "status": 503,
+        "cause": {
+            "type": "unavailable_shards_exception",
+            "reason": format!(
+                "[{name}][0] Not enough active copies to meet shard count of [{asked}] (have 1, \
+                 needed {asked}). Timeout: [{timeout}], request: [BulkShardRequest]"
+            ),
+            "index": name, "shard": "0", "index_uuid": "_na_",
+        },
+    }))
+}
+
+/// Why an index may not be created on the fly, where it may not.
+///
+/// `action.auto_create_index` is either a flat yes or no, or a list of
+/// patterns a new name has to match -- and a pattern written with a leading
+/// `-` forbids the names it matches.
+fn auto_create_complaint(store: &Store, name: &str) -> Option<Response> {
+    let setting = store.cluster_setting("action.auto_create_index")?;
+    let written = match &setting {
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let refuse = |why: String| Some(err(StatusCode::BAD_REQUEST, "index_not_found_exception", why));
+    if written == "false" {
+        return refuse(format!("no such index [{name}] and [action.auto_create_index] is [false]"));
+    }
+    if written == "true" {
+        return None;
+    }
+    for pattern in written.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let (forbids, glob) = match pattern.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, pattern),
+        };
+        if !crate::store::glob_match(glob, name) {
+            continue;
+        }
+        return match forbids {
+            true => refuse(format!(
+                "no such index [{name}] and [action.auto_create_index] contains [{pattern}] \
+                 which forbids automatic creation of the index"
+            )),
+            false => None,
+        };
+    }
+    refuse(format!(
+        "no such index [{name}] and [action.auto_create_index] ([{written}]) doesn't match"
+    ))
 }
 
 /// Whether the document has been written to since the walk read it.
@@ -425,33 +788,54 @@ fn index_name(named: Option<&Value>) -> Option<String> {
 }
 
 /// A document with only the fields the request asked to carry over.
+///
+/// `_source` is written here the way a search writes it -- a name, a list of
+/// names, or an object of includes and excludes -- so it is read the same way.
 fn only_these(document: &Value, fields: &Value) -> Value {
-    let wanted: Vec<String> = match fields {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
-        _ => return document.clone(),
-    };
-    let mut out = serde_json::Map::new();
-    for field in wanted {
-        if let Some(value) = document.get(&field) {
-            out.insert(field, value.clone());
-        }
+    match crate::api::apply_source_selector(document, fields) {
+        Value::Null => json!({}),
+        kept => kept,
     }
-    Value::Object(out)
 }
 
 /// The answer, or the name of the task it would have been.
-fn finish(store: &Store, tally: Tally, started: std::time::Instant, p: &Params) -> Response {
+async fn finish(
+    store: &Store,
+    tally: Tally,
+    started: std::time::Instant,
+    p: &Params,
+    read: &str,
+    per_batch: usize,
+) -> Response {
     // the walk reads a page at a time, and says how many pages it read
-    let per_batch = p
-        .get("scroll_size")
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1000);
     let batches = tally.total.div_ceil(per_batch).max(1);
+    // a walk told how many documents a second it may write waits between its
+    // batches until it has held to that rate
+    let rate = p.get("requests_per_second").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0);
+    let throttled_millis = match rate > 0.0 {
+        true => ((batches - 1) as f64 * per_batch as f64 / rate * 1000.0) as u64,
+        false => 0,
+    };
+    // a walk that is being waited for holds to the rate before it answers; a
+    // walk running as a task is left to be rethrottled instead
+    if throttled_millis > 0 && !as_task(p) {
+        tokio::time::sleep(std::time::Duration::from_millis(throttled_millis)).await;
+    }
     let mut answer = tally.answer(started.elapsed().as_millis(), batches);
+    answer["throttled_millis"] = json!(throttled_millis);
+    answer["requests_per_second"] = json!(rate);
     // a walk asked to be sliced is one walk here, and says so slice by slice
-    if let Some(slices) = p.get("slices").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1) {
+    // `auto` means one slice per shard of the index the walk read
+    let asked = match p.get("slices").map(|v| v.as_str()) {
+        Some("auto") => store
+            .resolve(read)
+            .first()
+            .and_then(|name| store.get(name))
+            .map(|st| st.read().shard_count() as usize)
+            .filter(|n| *n > 1),
+        other => other.and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1),
+    };
+    if let Some(slices) = asked {
         let each: Vec<Value> = (0..slices)
             .map(|slice| {
                 json!({
@@ -466,7 +850,25 @@ fn finish(store: &Store, tally: Tally, started: std::time::Instant, p: &Params) 
     }
     if as_task(p) {
         let name = task_name(store);
-        store.remember_task(&name, answer);
+        store.remember_task(&name, answer.clone());
+        // a task outlives the request that started it, so what it did is kept
+        // where anyone can read it back
+        if store.ensure(".tasks").is_ok()
+            && let Some(st) = store.get(".tasks")
+        {
+            let mut g = st.write();
+            let record = json!({
+                "completed": true,
+                "task": {
+                    "node": "node-0", "id": 1, "type": "transport",
+                    "action": "indices:data/write/by_query", "description": name,
+                    "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": true,
+                },
+                "response": answer,
+            });
+            let _ = write_doc_raw(&mut g, &name, record, "index", None);
+            let _ = g.refresh();
+        }
         return axum::Json(json!({ "task": name })).into_response();
     }
     // a walk that could not write what it found says so in its status

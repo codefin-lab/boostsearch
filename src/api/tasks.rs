@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// The part of a walk's answer that is its running status.
+///
+/// A task reports what it has done so far, which is everything the answer
+/// says except how long the request itself took.
+fn status_of(answer: &Value) -> Value {
+    let mut status = answer.clone();
+    if let Some(o) = status.as_object_mut() {
+        o.remove("took");
+        o.remove("timed_out");
+    }
+    status
+}
+
 /// `_tasks/{id}` -- what became of a task.
 ///
 /// Everything this engine is asked to do finishes before the request returns,
@@ -22,6 +35,9 @@ pub async fn get_task(
                     "action": "indices:data/write/by_query",
                     "description": id,
                     "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": true,
+                    // what the walk did is the task's status as well as its
+                    // answer; the status is the tally without the timing
+                    "status": status_of(&answer),
                 },
                 "response": answer,
             }),

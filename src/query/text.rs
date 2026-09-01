@@ -174,6 +174,17 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         return Ok(any_of(exact));
     }
 
+    // a number written as text matches the number itself: `order:1` finds a
+    // document whose `order` is 1, whether the field was written as text or
+    // as a number
+    let as_number = text
+        .parse::<i64>()
+        .ok()
+        .map(|n| serde_json::json!(n))
+        .or_else(|| text.parse::<f64>().ok().map(|n| serde_json::json!(n)))
+        .map(|n| term_for(f, &path, &n))
+        .filter(|exact| !exact.is_empty());
+
     let operator =
         opts.get("operator").and_then(|o| o.as_str()).unwrap_or("or").to_ascii_lowercase();
     let occur = if operator == "and" { Occur::Must } else { Occur::Should };
@@ -190,7 +201,12 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     } else {
         0
     };
-    Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
+    let words: Box<dyn Query> =
+        Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required));
+    match as_number {
+        Some(exact) => Ok(Box::new(BooleanQuery::union(vec![words, any_of(exact)]))),
+        None => Ok(words),
+    }
 }
 
 pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {

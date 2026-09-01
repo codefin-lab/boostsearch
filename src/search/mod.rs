@@ -31,7 +31,7 @@ pub(crate) use limits::*;
 mod shard;
 pub(crate) use shard::*;
 
-mod extras;
+pub(crate) mod extras;
 pub(crate) use extras::*;
 mod geo;
 pub(crate) use geo::*;

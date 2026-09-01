@@ -187,6 +187,11 @@ class Runner:
             ignore_codes = {int(v) for v in vals}
         try:
             method, path, used = self.resolve_path(api, params)
+            # an API whose spec says a body is required is refused by the
+            # client before it is sent, which is what `catch: param` names
+            spec = self.specs.get(api) or {}
+            if body is None and (spec.get("body") or {}).get("required"):
+                raise Failure(f"[{api}] requires a body")
         except Failure:
             # `catch: param` expects the client to refuse the call because a
             # required path part is missing -- which is exactly what a failure
@@ -247,10 +252,16 @@ class Runner:
                 # the fallback for the tests that name a field inside it
                 error = parsed.get("error") if isinstance(parsed, dict) else None
                 reason = error.get("reason") if isinstance(error, dict) else None
+                kind = error.get("type") if isinstance(error, dict) else None
                 blob = json.dumps(parsed)
+                # OpenSearch's own runner matches the regex against the string
+                # its client renders an error as, which names the type and the
+                # reason together
+                rendered = f"[type={kind}, reason={reason}]"
                 pattern = catch[1:-1]
                 if not (
                     (reason and re.search(pattern, reason))
+                    or re.search(pattern, rendered)
                     or re.search(pattern, blob)
                 ):
                     raise Failure(f"catch {catch} did not match {blob[:200]}")
