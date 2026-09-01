@@ -39,7 +39,7 @@ FILTERS = [
     "persian_normalization", "scandinavian_normalization", "scandinavian_folding",
     "serbian_normalization", "sorani_normalization", "bengali_normalization",
     "arabic_stem", "brazilian_stem", "czech_stem", "dutch_stem", "french_stem",
-    "german_stem", "persian_stem", "russian_stem", "bengali_stem",
+    "german_stem", "persian_stem", "russian_stem",
 ]
 
 def tokens(base, body):

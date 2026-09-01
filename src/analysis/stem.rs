@@ -1264,38 +1264,41 @@ pub(crate) fn normalize(script: &str, word: &str) -> String {
             .collect(),
         "serbian" => word
             .chars()
-            .map(|c| match c {
-                '\u{0430}' => "a",
-                '\u{0431}' => "b",
-                '\u{0432}' => "v",
-                '\u{0433}' => "g",
-                '\u{0434}' => "d",
-                '\u{0452}' => "dj",
-                '\u{0435}' => "e",
-                '\u{0436}' => "z",
-                '\u{0437}' => "z",
-                '\u{0438}' => "i",
-                '\u{0458}' => "j",
-                '\u{043A}' => "k",
-                '\u{043B}' => "l",
-                '\u{0459}' => "lj",
-                '\u{043C}' => "m",
-                '\u{043D}' => "n",
-                '\u{045A}' => "nj",
-                '\u{043E}' => "o",
-                '\u{043F}' => "p",
-                '\u{0440}' => "r",
-                '\u{0441}' => "s",
-                '\u{0442}' => "t",
-                '\u{045B}' => "c",
-                '\u{0443}' => "u",
-                '\u{0444}' => "f",
-                '\u{0445}' => "h",
-                '\u{0446}' => "c",
-                '\u{0447}' => "c",
-                '\u{045F}' => "dz",
-                '\u{0448}' => "s",
-                _ => "",
+            .map(|c| -> String {
+                match c {
+                    '\u{0430}' => String::from("a"),
+                    '\u{0431}' => String::from("b"),
+                    '\u{0432}' => String::from("v"),
+                    '\u{0433}' => String::from("g"),
+                    '\u{0434}' => String::from("d"),
+                    '\u{0452}' => String::from("dj"),
+                    '\u{0435}' => String::from("e"),
+                    '\u{0436}' => String::from("z"),
+                    '\u{0437}' => String::from("z"),
+                    '\u{0438}' => String::from("i"),
+                    '\u{0458}' => String::from("j"),
+                    '\u{043A}' => String::from("k"),
+                    '\u{043B}' => String::from("l"),
+                    '\u{0459}' => String::from("lj"),
+                    '\u{043C}' => String::from("m"),
+                    '\u{043D}' => String::from("n"),
+                    '\u{045A}' => String::from("nj"),
+                    '\u{043E}' => String::from("o"),
+                    '\u{043F}' => String::from("p"),
+                    '\u{0440}' => String::from("r"),
+                    '\u{0441}' => String::from("s"),
+                    '\u{0442}' => String::from("t"),
+                    '\u{045B}' => String::from("c"),
+                    '\u{0443}' => String::from("u"),
+                    '\u{0444}' => String::from("f"),
+                    '\u{0445}' => String::from("h"),
+                    '\u{0446}' => String::from("c"),
+                    '\u{0447}' => String::from("c"),
+                    '\u{045F}' => String::from("dz"),
+                    '\u{0448}' => String::from("s"),
+                    // a letter this alphabet does not write is left as it is
+                    other => String::from(other),
+                }
             })
             .collect::<String>(),
         _ => word.to_string(),
@@ -1553,6 +1556,56 @@ fn german_remove_particle(w: &mut Vec<char>) {
             }
         }
     }
+}
+
+/// German, as `GermanLightStemmer` cuts it: the umlauts, and then the two
+/// endings a noun or an adjective takes.
+pub(crate) fn german_light(word: &str) -> String {
+    let mut w: Vec<char> = word.chars().collect();
+    for c in w.iter_mut() {
+        *c = match *c {
+            '\u{00E4}' | '\u{00E0}' | '\u{00E1}' | '\u{00E2}' => 'a',
+            '\u{00F6}' | '\u{00F2}' | '\u{00F3}' | '\u{00F4}' => 'o',
+            '\u{00EF}' | '\u{00EC}' | '\u{00ED}' | '\u{00EE}' => 'i',
+            '\u{00FC}' | '\u{00F9}' | '\u{00FA}' | '\u{00FB}' => 'u',
+            other => other,
+        };
+    }
+    // the consonants after which a final `s` or `st` is an ending rather than
+    // part of the word
+    let st_ending =
+        |c: char| matches!(c, 'b' | 'd' | 'f' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 't');
+    let len = w.len();
+    // the ending, and how much of it there is to take off
+    let one =
+        (len > 3 && w[len - 1] == 'e') || (len > 3 && w[len - 1] == 's' && st_ending(w[len - 2]));
+    if len > 5 && w[len - 3] == 'e' && w[len - 2] == 'r' && w[len - 1] == 'n' {
+        w.truncate(len - 3);
+    } else if len > 4 && w[len - 2] == 'e' && matches!(w[len - 1], 'm' | 'n' | 'r' | 's') {
+        w.truncate(len - 2);
+    } else if one {
+        w.truncate(len - 1);
+    }
+    let len = w.len();
+    let two = (len > 4 && w[len - 2] == 'e' && matches!(w[len - 1], 'r' | 'n'))
+        || (len > 4 && w[len - 2] == 's' && w[len - 1] == 't' && st_ending(w[len - 3]));
+    if len > 5 && w[len - 3] == 'e' && w[len - 2] == 's' && w[len - 1] == 't' {
+        w.truncate(len - 3);
+    } else if two {
+        w.truncate(len - 2);
+    }
+    w.into_iter().collect()
+}
+
+/// A word as the classic tokenizer's filter leaves it: the possessive gone,
+/// and the dots out of an acronym.
+pub(crate) fn classic(word: &str) -> String {
+    let word = word.strip_suffix("'s").or_else(|| word.strip_suffix("'S")).unwrap_or(word);
+    // `U.S.A.` is `USA`, but a word with one dot in it is left alone
+    if word.matches('.').count() >= 2 && word.ends_with('.') {
+        return word.replace('.', "");
+    }
+    word.to_string()
 }
 
 #[cfg(test)]
