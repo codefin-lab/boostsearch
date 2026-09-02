@@ -87,6 +87,7 @@ impl Parser {
         }
         for r in &self.os {
             if let Ok(Some(c)) = r.regex.captures(ua) {
+                out.os_matched = true;
                 out.os_name = replaced(&r.family, &c, 1).unwrap_or_else(|| "Other".into());
                 out.os_major = replaced(&r.v1, &c, 2);
                 out.os_minor = replaced(&r.v2, &c, 3);
@@ -140,6 +141,8 @@ fn replaced(
 #[derive(Default, Debug)]
 pub struct Parsed {
     pub name: String,
+    /// whether any rule named the operating system
+    pub os_matched: bool,
     pub major: Option<String>,
     pub minor: Option<String>,
     pub patch: Option<String>,
@@ -173,7 +176,7 @@ impl Parsed {
         {
             out.insert("version".into(), json!(v));
         }
-        if wanted("os") {
+        if wanted("os") && self.os_matched {
             let mut os = Map::new();
             os.insert("name".into(), json!(self.os_name));
             if let Some(v) =

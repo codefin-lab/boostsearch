@@ -287,3 +287,39 @@ beside it.
 Gates: core 1427/1427, phase1 398/398, modules 665/895 (was 556 at the start
 of Phase 3), lang-painless 143/143, reindex 154/166, search_diff 92/92,
 analysis_diff 519/522.
+
+## Phase 4 -- Ingest (closed 2026-09-02)
+
+- 4.1 Ingest pipelines (`src/ingest/`): thirty-four processors -- set,
+  append, rename, remove (and exclude_field), remove_by_pattern, copy,
+  lowercase, uppercase, trim, split, join, sort, convert, gsub, json, kv,
+  csv, dot_expander, urldecode, html_strip, bytes, date, date_index_name,
+  grok (OpenSearch's own 312-pattern bank, atomic groups and possessive
+  quantifiers read as plain), dissect (append, skip, named keys, right
+  padding), script (with the `Processors` statics), pipeline, drop, fail,
+  foreach, fingerprint, community_id, user_agent, geoip (no database
+  shipped). `if`, `on_failure`, `ignore_failure`, `tag`, `description`,
+  mustache templates in values and field names, `_ingest` metadata,
+  `_simulate` (plain and verbose, with `if` results and nested pipeline
+  steps), `_ingest/processor/grok`, pipeline stats in nodes stats.
+  Pipelines run on single writes, bulk (index/create and upserts, scripted
+  or not), update upserts; `pipeline` param, `index.default_pipeline`,
+  `index.final_pipeline` (also from templates for an index not yet made),
+  `_none`; a script may change `_index`, `_id`, `_routing`, `_version`,
+  `_if_seq_no`; `drop` answers noop.
+- 4.2 Search pipelines (`src/search/pipeline.rs`): request processors
+  filter_query, script (over the search source and a request context),
+  oversample; response processors rename_field, sort, truncate_hits,
+  collapse; named on the request, given in the body, or the index's
+  `index.search.default_pipeline`. The user_agent processor reads uap-core's
+  regexes (shipped) or a file under `config/ingest-user-agent/`.
+- Along the way: Java date patterns write fractions, zones and quoted
+  text; a `match` on an already-collected `function_score` widens the page;
+  docvalue_fields come back sorted.
+
+Gates: core 1427/1427, phase1 398/398, modules 817/895 (was 666 at the
+start of Phase 4), ingest-common 138/139 (the one gap: a `char` typed value
+in a script, which this engine cannot tell from a one-letter string),
+search-pipeline-common 11/11, ingest-user-agent 5/5, search_diff 92/92.
+ingest-geoip 1/8 stays out: it needs MaxMind databases that are not in the
+tree.
