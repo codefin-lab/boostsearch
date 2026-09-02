@@ -52,6 +52,8 @@ pub const LEAVE: &str = "internal:cluster/coordination/leave";
 pub const SHARD_STARTED: &str = "internal:cluster/shard/started";
 pub const SHARD_FAILED: &str = "internal:cluster/shard/failure";
 pub const REROUTE: &str = "internal:cluster/reroute";
+/// a node holding an index's primary tells the manager the index's metadata
+pub const METADATA_REPORT: &str = "internal:cluster/metadata/report";
 
 /// What a node keeps across a restart, by durable key.
 pub const D_COMMITTED: &str = "cluster_state";
@@ -178,6 +180,12 @@ pub struct Coordinator {
     terms: BTreeMap<(String, u32), u64>,
     /// a table `_cluster/reroute` commands shaped, for the next publication
     command_table: Option<super::state::RoutingTable>,
+    /// index metadata the nodes holding primaries reported, by index
+    reports: BTreeMap<String, (NodeId, super::state::IndexMetadata)>,
+    /// what this node last reported about its own primaries, by index
+    reported_fp: BTreeMap<String, u64>,
+    /// the customs this node last applied, as a fingerprint
+    customs_applied: u64,
     /// `_cluster/voting_config_exclusions`, as (node id, node name)
     exclusions: Vec<(String, String)>,
     /// a publication asked for while one was in flight
@@ -282,6 +290,9 @@ impl Coordinator {
             shard_events: Vec::new(),
             terms: BTreeMap::new(),
             command_table: None,
+            reports: BTreeMap::new(),
+            reported_fp: BTreeMap::new(),
+            customs_applied: 0,
             exclusions: Vec::new(),
             republish_wanted: false,
             last_wall: 0,
@@ -703,7 +714,7 @@ impl Coordinator {
     /// over the table as it was.
     fn place(&mut self, s: &mut ClusterState) -> Vec<Output> {
         let Some(src) = self.metadata.clone() else { return vec![] };
-        let snapshot = src.snapshot();
+        let own = src.snapshot();
         let settings = src.cluster_settings();
         let cluster = super::allocation::ClusterSettings::from_value(&settings);
         let mut table = self.command_table.take().unwrap_or_else(|| s.routing.clone());
@@ -724,12 +735,56 @@ impl Coordinator {
                 }
             }
         }
-        // the manager's own store holds every primary it publishes
-        let home: BTreeMap<String, NodeId> =
-            snapshot.keys().map(|n| (n.clone(), self.me.id.clone())).collect();
+        // an index's metadata belongs to the node holding its primary: this
+        // node's store for the primaries here (and for indices not yet
+        // published), the latest report for primaries elsewhere, and what
+        // was published last for the rest; a deleted index goes to the graveyard
+        let me = self.me.id.clone();
+        let primary_of =
+            |name: &str| -> Option<NodeId> { table.primary(name, 0).and_then(|p| p.node.clone()) };
+        let mut base: BTreeMap<String, super::state::IndexMetadata> = s.indices.clone();
+        for t in src.tombstones() {
+            if let Some(name) = t.pointer("/index/index_name").and_then(|n| n.as_str()) {
+                base.remove(name);
+                self.reports.remove(name);
+                s.graveyard.push(t.clone());
+            }
+        }
+        if s.graveyard.len() > 500 {
+            let drop = s.graveyard.len() - 500;
+            s.graveyard.drain(..drop);
+        }
+        let buried = |name: &str, uuid: &str| {
+            s.graveyard.iter().any(|t| {
+                t.pointer("/index/index_uuid").and_then(|u| u.as_str()) == Some(uuid)
+                    && t.pointer("/index/index_name").and_then(|n| n.as_str()) == Some(name)
+            })
+        };
+        let mut home: BTreeMap<String, NodeId> = BTreeMap::new();
+        for (name, m) in &own {
+            if buried(name, &m.uuid) {
+                continue;
+            }
+            match primary_of(name) {
+                Some(p) if p == me => {
+                    base.insert(name.clone(), m.clone());
+                }
+                Some(_) => {}
+                None => {
+                    // not placed yet: a new index, whose primary is where its data is
+                    base.insert(name.clone(), m.clone());
+                    home.insert(name.clone(), me.clone());
+                }
+            }
+        }
+        for (name, (node, m)) in &self.reports {
+            if primary_of(name).as_ref() == Some(node) && !buried(name, &m.uuid) {
+                base.insert(name.clone(), m.clone());
+            }
+        }
         let ctx = super::allocation::Context {
             nodes: &s.nodes,
-            indices: &snapshot,
+            indices: &base,
             cluster: &cluster,
             primary_home: &home,
             now: self.last_wall,
@@ -754,20 +809,124 @@ impl Coordinator {
                 after: at.saturating_sub(self.last_wall).max(1),
             });
         }
-        s.indices = snapshot
+        s.indices = base
             .into_iter()
             .map(|(n, m)| (n, super::metadata::with_terms(m, &routing, &self.terms)))
             .collect();
         self.terms.retain(|(i, _), _| s.indices.contains_key(i));
         s.routing = routing;
         s.cluster_settings = settings;
-        self.last_fingerprint = super::metadata::fingerprint(&s.indices);
+        s.customs = src.customs();
+        self.last_fingerprint = self.metadata_fingerprint(&own, &s.routing);
         out
+    }
+
+    /// What of this node's store the cluster would notice changing: the
+    /// indices whose primary is here or that are not placed yet, the
+    /// exclusions, the customs.
+    fn metadata_fingerprint(
+        &self,
+        own: &BTreeMap<String, super::state::IndexMetadata>,
+        routing: &super::state::RoutingTable,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mine: BTreeMap<String, super::state::IndexMetadata> = own
+            .iter()
+            .filter(|(n, _)| {
+                routing
+                    .primary(n, 0)
+                    .and_then(|p| p.node.clone())
+                    .map(|p| p == self.me.id)
+                    .unwrap_or(true)
+            })
+            .map(|(n, m)| (n.clone(), m.clone()))
+            .collect();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        super::metadata::fingerprint(&mine).hash(&mut h);
+        if let Some(src) = &self.metadata {
+            src.customs().to_string().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// A follower holding primaries tells the manager about them when they
+    /// change; anyone applies what the manager published to the copies here.
+    fn report_metadata(&mut self) -> Vec<Output> {
+        let Some(src) = self.metadata.clone() else { return vec![] };
+        let Mode::Follower(leader) = self.mode.clone() else { return vec![] };
+        let own = src.snapshot();
+        let mut changed: Vec<Value> = Vec::new();
+        for (name, m) in &own {
+            let primary_here = self
+                .committed
+                .routing
+                .primary(name, 0)
+                .and_then(|p| p.node.clone())
+                .map(|p| p == self.me.id)
+                .unwrap_or(false);
+            if !primary_here {
+                continue;
+            }
+            let mut one = BTreeMap::new();
+            one.insert(name.clone(), m.clone());
+            let fp = super::metadata::fingerprint(&one);
+            if self.reported_fp.get(name) != Some(&fp) {
+                self.reported_fp.insert(name.clone(), fp);
+                changed.push(serde_json::to_value(m).unwrap_or(Value::Null));
+            }
+        }
+        if changed.is_empty() {
+            return vec![];
+        }
+        vec![self.request(&leader, METADATA_REPORT, json!({"indices": changed}))]
+    }
+
+    /// Published metadata reaches the store: the copies here of indices
+    /// whose primary is elsewhere take their settings, mappings and
+    /// aliases; the customs are taken whole; a local index the cluster
+    /// buried or placed nowhere here is let go.
+    fn apply_metadata(&mut self) {
+        let Some(src) = self.metadata.clone() else { return };
+        let me = self.me.id.clone();
+        let routing = &self.committed.routing;
+        for (name, m) in &self.committed.indices {
+            let primary_here = routing
+                .primary(name, 0)
+                .and_then(|p| p.node.clone())
+                .map(|p| p == me)
+                .unwrap_or(false);
+            let copy_here = routing.on_node(&me).any(|c| c.index == *name);
+            if copy_here && !primary_here {
+                src.apply_index_metadata(m);
+            }
+        }
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.committed.customs.to_string().hash(&mut h);
+            let fp = h.finish();
+            if fp != self.customs_applied && self.mode != Mode::Leader {
+                src.apply_customs(&self.committed.customs);
+                self.customs_applied = fp;
+            }
+        }
+        // what this node holds that the cluster does not place here
+        for (name, m) in src.snapshot() {
+            let buried = self.committed.graveyard.iter().any(|t| {
+                t.pointer("/index/index_uuid").and_then(|u| u.as_str()) == Some(m.uuid.as_str())
+            });
+            let published = self.committed.indices.contains_key(&name);
+            let copy_here = routing.on_node(&me).any(|c| c.index == name);
+            if buried || (published && !copy_here && self.committed.version > 0) {
+                src.drop_local(&name);
+            }
+        }
     }
 
     /// The copies the committed state puts on this node: started here and
     /// reported to the manager; the ones no longer here let go.
     fn apply_shards(&mut self) -> Vec<Output> {
+        self.apply_metadata();
         let mut out = Vec::new();
         let me = self.me.id.clone();
         let mine: Vec<super::state::ShardRouting> =
@@ -1030,6 +1189,9 @@ impl NodeLogic for Coordinator {
                 }
                 out.extend(self.bootstrap(durable));
                 out.extend(self.become_candidate());
+                if self.metadata.is_some() {
+                    out.push(Output::Timer { id: T_METADATA, after: self.metadata_poll });
+                }
                 out
             }
             Input::Timer(T_DISCOVER) => {
@@ -1117,25 +1279,34 @@ impl NodeLogic for Coordinator {
                 out
             }
             Input::Timer(T_METADATA) => {
-                if self.mode != Mode::Leader {
-                    return vec![];
-                }
                 let mut out = Vec::new();
-                if let Some(m) = self.metadata.as_ref() {
-                    if super::metadata::fingerprint(&m.snapshot()) != self.last_fingerprint {
-                        self.republish_wanted = true;
+                if self.mode == Mode::Leader {
+                    if let Some(m) = self.metadata.as_ref() {
+                        let own = m.snapshot();
+                        let routing = self.committed.routing.clone();
+                        if self.metadata_fingerprint(&own, &routing) != self.last_fingerprint {
+                            self.republish_wanted = true;
+                        }
+                        if m.has_tombstones() {
+                            // the publication takes them into the graveyard
+                            self.republish_wanted = true;
+                        }
+                        let ex = m.voting_exclusions();
+                        if ex != self.exclusions {
+                            self.exclusions = ex;
+                            self.republish_wanted = true;
+                        }
                     }
-                    let ex = m.voting_exclusions();
-                    if ex != self.exclusions {
-                        self.exclusions = ex;
-                        self.republish_wanted = true;
+                    if self.republish_wanted && self.notes && self.publishing.is_none() {
+                        out.push(self.note("metadata changed".into()));
                     }
+                    out.extend(self.next_publication(durable));
+                } else {
+                    out.extend(self.report_metadata());
                 }
-                if self.republish_wanted && self.notes && self.publishing.is_none() {
-                    out.push(self.note("metadata changed".into()));
+                if self.metadata.is_some() {
+                    out.push(Output::Timer { id: T_METADATA, after: self.metadata_poll });
                 }
-                out.extend(self.next_publication(durable));
-                out.push(Output::Timer { id: T_METADATA, after: self.metadata_poll });
                 out
             }
             Input::Timer(T_ALLOCATE) => {
@@ -1570,6 +1741,27 @@ impl Coordinator {
                 out.extend(self.next_publication(durable));
                 out
             }
+            (METADATA_REPORT, Kind::Request) => {
+                if self.mode != Mode::Leader {
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not the manager"}).to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                if let Some(list) = v.get("indices").and_then(|i| i.as_array()) {
+                    for m in list {
+                        if let Ok(meta) =
+                            serde_json::from_value::<super::state::IndexMetadata>(m.clone())
+                        {
+                            self.reports.insert(meta.name.clone(), (from.clone(), meta));
+                        }
+                    }
+                }
+                self.republish_wanted = true;
+                let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
+                out.extend(self.next_publication(durable));
+                out
+            }
             (REROUTE, Kind::Request) => {
                 if self.mode != Mode::Leader {
                     let who = match &self.mode {
@@ -1931,7 +2123,7 @@ mod tests {
     fn index_metadata_is_published_when_it_changes_and_only_then() {
         use crate::cluster::metadata::MapSource;
         use crate::cluster::state::{IndexMetadata, ShardState};
-        let source = std::sync::Arc::new(MapSource(parking_lot::Mutex::new(BTreeMap::new())));
+        let source = std::sync::Arc::new(MapSource::new(BTreeMap::new()));
         let mut sim = Sim::new(5);
         let ids: Vec<NodeId> = ["m", "a"].iter().map(|n| NodeId((*n).into())).collect();
         for n in ["m", "a"] {
@@ -2006,7 +2198,7 @@ mod tests {
     fn a_lost_replica_is_placed_again_after_its_delay() {
         use crate::cluster::metadata::MapSource;
         use crate::cluster::state::{IndexMetadata, ShardState};
-        let source = std::sync::Arc::new(MapSource(parking_lot::Mutex::new(BTreeMap::new())));
+        let source = std::sync::Arc::new(MapSource::new(BTreeMap::new()));
         source.0.lock().insert(
             "d".into(),
             IndexMetadata {
@@ -2066,6 +2258,110 @@ mod tests {
         let replica = s.routing.shards_of("d").find(|c| !c.primary).unwrap().clone();
         assert_eq!(replica.state, ShardState::Started, "{replica:?} {:?}", sim.notes);
         assert_ne!(replica.node, Some(holder));
+    }
+
+    fn index_meta(name: &str, shards: u32, replicas: u32) -> crate::cluster::state::IndexMetadata {
+        crate::cluster::state::IndexMetadata {
+            name: name.into(),
+            uuid: format!("{name}-uuid"),
+            version: 1,
+            mapping_version: 1,
+            settings_version: 1,
+            aliases_version: 1,
+            state: "open".into(),
+            settings: json!({"index": {"number_of_shards": shards.to_string(), "number_of_replicas": replicas.to_string(), "unassigned": {"node_left": {"delayed_timeout": "1s"}}}}),
+            mappings: json!({}),
+            aliases: json!({}),
+            number_of_shards: shards,
+            number_of_replicas: replicas,
+            primary_terms: BTreeMap::new(),
+            in_sync_allocations: BTreeMap::new(),
+            creation_date: 0,
+        }
+    }
+
+    /// Every node has a store of its own (a map); the manager's holds an index.
+    fn cluster_with_stores(
+        seed: u64,
+        names: &[&'static str],
+        holder: &str,
+        index: &str,
+        shards: u32,
+        replicas: u32,
+    ) -> (Sim, Vec<NodeId>) {
+        use crate::cluster::metadata::MapSource;
+        let mut sim = Sim::new(seed);
+        let ids: Vec<NodeId> = names.iter().map(|n| NodeId((*n).into())).collect();
+        for n in names {
+            let seeds: Vec<NodeId> = ids.iter().filter(|i| i.as_str() != *n).cloned().collect();
+            let initial: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            let mut map = BTreeMap::new();
+            if *n == holder {
+                map.insert(index.to_string(), index_meta(index, shards, replicas));
+            }
+            let src = std::sync::Arc::new(MapSource::new(map));
+            let n: &'static str = n;
+            sim.add_node(
+                NodeId(n.into()),
+                Box::new(move |_| {
+                    let mut c = Coordinator::new(node(n), "c", "u", initial.clone(), seeds.clone());
+                    c.metadata = Some(src.clone());
+                    Box::new(c)
+                }),
+            );
+        }
+        (sim, ids)
+    }
+
+    /// The balancer moves primaries too: the copy that lands keeps being the
+    /// primary, and the copy it came from is gone.
+    #[test]
+    fn a_primary_moved_by_the_balancer_stays_the_primary() {
+        use crate::cluster::state::ShardState;
+        let (mut sim, ids) = cluster_with_stores(31, &["a", "b", "c"], "a", "m", 6, 0);
+        sim.run_until(60_000);
+        assert_settled(&sim, &ids);
+        let s = committed_of(&sim, &ids[0]).unwrap();
+        let copies: Vec<_> = s.routing.shards_of("m").collect();
+        assert_eq!(copies.len(), 6, "{copies:?}");
+        assert!(copies.iter().all(|c| c.primary && c.state == ShardState::Started), "{copies:?}");
+        let on_a = copies.iter().filter(|c| c.node == Some(NodeId("a".into()))).count();
+        assert!(on_a <= 4, "the balancer moved nothing off a: {copies:?}");
+        assert!(sim.notes.iter().any(|(_, _, t)| t.contains("relocating=1")), "{:?}", sim.notes);
+    }
+
+    /// The manager that made an index dies: the next manager still
+    /// publishes it, and a replica of it becomes the primary.
+    #[test]
+    fn an_index_outlives_the_manager_that_made_it() {
+        use crate::cluster::state::ShardState;
+        let (mut sim, ids) = cluster_with_stores(32, &["a", "b", "c"], "a", "keep", 1, 1);
+        sim.run_until(20_000);
+        assert_settled(&sim, &ids);
+        let s = committed_of(&sim, &ids[0]).unwrap();
+        let leader = s.cluster_manager.clone().unwrap();
+        // the index was made on a; a may or may not be the manager
+        let holder = NodeId("a".into());
+        let victim = if leader == holder { holder.clone() } else { holder.clone() };
+        assert_eq!(s.routing.primary("keep", 0).unwrap().node, Some(holder.clone()));
+        sim.crash(&victim);
+        sim.run_until(60_000);
+        let up: Vec<NodeId> = ids.iter().filter(|i| **i != victim).cloned().collect();
+        assert_settled(&sim, &ids);
+        let s = committed_of(&sim, &up[0]).unwrap();
+        assert!(
+            s.indices.contains_key("keep"),
+            "the index was lost with its maker: {:?}",
+            s.indices.keys()
+        );
+        let p = s.routing.primary("keep", 0).unwrap();
+        assert_eq!(p.state, ShardState::Started);
+        assert_ne!(p.node, Some(victim.clone()));
+        assert_eq!(s.indices["keep"].primary_terms[&0], 2, "the promoted copy is in a new term");
+        // the copy on the other survivor was placed and started
+        let copies: Vec<_> = s.routing.shards_of("keep").collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|c| c.state == ShardState::Started), "{copies:?}");
     }
 
     #[test]

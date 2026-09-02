@@ -341,6 +341,14 @@ pub(crate) fn cluster_state_value(
         out.insert("nodes".into(), live.node_json());
     }
     if want("metadata") {
+        let graveyard = {
+            let live = crate::cluster::current_state();
+            if live.graveyard.is_empty() {
+                store.tombstones()
+            } else {
+                Value::Array(live.graveyard.clone())
+            }
+        };
         out.insert(
             "metadata".into(),
             json!({
@@ -358,7 +366,7 @@ pub(crate) fn cluster_state_value(
                 },
                 // the indices that were deleted, so that a node coming back
                 // with one of them knows it is gone
-                "index-graveyard": {"tombstones": store.tombstones()},
+                "index-graveyard": {"tombstones": graveyard},
                 "index_template": {"index_template": composable_templates(&store)},
                 "ingest": {"pipeline": ingest_pipelines(&store)},
             }),

@@ -1108,3 +1108,64 @@ wins all twelve dimensions against plain OpenSearch (index 101,880 vs
 67,080 docs/s, 372MiB vs 2.0GiB, every query p50 lower) and against
 os-secure (99,810 vs 60,136 docs/s, p50s 3-5x lower): the forwarding
 layer and the write buffer cost nothing on one node.
+
+### 6.7 Peer recovery: seed from a snapshot, replay the translog, catch up, track who is in sync (done)
+
+An index outlives the node that made it. Its metadata belongs to the node
+holding its primary: that node's store for primaries here (and for an
+index not placed yet), the latest report (`internal:cluster/metadata/
+report`, sent by a follower when what it holds a primary of changes) for
+primaries elsewhere, and what was published last for the rest -- so a
+manager that has just taken over publishes every index it never held. A
+deleted index goes to the `index-graveyard` in the state (500 kept), and
+every node holding a copy lets it go; an index deleted through a node
+that holds no copy is deleted by its tombstone. Index uuids are made
+fresh at creation and kept in `index.uuid` (a reload, or a copy, keeps
+the published one), so an index made again under a deleted name is a
+different index -- the name-derived uuid let a graveyard entry bury its
+successor, which the phase1 gate caught as a closed connection. What the
+manager's store keeps besides indices -- templates, component templates,
+pipelines, stored scripts -- rides in the state as `customs`; followers
+take them whole, and take an index's published settings, mappings,
+aliases and state into the copies they hold. Requests about an index's
+own metadata (`_settings`, `_mapping`, `_alias`, `_open`, `_close`,
+`_refresh`, `_flush`, `_stats`, ...) go to the node holding its primary.
+
+A copy is a copy of the index: every node holding one takes every write
+(the logical shards are how copies are counted and routed), and the
+acknowledgement counts follow the shard written to. Recovery is by files:
+the primary commits and lists the files of the commit
+(`internal:index/recovery/files`), the copy takes them in 4 MiB chunks
+(`internal:index/recovery/file`) into a directory beside its own, then
+adopts them in place of what it held, replaying what its own translog
+took in while the files travelled -- writes made during a recovery reach
+the initializing copy as they happen, and are in its translog when the
+files land. A primary not on disk, or files that fail, fall back to the
+scan of documents by sequence number. One recovery per index at a time on
+a node: two copies of one index placed together share the files (the
+live run found the two racing on one directory). The balancer moves
+primaries too (the `primary_home` pin is gone): a moved primary keeps
+being the primary and the copy it came from goes; the term rises only
+when a replica is promoted. The primary tracks each copy's local
+checkpoint from its acknowledgements and the global checkpoint is what
+every in-sync copy has; `_stats?level=shards` shows each copy's routing
+and `seq_no` (`max_seq_no`, `local_checkpoint`, `global_checkpoint`, as
+OpenSearch shows them).
+
+Tests: a primary moved by the balancer stays the primary; an index
+outlives the manager that made it (the next manager publishes it, a
+replica is promoted in term 2, a new copy is placed and started); the
+global checkpoint is what every in-sync copy has; copies of a shard never
+share a node or a zone once primaries move. Live, three nodes: a 4-shard
+index with 3,000 documents settles with a primary moved by files to
+another node (no scan fallback), every node counts 3,000, `_stats` shows
+`max_seq_no 2999` on primary and copy, a write through the moved
+primary's node is acknowledged 2 of 2, killing that node promotes the
+replica and re-places copies (count 3,001 on both survivors); killing the
+manager keeps the index, its documents, mapping, alias and template on
+the next manager; a delete through a follower empties every node's store
+and a re-creation under the same name is a different index. Gates: unit
+55/55, phase1 398/398; bench after 6.7 wins every dimension in all three
+passes (index 97,427 vs 66,673 docs/s against plain OpenSearch,
+92,943 vs 59,070 against os-secure; 393MiB vs 2.0GiB; every
+query p50 lower).

@@ -207,7 +207,24 @@ pub async fn delete_index(
         } else {
             let found = store.resolve(part);
             if found.is_empty() {
-                missing.get_or_insert_with(|| part.to_string());
+                // an index the cluster has that this node holds no copy of:
+                // deleted by its tombstone, which the manager publishes
+                let published =
+                    crate::cluster::with_state(|s| s.indices.get(part).map(|m| m.uuid.clone()));
+                match published {
+                    Some(uuid) => {
+                        store.tombstone(part, &uuid);
+                        crate::security::audit_index_event(
+                            part,
+                            "indices:admin/delete",
+                            "{}",
+                            false,
+                        );
+                    }
+                    None => {
+                        missing.get_or_insert_with(|| part.to_string());
+                    }
+                }
             }
             for n in found {
                 if !targets.contains(&n) {

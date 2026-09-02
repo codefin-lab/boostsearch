@@ -273,6 +273,14 @@ pub struct ClusterState {
     /// index -> the blocks on it (write, read_only, metadata, read)
     pub index_blocks: BTreeMap<String, Vec<String>>,
     pub cluster_settings: Value,
+    /// indices deleted, by name and uuid, so a node that still holds one
+    /// knows to let it go (`index-graveyard`)
+    #[serde(default)]
+    pub graveyard: Vec<Value>,
+    /// what the manager's store keeps besides indices: templates,
+    /// component templates, pipelines, stored scripts
+    #[serde(default)]
+    pub customs: Value,
 }
 
 impl ClusterState {
@@ -293,6 +301,8 @@ impl ClusterState {
             routing: RoutingTable::default(),
             index_blocks: BTreeMap::new(),
             cluster_settings: json!({"persistent": {}, "transient": {}}),
+            graveyard: Vec::new(),
+            customs: json!({}),
         }
     }
 

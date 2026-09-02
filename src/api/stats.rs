@@ -439,16 +439,45 @@ pub(crate) fn stats_value(
             "total": s,
         });
         if level == "shards" {
-            entry["shards"] = json!({"0": [{
-                "routing": {"state": "STARTED", "primary": true, "node": "boostsearch"},
-                "docs": s.get("docs").cloned().unwrap_or(json!({})),
-                "commit": {
-                    "id": st.read().commit_id(),
-                    "generation": 1,
-                    "user_data": {},
-                    "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0)),
-                },
-            }]});
+            // each copy as the manager placed it, with the checkpoints the
+            // primary tracks for it
+            let live = crate::cluster::current_state();
+            let me = crate::cluster::identity().id.clone();
+            let seq_no = st.read().seq_no;
+            let max_seq = seq_no as i64 - 1;
+            let (local, global) = if seq_no == 0 {
+                (-1i64, -1i64)
+            } else {
+                let (l, g) = crate::cluster::replication::checkpoints(n, seq_no - 1);
+                (l as i64, g as i64)
+            };
+            let commit = json!({"id": st.read().commit_id(), "generation": 1, "user_data": {},
+                "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0))});
+            let seq = json!({"max_seq_no": max_seq, "local_checkpoint": local, "global_checkpoint": global});
+            let mut shards = serde_json::Map::new();
+            let mut copies: Vec<_> = live.routing.shards_of(n).collect();
+            if copies.is_empty() {
+                shards.insert("0".into(), json!([{
+                    "routing": {"state": "STARTED", "primary": true, "node": me.as_str(), "relocating_node": null},
+                    "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                    "commit": commit, "seq_no": seq,
+                }]));
+            } else {
+                copies.sort_by_key(|c| (c.shard, !c.primary));
+                for c in copies {
+                    let list = shards.entry(c.shard.to_string()).or_insert_with(|| json!([]));
+                    if let Some(a) = list.as_array_mut() {
+                        a.push(json!({
+                            "routing": {"state": c.state.as_str(), "primary": c.primary,
+                                "node": c.node.as_ref().map(|x| x.as_str().to_string()),
+                                "relocating_node": c.relocating_node.as_ref().map(|x| x.as_str().to_string())},
+                            "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                            "commit": commit.clone(), "seq_no": seq.clone(),
+                        }));
+                    }
+                }
+            }
+            entry["shards"] = Value::Object(shards);
         }
         indices.insert(n.clone(), entry);
     }

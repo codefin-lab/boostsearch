@@ -120,6 +120,29 @@ pub fn classify(method: &Method, path: &str) -> Target {
         "_search" | "_count" | "_msearch" | "_mget" | "_explain" | "_termvectors"
         | "_mtermvectors" | "_field_caps" | "_validate" | "_search_shards" | "_rank_eval"
         | "_analyze" | "_pit" => Target::Read(index),
+        // the index's own metadata and maintenance: the node holding its primary
+        "_settings"
+        | "_mapping"
+        | "_mappings"
+        | "_alias"
+        | "_aliases"
+        | "_open"
+        | "_close"
+        | "_block"
+        | "_refresh"
+        | "_flush"
+        | "_forcemerge"
+        | "_cache"
+        | "_stats"
+        | "_segments"
+        | "_recovery"
+        | "_shard_stores"
+        | "_upgrade"
+        | "_split"
+        | "_shrink"
+        | "_clone"
+        | "_rollover"
+        | "_reload_search_analyzers" => Target::Write(Some(index)),
         _ => Target::Manager,
     }
 }
@@ -517,7 +540,8 @@ mod tests {
         assert_eq!(classify(&put, "/_cluster/settings"), Target::Manager);
         assert_eq!(classify(&put, "/logs"), Target::Manager);
         assert_eq!(classify(&del, "/logs"), Target::Manager);
-        assert_eq!(classify(&put, "/logs/_mapping"), Target::Manager);
+        assert_eq!(classify(&put, "/logs/_mapping"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&get, "/logs/_settings"), Target::Write(Some("logs".into())));
         assert_eq!(classify(&put, "/logs/_doc/1"), Target::Write(Some("logs".into())));
         assert_eq!(classify(&post, "/logs/_update/1"), Target::Write(Some("logs".into())));
         assert_eq!(classify(&del, "/logs/_doc/1"), Target::Write(Some("logs".into())));

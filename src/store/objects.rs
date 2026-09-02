@@ -230,3 +230,36 @@ impl Store {
         self.scripts.write().remove(id).is_some()
     }
 }
+
+impl Store {
+    /// What the cluster manager publishes besides indices, so another node
+    /// can take over with them: templates, component templates, pipelines
+    /// and stored scripts.
+    pub fn customs(&self) -> Value {
+        serde_json::json!({
+            "templates": self.get_templates(),
+            "components": self.get_components(),
+            "pipelines": {"ingest": self.pipelines("ingest"), "search": self.pipelines("search")},
+            "scripts": self.scripts.read().clone(),
+        })
+    }
+
+    /// Take the manager's customs as this node's own.
+    pub fn replace_customs(&self, v: &Value) {
+        let map = |v: Option<&Value>| -> HashMap<String, Value> {
+            v.and_then(|o| o.as_object())
+                .map(|o| o.iter().map(|(k, x)| (k.clone(), x.clone())).collect())
+                .unwrap_or_default()
+        };
+        *self.templates.write() = map(v.get("templates"));
+        *self.components.write() = map(v.get("components"));
+        {
+            let mut p = self.pipelines.write();
+            p.insert("ingest".into(), map(v.pointer("/pipelines/ingest")));
+            p.insert("search".into(), map(v.pointer("/pipelines/search")));
+            let any = p.get("ingest").map(|m| !m.is_empty()).unwrap_or(false);
+            self.any_ingest_pipeline.store(any, std::sync::atomic::Ordering::Relaxed);
+        }
+        *self.scripts.write() = map(v.get("scripts"));
+    }
+}

@@ -26,6 +26,25 @@ pub trait MetadataSource: Send + Sync {
     fn cluster_settings(&self) -> Value {
         json!({"persistent": {}, "transient": {}})
     }
+    /// Indices deleted through this store since last asked, as graveyard
+    /// entries; asking takes them.
+    fn tombstones(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    /// Whether there are tombstones to take, without taking them.
+    fn has_tombstones(&self) -> bool {
+        false
+    }
+    /// Templates, component templates, pipelines and scripts.
+    fn customs(&self) -> Value {
+        json!({})
+    }
+    /// Take the published metadata of an index this node holds a copy of.
+    fn apply_index_metadata(&self, _meta: &IndexMetadata) {}
+    /// Take the published customs.
+    fn apply_customs(&self, _customs: &Value) {}
+    /// Let go of a local index the cluster no longer places here.
+    fn drop_local(&self, _index: &str) {}
 }
 
 /// What a data node does with the copies the manager puts on it: the store
@@ -86,13 +105,13 @@ pub fn with_terms(
 /// manager puts on this node.
 pub struct StoreSource {
     pub store: crate::store::Store,
-    /// indices this node created for copies placed on it; the ones it may remove
-    created: parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    /// how many graveyard entries have been handed to the manager
+    tombstones_seen: parking_lot::Mutex<usize>,
 }
 
 impl StoreSource {
     pub fn new(store: crate::store::Store) -> StoreSource {
-        StoreSource { store, created: parking_lot::Mutex::new(std::collections::BTreeSet::new()) }
+        StoreSource { store, tombstones_seen: parking_lot::Mutex::new(0) }
     }
 
     /// Fill a copy from the primary's documents, off this thread; the
@@ -114,40 +133,91 @@ impl StoreSource {
 
 impl ShardHost for StoreSource {
     fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
-        if self.store.get(&meta.name).is_some() && !self.created.lock().contains(&meta.name) {
-            // this node's own index: the primary, already here
+        if copy.primary && copy.relocating_node.is_none() {
+            // a primary placed where its data is (a new index, or a promoted copy)
             return Ok(true);
         }
         if self.store.get(&meta.name).is_some() {
-            // a copy already built here (another shard of the same index):
-            // caught up from the primary like a new one
+            // a copy already built here: caught up from the primary like a new one
             return self.seed(meta, copy);
         }
         // the index as the manager describes it, minus what the store assigns itself
         let mut settings = meta.settings.clone();
+        // the copy keeps the index's uuid: it is the same index, held here too
         if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
-            for k in ["uuid", "creation_date", "provided_name", "version"] {
+            for k in ["creation_date", "provided_name", "version"] {
                 idx.remove(k);
             }
+            idx.insert("uuid".into(), json!(meta.uuid));
         }
         let body = json!({"settings": settings, "mappings": meta.mappings});
         self.store.create(&meta.name, &body).map_err(|e| {
             format!("could not create a local copy of [{}][{}]: {e}", meta.name, copy.shard)
         })?;
-        self.created.lock().insert(meta.name.clone());
         self.seed(meta, copy)
     }
 
     fn remove_shard(&self, index: &str, _shard: u32) {
-        if self.created.lock().remove(index) {
-            self.store.delete(index);
-        }
+        self.store.drop_local(index);
     }
 }
 
 impl MetadataSource for StoreSource {
     fn cluster_settings(&self) -> Value {
         self.store.cluster_settings()
+    }
+
+    fn tombstones(&self) -> Vec<Value> {
+        let all = self.store.tombstones();
+        let all = all.as_array().cloned().unwrap_or_default();
+        let mut seen = self.tombstones_seen.lock();
+        let fresh: Vec<Value> = all.iter().skip(*seen).cloned().collect();
+        *seen = all.len();
+        fresh
+    }
+
+    fn has_tombstones(&self) -> bool {
+        let n = self.store.tombstones().as_array().map(|a| a.len()).unwrap_or(0);
+        n > *self.tombstones_seen.lock()
+    }
+
+    fn customs(&self) -> Value {
+        self.store.customs()
+    }
+
+    fn apply_index_metadata(&self, meta: &IndexMetadata) {
+        let Some(st) = self.store.get(&meta.name) else { return };
+        let mut g = st.write();
+        if g.settings != meta.settings {
+            g.settings = meta.settings.clone();
+            g.refresh_knobs();
+        }
+        if g.mapping.raw != meta.mappings {
+            g.mapping.merge(&meta.mappings);
+        }
+        let aliases: std::collections::HashMap<String, Value> = meta
+            .aliases
+            .as_object()
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        if g.aliases != aliases {
+            g.aliases = aliases;
+        }
+        let closed = meta.state == "close";
+        if g.closed != closed {
+            g.closed = closed;
+        }
+        g.save_meta();
+    }
+
+    fn apply_customs(&self, customs: &Value) {
+        if customs.is_object() && *customs != self.store.customs() {
+            self.store.replace_customs(customs);
+        }
+    }
+
+    fn drop_local(&self, index: &str) {
+        self.store.drop_local(index);
     }
 
     fn voting_exclusions(&self) -> Vec<(String, String)> {
@@ -164,12 +234,7 @@ impl MetadataSource for StoreSource {
 
     fn snapshot(&self) -> BTreeMap<String, IndexMetadata> {
         let mut out = BTreeMap::new();
-        // copies this node holds for the manager are not this node's own indices
-        let created = self.created.lock().clone();
         for name in self.store.resolve("*") {
-            if created.contains(&name) {
-                continue;
-            }
             let Some(st) = self.store.get(&name) else { continue };
             let g = st.read();
             let settings = g.effective_settings();
@@ -204,12 +269,40 @@ impl MetadataSource for StoreSource {
     }
 }
 
-/// A fixed map, for tests and the simulation.
-pub struct MapSource(pub parking_lot::Mutex<BTreeMap<String, IndexMetadata>>);
+/// A fixed map, for tests and the simulation; an index taken out of it is
+/// reported as deleted, as the store's graveyard would.
+pub struct MapSource(
+    pub parking_lot::Mutex<BTreeMap<String, IndexMetadata>>,
+    pub parking_lot::Mutex<BTreeMap<String, String>>,
+);
+
+impl MapSource {
+    pub fn new(indices: BTreeMap<String, IndexMetadata>) -> MapSource {
+        MapSource(parking_lot::Mutex::new(indices), parking_lot::Mutex::new(BTreeMap::new()))
+    }
+}
 
 impl MetadataSource for MapSource {
     fn snapshot(&self) -> BTreeMap<String, IndexMetadata> {
         self.0.lock().clone()
+    }
+
+    fn has_tombstones(&self) -> bool {
+        let now = self.0.lock();
+        self.1.lock().keys().any(|n| !now.contains_key(n))
+    }
+
+    fn tombstones(&self) -> Vec<Value> {
+        let now: BTreeMap<String, String> =
+            self.0.lock().iter().map(|(n, m)| (n.clone(), m.uuid.clone())).collect();
+        let mut seen = self.1.lock();
+        let gone: Vec<Value> = seen
+            .iter()
+            .filter(|(n, _)| !now.contains_key(*n))
+            .map(|(n, u)| json!({"index": {"index_name": n, "index_uuid": u}, "delete_date_in_millis": 0}))
+            .collect();
+        *seen = now;
+        gone
     }
 }
 

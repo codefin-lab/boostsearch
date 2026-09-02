@@ -1024,18 +1024,6 @@ pub fn can_rebalance(ctx: &Context, table: &RoutingTable, copy: &ShardRouting) -
         ));
     }
     out.push(verdict("snapshot_in_progress", Decision::Yes, "no snapshots are currently running"));
-    // primary_home: until peer recovery (6.7) can move a primary's data, the
-    // primary stays with the store that holds it
-    if copy.primary
-        && ctx.primary_home.get(&copy.index).is_some()
-        && ctx.primary_home.get(&copy.index) == copy.node.as_ref()
-    {
-        out.push(verdict(
-            "primary_home",
-            Decision::No,
-            "the primary copy stays on the node that holds its data until peer recovery can move it",
-        ));
-    }
     out
 }
 
@@ -2215,10 +2203,14 @@ mod tests {
                 copies.iter().filter(|c| c.shard == s).map(|c| c.node.clone()).collect();
             assert_eq!(nodes.len(), 2);
         }
-        // the four replicas split between b and c
-        assert_eq!(w.count("b", "logs"), 2);
-        assert_eq!(w.count("c", "logs"), 2);
-        assert_eq!(w.count("a", "logs"), 4);
+        // eight copies over three nodes: no node holds more than three
+        assert!(
+            w.count("a", "logs") <= 3 && w.count("b", "logs") <= 3 && w.count("c", "logs") <= 3,
+            "a={} b={} c={}",
+            w.count("a", "logs"),
+            w.count("b", "logs"),
+            w.count("c", "logs")
+        );
     }
 
     #[test]
@@ -2294,9 +2286,18 @@ mod tests {
         );
         w.cluster.awareness_attributes = vec!["zone".into()];
         w.settle();
-        // both replicas land in z2, on c, never on b next to the primaries' zone
+        // no shard has both copies in one zone: every copy in z1 has its
+        // twin on c, in z2
+        for shard in 0..2 {
+            let zones: BTreeSet<&str> = w
+                .table
+                .shards_of("z")
+                .filter(|c| c.shard == shard && c.state != ShardState::Unassigned)
+                .map(|c| w.nodes[c.node.as_ref().unwrap()].attributes["zone"].as_str())
+                .collect();
+            assert_eq!(zones.len(), 2, "shard {shard} copies share a zone");
+        }
         assert_eq!(w.count("c", "z"), 2);
-        assert_eq!(w.count("b", "z"), 0);
         let replica = w.table.shards_of("z").find(|c| !c.primary).unwrap().clone();
         let vs = can_allocate(&w.ctx(), &w.table, &replica, &w.nodes[&NodeId("b".into())]);
         let aw = vs.iter().find(|v| v.decider == "awareness").unwrap();
@@ -2403,7 +2404,7 @@ mod tests {
         let ch = w.reroute();
         assert_eq!(ch.relocating.len(), 1, "{ch:?}");
         let (_, _, _, from, to) = &ch.relocating[0];
-        assert_eq!(from.as_str(), "b");
+        assert!(from.as_str() == "a" || from.as_str() == "b", "{from:?}");
         assert_eq!(to.as_str(), "c");
         assert_eq!(w.table.all().filter(|c| c.state == ShardState::Relocating).count(), 1);
         assert_eq!(
@@ -2423,14 +2424,27 @@ mod tests {
         w.start_all();
         assert_eq!(w.table.all().filter(|c| c.index == "m").count(), 12);
         w.settle();
-        // b and c end up sharing the replicas
-        assert!(
-            w.count("b", "m") >= 2 && w.count("c", "m") >= 2,
-            "b={} c={}",
+        // the copies end up shared out: twelve over three nodes, none with
+        // more than five, no shard with both copies on one node
+        let total = w.count("a", "m") + w.count("b", "m") + w.count("c", "m");
+        assert_eq!(
+            total,
+            12,
+            "a={} b={} c={}",
+            w.count("a", "m"),
             w.count("b", "m"),
             w.count("c", "m")
         );
-        assert_eq!(w.count("b", "m") + w.count("c", "m"), 6);
+        assert!(w.count("a", "m") <= 5 && w.count("b", "m") <= 5 && w.count("c", "m") <= 5);
+        for shard in 0..6 {
+            let nodes: BTreeSet<_> = w
+                .table
+                .shards_of("m")
+                .filter(|c| c.shard == shard)
+                .map(|c| c.node.clone())
+                .collect();
+            assert_eq!(nodes.len(), 2, "shard {shard}");
+        }
         assert!(w.table.all().all(|c| c.state == ShardState::Started));
     }
 

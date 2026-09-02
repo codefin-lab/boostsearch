@@ -50,6 +50,69 @@ pub const MODE: Mode = Mode { ack: AckPolicy::AllInSync, read: ReadRouting::AnyA
 
 pub const REPLICA_WRITE: &str = "indices:data/write/bulk[r]";
 pub const RECOVERY_SCAN: &str = "internal:index/recovery/scan";
+/// the files of the primary's last commit, and one chunk of one of them
+pub const RECOVERY_FILES: &str = "internal:index/recovery/files";
+pub const RECOVERY_FILE: &str = "internal:index/recovery/file";
+const CHUNK: u64 = 4 * 1024 * 1024;
+
+/// What the primary knows of its copies: the last sequence number each
+/// node acknowledged (its local checkpoint), from which the global
+/// checkpoint -- the sequence number every in-sync copy has -- follows.
+#[derive(Default)]
+pub struct Tracker {
+    /// index -> node -> local checkpoint
+    checkpoints: BTreeMap<String, BTreeMap<NodeId, u64>>,
+}
+
+static TRACKER: std::sync::OnceLock<parking_lot::Mutex<Tracker>> = std::sync::OnceLock::new();
+
+fn tracker() -> &'static parking_lot::Mutex<Tracker> {
+    TRACKER.get_or_init(|| parking_lot::Mutex::new(Tracker::default()))
+}
+
+impl Tracker {
+    pub fn acked(&mut self, index: &str, node: &NodeId, seq: u64) {
+        let e = self.checkpoints.entry(index.into()).or_default().entry(node.clone()).or_insert(0);
+        *e = (*e).max(seq);
+    }
+
+    /// The sequence number every named copy has reached, or the primary's
+    /// own when it has no copies to wait for.
+    pub fn global_checkpoint(&self, index: &str, primary_max: u64, in_sync: &[NodeId]) -> u64 {
+        let mut g = primary_max;
+        match self.checkpoints.get(index) {
+            Some(m) => {
+                for n in in_sync {
+                    g = g.min(m.get(n).copied().unwrap_or(0));
+                }
+            }
+            None if !in_sync.is_empty() => g = 0,
+            None => {}
+        }
+        g
+    }
+
+    pub fn local_checkpoint(&self, index: &str, node: &NodeId) -> Option<u64> {
+        self.checkpoints.get(index).and_then(|m| m.get(node).copied())
+    }
+}
+
+/// The checkpoints as `_stats` reports them for a primary here.
+pub fn checkpoints(index: &str, primary_max: u64) -> (u64, u64) {
+    let in_sync: Vec<NodeId> = super::with_state(|s| {
+        let me = super::runtime().map(|r| r.local());
+        s.routing
+            .shards_of(index)
+            .filter(|c| {
+                !c.primary && matches!(c.state, ShardState::Started | ShardState::Relocating)
+            })
+            .filter_map(|c| c.node.clone())
+            .filter(|n| Some(n) != me.as_ref())
+            .collect()
+    });
+    let t = tracker().lock();
+    (primary_max, t.global_checkpoint(index, primary_max, &in_sync))
+}
 
 /// One write as the primary made it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,20 +141,30 @@ pub fn record(op: ReplicaOp) {
 /// Where a write to a shard is copied: the replica copies on other nodes,
 /// active or still initializing (an initializing copy takes writes so it
 /// is caught up when it starts), with whether each one is in sync.
-pub fn targets(state: &ClusterState, me: &NodeId, index: &str, shard: u32) -> Vec<(NodeId, bool)> {
-    state
-        .routing
-        .shards_of(index)
-        .filter(|c| c.shard == shard && !c.primary)
-        .filter(|c| {
-            matches!(
-                c.state,
-                ShardState::Started | ShardState::Relocating | ShardState::Initializing
-            )
-        })
-        .filter_map(|c| c.node.clone().map(|n| (n, c.state != ShardState::Initializing)))
-        .filter(|(n, _)| n != me)
-        .collect()
+pub fn targets(state: &ClusterState, me: &NodeId, index: &str, _shard: u32) -> Vec<(NodeId, bool)> {
+    // a copy is a copy of the whole index: every node holding one, for any
+    // shard, takes every write, and is in sync when all it holds is active
+    let mut by_node: BTreeMap<NodeId, bool> = BTreeMap::new();
+    for c in state.routing.shards_of(index) {
+        if !matches!(
+            c.state,
+            ShardState::Started | ShardState::Relocating | ShardState::Initializing
+        ) {
+            continue;
+        }
+        // a primary that is not being moved is the source, not a copy; the
+        // source of a move stays the primary until its target takes over
+        if c.primary && (c.relocating_node.is_none() || c.state == ShardState::Relocating) {
+            continue;
+        }
+        let Some(n) = c.node.clone() else { continue };
+        if n == *me {
+            continue;
+        }
+        let e = by_node.entry(n).or_insert(true);
+        *e &= c.state != ShardState::Initializing;
+    }
+    by_node.into_iter().collect()
 }
 
 /// How many copies of an index took a request's writes.
@@ -145,6 +218,9 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         }
     }
     let manager = state.cluster_manager.clone();
+    // which nodes answered for each index; the counts follow the shards
+    // written, since `_shards` speaks of a shard's copies
+    let mut acked_nodes: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
     for (node, index, in_sync, answer) in answers {
         let ack = acks.entry(index.clone()).or_default();
         let failure: Option<String> = match &answer {
@@ -155,8 +231,11 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         match failure {
             None => {
                 if in_sync {
-                    ack.successful += 1;
+                    acked_nodes.entry(index.clone()).or_default().push(node.clone());
                 }
+                let max_seq =
+                    ops.iter().filter(|o| o.index == index).map(|o| o.seq).max().unwrap_or(0);
+                tracker().lock().acked(&index, &node, max_seq);
             }
             Some(reason) => {
                 if in_sync {
@@ -192,6 +271,30 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                 }
             }
         }
+    }
+    // successful copies of a shard: the primary and the in-sync replica
+    // copies of that shard whose node answered; over a request that wrote
+    // to several shards, the fewest
+    for (index, ack) in acks.iter_mut() {
+        let acked = acked_nodes.get(index).cloned().unwrap_or_default();
+        let shards: std::collections::BTreeSet<u32> =
+            ops.iter().filter(|o| o.index == *index).map(|o| o.shard).collect();
+        let mut fewest: Option<usize> = None;
+        for shard in shards {
+            let holders = state
+                .routing
+                .shards_of(index)
+                .filter(|c| {
+                    c.shard == shard
+                        && !c.primary
+                        && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                })
+                .filter(|c| c.node.as_ref().map(|n| acked.contains(n)).unwrap_or(false))
+                .count();
+            fewest = Some(fewest.map_or(holders, |f| f.min(holders)));
+        }
+        ack.successful = 1 + fewest.unwrap_or(0);
+        ack.successful = ack.successful.min(ack.total.max(1));
     }
     acks
 }
@@ -277,6 +380,12 @@ pub fn install(store: Store) {
                     .get("ops")
                     .and_then(|o| serde_json::from_value(o.clone()).ok())
                     .unwrap_or_default();
+                // a copy being swapped in by recovery is away for a moment
+                let mut waited = 0;
+                while store.get(&index).is_none() && waited < 40 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    waited += 1;
+                }
                 let result = tokio::task::spawn_blocking(move || {
                     let Some(st) = store.get(&index) else {
                         return Err(format!("no copy of [{index}] on this node"));
@@ -306,6 +415,7 @@ pub fn install(store: Store) {
             })
         }),
     );
+    install_files(&rt, &store, &me);
     let s = store.clone();
     let from = me.clone();
     rt.register(
@@ -341,8 +451,257 @@ pub fn install(store: Store) {
     );
 }
 
-/// Fill a copy the manager placed here from the primary's documents.
+/// The primary's side of a file-based recovery: commit, then list and serve files.
+fn install_files(rt: &super::runtime::Runtime, store: &Store, me: &NodeId) {
+    let s = store.clone();
+    let from = me.clone();
+    rt.register(
+        RECOVERY_FILES,
+        Arc::new(move |e: Envelope| -> DataFuture {
+            let store = s.clone();
+            let from = from.clone();
+            Box::pin(async move {
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                let index = v.get("index").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+                    let Some(st) = store.get(&index) else {
+                        return Err(format!("no index [{index}] on this node"));
+                    };
+                    let (dir, max_seq) = {
+                        let mut g = st.write();
+                        // everything acknowledged goes into one commit the copy can take whole
+                        g.refresh().map_err(|e| e.to_string())?;
+                        (g.path.clone(), g.seq_no)
+                    };
+                    let Some(dir) = dir else { return Err("the index is not on disk".into()) };
+                    let mut files = Vec::new();
+                    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                        let entry = entry.map_err(|e| e.to_string())?;
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+                        if name == crate::store::TRANSLOG || name.ends_with(".lock") || !is_file {
+                            continue;
+                        }
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        files.push(json!({"name": name, "len": len}));
+                    }
+                    Ok(json!({"files": files, "max_seq": max_seq}))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("listing panicked: {e}")));
+                match result {
+                    Ok(v) => e.response(from, serde_json::to_vec(&v).unwrap_or_default()),
+                    Err(msg) => e.error(from, &msg),
+                }
+            })
+        }),
+    );
+    let s = store.clone();
+    let from = me.clone();
+    rt.register(
+        RECOVERY_FILE,
+        Arc::new(move |e: Envelope| -> DataFuture {
+            let store = s.clone();
+            let from = from.clone();
+            Box::pin(async move {
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                let index = v.get("index").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let name = v.get("name").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let offset = v.get("offset").and_then(|i| i.as_u64()).unwrap_or(0);
+                let len = v.get("len").and_then(|i| i.as_u64()).unwrap_or(CHUNK).min(CHUNK);
+                let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                    use std::io::{Read, Seek};
+                    if name.contains('/') || name.contains("..") {
+                        return Err("bad file name".into());
+                    }
+                    let Some(st) = store.get(&index) else {
+                        return Err(format!("no index [{index}] on this node"));
+                    };
+                    let dir = st.read().path.clone().ok_or("the index is not on disk")?;
+                    let mut f = std::fs::File::open(dir.join(&name)).map_err(|e| e.to_string())?;
+                    f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+                    let mut buf = vec![0u8; len as usize];
+                    let mut got = 0;
+                    while got < buf.len() {
+                        let n = f.read(&mut buf[got..]).map_err(|e| e.to_string())?;
+                        if n == 0 {
+                            break;
+                        }
+                        got += n;
+                    }
+                    buf.truncate(got);
+                    Ok(buf)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("read panicked: {e}")));
+                match result {
+                    Ok(bytes) => e.response(from, bytes),
+                    Err(msg) => e.error(from, &msg),
+                }
+            })
+        }),
+    );
+}
+
+/// Fill a copy from the primary's committed files, then replay what the
+/// copy here was holding meanwhile. `Ok(false)` when the primary is not on
+/// disk, so the document scan must do it.
+async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result<bool, String> {
+    let Some(rt) = super::runtime() else { return Ok(false) };
+    let body = serde_json::to_vec(&json!({"index": index})).unwrap_or_default();
+    let Some(answer) =
+        rt.call(primary, RECOVERY_FILES, body, std::time::Duration::from_secs(120)).await
+    else {
+        return Err(format!("recovery of [{index}]: no answer to the file listing"));
+    };
+    if answer.kind != Kind::Response {
+        let why = String::from_utf8_lossy(&answer.body).into_owned();
+        if why.contains("not on disk") {
+            return Ok(false);
+        }
+        return Err(format!("recovery of [{index}]: {why}"));
+    }
+    let v: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
+    let files: Vec<(String, u64)> = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    Some((f.get("name")?.as_str()?.to_string(), f.get("len")?.as_u64()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(dest) = store.index_dir(index) else { return Ok(false) };
+    let tmp = dest.with_extension("recovering");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    for (name, len) in &files {
+        let mut offset = 0u64;
+        let mut out = std::fs::File::create(tmp.join(name)).map_err(|e| e.to_string())?;
+        use std::io::Write;
+        while offset < *len {
+            let ask = serde_json::to_vec(
+                &json!({"index": index, "name": name, "offset": offset, "len": CHUNK}),
+            )
+            .unwrap_or_default();
+            let Some(chunk) =
+                rt.call(primary, RECOVERY_FILE, ask, std::time::Duration::from_secs(120)).await
+            else {
+                return Err(format!("recovery of [{index}]: no answer for [{name}] at {offset}"));
+            };
+            if chunk.kind != Kind::Response {
+                return Err(format!(
+                    "recovery of [{index}]: [{name}]: {}",
+                    String::from_utf8_lossy(&chunk.body)
+                ));
+            }
+            if chunk.body.is_empty() {
+                break;
+            }
+            out.write_all(&chunk.body).map_err(|e| e.to_string())?;
+            offset += chunk.body.len() as u64;
+        }
+        if offset == 0 && *len > 0 {
+            return Err(format!("recovery of [{index}]: [{name}] came back empty"));
+        }
+    }
+    // the copy that was here goes, the files take its place, and what its
+    // translog held (writes copied in while the files travelled) is replayed
+    let store2 = store.clone();
+    let name = index.to_string();
+    let tmp2 = tmp.clone();
+    let replayed = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let held = store2.adopt(&name, &tmp2).map_err(|e| e.to_string())?;
+        let Some(st) = store2.get(&name) else {
+            return Err(format!("[{name}] did not open after recovery"));
+        };
+        let mut g = st.write();
+        let mut n = 0;
+        for rec in held {
+            let Some(id) = rec.get("id").and_then(|v| v.as_str()) else { continue };
+            let op = ReplicaOp {
+                index: name.clone(),
+                id: id.to_string(),
+                routing: rec.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                version: rec.get("version").and_then(|v| v.as_u64()).unwrap_or(1),
+                seq: rec.get("seq").and_then(|v| v.as_u64()).unwrap_or(0),
+                term: 1,
+                shard: 0,
+                source: match rec.get("source") {
+                    Some(Value::Null) | None => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(v) => Some(v.to_string()),
+                },
+            };
+            if crate::api::doc::apply_replicated(&mut g, &op) {
+                n += 1;
+            }
+        }
+        g.sync_translog();
+        let _ = g.refresh();
+        Ok(n)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("adopting panicked: {e}")));
+    replayed?;
+    Ok(true)
+}
+
+/// One recovery per index at a time on a node: two copies of one index
+/// placed here together share the files, so the second waits for the
+/// first and finds them.
+static RECOVERING: std::sync::OnceLock<
+    parking_lot::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<u64>>>>,
+> = std::sync::OnceLock::new();
+
+fn recovery_lock(index: &str) -> Arc<tokio::sync::Mutex<u64>> {
+    let m = RECOVERING.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()));
+    m.lock()
+        .entry(index.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(0)))
+        .clone()
+}
+
+/// Fill a copy the manager placed here: from the primary's files when it
+/// has them on disk, else from a scan of its documents.
 pub async fn seed_replica(store: &Store, index: &str, shard: u32) -> Result<(), String> {
+    let lock = recovery_lock(index);
+    let mut done = lock.lock().await;
+    let now = super::clock().wall();
+    // a copy filled in the last few seconds is this one too
+    if *done > 0 && now.saturating_sub(*done) < 30_000 && store.get(index).is_some() {
+        return Ok(());
+    }
+    let r = seed_replica_inner(store, index, shard).await;
+    if r.is_ok() {
+        *done = now.max(1);
+    }
+    r
+}
+
+async fn seed_replica_inner(store: &Store, index: &str, shard: u32) -> Result<(), String> {
+    let primary =
+        super::with_state(|s| s.routing.primary(index, shard).and_then(|p| p.node.clone()));
+    let me = super::runtime().map(|r| r.local());
+    if let (Some(p), Some(me)) = (&primary, &me) {
+        if p != me {
+            match seed_from_files(store, index, p).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(why) => {
+                    // the files did not come: the documents will
+                    eprintln!("boostsearch: {why}; scanning instead");
+                }
+            }
+        }
+    }
+    seed_by_scan(store, index, shard).await
+}
+
+/// Fill a copy from a scan of the primary's documents, in sequence order.
+pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), String> {
     let Some(rt) = super::runtime() else { return Ok(()) };
     let me = rt.local();
     let primary =
@@ -357,7 +716,7 @@ pub async fn seed_replica(store: &Store, index: &str, shard: u32) -> Result<(), 
     let mut tries = 0;
     loop {
         let body = serde_json::to_vec(
-            &json!({"index": index, "shard": shard, "from_seq": from_seq, "size": 2000}),
+            &json!({"index": index, "shard": u32::MAX, "from_seq": from_seq, "size": 2000}),
         )
         .unwrap_or_default();
         let answer =
@@ -463,6 +822,21 @@ mod tests {
         );
         let t = targets(&s, &NodeId("p".into()), "i", 0);
         assert_eq!(t, vec![(NodeId("r1".into()), true), (NodeId("r2".into()), false)]);
-        assert!(targets(&s, &NodeId("p".into()), "i", 1).is_empty());
+        // a copy is a copy of the index: any shard's write goes to every copy
+        assert_eq!(targets(&s, &NodeId("p".into()), "i", 1), t);
+    }
+
+    #[test]
+    fn the_global_checkpoint_is_what_every_in_sync_copy_has() {
+        let mut t = Tracker::default();
+        let (a, b) = (NodeId("a".into()), NodeId("b".into()));
+        assert_eq!(t.global_checkpoint("i", 10, &[]), 10);
+        t.acked("i", &a, 7);
+        t.acked("i", &b, 9);
+        t.acked("i", &a, 5);
+        assert_eq!(t.local_checkpoint("i", &a), Some(7));
+        assert_eq!(t.global_checkpoint("i", 10, &[a.clone(), b.clone()]), 7);
+        assert_eq!(t.global_checkpoint("i", 10, &[b.clone()]), 9);
+        assert_eq!(t.global_checkpoint("j", 3, &[a]), 0);
     }
 }

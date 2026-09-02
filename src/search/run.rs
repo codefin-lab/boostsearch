@@ -973,15 +973,18 @@ pub fn run(
     // rather than the shard's query, so where every target is filtered the
     // same way the filter is folded in here once; each shard folds its own
     // in as well, and a filter laid twice changes nothing
-    let query_json: Option<Value> = match views.get(&targets[0]).and_then(|v| v.dls.clone()) {
-        Some(dls)
-            if targets.iter().all(|t| views.get(t).and_then(|v| v.dls.as_ref()) == Some(&dls)) =>
-        {
-            let base = query_json.unwrap_or_else(|| json!({"match_all": {}}));
-            Some(json!({"bool": {"must": [base], "filter": [dls]}}))
-        }
-        _ => query_json,
-    };
+    let query_json: Option<Value> =
+        match targets.first().and_then(|t| views.get(t)).and_then(|v| v.dls.clone()) {
+            Some(dls)
+                if targets
+                    .iter()
+                    .all(|t| views.get(t).and_then(|v| v.dls.as_ref()) == Some(&dls)) =>
+            {
+                let base = query_json.unwrap_or_else(|| json!({"match_all": {}}));
+                Some(json!({"bool": {"must": [base], "filter": [dls]}}))
+            }
+            _ => query_json,
+        };
     let run_shard =
         |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
             search_one_shard(

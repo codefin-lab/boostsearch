@@ -73,8 +73,9 @@ pub fn scan_replicated(
     // seq -> op; the pending table wins over the index for the same id
     let mut found: BTreeMap<u64, ReplicaOp> = BTreeMap::new();
     let mut pending_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let all = shard == u32::MAX;
     for (id, source) in &st.pending {
-        if st.shard_of_doc(id) as u32 != shard {
+        if !all && st.shard_of_doc(id) as u32 != shard {
             continue;
         }
         let seq = st.pending_seq.get(id).copied().unwrap_or(u64::MAX - 1);
@@ -122,7 +123,7 @@ pub fn scan_replicated(
         };
         let Ok(doc) = store_reader.get::<TantivyDocument>(doc_id) else { continue };
         let Some(id) = doc.get_first(st.fields.id).and_then(|v| v.as_str()) else { continue };
-        if pending_ids.contains(id) || st.shard_of_doc(id) as u32 != shard {
+        if pending_ids.contains(id) || (!all && st.shard_of_doc(id) as u32 != shard) {
             continue;
         }
         let Some(raw) = doc.get_first(st.fields.source).and_then(|v| v.as_str()) else { continue };
