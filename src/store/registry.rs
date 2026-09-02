@@ -52,6 +52,7 @@ impl Store {
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
             graveyard: Arc::new(RwLock::new(Vec::new())),
+            any_ingest_pipeline: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             repositories: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -87,6 +88,7 @@ impl Store {
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
             graveyard: Arc::new(RwLock::new(Vec::new())),
+            any_ingest_pipeline: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             repositories: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -403,6 +405,7 @@ impl Store {
             writer_threads,
             writer_budget,
             last_write: std::time::Instant::now(),
+            knobs: WriteKnobs::default(),
             reader,
             fields,
             mapping,
@@ -446,6 +449,7 @@ impl Store {
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         st.apply_analysis();
+        st.refresh_knobs();
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())
     }

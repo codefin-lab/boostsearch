@@ -80,7 +80,7 @@ pub fn write_doc_versioned(
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
     // an index held still refuses writes until the block is lifted
-    if st.setting("blocks.write").as_deref() == Some("true") {
+    if st.knobs.blocks_write {
         return Err(err(
             StatusCode::FORBIDDEN,
             "cluster_block_exception",
@@ -131,8 +131,7 @@ pub fn write_doc_versioned(
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
         return Err(err_caused_by(&kind, &reason, &cause));
     }
-    let default_lenient =
-        st.setting("mapping.ignore_malformed").map(|v| v == "true").unwrap_or(false);
+    let default_lenient = st.knobs.ignore_malformed;
     let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
         Ok(v) => v,
         Err((field, ty)) => {

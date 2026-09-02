@@ -4,7 +4,7 @@ use super::*;
 
 /// Write one document. `op_type == "create"` refuses to overwrite.
 pub fn append_only(st: &IdxState) -> bool {
-    st.setting("append_only.enabled").map(|v| v == "true").unwrap_or(false)
+    st.knobs.append_only
 }
 
 /// A version the caller supplied, and what it means for the write.
@@ -158,7 +158,7 @@ pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, Stri
     }
     // a nested field is a list of documents of its own, and an index says how
     // many of them one document may carry
-    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
+    let nested_limit = st.knobs.nested_limit;
     let mut nested_count = 0u64;
     for (name, kind) in st.mapping.types.iter() {
         if kind != "nested" {

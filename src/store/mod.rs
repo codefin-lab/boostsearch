@@ -44,6 +44,18 @@ pub struct Fields {
     pub seq: Field,
 }
 
+/// The settings a write consults, cached off the settings tree.
+#[derive(Clone, Debug, Default)]
+pub struct WriteKnobs {
+    pub blocks_write: bool,
+    pub ignore_malformed: bool,
+    pub append_only: bool,
+    pub nested_limit: u64,
+    pub durability: Option<String>,
+    /// how many shards the index has, which every write is placed by
+    pub shards: u64,
+}
+
 /// How much un-refreshed document source may sit in memory before the writer
 /// flushes. Without a cap, a large bulk load holds every document twice.
 pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
@@ -167,6 +179,12 @@ pub struct Mapping {
     nanos: Vec<String>,
     /// the fields a script makes from the source, as (name, definition)
     derived: Vec<(String, Value)>,
+    /// the fields that say whether a malformed value is dropped or refused,
+    /// read once rather than out of the mapping tree per leaf per write
+    lenient: HashMap<String, bool>,
+    /// the top-level key sets already found to be wholly mapped, so a
+    /// document of a shape seen before is not walked for new fields
+    mapped_shapes: std::collections::HashSet<u64>,
 }
 
 impl Mapping {}
@@ -256,6 +274,9 @@ pub struct IdxState {
     /// When this index was last written to. A writer holds indexing threads and
     /// an arena, so an index that has gone quiet should not keep one.
     last_write: std::time::Instant,
+    /// the settings every write asks about, read once when they change
+    /// rather than out of the settings tree for every document
+    pub knobs: WriteKnobs,
     pub reader: IndexReader,
     pub fields: Fields,
     pub mapping: Mapping,
@@ -425,6 +446,9 @@ pub struct Store {
     pub ingest_stats: Arc<RwLock<HashMap<String, (u64, u64, u64)>>>,
     /// the indices deleted since the node came up: name, uuid and when
     pub graveyard: Arc<RwLock<Vec<Value>>>,
+    /// whether any ingest pipeline exists at all: while none does, no write
+    /// needs to ask which pipelines apply to it
+    pub any_ingest_pipeline: Arc<std::sync::atomic::AtomicBool>,
     /// Snapshot repositories by name.
     repositories: Arc<RwLock<HashMap<String, Value>>>,
     /// Snapshots by repository and then by name.
@@ -609,14 +633,7 @@ fn walk_malformed(
             if value_is_valid(leaf, ty, fmt) {
                 return Ok(());
             }
-            let lenient = mapping
-                .field_option(path, "ignore_malformed")
-                .and_then(|v| match v {
-                    Value::Bool(b) => Some(b),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-                .unwrap_or(index_default);
+            let lenient = mapping.lenient_of(path).unwrap_or(index_default);
             if lenient {
                 ignored.push(path.clone());
             } else {

@@ -457,7 +457,8 @@ pub async fn bulk(
                             let mut ups = ups.clone();
                             // an upsert makes a document, which goes in through
                             // the index's pipelines like any fresh write
-                            let names = crate::api::pipelines_for_state(
+                            let names = crate::api::pipelines_for_state_in(
+                                &store,
                                 &g,
                                 meta.get("pipeline").and_then(|v| v.as_str()),
                             );

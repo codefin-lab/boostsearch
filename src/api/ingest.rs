@@ -293,6 +293,22 @@ pub(crate) fn pipelines_for_write(store: &Store, index: &str, asked: Option<&str
     }
 }
 
+/// The same, read off an index that is already held, where the store
+/// says any pipeline exists at all.
+pub(crate) fn pipelines_for_state_in(
+    store: &Store,
+    g: &IdxState,
+    asked: Option<&str>,
+) -> Vec<String> {
+    if !store.any_ingest_pipeline.load(std::sync::atomic::Ordering::Relaxed) {
+        return match asked {
+            Some(named) if named != "_none" => vec![named.to_string()],
+            _ => Vec::new(),
+        };
+    }
+    pipelines_for_state(g, asked)
+}
+
 /// The same, read off an index that is already held.
 pub(crate) fn pipelines_for_state(g: &IdxState, asked: Option<&str>) -> Vec<String> {
     let setting =

@@ -25,6 +25,8 @@ impl Mapping {
             shingled: Vec::new(),
             nanos: Vec::new(),
             derived: Vec::new(),
+            lenient: HashMap::new(),
+            mapped_shapes: Default::default(),
         };
         m.remember_subfields();
         m
@@ -134,7 +136,46 @@ impl Mapping {
     /// Only dates are inferred. Every other type is stored the same way
     /// whether the mapping named it or not, but a date needs its own column,
     /// and nothing downstream can build one without knowing the field is one.
+    /// What a field's own `ignore_malformed` says, if it says anything.
+    pub fn lenient_of(&self, field: &str) -> Option<bool> {
+        self.lenient.get(field).copied()
+    }
+
     pub fn learn_dynamic(&mut self, source: &Value) {
+        // a document shaped like one already walked, whose every top-level
+        // field is mapped, has nothing new to teach
+        let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut all_mapped = true;
+        if let Some(obj) = source.as_object() {
+            for k in obj.keys() {
+                for b in k.as_bytes() {
+                    sig ^= *b as u64;
+                    sig = sig.wrapping_mul(0x1000_0000_01b3);
+                }
+                sig ^= 0xff;
+                if !k.starts_with('_') && !self.types.contains_key(k) {
+                    all_mapped = false;
+                }
+            }
+        }
+        if self.mapped_shapes.contains(&sig) {
+            return;
+        }
+        let learned = self.learn_dynamic_walk(source);
+        // only a shape that needed nothing is remembered: an object field may
+        // hold new leaves the next time it appears
+        if !learned
+            && all_mapped
+            && source
+                .as_object()
+                .map(|o| o.values().all(|v| !v.is_object() && !v.is_array()))
+                .unwrap_or(false)
+        {
+            self.mapped_shapes.insert(sig);
+        }
+    }
+
+    fn learn_dynamic_walk(&mut self, source: &Value) -> bool {
         // an index told not to map what it is not told about keeps its
         // mapping as it was; the values are still stored and searched
         let dynamic = self.raw.get("dynamic").cloned().unwrap_or(Value::Bool(true));
@@ -143,13 +184,13 @@ impl Mapping {
             Some("false" | "false_allow_templates" | "strict_allow_templates")
         ) || dynamic == Value::Bool(false);
         if off {
-            return;
+            return false;
         }
-        let Some(obj) = source.as_object() else { return };
+        let Some(obj) = source.as_object() else { return false };
         let mut learned: Vec<(String, Value)> = Vec::new();
         self.sniff_fields(obj, &mut String::new(), &mut learned);
         if learned.is_empty() {
-            return;
+            return false;
         }
         for (path, def) in learned {
             // a leaf under an object that holds no objects keeps its dotted
@@ -164,6 +205,7 @@ impl Mapping {
         }
         // what the flat views know follows the raw mapping, once for the lot
         self.remember_subfields();
+        true
     }
 
     /// Take fields back out of `properties`, keeping what was learned of
@@ -405,6 +447,15 @@ impl Mapping {
         self.flats = of(&|t| t == "flat_object").into_iter().map(|(p, _)| p).collect();
         self.shingled = of(&|t| t == "search_as_you_type").into_iter().map(|(p, _)| p).collect();
         self.nanos = of(&|t| t == "date_nanos").into_iter().map(|(p, _)| p).collect();
+        // which fields say what happens to a malformed value
+        self.lenient.clear();
+        let mut lenient: HashMap<String, bool> = HashMap::new();
+        if let Some(props) = self.raw.get("properties").and_then(|p| p.as_object()) {
+            collect_lenient(props, "", &mut lenient);
+        }
+        self.lenient = lenient;
+        // the shapes are learned again against the new mapping
+        self.mapped_shapes.clear();
         // a derived field is typed like any other, so a query or an
         // aggregation reads it the way its type says
         self.derived = self
@@ -673,6 +724,29 @@ fn collect_indirections(
         }
         if let Some(sub) = spec.get("fields").and_then(|p| p.as_object()) {
             collect_indirections(sub, &path, aliases, formats);
+        }
+    }
+}
+
+/// Every field that says what a malformed value does, by path.
+fn collect_lenient(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<String, bool>) {
+    for (name, def) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(v) = def.get("ignore_malformed") {
+            let b = match v {
+                Value::Bool(b) => Some(*b),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            };
+            if let Some(b) = b {
+                out.insert(path.clone(), b);
+            }
+        }
+        if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
+            collect_lenient(sub, &path, out);
+        }
+        if let Some(sub) = def.get("fields").and_then(|p| p.as_object()) {
+            collect_lenient(sub, &path, out);
         }
     }
 }

@@ -224,7 +224,11 @@ pub async fn update_doc(
         // through the pipelines the index asks for
         let mut next = next.clone();
         if result == "created" {
-            let names = crate::api::pipelines_for_state(&g, p.get("pipeline").map(|s| s.as_str()));
+            let names = crate::api::pipelines_for_state_in(
+                &store,
+                &g,
+                p.get("pipeline").map(|s| s.as_str()),
+            );
             if !names.is_empty() {
                 let doc = crate::ingest::IngestDoc::new(&g.name, &id, next.clone());
                 match crate::api::run_named_pipelines(&store, names, doc) {

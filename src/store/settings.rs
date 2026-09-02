@@ -1,5 +1,6 @@
 //! An index's settings, and what it has learned about its own fields.
 
+use super::WriteKnobs;
 use super::*;
 
 impl IdxState {
@@ -196,10 +197,25 @@ impl IdxState {
 
     /// How many shards the index reports. Read per shard of every query.
     pub fn shard_count(&self) -> u64 {
+        if self.knobs.shards > 0 {
+            return self.knobs.shards;
+        }
         self.numeric_setting("number_of_shards").unwrap_or(1)
     }
 
     /// Look a setting up by dotted name, accepting the flat or nested form.
+    /// Read the settings every write asks about, once, after they changed.
+    pub fn refresh_knobs(&mut self) {
+        self.knobs = WriteKnobs {
+            blocks_write: self.setting("blocks.write").as_deref() == Some("true"),
+            ignore_malformed: self.setting("mapping.ignore_malformed").as_deref() == Some("true"),
+            append_only: self.setting("append_only.enabled").as_deref() == Some("true"),
+            nested_limit: self.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000),
+            durability: self.setting("translog.durability"),
+            shards: self.numeric_setting("number_of_shards").unwrap_or(1).max(1),
+        };
+    }
+
     pub fn setting(&self, key: &str) -> Option<String> {
         // read off what was written rather than off the whole view an index
         // reports of itself: this is asked a few times for every document
