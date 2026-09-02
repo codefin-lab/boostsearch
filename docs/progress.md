@@ -1050,3 +1050,61 @@ part-nested keys (`{"index": {"unassigned.node_left.delayed_timeout":
 49/49, phase1 398/398; bench after 6.5 wins all twelve dimensions in
 every pass (index 97,210 vs 66,405 docs/s, 394MiB vs 2.0GiB, every query
 p50 lower; against os-secure 94,129 vs 59,462 docs/s, p50s 3-5x lower).
+
+### 6.6 Replication with the mode as a parameter (done)
+
+The mode is two parameters with one value each (ADR 0003;
+`src/cluster/replication.rs`): `AckPolicy::AllInSync` -- a write is
+acknowledged once the primary and every in-sync replica copy have applied
+it, as OpenSearch acknowledges -- and `ReadRouting::AnyActiveCopy` -- a
+read is answered by any active copy, which may be behind. Version two's
+quorum acknowledgement and lease-bound reads are the other values.
+
+A request lands on any node and is carried to the node it belongs on
+(`src/cluster/forward.rs`): writes to the node holding the primary,
+changes to metadata (index create and delete, settings, mappings,
+aliases, templates, pipelines, scripts, snapshots, cluster settings) to
+the cluster manager, and reads answered where the request arrived when
+that node holds an active copy of everything named, else on a node that
+does. The request travels whole over the transport with its caller
+(`internal:http/forward`), runs through the answering node's own router
+as that caller, and the answer comes back whole. `wait_for_active_shards`
+holds a write until enough copies are active and refuses it with the
+plugin's `unavailable_shards_exception` after `timeout`, compared with
+OpenSearch: the same 503 text.
+
+Every write a handler makes (`write_doc_versioned`, `delete_doc`, so
+index, create, update, bulk, update-by-query, reindex) is recorded with
+the version, sequence number, term and shard it was given, in a buffer
+scoped to the request; before the answer leaves, the buffer is copied to
+the replica copies (`indices:data/write/bulk[r]`, one call per node,
+active and initializing copies alike, the answers gathered) and the
+answer's `_shards` say how many copies took it (`total`, `successful`,
+`failed`, `failures`). A copy applies a write only if it is newer than
+what it holds, with the primary's version, sequence and term (`_seq_no`
+and `_primary_term` now come from the manager's published terms). A copy
+that fails a write is reported to the manager, which fails it and places
+it again. A copy the manager places on a node is filled from the primary
+before the node reports it started: a scan of the primary's documents by
+sequence number (`internal:index/recovery/scan`, the pending table read
+over the index), applied in pages, with writes made meanwhile arriving as
+they happen; the host answers the coordinator later through
+`Input::ShardDone`. The runtime grew a data-plane registry: an action
+with a handler runs on its own task and answers over the transport, apart
+from the coordinator.
+
+Live, three nodes: an index created through a follower, documents
+written and bulked through a follower (`_shards.successful: 2`), searched
+and fetched on the replica's node (answered there), counted on the
+manager; `wait_for_active_shards=2` acknowledged and `=3&timeout=1s`
+refused as OpenSearch refuses it; the replica's node killed, the copy
+placed on the third node after its delay and seeded with every document,
+a later write read back on it, an update sent through it forwarded and
+copied back. What is not here yet: a primary lost together with the
+manager (6.7 moves primaries and makes the published metadata the source
+of truth), and searches across nodes are whole-request forwards until 6.8
+fans out by shard. Gates: unit 52/52, phase1 398/398; bench after 6.6
+wins all twelve dimensions against plain OpenSearch (index 101,880 vs
+67,080 docs/s, 372MiB vs 2.0GiB, every query p50 lower) and against
+os-secure (99,810 vs 60,136 docs/s, p50s 3-5x lower): the forwarding
+layer and the write buffer cost nothing on one node.

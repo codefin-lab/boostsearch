@@ -82,6 +82,12 @@ pub fn no_permissions(action: &str, caller: &Caller) -> Response {
 /// Work out the caller and put it on the request; refuse what they may
 /// not do before the handler runs.
 pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) -> Response {
+    // a request another node forwarded here comes with the caller it was
+    // authenticated as there; only this node's transport handler can set it
+    if let Some(f) = req.extensions().get::<crate::cluster::forward::ForwardedCaller>() {
+        let caller = f.0.clone();
+        return run_as(caller, req, next).await;
+    }
     let sec = store.security.clone();
     if !sec.enabled {
         return run_as(Caller::unrestricted(), req, next).await;

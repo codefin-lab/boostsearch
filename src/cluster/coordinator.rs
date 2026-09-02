@@ -782,17 +782,17 @@ impl Coordinator {
             let meta = self.committed.indices.get(&copy.index).cloned();
             let result = match (&self.host, meta) {
                 (Some(h), Some(m)) => h.start_shard(&m, copy),
-                _ => Ok(()),
+                _ => Ok(true),
             };
+            self.hosted.insert(aid.clone(), (copy.index.clone(), copy.shard));
             let ev = match result {
-                Ok(()) => {
-                    self.hosted.insert(aid.clone(), (copy.index.clone(), copy.shard));
-                    ShardEvent::Started {
-                        index: copy.index.clone(),
-                        shard: copy.shard,
-                        allocation_id: aid,
-                    }
-                }
+                // the host will say when the copy is ready
+                Ok(false) => continue,
+                Ok(true) => ShardEvent::Started {
+                    index: copy.index.clone(),
+                    shard: copy.shard,
+                    allocation_id: aid,
+                },
                 Err(message) => ShardEvent::Failed {
                     index: copy.index.clone(),
                     shard: copy.shard,
@@ -1174,6 +1174,19 @@ impl NodeLogic for Coordinator {
             Input::Peer(node) => {
                 let mut out = self.learn(node);
                 out.extend(self.bootstrap(durable));
+                out
+            }
+            Input::ShardDone { allocation_id, result } => {
+                // the copy the host was building: reported now, if it is still ours
+                let Some((index, shard)) = self.hosted.get(&allocation_id).cloned() else {
+                    return vec![];
+                };
+                let ev = match result {
+                    Ok(()) => ShardEvent::Started { index, shard, allocation_id },
+                    Err(message) => ShardEvent::Failed { index, shard, allocation_id, message },
+                };
+                let mut out = self.report(ev);
+                out.extend(self.next_publication(durable));
                 out
             }
             Input::Message(e) => self.on_message(e, durable),

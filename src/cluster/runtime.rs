@@ -28,17 +28,26 @@ pub struct Shared {
 /// Answers awaited by callers on this node, by request id.
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Envelope>>>>;
 
+/// What answers a data-plane action (replication, recovery, a forwarded
+/// request): not the coordinator, which only minds the cluster.
+pub type DataFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Envelope> + Send>>;
+pub type DataHandler = Arc<dyn Fn(Envelope) -> DataFuture + Send + Sync>;
+type Handlers = Arc<RwLock<BTreeMap<String, DataHandler>>>;
+
 pub struct Runtime {
     inputs: mpsc::UnboundedSender<Input>,
     pub shared: Arc<Shared>,
     transport: Arc<TcpTransport>,
     pending: Pending,
+    handlers: Handlers,
     next_call: std::sync::atomic::AtomicU64,
 }
 
 struct Inbox {
     inputs: mpsc::UnboundedSender<Input>,
     pending: Pending,
+    handlers: Handlers,
+    transport: Arc<TcpTransport>,
 }
 
 impl Handler for Inbox {
@@ -47,6 +56,18 @@ impl Handler for Inbox {
         if envelope.kind != super::transport::Kind::Request {
             if let Some(tx) = self.pending.lock().remove(&envelope.request_id) {
                 let _ = tx.send(envelope);
+                return;
+            }
+        }
+        // a data-plane request runs on its own task and answers over the transport
+        if envelope.kind == super::transport::Kind::Request {
+            if let Some(h) = self.handlers.read().get(&envelope.action).cloned() {
+                let transport = self.transport.clone();
+                let to = envelope.from.clone();
+                tokio::spawn(async move {
+                    let answer = h(envelope).await;
+                    let _ = transport.send(&to, answer);
+                });
                 return;
             }
         }
@@ -100,7 +121,13 @@ impl Runtime {
     ) -> Arc<Runtime> {
         let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
         let answers: Pending = Arc::default();
-        transport.set_handler(Arc::new(Inbox { inputs: tx.clone(), pending: answers.clone() }));
+        let handlers: Handlers = Arc::default();
+        transport.set_handler(Arc::new(Inbox {
+            inputs: tx.clone(),
+            pending: answers.clone(),
+            handlers: handlers.clone(),
+            transport: transport.clone(),
+        }));
         let shared = Arc::new(Shared {
             state: RwLock::new(logic.state().clone()),
             mode: RwLock::new(format!("{:?}", logic.mode)),
@@ -110,6 +137,7 @@ impl Runtime {
             shared: shared.clone(),
             transport: transport.clone(),
             pending: answers.clone(),
+            handlers,
             next_call: std::sync::atomic::AtomicU64::new(1 << 40),
         });
         let timers: Arc<Mutex<BTreeMap<u64, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
@@ -138,6 +166,9 @@ impl Runtime {
                         Input::Start => "start".to_string(),
                         Input::Timer(id) => format!("timer {id}"),
                         Input::Peer(n) => format!("peer {}", n.id),
+                        Input::ShardDone { allocation_id, result } => {
+                            format!("shard done {allocation_id}: {result:?}")
+                        }
                         Input::Message(e) => format!("{:?} {} from {}", e.kind, e.action, e.from),
                     };
                     eprintln!("cluster {me} <- {what}");
@@ -239,6 +270,26 @@ impl Runtime {
         let _ = self.inputs.send(Input::Message(envelope));
     }
 
+    /// The host finished (or failed) a copy the manager put here.
+    pub fn shard_done(&self, allocation_id: String, result: Result<(), String>) {
+        let _ = self.inputs.send(Input::ShardDone { allocation_id, result });
+    }
+
+    /// Answer a data-plane action on this node.
+    pub fn register(&self, action: &str, handler: DataHandler) {
+        self.handlers.write().insert(action.into(), handler);
+    }
+
+    /// Read the committed state without copying it.
+    pub fn with_state<R>(&self, f: impl FnOnce(&ClusterState) -> R) -> R {
+        f(&self.shared.state.read())
+    }
+
+    /// This node's id.
+    pub fn local(&self) -> NodeId {
+        self.transport.local()
+    }
+
     /// Ask a node (this one included) and wait for its answer.
     pub async fn call(
         &self,
@@ -250,6 +301,13 @@ impl Runtime {
         let rid = self.next_call.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let me = self.transport.local();
         let envelope = Envelope::request(action, me.clone(), rid, body);
+        // a data-plane action asked of this node runs here
+        if *to == me {
+            let handler = self.handlers.read().get(action).cloned();
+            if let Some(h) = handler {
+                return tokio::time::timeout(timeout, h(envelope)).await.ok();
+            }
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.lock().insert(rid, tx);
         if *to == me {

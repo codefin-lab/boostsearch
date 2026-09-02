@@ -658,7 +658,7 @@ pub fn any_matches(patterns: &[String], candidate: &str) -> bool {
 
 /// Who is asking: the user, the backend roles they came with, and the
 /// roles the mappings gave them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Caller {
     pub name: String,
     pub backend_roles: Vec<String>,

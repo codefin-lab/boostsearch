@@ -15,6 +15,8 @@ mod termvectors;
 pub use termvectors::*;
 mod update;
 pub use update::*;
+mod replica;
+pub use replica::*;
 
 /// The arrival order recorded for a document, which is what `_seq_no` reports.
 pub fn read_seq(st: &IdxState, id: &str) -> Option<u64> {
@@ -227,6 +229,18 @@ pub fn write_doc_versioned(
     // recorded before it is answered for: the index has it only after a commit
     let routing = st.routing.get(id).cloned();
     st.log_write(id, routing.as_deref(), version, seq, Some(&raw));
+    let term = crate::cluster::primary_term(&st.name, shard as u32);
+    // the copies hear of it once the request is answered for here
+    crate::cluster::replication::record(crate::cluster::replication::ReplicaOp {
+        index: st.name.clone(),
+        id: id.to_string(),
+        routing,
+        version,
+        seq,
+        term,
+        shard: shard as u32,
+        source: Some(raw.clone()),
+    });
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
     let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
@@ -237,7 +251,7 @@ pub fn write_doc_versioned(
         "result": if existed { "updated" } else { "created" },
         "_shards": shards_of(st),
         "_seq_no": seq,
-        "_primary_term": 1,
+        "_primary_term": term,
     });
     Ok((body, status))
 }
@@ -245,11 +259,22 @@ pub fn write_doc_versioned(
 pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
+    let shard = st.shard_of_doc(id);
     if existed {
-        let shard = st.shard_of_doc(id);
         st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
         st.log_write(id, None, version, seq, None);
         st.note_pending(id, None);
+        st.note_pending_seq(id, seq);
+        crate::cluster::replication::record(crate::cluster::replication::ReplicaOp {
+            index: st.name.clone(),
+            id: id.to_string(),
+            routing: None,
+            version,
+            seq,
+            term: crate::cluster::primary_term(&st.name, shard as u32),
+            shard: shard as u32,
+            source: None,
+        });
     }
     let body = json!({
         "_index": st.name,
@@ -258,7 +283,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
         "result": if existed { "deleted" } else { "not_found" },
         "_shards": shards_of(st),
         "_seq_no": seq,
-        "_primary_term": 1,
+        "_primary_term": crate::cluster::primary_term(&st.name, shard as u32),
     });
     (body, if existed { StatusCode::OK } else { StatusCode::NOT_FOUND })
 }

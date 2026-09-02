@@ -31,8 +31,10 @@ pub trait MetadataSource: Send + Sync {
 /// What a data node does with the copies the manager puts on it: the store
 /// in production, nothing (every copy starts at once) in the simulation.
 pub trait ShardHost: Send + Sync {
-    /// Make the copy exist here; an error fails the allocation.
-    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<(), String>;
+    /// Make the copy exist here. `Ok(true)` means it is ready now; `Ok(false)`
+    /// means the host will say later, through `Input::ShardDone`; an error
+    /// fails the allocation.
+    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String>;
     /// The copy is no longer this node's.
     fn remove_shard(&self, index: &str, shard: u32);
 }
@@ -92,12 +94,34 @@ impl StoreSource {
     pub fn new(store: crate::store::Store) -> StoreSource {
         StoreSource { store, created: parking_lot::Mutex::new(std::collections::BTreeSet::new()) }
     }
+
+    /// Fill a copy from the primary's documents, off this thread; the
+    /// runtime hears the result as `Input::ShardDone`.
+    fn seed(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
+        let Some(aid) = copy.allocation_id.clone() else { return Ok(true) };
+        let store = self.store.clone();
+        let index = meta.name.clone();
+        let shard = copy.shard;
+        tokio::spawn(async move {
+            let result = super::replication::seed_replica(&store, &index, shard).await;
+            if let Some(rt) = super::runtime() {
+                rt.shard_done(aid, result);
+            }
+        });
+        Ok(false)
+    }
 }
 
 impl ShardHost for StoreSource {
-    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<(), String> {
+    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
+        if self.store.get(&meta.name).is_some() && !self.created.lock().contains(&meta.name) {
+            // this node's own index: the primary, already here
+            return Ok(true);
+        }
         if self.store.get(&meta.name).is_some() {
-            return Ok(());
+            // a copy already built here (another shard of the same index):
+            // caught up from the primary like a new one
+            return self.seed(meta, copy);
         }
         // the index as the manager describes it, minus what the store assigns itself
         let mut settings = meta.settings.clone();
@@ -111,7 +135,7 @@ impl ShardHost for StoreSource {
             format!("could not create a local copy of [{}][{}]: {e}", meta.name, copy.shard)
         })?;
         self.created.lock().insert(meta.name.clone());
-        Ok(())
+        self.seed(meta, copy)
     }
 
     fn remove_shard(&self, index: &str, _shard: u32) {

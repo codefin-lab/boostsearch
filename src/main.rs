@@ -387,6 +387,7 @@ fn app(store: Store) -> Router {
                 .patch(security::api::patch_one),
         )
         .route("/_plugins/_security/{*rest}", any(security::api::unknown))
+        .layer(axum::middleware::from_fn_with_state(store.clone(), cluster::forward::layer))
         .layer(axum::middleware::from_fn_with_state(store.clone(), security::layer::authenticate))
         .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
         .with_state(store)
@@ -479,6 +480,10 @@ async fn main() -> anyhow::Result<()> {
             data_dir.clone(),
         );
         cluster::set_runtime(rt);
+        // the data plane: replication and recovery between nodes, and
+        // requests carried to the node they belong on
+        cluster::replication::install(store.clone());
+        cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)

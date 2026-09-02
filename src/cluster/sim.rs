@@ -58,6 +58,11 @@ pub enum Input {
     Timer(u64),
     /// a node the runtime reached by dialling an address it was asked to
     Peer(super::state::DiscoveryNode),
+    /// a copy the host finished starting (or failed to), by allocation id
+    ShardDone {
+        allocation_id: String,
+        result: Result<(), String>,
+    },
 }
 
 /// What a node asks for.
@@ -500,7 +505,7 @@ mod tests {
                     },
                     Output::Timer { id: 1, after: 100 },
                 ],
-                Input::Timer(_) | Input::Peer(_) => vec![],
+                Input::Timer(_) | Input::Peer(_) | Input::ShardDone { .. } => vec![],
                 Input::Message(e) if e.kind == super::super::transport::Kind::Request => {
                     vec![Output::Send {
                         to: e.from.clone(),

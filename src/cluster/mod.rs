@@ -9,8 +9,10 @@
 pub mod allocation;
 pub mod clock;
 pub mod coordinator;
+pub mod forward;
 pub mod metadata;
 pub mod node;
+pub mod replication;
 pub mod runtime;
 pub mod sim;
 pub mod state;
@@ -87,6 +89,27 @@ pub fn with_state_override<R>(s: state::ClusterState, f: impl FnOnce() -> R) -> 
     let r = f();
     OVERRIDE.with(|o| *o.borrow_mut() = None);
     r
+}
+
+/// Read the committed state without copying it (the write path asks per
+/// document); a node with nothing committed reads the synthetic state.
+pub fn with_state<R>(f: impl FnOnce(&state::ClusterState) -> R) -> R {
+    let overridden = OVERRIDE.with(|o| o.borrow().clone());
+    if let Some(s) = overridden {
+        return f(&s);
+    }
+    match runtime() {
+        Some(rt) if rt.with_state(|s| s.version > 0) => rt.with_state(f),
+        _ => f(&current_state()),
+    }
+}
+
+/// The term a shard's primary is in, as the manager published it (1 until
+/// a replica has taken over).
+pub fn primary_term(index: &str, shard: u32) -> u64 {
+    with_state(|s| {
+        s.indices.get(index).and_then(|m| m.primary_terms.get(&shard).copied()).unwrap_or(1)
+    })
 }
 
 pub fn current_state() -> state::ClusterState {
