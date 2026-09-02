@@ -257,3 +257,33 @@ update_by_query/reindex scripts, derived fields, intervals script filter,
 analysis-common script filters. The terms aggregation is answered by
 BoostCore's own engine, so a script-sourced one needs a source-reading path
 beside it.
+
+### Phase 3 closed (2026-09-02)
+
+- 3.3 contexts, all wired: update, update_by_query and reindex scripts
+  (ctx with op/noop/delete, null _id -> auto id, _index redirect, junk
+  fields refused), script_fields, script query, script_score and
+  function_score scripts with term statistics, sort by _script, intervals
+  script filter, aggregation scripts (terms with _value/doc, scripted_metric,
+  bucket_script, bucket_selector, moving_fn), derived fields (mapping and
+  search-body definitions; queried, fetched, highlighted and aggregated),
+  analysis-common condition and predicate_token_filter.
+- 3.4 whitelist: every context answers `_context` from OpenSearch's own
+  whitelists; the builtins now cover the String, StringBuilder, List/Set/
+  Collection (Groovy-style each/any/every/findAll/groupBy and the Stream
+  forms), Map, Math, Integer/Long/Double/Boolean/Character statics and
+  fields, Collections, Objects, Arrays, Optional, Iterator, Pattern/Matcher,
+  Collectors (toList/toSet/joining/counting/toMap/groupingBy/partitioningBy/
+  mapping/summing/averaging/minBy/maxBy/reducing/collectingAndThen/
+  summarizing), Duration, LocalDate/LocalDateTime/Instant/ZonedDateTime
+  constructors and DateTimeFormatter names.
+- 3.5 lang-painless: 143/143 (1 skipped).
+- Along the way: the standard tokenizer keeps `example.com` and `x:y`
+  whole (BoostCore e3be811); `match` on a date, number, boolean or ip is
+  the value itself with a score of one; auto_date_histogram steps below a
+  day and honours `format`; a `keyword` field under an object is a field of
+  its own in aggregations.
+
+Gates: core 1427/1427, phase1 398/398, modules 665/895 (was 556 at the start
+of Phase 3), lang-painless 143/143, reindex 154/166, search_diff 92/92,
+analysis_diff 519/522.
