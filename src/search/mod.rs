@@ -115,6 +115,7 @@ impl SortValue {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SortKey {
     field: String,
     desc: bool,
@@ -538,6 +539,9 @@ pub struct Outcome {
     pub suggest: Option<Value>,
     /// shards that could not answer, and why
     pub failures: Vec<Value>,
+    /// a document-level security filter was laid over the query, which
+    /// makes it a real query: nothing ends early under it
+    pub filtered: bool,
 }
 
 /// The parts of a query that only a document's own values can settle.

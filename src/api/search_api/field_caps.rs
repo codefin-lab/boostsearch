@@ -83,10 +83,22 @@ pub async fn field_caps(
     for n in &kept {
         let Some(st) = store.get(n) else { continue };
         let g = st.read();
+        let view = crate::security::view::view_for(&store, &g.name);
         for (name, kind) in g.all_field_types() {
-            if !patterns.iter().any(|pat| {
-                pat == "*" || *pat == name || crate::store::wildcard_to_regex(pat).is_match(&name)
-            }) {
+            // a field the caller may not see is not there
+            if view.as_ref().map(|v| v.hidden(&name)).unwrap_or(false) {
+                continue;
+            }
+            let asked = |n: &str| {
+                patterns.iter().any(|pat| {
+                    pat == "*" || *pat == n || crate::store::wildcard_to_regex(pat).is_match(n)
+                })
+            };
+            let child_asked = matches!(kind.as_str(), "object" | "nested")
+                && g.all_field_types()
+                    .iter()
+                    .any(|(other, _)| other.starts_with(&format!("{name}.")) && asked(other));
+            if !asked(&name) && !child_asked {
                 continue;
             }
             let kinds: Vec<String> = vec![kind.clone()];

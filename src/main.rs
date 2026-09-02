@@ -14,9 +14,11 @@ mod ingest;
 mod painless;
 mod query;
 mod search;
+mod security;
 mod snapshot;
 mod source;
 mod store;
+mod tls;
 mod tz;
 
 use axum::Router;
@@ -353,6 +355,36 @@ fn app(store: Store) -> Router {
         // stops at 2 MB by default, which is smaller than any bulk helper's
         // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
         // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
+        .route("/_plugins/_security/authinfo", get(security::api::authinfo))
+        .route("/_plugins/_security/health", get(security::api::health))
+        .route("/_plugins/_security/api/permissionsinfo", get(security::api::permissions_info))
+        .route("/_plugins/_security/api/ssl/certs", get(security::api::certs))
+        .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
+        .route(
+            "/_plugins/_security/api/audit",
+            get(security::api::audit_get).patch(security::api::audit_patch).fallback(security::api::audit_wrong_method),
+        )
+        .route(
+            "/_plugins/_security/api/audit/config",
+            put(security::api::audit_put).fallback(security::api::audit_wrong_method),
+        )
+        .route(
+            "/_plugins/_security/api/account",
+            get(security::api::account).put(security::api::change_password),
+        )
+        .route(
+            "/_plugins/_security/api/{kind}",
+            get(security::api::list).patch(security::api::patch_all),
+        )
+        .route(
+            "/_plugins/_security/api/{kind}/{name}",
+            get(security::api::get_one)
+                .put(security::api::put_one)
+                .delete(security::api::delete_one)
+                .patch(security::api::patch_one),
+        )
+        .route("/_plugins/_security/{*rest}", any(security::api::unknown))
+        .layer(axum::middleware::from_fn_with_state(store.clone(), security::layer::authenticate))
         .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
         .with_state(store)
 }
@@ -382,8 +414,22 @@ async fn main() -> anyhow::Result<()> {
     // in a translog and nowhere else; it goes back into the index before the
     // first request is answered
     api::recover(&store);
+    security::audit::attach_store(&store);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("boostsearch listening on {addr}");
-    axum::serve(listener, app(store)).await?;
+    // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
+    // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true
+    let node_settings = tls::node_settings();
+    let tls_settings = tls::TlsSettings::read(&node_settings);
+    if tls_settings.enabled {
+        eprintln!("boostsearch listening on https://{addr}");
+        tls::serve_tls(listener, app(store), &tls_settings).await?;
+    } else {
+        eprintln!("boostsearch listening on {addr}");
+        axum::serve(
+            listener,
+            app(store).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
+    }
     Ok(())
 }

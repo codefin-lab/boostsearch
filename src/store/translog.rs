@@ -65,7 +65,7 @@ impl IdxState {
         }
         if let Some(log) = self.translog.as_mut() {
             let _ = log.flush();
-            let _ = log.get_ref().sync_data();
+            let _ = sync_file(log.get_ref());
         }
     }
 
@@ -225,5 +225,20 @@ fn push_json_str(out: &mut String, text: &str) {
     match serde_json::to_string(text) {
         Ok(quoted) => out.push_str(&quoted),
         Err(_) => out.push_str("\"\""),
+    }
+}
+
+/// The translog's durability call: a plain `fsync` on macOS, as Java's
+/// `FileChannel.force` is there (Rust's `sync_data` would be the far
+/// dearer `F_FULLFSYNC`); `sync_data` elsewhere, where they are the same.
+fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        file.sync_data()
     }
 }

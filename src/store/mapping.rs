@@ -141,7 +141,7 @@ impl Mapping {
         self.lenient.get(field).copied()
     }
 
-    pub fn learn_dynamic(&mut self, source: &Value) {
+    pub fn learn_dynamic(&mut self, source: &Value) -> Vec<String> {
         // a document shaped like one already walked, whose every top-level
         // field is mapped, has nothing new to teach
         let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
@@ -159,8 +159,14 @@ impl Mapping {
             }
         }
         if self.mapped_shapes.contains(&sig) {
-            return;
+            return Vec::new();
         }
+        let before: std::collections::HashSet<String> = self
+            .raw
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
         let learned = self.learn_dynamic_walk(source);
         // only a shape that needed nothing is remembered: an object field may
         // hold new leaves the next time it appears
@@ -173,8 +179,15 @@ impl Mapping {
         {
             self.mapped_shapes.insert(sig);
         }
+        if !learned {
+            return Vec::new();
+        }
+        self.raw
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|o| o.keys().filter(|k| !before.contains(*k)).cloned().collect())
+            .unwrap_or_default()
     }
-
     fn learn_dynamic_walk(&mut self, source: &Value) -> bool {
         // an index told not to map what it is not told about keeps its
         // mapping as it was; the values are still stored and searched

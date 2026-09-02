@@ -5,11 +5,18 @@ The claim is that BoostSearch beats OpenSearch everywhere, which is only worth
 saying if it is checked everywhere and checked again after every change. This
 writes the table that says so, and exits non-zero if any dimension is lost.
 """
-import urllib.request, json, time, statistics, subprocess, sys
+import urllib.request, json, time, statistics, subprocess, sys, os, ssl, base64
+_CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mode = ssl.CERT_NONE
+import os, ssl, base64
+_CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mode = ssl.CERT_NONE
 def req(base, method, path, body=None):
     data = body.encode() if isinstance(body,str) else (json.dumps(body).encode() if body is not None else None)
-    r = urllib.request.Request(base+path, data, {"Content-Type":"application/json"}, method=method)
-    return json.load(urllib.request.urlopen(r))
+    headers = {"Content-Type":"application/json"}
+    # BENCH_AUTH=user:pass sends basic auth, for an engine with security on
+    if os.environ.get("BENCH_AUTH"):
+        headers["Authorization"] = "Basic " + base64.b64encode(os.environ["BENCH_AUTH"].encode()).decode()
+    r = urllib.request.Request(base+path, data, headers, method=method)
+    return json.load(urllib.request.urlopen(r, context=_CTX))
 def bulk_index(base, name, path, batch=4000):
     try: req(base,"DELETE","/"+name)
     except Exception: pass
@@ -38,7 +45,9 @@ QUERIES={
  "nested_agg":{"size":0,"aggs":{"a":{"terms":{"field":"region"},"aggs":{"s":{"avg":{"field":"response_ms"}}}}}},
  "cardinality":{"size":0,"aggs":{"c":{"cardinality":{"field":"request.keyword" if False else "region"}}}},
 }
-def latency(base,name,body,n=60):
+def latency(base,name,body,n=150):
+    # a few unmeasured requests first: connection setup, caches, JIT on the other side
+    for _ in range(15): req(base,"POST",f"/{name}/_search",body)
     ts=[]
     for _ in range(n):
         t=time.time(); req(base,"POST",f"/{name}/_search",body); ts.append((time.time()-t)*1000)
@@ -50,7 +59,7 @@ def rss(container=None, pid=None):
         return out.split('/')[0].strip()
     out=subprocess.run(["ps","-o","rss=","-p",str(pid)],capture_output=True,text=True).stdout.strip()
     return f"{int(out)/1024:.0f}MiB"
-A=("OpenSearch","http://127.0.0.1:9299"); B=("BoostSearch","http://127.0.0.1:9200")
+A=("OpenSearch",os.environ.get("BENCH_A","http://127.0.0.1:9299")); B=("BoostSearch",os.environ.get("BENCH_B","http://127.0.0.1:9200"))
 res={}
 for label,base in (A,B):
     print(f"indexing into {label}...", flush=True)
@@ -59,7 +68,7 @@ for label,base in (A,B):
     for q,body in QUERIES.items():
         lat[q]=latency(base,"perf",body)
     res[label]["latency"]=lat
-res["OpenSearch"]["rss"]=rss(container="os-compat")
+res["OpenSearch"]["rss"]=rss(container=os.environ.get("BENCH_A_CONTAINER","os-compat"))
 res["BoostSearch"]["rss"]=rss(pid=subprocess.run(["pgrep","-f","release/boostsearch"],capture_output=True,text=True).stdout.split()[0])
 json.dump(res,open('/tmp/matrix.json','w'),indent=1)
 print(f"\n{'dimension':<20}{'OpenSearch':>14}{'BoostSearch':>14}   winner")
@@ -69,11 +78,15 @@ print(f"{'memory':<20}{o['rss']:>14}{b['rss']:>14}")
 for q in QUERIES:
     om,op=o['latency'][q]; bm,bp=b['latency'][q]
     print(f"{q+' p50 (ms)':<20}{om:>14.2f}{bm:>14.2f}   {'BoostSearch' if bm<om else 'OpenSearch'}")
-import urllib.request, json, time, statistics, subprocess, sys
+import urllib.request, json, time, statistics, subprocess, sys, os, ssl, base64
+_CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mode = ssl.CERT_NONE
 def req(base, method, path, body=None):
     data = body.encode() if isinstance(body,str) else (json.dumps(body).encode() if body is not None else None)
-    r = urllib.request.Request(base+path, data, {"Content-Type":"application/json"}, method=method)
-    return json.load(urllib.request.urlopen(r))
+    headers = {"Content-Type":"application/json"}
+    if os.environ.get("BENCH_AUTH"):
+        headers["Authorization"] = "Basic " + base64.b64encode(os.environ["BENCH_AUTH"].encode()).decode()
+    r = urllib.request.Request(base+path, data, headers, method=method)
+    return json.load(urllib.request.urlopen(r, context=_CTX))
 def bulk_index(base, name, path, batch=4000):
     try: req(base,"DELETE","/"+name)
     except Exception: pass
@@ -102,7 +115,9 @@ QUERIES={
  "nested_agg":{"size":0,"aggs":{"a":{"terms":{"field":"region"},"aggs":{"s":{"avg":{"field":"response_ms"}}}}}},
  "cardinality":{"size":0,"aggs":{"c":{"cardinality":{"field":"request.keyword" if False else "region"}}}},
 }
-def latency(base,name,body,n=60):
+def latency(base,name,body,n=150):
+    # a few unmeasured requests first: connection setup, caches, JIT on the other side
+    for _ in range(15): req(base,"POST",f"/{name}/_search",body)
     ts=[]
     for _ in range(n):
         t=time.time(); req(base,"POST",f"/{name}/_search",body); ts.append((time.time()-t)*1000)
@@ -114,7 +129,7 @@ def rss(container=None, pid=None):
         return out.split('/')[0].strip()
     out=subprocess.run(["ps","-o","rss=","-p",str(pid)],capture_output=True,text=True).stdout.strip()
     return f"{int(out)/1024:.0f}MiB"
-A=("OpenSearch","http://127.0.0.1:9299"); B=("BoostSearch","http://127.0.0.1:9200")
+A=("OpenSearch",os.environ.get("BENCH_A","http://127.0.0.1:9299")); B=("BoostSearch",os.environ.get("BENCH_B","http://127.0.0.1:9200"))
 res={}
 for label,base in (A,B):
     print(f"indexing into {label}...", flush=True)
@@ -123,7 +138,7 @@ for label,base in (A,B):
     for q,body in QUERIES.items():
         lat[q]=latency(base,"perf",body)
     res[label]["latency"]=lat
-res["OpenSearch"]["rss"]=rss(container="os-compat")
+res["OpenSearch"]["rss"]=rss(container=os.environ.get("BENCH_A_CONTAINER","os-compat"))
 res["BoostSearch"]["rss"]=rss(pid=subprocess.run(["pgrep","-f","release/boostsearch"],capture_output=True,text=True).stdout.split()[0])
 json.dump(res,open('/tmp/matrix.json','w'),indent=1)
 print(f"\n{'dimension':<20}{'OpenSearch':>14}{'BoostSearch':>14}   winner")
