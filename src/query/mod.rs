@@ -6,7 +6,7 @@ use boostcore::query::{
     AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
     FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
 };
-use boostcore::schema::{Field, IndexRecordOption, Term, Type};
+use boostcore::schema::{Field, IndexRecordOption, TantivyDocument, Term, Type, Value as _};
 use boostcore::{Index, TantivyError};
 use boostcore_fst::Regex;
 use serde_json::Value;
@@ -15,6 +15,9 @@ use std::sync::Arc;
 
 mod dispatch;
 pub(crate) use dispatch::*;
+
+mod script;
+pub(crate) use script::*;
 
 mod analyze;
 pub(crate) use analyze::*;
@@ -693,6 +696,35 @@ pub fn interval_spans(
     }
     if let Some(filter) = spec.get("filter").and_then(|f| f.as_object()) {
         for (name, inner) in filter {
+            // a script sees each stretch as `interval`, with where it starts
+            // and ends and how many gaps it holds, and says whether it stays
+            if name == "script" {
+                let terms = rule_width(rule, analyse);
+                let Ok(compiled) = crate::painless::contexts::Compiled::of(inner, &|_| None) else {
+                    spans.clear();
+                    continue;
+                };
+                spans.retain(|s| {
+                    let interval = crate::painless::Value::map(vec![
+                        (
+                            crate::painless::Value::str("start"),
+                            crate::painless::Value::Int(s.0 as i64),
+                        ),
+                        (
+                            crate::painless::Value::str("end"),
+                            crate::painless::Value::Int(s.1 as i64),
+                        ),
+                        (
+                            crate::painless::Value::str("gaps"),
+                            crate::painless::Value::Int(((s.1 - s.0 + 1) as i64 - terms).max(0)),
+                        ),
+                    ]);
+                    let mut runner = crate::painless::contexts::Runner::new(&compiled.params);
+                    runner.interval = Some(interval);
+                    runner.run(&compiled.script).ok().and_then(|v| v.truthy()).unwrap_or(false)
+                });
+                continue;
+            }
             let other_spans = interval_spans(tokens, inner, analyse, other);
             let other = other_spans;
             spans.retain(|s| match name.as_str() {

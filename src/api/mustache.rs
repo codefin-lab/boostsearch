@@ -371,8 +371,27 @@ pub async fn put_script(
             "Validation Failed: 1: must specify source for stored script;",
         );
     }
+    // a script stored for a context is compiled first, so that a fault is
+    // reported now rather than at the first search
+    let lang = script.get("lang").and_then(|v| v.as_str()).unwrap_or("painless");
+    if lang == "painless" && p.get("context").is_some() {
+        if let Err(e) = crate::painless::contexts::Compiled::of(&script, &|_| None) {
+            return crate::api::compile_failure(e);
+        }
+    }
     store.remember_script(&id, script);
     respond(&p, json!({"acknowledged": true}))
+}
+
+/// `PUT _scripts/{id}/{context}` -- the context named on the path.
+pub async fn put_script_in_context(
+    State(store): State<Store>,
+    Path((id, context)): Path<(String, String)>,
+    Query(mut p): Query<Params>,
+    body: String,
+) -> Response {
+    p.insert("context".into(), context);
+    put_script(State(store), Path(id), Query(p), body).await
 }
 
 pub async fn get_script(
@@ -382,7 +401,10 @@ pub async fn get_script(
 ) -> Response {
     match store.stored_script(&id) {
         Some(script) => respond(&p, json!({"_id": id, "found": true, "script": script})),
-        None => respond(&p, json!({"_id": id, "found": false})),
+        None => {
+            let body = json!({"_id": id, "found": false});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
     }
 }
 
@@ -391,7 +413,13 @@ pub async fn delete_script(
     Path(id): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    store.forget_script(&id);
+    if !store.forget_script(&id) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("stored script [{id}] does not exist and cannot be deleted"),
+        );
+    }
     respond(&p, json!({"acknowledged": true}))
 }
 

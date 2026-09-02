@@ -200,3 +200,187 @@ pub(crate) fn run_missing_terms_agg(
         "buckets": [bucket],
     }))
 }
+
+/// A terms aggregation whose keys a script makes: over each value of a
+/// field (`_value`), or over the document itself (`doc`, `_score`).
+///
+/// BoostCore's engine reads a field; a script has to be run here, over the
+/// documents the query finds.
+pub(crate) fn run_scripted_terms_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    weighted: bool,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("terms").cloned().unwrap_or_else(|| json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).map(|s| s.to_string());
+    let script = spec.get("script").cloned().unwrap_or(Value::Null);
+    let compiled = crate::painless::contexts::Compiled::of(&script, &|id| store.stored_script(id))
+        .map_err(|e| {
+            crate::search::search_script_failure(
+                e,
+                targets.first().map(|s| s.as_str()).unwrap_or(""),
+            )
+        })?;
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
+    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    // what kind of key the field gives, so the buckets read as its values do
+    let numeric = field.as_ref().and_then(|f| {
+        targets.iter().find_map(|t| {
+            let st = store.get(t)?;
+            let g = st.read();
+            g.mapping.type_of(f).map(|k| {
+                matches!(
+                    k,
+                    "long"
+                        | "integer"
+                        | "short"
+                        | "byte"
+                        | "double"
+                        | "float"
+                        | "half_float"
+                        | "scaled_float"
+                        | "unsigned_long"
+                        | "date"
+                        | "boolean"
+                )
+            })
+        })
+    });
+    let mut counts: Vec<(Value, u64, Vec<String>)> = Vec::new();
+    let mut note = |key: Value, id: String| match counts.iter_mut().find(|(k, _, _)| *k == key) {
+        Some(entry) => {
+            entry.1 += 1;
+            entry.2.push(id);
+        }
+        None => counts.push((key, 1, vec![id])),
+    };
+    for hit in &found.hits {
+        let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("");
+        let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let source = hit.get("_source").cloned().unwrap_or(json!({}));
+        let Some(st) = store.get(index) else { continue };
+        let mapping = st.read().mapping.clone();
+        let expanded = crate::store::expand_for_indexing(source, &mapping);
+        let mut keys: Vec<Value> = Vec::new();
+        let mut run_with = |runner: crate::painless::contexts::Runner| -> Result<crate::painless::Value, Response> {
+            let mut runner = runner;
+            runner.run(&compiled.script).map_err(|e| crate::search::search_script_failure(e, index))
+        };
+        match &field {
+            Some(f) => {
+                // the script maps each value the field holds
+                let held = expanded.pointer(&format!("/{}", f.replace('.', "/"))).cloned();
+                let values: Vec<Value> = match held {
+                    Some(Value::Array(a)) => a,
+                    Some(Value::Null) | None => Vec::new(),
+                    Some(other) => vec![other],
+                };
+                for v in values {
+                    let typed = crate::painless::Value::from_json(&v);
+                    let runner = crate::painless::contexts::Runner::new(&compiled.params)
+                        .with_doc(&expanded, &mapping)
+                        .with_score(score)
+                        .with_value(typed);
+                    let made = run_with(runner)?;
+                    keys.push(scripted_key(&made, numeric, index)?);
+                }
+            }
+            None => {
+                let runner = crate::painless::contexts::Runner::new(&compiled.params)
+                    .with_doc(&expanded, &mapping)
+                    .with_score(score);
+                let made = run_with(runner)?;
+                match &made {
+                    crate::painless::Value::List(l) => {
+                        for v in l.borrow().iter() {
+                            keys.push(scripted_key(v, numeric, index)?);
+                        }
+                    }
+                    other => keys.push(scripted_key(other, numeric, index)?),
+                }
+            }
+        }
+        keys.dedup();
+        for k in keys {
+            note(k, id.clone());
+        }
+    }
+    let order = spec.get("order").cloned();
+    let (order_key, descending) = order
+        .as_ref()
+        .and_then(|o| o.as_object())
+        .and_then(|o| o.iter().next())
+        .map(|(k, v)| (k.clone(), v.as_str() == Some("desc")))
+        .unwrap_or(("_count".into(), true));
+    counts.sort_by(|a, b| {
+        let by_key = || match (&a.0, &b.0) {
+            (Value::Number(x), Value::Number(y)) => {
+                x.as_f64().partial_cmp(&y.as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (x, y) => x.to_string().cmp(&y.to_string()),
+        };
+        let ord = if order_key == "_key" {
+            by_key()
+        } else {
+            a.1.cmp(&b.1).then_with(|| by_key().reverse())
+        };
+        if descending { ord.reverse() } else { ord }
+    });
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(1);
+    let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let total: u64 = counts.iter().map(|c| c.1).sum();
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let mut buckets = Vec::new();
+    let mut shown: u64 = 0;
+    for (key, count, ids) in counts.into_iter().filter(|c| c.1 >= min_doc_count).take(size) {
+        shown += count;
+        let mut b = json!({"key": key, "doc_count": count});
+        if let Some(subs) = sub_aggs.as_ref().and_then(|s| s.as_object()) {
+            let narrowed = Some(json!({"bool": {"filter": [
+                {"ids": {"values": ids}},
+                query.clone(),
+            ]}}));
+            for (n, d) in subs {
+                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            }
+        }
+        buckets.push(b);
+    }
+    Ok(json!({
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": total - shown,
+        "buckets": buckets,
+    }))
+}
+
+/// A script's result as a bucket key: a number where the field is numeric,
+/// else the text of it. A value that holds itself has no key.
+fn scripted_key(
+    v: &crate::painless::Value,
+    numeric: Option<bool>,
+    index: &str,
+) -> std::result::Result<Value, Response> {
+    use crate::painless::Value as PV;
+    if v.try_json().is_err() {
+        return Err(crate::search::search_shard_failure(
+            "illegal_argument_exception",
+            "Iterable object is self-referencing itself (ScriptBytesValues value)",
+            index,
+        ));
+    }
+    Ok(match (numeric, v) {
+        (Some(true), PV::Int(n) | PV::Long(n)) => json!(*n as f64),
+        (Some(true), PV::Float(f) | PV::Double(f)) => json!(f),
+        (Some(true), PV::Bool(b)) => json!(if *b { 1.0 } else { 0.0 }),
+        (Some(true), other) => {
+            other.as_f64().map(|f| json!(f)).unwrap_or_else(|| json!(other.as_text()))
+        }
+        (_, PV::Str(s)) => json!(s.as_ref()),
+        (_, PV::Date { .. }) => json!(v.as_text()),
+        (_, other) => json!(other.as_text()),
+    })
+}

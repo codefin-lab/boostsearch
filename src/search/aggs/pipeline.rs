@@ -158,6 +158,77 @@ pub(crate) fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str,
         return;
     }
 
+    // a script over the buckets: `bucket_script` adds a value from the
+    // metrics each path names, `bucket_selector` keeps the buckets it is true
+    // for, and `moving_fn` sees a window of the values before each bucket
+    if matches!(kind.as_str(), "bucket_script" | "bucket_selector" | "moving_fn") {
+        let spec = def.get(&kind).cloned().unwrap_or(json!({}));
+        let Some(script) = spec.get("script") else { return };
+        let compiled = match crate::painless::contexts::Compiled::of(script, &|_| None) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if kind == "moving_fn" {
+            let window = spec.get("window").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            let shift = spec.get("shift").and_then(|v| v.as_i64()).unwrap_or(0);
+            let all: Vec<Option<f64>> = buckets.iter().map(|b| read(b)).collect();
+            for (i, b) in buckets.iter_mut().enumerate() {
+                // the window ends just before this bucket, moved by the shift
+                let end = (i as i64 + shift).max(0) as usize;
+                let start = end.saturating_sub(window);
+                let values: Vec<f64> = all[start.min(all.len())..end.min(all.len())]
+                    .iter()
+                    .filter_map(|v| *v)
+                    .collect();
+                let mut runner =
+                    crate::painless::contexts::Runner::new(&compiled.params).with_values(values);
+                let made = runner.run(&compiled.script).ok().and_then(|v| v.as_f64());
+                b[name] = json!({"value": made.filter(|m| m.is_finite())});
+            }
+            return;
+        }
+        // each named path is a parameter the script reads
+        let paths: Vec<(String, String)> = match spec.get("buckets_path") {
+            Some(Value::String(one)) => vec![("_value".to_string(), one.clone())],
+            Some(Value::Object(o)) => o
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|p| (k.clone(), p.to_string())))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let snapshot = buckets.clone();
+        let mut kept = Vec::new();
+        for (i, b) in buckets.iter_mut().enumerate() {
+            let mut params = compiled.params.clone();
+            let mut missing = false;
+            for (key, path) in &paths {
+                match value_at_path(&snapshot[i], path) {
+                    Some(v) => params[key.clone()] = json!(v),
+                    None => missing = true,
+                }
+            }
+            if missing {
+                kept.push(true);
+                continue;
+            }
+            let mut runner = crate::painless::contexts::Runner::new(&params);
+            let made = runner.run(&compiled.script).ok();
+            if kind == "bucket_selector" {
+                kept.push(made.and_then(|v| v.truthy()).unwrap_or(false));
+            } else {
+                kept.push(true);
+                if let Some(v) = made.and_then(|v| v.as_f64()) {
+                    b[name] = json!({"value": v});
+                }
+            }
+        }
+        if kind == "bucket_selector" {
+            let mut keep = kept.into_iter();
+            buckets.retain(|_| keep.next().unwrap_or(true));
+        }
+        return;
+    }
+
     let mut running = 0.0f64;
     let mut previous: Option<f64> = None;
     for b in buckets.iter_mut() {
@@ -354,4 +425,41 @@ pub(crate) fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
             cur.get("value").and_then(|v| v.as_f64()).or_else(|| cur.as_f64())
         })
         .collect()
+}
+
+/// The number a `buckets_path` names inside one bucket: `the_avg`,
+/// `the_avg.value`, `_count`, or `terms['key']>metric` picking a bucket of a
+/// sibling by its key.
+fn value_at_path(bucket: &Value, path: &str) -> Option<f64> {
+    if path == "_count" {
+        return bucket.get("doc_count").and_then(|v| v.as_f64());
+    }
+    let mut node = bucket;
+    for step in path.split('>') {
+        let (name, key) = match step.split_once('[') {
+            Some((n, k)) => (n, Some(k.trim_end_matches(']').trim_matches(['\'', '"']))),
+            None => (step, None),
+        };
+        let mut parts = name.split('.');
+        let head = parts.next()?;
+        node = node.get(head)?;
+        if let Some(key) = key {
+            let buckets = node.get("buckets")?;
+            node = match buckets {
+                Value::Array(list) => list.iter().find(|b| {
+                    b.get("key")
+                        .map(|k| {
+                            k.as_str().map(|s| s == key).unwrap_or_else(|| k.to_string() == key)
+                        })
+                        .unwrap_or(false)
+                })?,
+                Value::Object(named) => named.get(key)?,
+                _ => return None,
+            };
+        }
+        for part in parts {
+            node = node.get(part)?;
+        }
+    }
+    node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
 }

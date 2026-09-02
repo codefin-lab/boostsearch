@@ -40,7 +40,22 @@ pub(crate) fn write_page(
     named_scores: bool,
     rescored: bool,
     extras: &Extras,
+    script_error: &mut Option<Response>,
 ) -> Vec<Value> {
+    let script_fields: Vec<(String, Value, bool)> = body
+        .get("script_fields")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(name, spec)| {
+                    let script = spec.get("script").cloned().unwrap_or(Value::Null);
+                    let ignore =
+                        spec.get("ignore_failure").and_then(|v| v.as_bool()).unwrap_or(false);
+                    (name.clone(), script, ignore)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     all_hits
         .into_iter()
         .map(|h| {
@@ -157,7 +172,8 @@ pub(crate) fn write_page(
                 // a flat_object is one value unless the request named a path
                 // inside it, in which case it has to be descended
                 let is_leaf = |p: &str| {
-                    g.mapping.is_leaf_type(p)
+                    // a point written as an object is one value, not two
+                    (g.mapping.is_leaf_type(p) || g.mapping.type_of(p) == Some("geo_point"))
                         && !specs.iter().any(|(n, _)| {
                             n.len() > p.len() && n.starts_with(p) && n.as_bytes()[p.len()] == b'.'
                         })
@@ -168,7 +184,24 @@ pub(crate) fn write_page(
                     .map(|(n, _)| n.clone())
                     .filter(|n| g.mapping.field_option(n, "doc_values") != Some(json!(false)))
                     .collect();
-                let raw = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a derived field is not in the source: it is made from it
+                let derived_source = names
+                    .iter()
+                    .any(|n| g.mapping.is_derived(n))
+                    .then(|| crate::store::with_derived(&h.source, &g.mapping));
+                let read_from = derived_source.as_ref().unwrap_or(&h.source);
+                let mut raw = crate::source::extract_fields(read_from, &names, &is_leaf);
+                // a derived object asked for by name is the text its script
+                // emitted, not the object read out of that text
+                for name in &names {
+                    if g.mapping.is_derived(name)
+                        && g.mapping.type_of(name) == Some("object")
+                        && let Some(text) =
+                            crate::store::derived_text_of(&h.source, &g.mapping, name)
+                    {
+                        raw.insert(name.clone(), text);
+                    }
+                }
                 // A field may be asked for more than once, each time with its
                 // own format, and each asking adds its values to the one list
                 // the field is reported under.
@@ -240,6 +273,39 @@ pub(crate) fn write_page(
                 if let Some(Value::Object(existing)) = hit.get("fields") {
                     for (k, v) in existing {
                         f.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                if !f.is_empty() {
+                    hit["fields"] = Value::Object(f);
+                }
+            }
+            // a script field is whatever its script returns for the document
+            if !script_fields.is_empty() && script_error.is_none() {
+                let g = searchers[h.shard_idx].2.read();
+                let expanded = crate::store::expand_for_indexing(h.source.clone(), &g.mapping);
+                let mut f = match hit.get("fields") {
+                    Some(Value::Object(o)) => o.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                for (name, script, ignore) in &script_fields {
+                    match crate::painless::contexts::run_on_doc(
+                        script,
+                        &expanded,
+                        &g.mapping,
+                        h.score as f64,
+                    ) {
+                        Ok(v) => {
+                            let out = match v.to_json() {
+                                Value::Array(a) => Value::Array(a),
+                                Value::Null => continue,
+                                other => Value::Array(vec![other]),
+                            };
+                            f.insert(name.clone(), out);
+                        }
+                        Err(_) if *ignore => {}
+                        Err(e) => {
+                            *script_error = Some(crate::search::search_script_failure(e, &h.index));
+                        }
                     }
                 }
                 if !f.is_empty() {

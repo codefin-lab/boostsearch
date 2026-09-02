@@ -19,6 +19,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 nested: None,
                 nested_filter: None,
                 numeric_type: None,
+                script: None,
             }),
             Value::Object(o) => {
                 for (field, opts) in o {
@@ -58,6 +59,16 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .get("numeric_type")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_ascii_lowercase());
+                    // `_script` sorts by what a script makes of each document
+                    let script = (field == "_script").then(|| {
+                        (
+                            opts.get("script").cloned().unwrap_or(Value::Null),
+                            opts.get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("number")
+                                .to_string(),
+                        )
+                    });
                     out.push(SortKey {
                         field,
                         desc,
@@ -66,6 +77,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         nested,
                         nested_filter,
                         numeric_type,
+                        script,
                     });
                 }
             }
@@ -372,4 +384,36 @@ pub(crate) fn sort_by_filtered_nested(
             }
         }
     }
+}
+
+/// Give each candidate the value its `_script` sort keys make of it.
+pub(crate) fn sort_by_script(
+    cands: &mut [Cand],
+    searchers: &Searchers,
+    sort_keys: &[SortKey],
+) -> std::result::Result<(), Response> {
+    for (i, key) in sort_keys.iter().enumerate() {
+        let Some((spec, kind)) = key.script.as_ref() else { continue };
+        for c in cands.iter_mut() {
+            let (name, searcher, st) = &searchers[c.shard];
+            let g = st.read();
+            let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+            let expanded = crate::store::expand_for_indexing(src, &g.mapping);
+            let made =
+                crate::painless::contexts::run_on_doc(spec, &expanded, &g.mapping, c.score as f64)
+                    .map_err(|e| crate::search::search_script_failure(e, name))?;
+            let value = if kind == "string" {
+                if made.is_null() { SortValue::Missing } else { SortValue::Str(made.as_text()) }
+            } else {
+                match made.as_f64() {
+                    Some(n) => SortValue::F64(n),
+                    None => SortValue::Missing,
+                }
+            };
+            if let Some(slot) = c.sort.get_mut(i) {
+                *slot = value;
+            }
+        }
+    }
+    Ok(())
 }

@@ -117,6 +117,29 @@ pub(crate) fn check_agg_node(
     let Some(o) = node.as_object() else { return Ok(()) };
     for (name, def) in o {
         check_agg_params(name, def, owner)?;
+        // a derived field has no index of its own to read frequencies or
+        // distances from, which these aggregations need
+        if let Some(field) = def.get("field").and_then(|f| f.as_str())
+            && ctx.mapping.is_derived(field)
+        {
+            match name.as_str() {
+                "significant_terms" | "significant_text" => {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!("Aggregation [{name}] is not supported on derived field [{field}]"),
+                    ));
+                }
+                "geo_distance" => {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "aggregation_execution_exception",
+                        format!("Aggregation [{name}] is not supported on derived field [{field}]"),
+                    ));
+                }
+                _ => {}
+            }
+        }
         // a flat_object holds whatever it was given, so there is nothing of a
         // known type under it to aggregate over
         if let Some(field) = def.get("field").and_then(|f| f.as_str()) {
@@ -175,7 +198,14 @@ pub(crate) fn check_agg_node(
                     continue;
                 }
                 let field = def.get("field").and_then(|f| f.as_str()).unwrap_or("");
-                let base = field.strip_suffix(".keyword").unwrap_or(field);
+                let base = match field.strip_suffix(".keyword") {
+                    Some(parent)
+                        if !matches!(ctx.mapping.type_of(parent), Some("object" | "nested")) =>
+                    {
+                        parent
+                    }
+                    _ => field,
+                };
                 if !matches!(
                     ctx.mapping.type_of(base),
                     None | Some("keyword" | "text" | "wildcard")

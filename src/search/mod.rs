@@ -127,6 +127,9 @@ pub(crate) struct SortKey {
     /// the width the values are read as, where the caller asked for one other
     /// than the field's own
     numeric_type: Option<String>,
+    /// a `_script` sort: the script that makes each document's value, and
+    /// whether it is read as a number or as text
+    script: Option<(Value, String)>,
 }
 
 /// One segment's readers for one sort field: the strings, the numbers, and
@@ -434,6 +437,7 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
                     nested: None,
                     nested_filter: None,
                     numeric_type: None,
+                    script: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);
                 match ord {

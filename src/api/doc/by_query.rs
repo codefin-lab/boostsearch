@@ -522,15 +522,18 @@ pub async fn update_by_query(
     if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
     }
-    // a script would say what to change; without one the walk rewrites each
+    // a script says what to change; without one the walk rewrites each
     // document as it stands, which is what gives it a new version
-    if body.get("script").is_some() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            "scripts are not supported yet",
-        );
-    }
+    let script = match body.get("script") {
+        Some(spec) => {
+            match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
+                Ok(c) => Some(c),
+                Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
+                Err(e) => return crate::api::script_failure(e),
+            }
+        }
+        None => None,
+    };
     let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
@@ -553,7 +556,51 @@ pub async fn update_by_query(
             }
             continue;
         }
-        match write_doc_raw(&mut g, &seen.id, seen.source.clone(), "index", None) {
+        // the script sees the document in `ctx` and may change it, leave
+        // it, or have it deleted
+        let mut next = seen.source.clone();
+        let mut op = "index";
+        if let Some(compiled) = &script {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let ctx = crate::painless::contexts::update_ctx(
+                &g.name,
+                &seen.id,
+                g.version_of(&seen.id),
+                &seen.source,
+                now,
+                "index",
+            );
+            let mut runner =
+                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
+            if let Err(e) = runner.run(&compiled.script) {
+                return crate::api::script_failure(e);
+            }
+            match scripted_change(&ctx, &seen.id) {
+                Ok((changed_op, source)) => {
+                    op = changed_op;
+                    next = source;
+                }
+                Err(reason) => {
+                    return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
+                }
+            }
+        }
+        match op {
+            "noop" => {
+                tally.noops += 1;
+                continue;
+            }
+            "delete" => {
+                let _ = crate::api::doc::delete_doc(&mut g, &seen.id);
+                tally.deleted += 1;
+                continue;
+            }
+            _ => {}
+        }
+        match write_doc_raw(&mut g, &seen.id, next, "index", None) {
             Ok(_) => tally.updated += 1,
             Err(_) => {
                 tally.version_conflicts += 1;
@@ -564,6 +611,7 @@ pub async fn update_by_query(
             }
         }
     }
+    drop(script);
     for name in store.resolve(&index) {
         if let Some(st) = store.get(&name) {
             let _ = st.write().refresh();
@@ -585,13 +633,16 @@ pub async fn reindex(
     if let Some(complaint) = complaint(&p, &body) {
         return complaint;
     }
-    if body.get("script").is_some() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            "scripts are not supported yet",
-        );
-    }
+    let script = match body.get("script") {
+        Some(spec) => {
+            match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
+                Ok(c) => Some(c),
+                Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
+                Err(e) => return crate::api::script_failure(e),
+            }
+        }
+        None => None,
+    };
     let source = body.get("source").cloned().unwrap_or_else(|| json!({}));
     let dest = body.get("dest").cloned().unwrap_or_else(|| json!({}));
     if source.get("remote").is_some() {
@@ -635,7 +686,9 @@ pub async fn reindex(
     {
         return complaint;
     }
-    if store.ensure(&to).is_err() {
+    // with a script, the destination is made only when a document is
+    // written to it: the script may send them all elsewhere, or drop them
+    if script.is_none() && store.ensure(&to).is_err() {
         return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "cannot open dest");
     }
     if let Some(failure) = too_few_copies(&store, &to, &p) {
@@ -643,6 +696,9 @@ pub async fn reindex(
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
     }
     let mut tally = Tally { total: hits.len(), ..Default::default() };
+    // every index a document was written to is refreshed at the end; a
+    // script may have sent some elsewhere
+    let mut written: Vec<String> = vec![to.clone()];
     // where a destination names a routing, it decides which shard each
     // document lands on: `=value` writes them all under one, `discard` drops
     // the one the source carried, and `keep` leaves it as it stands
@@ -652,20 +708,115 @@ pub async fn reindex(
         if let Some(fields) = kept.as_ref() {
             document = only_these(&document, fields);
         }
-        let Some(st) = store.get(&to) else { continue };
+        // the script may send the document elsewhere, rename it, route it,
+        // or say it is not to be written at all
+        let mut to = to.clone();
+        let mut id = seen.id.clone();
+        let mut scripted_routing: Option<String> = None;
+        let mut op_asked = "index";
+        if let Some(compiled) = &script {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let ctx = crate::painless::contexts::update_ctx(&to, &id, 1, &document, now, "index");
+            let mut runner =
+                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
+            if let Err(e) = runner.run(&compiled.script) {
+                return crate::api::script_failure(e);
+            }
+            let extra = crate::painless::contexts::ctx_extra_keys(&ctx);
+            if let Some(junk) = extra.first() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("Invalid fields added to context [{junk}]"),
+                );
+            }
+            let (op, src, changed_id, changed_routing) =
+                match crate::painless::contexts::read_ctx(&ctx) {
+                    Ok(read) => read,
+                    Err(reason) => {
+                        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
+                    }
+                };
+            if let crate::painless::Value::Map(m) = &ctx
+                && let Some(index_now) =
+                    crate::painless::value::map_get(m, &crate::painless::Value::str("_index"))
+            {
+                to = index_now.as_text();
+            }
+            match op.as_str() {
+                "noop" => {
+                    tally.noops += 1;
+                    continue;
+                }
+                "delete" => {
+                    // the document deleted is the one the script named
+                    let target = changed_id.clone().unwrap_or_else(|| id.clone());
+                    if let Some(st) = store.get(&to) {
+                        let _ = crate::api::doc::delete_doc(&mut st.write(), &target);
+                    }
+                    tally.deleted += 1;
+                    continue;
+                }
+                "index" | "create" => op_asked = if op == "create" { "create" } else { "index" },
+                other => {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "Operation type [{other}] not allowed, only [noop, index, delete] \
+                             are allowed"
+                        ),
+                    );
+                }
+            }
+            document = src;
+            if let Some(new_id) = changed_id {
+                id = new_id;
+            } else if let crate::painless::Value::Map(m) = &ctx
+                && crate::painless::value::map_get(m, &crate::painless::Value::str("_id"))
+                    .map(|v| v.is_null())
+                    .unwrap_or(false)
+            {
+                // an id set to nothing asks for one to be made up
+                id = String::new();
+            }
+            scripted_routing = changed_routing;
+        }
+        // the destination is made on the first document written to it, so a
+        // script that sends every document elsewhere, or drops them all,
+        // leaves no empty index behind
+        let st = match store.get(&to) {
+            Some(st) => st,
+            None => match store.ensure(&to) {
+                Ok(st) => st,
+                Err(_) => continue,
+            },
+        };
         let mut g = st.write();
+        if !written.contains(&to) {
+            written.push(to.clone());
+        }
+        if id.is_empty() {
+            id = g.next_auto_id();
+        }
+        if let Some(r) = scripted_routing {
+            g.routing.insert(id.clone(), r);
+        }
         match routing.as_deref() {
             Some("discard") => {
-                g.routing.remove(&seen.id);
+                g.routing.remove(&id);
             }
             Some(named) if named.starts_with('=') => {
-                g.routing.insert(seen.id.clone(), named[1..].to_string());
+                g.routing.insert(id.clone(), named[1..].to_string());
             }
             _ => {}
         }
-        let existed = crate::api::doc::exists_doc(&g, &seen.id);
-        let op = if create_only { "create" } else { "index" };
-        match write_doc_raw(&mut g, &seen.id, document, op, None) {
+        let existed = crate::api::doc::exists_doc(&g, &id);
+        let op = if create_only || op_asked == "create" { "create" } else { "index" };
+        match write_doc_raw(&mut g, &id, document, op, None) {
             Ok(_) if existed => tally.updated += 1,
             Ok(_) => tally.created += 1,
             Err(_) => {
@@ -689,9 +840,12 @@ pub async fn reindex(
             }
         }
     }
-    if let Some(st) = store.get(&to) {
-        let _ = st.write().refresh();
+    for name in &written {
+        if let Some(st) = store.get(name) {
+            let _ = st.write().refresh();
+        }
     }
+    drop(script);
     finish(&store, tally, started, &p, &from, batch_size(&p, &source)).await
 }
 
@@ -905,4 +1059,30 @@ pub async fn rethrottle(
             "node_failures": [],
         }),
     )
+}
+
+/// What an update script asked for: the operation and the document as it
+/// left `ctx`, or why the request cannot be honoured.
+fn scripted_change(
+    ctx: &crate::painless::Value,
+    id: &str,
+) -> std::result::Result<(&'static str, Value), String> {
+    let extra = crate::painless::contexts::ctx_extra_keys(ctx);
+    if let Some(junk) = extra.first() {
+        return Err(format!("Invalid fields added to context [{junk}]"));
+    }
+    let (op, source, changed_id, _) = crate::painless::contexts::read_ctx(ctx)?;
+    if changed_id.as_deref().map(|c| c != id).unwrap_or(false) {
+        return Err("Modifying [_id] not allowed".into());
+    }
+    Ok(match op.as_str() {
+        "noop" | "none" => ("noop", source),
+        "delete" => ("delete", source),
+        "index" => ("index", source),
+        other => {
+            return Err(format!(
+                "Operation type [{other}] not allowed, only [noop, index, delete] are allowed"
+            ));
+        }
+    })
 }

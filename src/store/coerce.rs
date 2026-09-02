@@ -375,9 +375,15 @@ pub(crate) fn coerce_leaf(v: &Value, ty: Option<&str>) -> Option<Value> {
 /// does not collide with the parent being a scalar.
 pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     let subs = mapping.normalized_subfields();
+    // a derived field reads the source as it was sent, so that is kept
+    // aside where there are any to make
+    let original = (!mapping.derived_fields().is_empty()).then(|| source.clone());
     // the document is coerced where it stands: it was cloned for this once per
     // write, which for a bulk of large documents is a copy of the whole body
     let mut out = source;
+    if let Some(original) = &original {
+        super::derive_into(&mut out, original, mapping);
+    }
     coerce_leaves(&mut out, &mut String::new(), mapping);
     fill_open_ranges(&mut out, mapping);
     gather_flat_objects(&mut out, mapping);

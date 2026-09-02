@@ -42,7 +42,10 @@ Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup)
 
 def load_api_specs():
     specs = {}
-    for f in API_DIR.glob("*.json"):
+    module_apis = pathlib.Path("study/OpenSearch").glob(
+        "*/*/src/yamlRestTest/resources/rest-api-spec/api/*.json"
+    )
+    for f in [*API_DIR.glob("*.json"), *module_apis]:
         if f.name == "_common.json":
             continue
         try:
@@ -306,6 +309,20 @@ class Runner:
                 if float(actual) != float(expected):
                     raise Failure(f"match {path}: {actual!r} != {expected!r}")
                 continue
+            # YAML reads an unquoted date as a datetime; the wire carries text
+            if isinstance(expected, (datetime.datetime, datetime.date)) and isinstance(actual, str):
+                try:
+                    got = datetime.datetime.fromisoformat(actual.replace("Z", "+00:00"))
+                    if isinstance(expected, datetime.datetime) and expected.tzinfo is None:
+                        expected = expected.replace(tzinfo=datetime.timezone.utc)
+                    if got.tzinfo is None:
+                        got = got.replace(tzinfo=datetime.timezone.utc)
+                    if isinstance(expected, datetime.date) and not isinstance(expected, datetime.datetime):
+                        expected = datetime.datetime(expected.year, expected.month, expected.day, tzinfo=datetime.timezone.utc)
+                    if got == expected:
+                        continue
+                except ValueError:
+                    pass
             if actual != expected:
                 raise Failure(f"match {path}: {actual!r} != {expected!r}")
 

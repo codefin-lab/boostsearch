@@ -132,6 +132,10 @@ pub(crate) fn run_peeled_agg(
         run_auto_date_histogram(store, targets, query_json, def)
     } else if def.get("date_range").is_some() {
         run_date_range_agg(store, targets, query_json, def)
+    } else if def.pointer("/terms/script").is_some() {
+        run_scripted_terms_agg(store, targets, query_json, def, weighted)
+    } else if def.get("scripted_metric").is_some() {
+        run_scripted_metric_agg(store, targets, query_json, def)
     } else if def
         .get("terms")
         .and_then(|t| t.get("field"))
@@ -392,12 +396,24 @@ pub(crate) fn run_matrix_stats_agg(
     let mode = spec.get("mode").and_then(|v| v.as_str()).unwrap_or("avg").to_string();
     // a document with no value for a field may be counted as holding one
     let missing = spec.get("missing").cloned().unwrap_or_else(|| json!({}));
+    // a derived field is made from the whole source
+    let derived_in = targets.iter().filter_map(|n| store.get(n)).find_map(|st| {
+        let g = st.read();
+        fields.iter().any(|f| g.mapping.is_derived(f)).then(|| g.mapping.clone())
+    });
     let probe = json!({
         "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
         "size": 10_000,
-        "_source": fields.clone(),
+        "_source": if derived_in.is_some() { json!(true) } else { json!(fields.clone()) },
     });
-    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    if let Some(m) = &derived_in {
+        for hit in answer.hits.iter_mut() {
+            if let Some(src) = hit.get("_source") {
+                hit["_source"] = crate::store::with_derived(src, m);
+            }
+        }
+    }
     // only the documents that hold every field count, which is what makes a
     // covariance a covariance
     // which of the fields are kept at single precision: the ones no mapping
@@ -500,9 +516,17 @@ pub(crate) fn run_matrix_stats_agg(
             "correlation": correlation,
         }));
     }
-    // the fields are named back in the order OpenSearch names them
-    fields_out.sort_by(|a, b| {
-        b.get("name").and_then(|v| v.as_str()).cmp(&a.get("name").and_then(|v| v.as_str()))
+    // the fields are named back in the order OpenSearch names them, which
+    // is the order its hash map happens to keep them in: by the bucket the
+    // name's Java hash lands in, and by the request where two share one
+    let bucket_of = |name: &str| -> u32 {
+        let h = name.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
+        (h ^ (h >> 16)) & 15
+    };
+    let asked = |name: &str| fields.iter().position(|f| f == name).unwrap_or(usize::MAX);
+    fields_out.sort_by_key(|f| {
+        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        (bucket_of(name), asked(name))
     });
     Ok(json!({"doc_count": count, "fields": fields_out}))
 }
@@ -535,8 +559,15 @@ pub(crate) fn run_sampler_agg(
         "size": (most.max(1) * per_value.max(1)).saturating_mul(10).min(10_000),
         "_source": false,
     });
+    // a derived field is made from the whole source
+    let derived_in = field.as_deref().and_then(|f| {
+        targets.iter().filter_map(|n| store.get(n)).find_map(|st| {
+            let g = st.read();
+            g.mapping.is_derived(f).then(|| g.mapping.clone())
+        })
+    });
     if let Some(field) = field.as_deref() {
-        probe["_source"] = json!([field]);
+        probe["_source"] = if derived_in.is_some() { json!(true) } else { json!([field]) };
     }
     let found = run(store, &targets.join(","), &probe, &Params::new())?;
     let mut kept: Vec<String> = Vec::new();
@@ -544,8 +575,13 @@ pub(crate) fn run_sampler_agg(
     for hit in &found.hits {
         let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
         if let (Some(field), true) = (field.as_deref(), diversified.is_some()) {
-            let value = hit
-                .pointer(&format!("/_source/{}", field.replace('.', "/")))
+            let made = derived_in
+                .as_ref()
+                .and_then(|m| hit.get("_source").map(|src| crate::store::with_derived(src, m)));
+            let value = made
+                .as_ref()
+                .and_then(|src| src.pointer(&format!("/{}", field.replace('.', "/"))))
+                .or_else(|| hit.pointer(&format!("/_source/{}", field.replace('.', "/"))))
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),

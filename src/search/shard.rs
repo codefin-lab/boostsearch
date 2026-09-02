@@ -274,6 +274,13 @@ pub(crate) fn search_one_shard(
                 // the object, not to the document, so a sort that does not
                 // say which object it reads inside finds nothing -- which
                 // is what OpenSearch's resolveNested returning null means.
+                // a script's value is worked out once the candidates are
+                // known; while collecting there is nothing to read
+                _ if k.script.is_some() => SortSource::Column {
+                    name: "_bs_no_such_column".to_string(),
+                    desc: k.desc,
+                    mode: k.mode.clone(),
+                },
                 _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
                     SortSource::Column {
                         name: "_bs_no_such_column".to_string(),
@@ -298,7 +305,12 @@ pub(crate) fn search_one_shard(
                 sources,
                 missing_last: sort_keys.iter().map(|k| k.missing_last).collect(),
                 desc,
-                limit: want.max(1),
+                limit: if sort_keys.iter().any(|k| k.script.is_some()) {
+                    // every match has to reach the script, which sorts them
+                    10_000.max(want)
+                } else {
+                    want.max(1)
+                },
                 after: search_after.clone(),
             },
             agg_collector,

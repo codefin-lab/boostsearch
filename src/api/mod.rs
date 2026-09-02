@@ -27,6 +27,8 @@ mod datastream;
 pub use datastream::*;
 mod doc;
 pub use doc::*;
+mod scripts;
+pub use scripts::*;
 mod mustache;
 pub use mustache::*;
 mod rank_eval;

@@ -18,6 +18,8 @@ mod coerce;
 pub use coerce::*;
 mod dates;
 pub use dates::*;
+mod derive;
+pub use derive::*;
 mod ids;
 mod mapping;
 mod net;
@@ -163,6 +165,8 @@ pub struct Mapping {
     flats: Vec<String>,
     shingled: Vec<String>,
     nanos: Vec<String>,
+    /// the fields a script makes from the source, as (name, definition)
+    derived: Vec<(String, Value)>,
 }
 
 impl Mapping {}

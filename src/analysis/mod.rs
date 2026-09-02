@@ -100,6 +100,13 @@ enum Source {
 /// One step of a chain, in the order OpenSearch writes them.
 #[derive(Clone, Debug)]
 pub enum Step {
+    /// the filters inside apply to a token only where the script says so
+    Condition {
+        script: String,
+        inner: Vec<Step>,
+    },
+    /// a token stays only where the script says so
+    Predicate(String),
     Lowercase,
     AsciiFolding,
     Stop(Vec<String>),
@@ -809,6 +816,33 @@ fn path_hierarchy(text: &str, delimiter: char, replacement: char) -> Vec<Token> 
 }
 
 /// Steps BoostCore has no filter for, or where OpenSearch's order differs.
+/// A script over one token at a time, answering whether it holds: the
+/// token is `token`, with its term, position, offsets and the rest.
+fn token_judge(script: &str) -> Option<Box<dyn Fn(&Token, Option<usize>) -> bool>> {
+    let compiled = crate::painless::Script::compile(script).ok()?;
+    Some(Box::new(move |tok: &Token, previous: Option<usize>| -> bool {
+        use crate::painless::Value as V;
+        let (term, position, start, end, length) = tok;
+        let increment = match previous {
+            Some(p) => position.saturating_sub(p) as i64,
+            None => 1,
+        };
+        let token = V::map(vec![
+            (V::str("term"), V::str(term)),
+            (V::str("position"), V::Int(*position as i64)),
+            (V::str("positionIncrement"), V::Int(increment)),
+            (V::str("positionLength"), V::Int((*length).max(1) as i64)),
+            (V::str("startOffset"), V::Int(*start as i64)),
+            (V::str("endOffset"), V::Int(*end as i64)),
+            (V::str("type"), V::str("word")),
+            (V::str("keyword"), V::Bool(false)),
+        ]);
+        let mut runner = crate::painless::contexts::Runner::new(&serde_json::json!({}));
+        runner.token = Some(token);
+        runner.run(&compiled).ok().and_then(|v| v.truthy()).unwrap_or(false)
+    }))
+}
+
 fn apply_step(
     step: &Step,
     tokens: Vec<Token>,
@@ -832,6 +866,37 @@ fn apply_step(
         return out;
     }
     match step {
+        Step::Predicate(script) => {
+            let judge = token_judge(script);
+            let mut previous: Option<usize> = None;
+            tokens
+                .into_iter()
+                .filter(|tok| {
+                    let keep = judge.as_ref().map(|j| j(tok, previous)).unwrap_or(true);
+                    previous = Some(tok.1);
+                    keep
+                })
+                .collect()
+        }
+        Step::Condition { script, inner } => {
+            let judge = token_judge(script);
+            let mut previous: Option<usize> = None;
+            let mut out = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                let applies = judge.as_ref().map(|j| j(&tok, previous)).unwrap_or(true);
+                previous = Some(tok.1);
+                if applies {
+                    let mut one = vec![tok];
+                    for step in inner {
+                        one = apply_step(step, one, protected);
+                    }
+                    out.extend(one);
+                } else {
+                    out.push(tok);
+                }
+            }
+            out
+        }
         Step::Lowercase => {
             tokens.into_iter().map(|(t, p, a, b, l)| (t.to_lowercase(), p, a, b, l)).collect()
         }
@@ -2542,7 +2607,35 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
     let text = |k: &str| spec.get(k).and_then(|v| v.as_str());
     let one = |k: &str, d: char| text(k).and_then(|s| s.chars().next()).unwrap_or(d);
     let flag = |k: &str| spec.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let script_of = |s: &Value| -> String {
+        match s {
+            Value::String(text) => text.clone(),
+            other => other.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        }
+    };
     let steps = match kind {
+        // a script decides, token by token, whether the filters inside apply
+        "condition" => {
+            let inner: Vec<Step> = spec
+                .get("filter")
+                .and_then(|f| f.as_array())
+                .map(|list| {
+                    list.iter()
+                        .flat_map(|f| match f {
+                            Value::String(name) => token_filter(name, defined).unwrap_or_default(),
+                            other => filter_of_spec(other, defined).unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            vec![Step::Condition {
+                script: spec.get("script").map(script_of).unwrap_or_default(),
+                inner,
+            }]
+        }
+        "predicate_token_filter" => {
+            vec![Step::Predicate(spec.get("script").map(script_of).unwrap_or_default())]
+        }
         "stop" => vec![Step::Stop(match spec.get("stopwords") {
             Some(list) => word_list(list),
             None => stop_words("_english_"),
