@@ -454,6 +454,15 @@ pub async fn get_doc(
             if let Some(r) = g.routing.get(&id) {
                 body["_routing"] = json!(r);
             }
+            // a mapping that keeps the size of each document reports it as
+            // the bytes the source takes, when asked for it as a stored field
+            let asked_size = p
+                .get("stored_fields")
+                .map(|s| s.split(',').any(|f| f.trim() == "_size"))
+                .unwrap_or(false);
+            if asked_size && g.mapping.raw.pointer("/_size/enabled") == Some(&json!(true)) {
+                body["_size"] = json!(src.to_string().len());
+            }
             if let Some(f) = fields {
                 body["fields"] = f;
                 // OpenSearch omits _source when only stored_fields were asked for

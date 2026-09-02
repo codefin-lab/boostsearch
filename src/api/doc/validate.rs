@@ -102,10 +102,7 @@ pub(crate) fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response>
 pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, String, String)> {
     // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
     // out in 2262
-    for (name, kind) in st.mapping.types.iter() {
-        if kind != "date_nanos" {
-            continue;
-        }
+    for name in st.mapping.nanos_fields().iter() {
         let Some(value) = source.pointer(&format!("/{}", name.replace('.', "/"))) else {
             continue;
         };

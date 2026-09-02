@@ -112,6 +112,14 @@ impl<'a> Ctx<'a> {
         {
             return (self.fields.raw, base.to_string(), View::Raw);
         }
+        // a plain keyword sub-field -- no normalizer -- holds what the raw view
+        // of its parent already holds, so it is read from there rather than
+        // from a copy of its own
+        if let Some((parent, _)) = field.rsplit_once('.')
+            && self.mapping.plain_keyword_sub(field)
+        {
+            return (self.fields.raw, parent.to_string(), View::Raw);
+        }
         let v = self.view(field, analyzed);
         (self.field_of(v), field.to_string(), v)
     }
