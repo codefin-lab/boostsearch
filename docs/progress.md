@@ -795,3 +795,47 @@ Three quiet passes after 5.7, security on:
 Passes 1 and 3 win every dimension; pass 2, the transport mismatch, lost
 one line by 0.03 ms. Gates: phase1 398/398, the six security suites and
 the two audit suites at 0 diffs.
+
+## Phase 6 -- Cluster (in progress, 2026-09-03)
+
+Written against a transport and a clock it does not own (ADR 0002), with
+the acknowledgement policy and read routing as parameters (ADR 0003). The
+reference for shapes stays the single OpenSearch node; the reference for
+behaviour under partitions and crashes is the simulation the plan asks
+for, seeded and repeatable.
+
+### 6.1 Transport and clock as traits, framing, node identity (done)
+
+- `src/cluster/clock.rs`: `Clock` (`now` monotonic millis, `wall`),
+  `SystemClock`, and `ManualClock` (advance, set) for the simulation.
+- `src/cluster/transport.rs`: `NodeId` (22 base64url characters of 16
+  random bytes, as OpenSearch names nodes), `Envelope` (kind
+  request/response/error, request id, action name, sender, body), the
+  frame (`u32 length | version | kind | request id | action | from |
+  body`, 512 MiB cap), `Transport` (`local`, `send`, `set_handler`) and
+  `Handler`.
+- `src/cluster/node.rs`: `NodeIdentity` from the settings (`node.name`,
+  `node.roles`, `node.attr.*`, `network.host`, `transport.port`,
+  `transport.bind_host`/`publish_host`, `cluster.name`,
+  `discovery.seed_hosts`, `cluster.initial_cluster_manager_nodes`,
+  `discovery.type`); the node id and the cluster uuid kept under
+  `<data>/_state/`, so a node is the same node after a restart; a fresh
+  ephemeral id each start.
+- `src/cluster/tcp.rs`: the production transport -- a listener on
+  `transport.port` (9300; `BOOSTSEARCH_TRANSPORT_PORT` for tests), one
+  framed connection per peer opened on demand, a handshake
+  (`internal:transport/handshake`) carrying identity and cluster name so
+  a connection is known by the node behind it, delivery by node id.
+- The identity reaches `_nodes`, `_nodes/_local`, `_cluster/state`
+  (`cluster_uuid`, `state_uuid`, `master_node`, the node's entry with its
+  ephemeral id, the coordination configs), `_tasks` (task ids `<node>:n`),
+  `_cat/nodes` (four-character id, `full_id`), `_cat/*` node columns and
+  the audit log's `audit_node_*`.
+
+Checked: framing round-trips and refuses other versions; ids have the
+plugin's shape; the persisted id survives a restart while the ephemeral
+id changes (seen live); two transports on loopback shake hands and
+deliver a message by node id (unit test); `_nodes`, `_cluster/state`,
+`_cat/nodes` and `_tasks` compared with OpenSearch on every identity
+field. Gates unchanged: phase1 398/398, modules 820/895, security and
+audit suites 0 diffs.

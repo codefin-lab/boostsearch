@@ -33,29 +33,30 @@ pub async fn reroute(
                 }),
             );
         }
+        let me = crate::cluster::identity();
         let mut state = json!({
-            "cluster_name": "boostsearch", "cluster_uuid": "_na_",
-            "version": 1, "state_uuid": "_na_",
+            "cluster_name": me.cluster_name, "cluster_uuid": crate::cluster::cluster_uuid(),
+            "version": 1, "state_uuid": crate::cluster::state_uuid(),
         });
         if want("master_node") {
-            state["master_node"] = json!("node-0");
+            state["master_node"] = json!(me.id.as_str());
         }
         if want("cluster_manager_node") {
-            state["cluster_manager_node"] = json!("node-0");
+            state["cluster_manager_node"] = json!(me.id.as_str());
         }
         if want("nodes") {
-            state["nodes"] = json!({"node-0": {
-                "name": "boostsearch", "ephemeral_id": "_na_",
-                "transport_address": "127.0.0.1:9300", "attributes": {}}});
+            state["nodes"] = json!({me.id.as_str(): {
+                "name": me.name, "ephemeral_id": me.ephemeral_id.as_str(),
+                "transport_address": me.transport_address, "attributes": me.attributes}});
         }
         if want("metadata") {
             state["metadata"] = json!({
-                "cluster_uuid": "_na_",
-                "cluster_uuid_committed": false,
+                "cluster_uuid": crate::cluster::cluster_uuid(),
+                "cluster_uuid_committed": true,
                 "cluster_coordination": {
                     "term": 1,
-                    "last_committed_config": ["node-0"],
-                    "last_accepted_config": ["node-0"],
+                    "last_committed_config": [me.id.as_str()],
+                    "last_accepted_config": [me.id.as_str()],
                     "voting_config_exclusions": [],
                 },
                 "templates": legacy_templates(&store),
@@ -124,8 +125,8 @@ pub async fn allocation_explain(
     } else {
         out["current_state"] = json!("started");
         out["current_node"] = json!({
-            "id": "node-0", "name": "boostsearch",
-            "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
+            "id": crate::cluster::identity().id.as_str(), "name": crate::cluster::identity().name,
+            "transport_address": crate::cluster::identity().transport_address, "weight_ranking": 1,
         });
         out["can_remain_on_current_node"] = json!("yes");
         out["can_rebalance_cluster"] = json!("yes");
@@ -140,8 +141,8 @@ pub async fn allocation_explain(
     if flag(&p, "include_disk_info") {
         out["cluster_info"] = json!({
             "nodes": {
-                "node-0": {
-                    "node_name": "boostsearch",
+                crate::cluster::identity().id.as_str(): {
+                    "node_name": crate::cluster::identity().name,
                     "least_available": {
                         "path": "/", "total_bytes": 2_147_483_648u64,
                         "used_bytes": 1_073_741_824u64,
@@ -248,42 +249,42 @@ pub(crate) fn cluster_state_inner(
     }
 
     let mut out = serde_json::Map::new();
-    out.insert("cluster_name".into(), json!("boostsearch"));
-    out.insert("cluster_uuid".into(), json!("_na_"));
+    out.insert("cluster_name".into(), json!(crate::cluster::identity().cluster_name));
+    out.insert("cluster_uuid".into(), json!(crate::cluster::cluster_uuid()));
     if want("version") || all {
         out.insert("version".into(), json!(1));
-        out.insert("state_uuid".into(), json!("_na_"));
+        out.insert("state_uuid".into(), json!(crate::cluster::state_uuid()));
     }
     // the two names are the old and new spellings of one thing, but a
     // request naming one does not ask for the other
     if want("master_node") {
-        out.insert("master_node".into(), json!("node-0"));
+        out.insert("master_node".into(), json!(crate::cluster::identity().id.as_str()));
     }
     if want("cluster_manager_node") {
-        out.insert("cluster_manager_node".into(), json!("node-0"));
+        out.insert("cluster_manager_node".into(), json!(crate::cluster::identity().id.as_str()));
     }
     if want("nodes") {
         out.insert(
             "nodes".into(),
-            json!({"node-0": {
-            "name": "boostsearch", "ephemeral_id": "_na_",
-            "transport_address": "127.0.0.1:9300", "attributes": {}}}),
+            json!({crate::cluster::identity().id.as_str(): {
+            "name": crate::cluster::identity().name, "ephemeral_id": crate::cluster::identity().ephemeral_id.as_str(),
+            "transport_address": crate::cluster::identity().transport_address, "attributes": crate::cluster::identity().attributes}}),
         );
     }
     if want("metadata") {
         out.insert(
             "metadata".into(),
             json!({
-                "cluster_uuid": "_na_",
+                "cluster_uuid": crate::cluster::cluster_uuid(),
                 // whether the cluster's name has been agreed on, and by whom:
                 // one node agrees with itself
-                "cluster_uuid_committed": false,
+                "cluster_uuid_committed": true,
                 "templates": store.get_templates(),
                 "indices": Value::Object(indices.clone()),
                 "cluster_coordination": {
                     "term": 1,
-                    "last_committed_config": ["node-0"],
-                    "last_accepted_config": ["node-0"],
+                    "last_committed_config": [crate::cluster::identity().id.as_str()],
+                    "last_accepted_config": [crate::cluster::identity().id.as_str()],
                     "voting_config_exclusions": store.voting_exclusions(),
                 },
                 // the indices that were deleted, so that a node coming back
@@ -366,7 +367,7 @@ pub(crate) fn cluster_state_inner(
             tables.insert(
                 name.clone(),
                 json!({"shards": {"0": [{
-                    "state": "STARTED", "primary": true, "node": "node-0",
+                    "state": "STARTED", "primary": true, "node": crate::cluster::identity().id.as_str(),
                     "relocating_node": Value::Null, "shard": 0, "index": name,
                 }]}}),
             );
@@ -378,12 +379,15 @@ pub(crate) fn cluster_state_inner(
             .keys()
             .map(|name| {
                 json!({
-                    "state": "STARTED", "primary": true, "node": "node-0",
+                    "state": "STARTED", "primary": true, "node": crate::cluster::identity().id.as_str(),
                     "relocating_node": Value::Null, "shard": 0, "index": name,
                 })
             })
             .collect();
-        out.insert("routing_nodes".into(), json!({"unassigned": [], "nodes": {"node-0": shards}}));
+        out.insert(
+            "routing_nodes".into(),
+            json!({"unassigned": [], "nodes": {crate::cluster::identity().id.as_str(): shards}}),
+        );
     }
     respond(p, Value::Object(out))
 }

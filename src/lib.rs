@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod api;
 pub mod blockstats;
+pub mod cluster;
 pub mod hdr;
 pub mod ingest;
 pub mod tls;

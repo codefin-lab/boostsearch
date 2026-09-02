@@ -82,7 +82,11 @@ pub async fn nodes_stats(
         .unwrap_or_default();
     for m in asked.iter().filter(|m| !m.is_empty() && *m != "stats") {
         // a node id is also allowed in this position, and ours is known
-        if METRICS.contains(&m.as_str()) || matches!(m.as_str(), "node-0" | "_local" | "_all") {
+        if METRICS.contains(&m.as_str())
+            || matches!(m.as_str(), "_local" | "_all")
+            || m == crate::cluster::identity().id.as_str()
+            || *m == crate::cluster::identity().name
+        {
             continue;
         }
         // a near miss is a typo, and naming the metric meant saves a reading
@@ -115,11 +119,12 @@ pub async fn nodes_stats(
     let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
     let mut out = json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "boostsearch",
-        "nodes": {"node-0": {
-            "timestamp": 0, "name": "boostsearch",
-            "transport_address": "127.0.0.1:9300", "host": "127.0.0.1", "ip": "127.0.0.1",
-            "roles": ["cluster_manager", "data", "ingest"], "attributes": {},
+        "cluster_name": crate::cluster::identity().cluster_name,
+        "nodes": {crate::cluster::identity().id.as_str(): {
+            "timestamp": 0, "name": crate::cluster::identity().name,
+            "transport_address": crate::cluster::identity().transport_address,
+            "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host,
+            "roles": crate::cluster::identity().roles, "attributes": crate::cluster::identity().attributes,
             "indices": {
                 "docs": {"count": docs, "deleted": 0},
                 "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
@@ -191,7 +196,9 @@ pub async fn nodes_stats(
     });
     if !index_metrics.is_empty()
         && !index_metrics.iter().any(|m| m == "_all")
-        && let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
+        && let Some(idx) = out
+            .pointer_mut(&format!("/nodes/{}/indices", crate::cluster::identity().id))
+            .and_then(|v| v.as_object_mut())
     {
         // the status counter belongs to indexing, and travels with it
         idx.retain(|k, _| {
@@ -334,7 +341,8 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
         "CPU_USAGE",
         "MEMORY_USAGE",
     ];
-    let row = ["node-0", "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
+    let me = crate::cluster::identity();
+    let row = [me.id.as_str(), "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
     let mut out = String::new();
     if p.get("v").map(|v| v != "false").unwrap_or(false) {
         out.push_str(&cols.join(" "));
@@ -412,12 +420,12 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
         &p,
         json!({
             "_nodes": {"total": 1, "successful": 1, "failed": 0},
-            "cluster_name": "boostsearch",
-            "nodes": {"node-0": {
-                "name": "boostsearch", "transport_address": "127.0.0.1:9300",
-                "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
-                "build_type": "tar", "build_hash": "boostsearch", "roles": ["data", "ingest"],
-                "attributes": {},
+            "cluster_name": crate::cluster::identity().cluster_name,
+            "nodes": {crate::cluster::identity().id.as_str(): {
+                "name": crate::cluster::identity().name, "transport_address": crate::cluster::identity().transport_address,
+                "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host, "version": "3.9.0",
+                "build_type": "tar", "build_hash": "boostsearch", "roles": crate::cluster::identity().roles,
+                "attributes": crate::cluster::identity().attributes,
                 "os": {"refresh_interval_in_millis": 1000,
                        "available_processors": num_cpus(),
                        "allocated_processors": num_cpus()},

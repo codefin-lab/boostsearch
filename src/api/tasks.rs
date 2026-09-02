@@ -31,7 +31,7 @@ pub async fn get_task(
             json!({
                 "completed": true,
                 "task": {
-                    "node": "node-0", "id": 1, "type": "transport",
+                    "node": crate::cluster::identity().id.as_str(), "id": 1, "type": "transport",
                     "action": "indices:data/write/by_query",
                     "description": id,
                     "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": true,
@@ -46,7 +46,10 @@ pub async fn get_task(
     // the id carries what the task was, after the node that ran it
     let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
     // a task named after a node that is not here is a task nobody has heard of
-    if !node.is_empty() && node != "node-0" && node != "boostsearch" {
+    if !node.is_empty()
+        && node != crate::cluster::identity().id.as_str()
+        && node != crate::cluster::identity().name
+    {
         return err(
             StatusCode::NOT_FOUND,
             "resource_not_found_exception",
@@ -69,7 +72,7 @@ pub async fn get_task(
         json!({
             "completed": true,
             "task": {
-                "node": "node-0", "id": 1, "type": "transport",
+                "node": crate::cluster::identity().id.as_str(), "id": 1, "type": "transport",
                 "action": action,
                 "description": what,
                 "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": false,
@@ -88,7 +91,7 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     // the request asking is itself a task, which is the one every caller of
     // this endpoint sees
     let task = json!({
-        "node": "node-0", "id": 1, "type": "transport",
+        "node": crate::cluster::identity().id.as_str(), "id": 1, "type": "transport",
         "action": "cluster:monitor/tasks/lists", "start_time_in_millis": 0,
         "running_time_in_nanos": 0, "cancellable": false,
         "headers": Value::Object(task_headers),
@@ -119,17 +122,23 @@ pub async fn list_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>)
     match p.get("group_by").map(|v| v.as_str()) {
         // `none` asks for them in a plain list, `parents` keyed by their id
         Some("none") => return respond(&p, json!({"tasks": [task]})),
-        Some("parents") => return respond(&p, json!({"tasks": {"node-0:1": task}})),
+        Some("parents") => {
+            return respond(
+                &p,
+                json!({"tasks": {format!("{}:1", crate::cluster::identity().id): task}}),
+            );
+        }
         _ => {}
     }
     respond(
         &p,
         json!({
-            "nodes": {"node-0": {
-                "name": "boostsearch", "transport_address": "127.0.0.1:9300",
+            "nodes": {crate::cluster::identity().id.as_str(): {
+                "name": crate::cluster::identity().name, "transport_address": crate::cluster::identity().transport_address,
+                "attributes": crate::cluster::identity().attributes,
                 "host": "127.0.0.1", "ip": "127.0.0.1",
                 "roles": ["cluster_manager", "data", "ingest"],
-                "tasks": {"node-0:1": task},
+                "tasks": {format!("{}:1", crate::cluster::identity().id): task},
             }},
         }),
     )

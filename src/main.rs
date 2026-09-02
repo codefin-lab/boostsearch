@@ -9,6 +9,7 @@
 mod analysis;
 mod api;
 mod blockstats;
+mod cluster;
 mod hdr;
 mod ingest;
 mod painless;
@@ -362,7 +363,9 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
             "/_plugins/_security/api/audit",
-            get(security::api::audit_get).patch(security::api::audit_patch).fallback(security::api::audit_wrong_method),
+            get(security::api::audit_get)
+                .patch(security::api::audit_patch)
+                .fallback(security::api::audit_wrong_method),
         )
         .route(
             "/_plugins/_security/api/audit/config",
@@ -406,6 +409,15 @@ async fn main() -> anyhow::Result<()> {
     let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
     // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
+    // who this node is: the id kept in the data directory, the name, roles
+    // and addresses from the settings -- fixed before anything reads it
+    let node_settings = tls::node_settings();
+    let data_dir = std::env::var("BOOSTSEARCH_DATA")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from);
+    let identity = cluster::NodeIdentity::load(&node_settings, data_dir.as_deref(), &addr);
+    cluster::set_identity(identity.clone());
     let store = match std::env::var("BOOSTSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
@@ -415,10 +427,21 @@ async fn main() -> anyhow::Result<()> {
     // first request is answered
     api::recover(&store);
     security::audit::attach_store(&store);
+    // the transport: other nodes reach this one here
+    let transport = cluster::tcp::TcpTransport::new(&identity);
+    transport.register();
+    {
+        let t = transport.clone();
+        let bind = identity.transport_bind.clone();
+        tokio::spawn(async move {
+            if let Err(e) = t.listen(&bind).await {
+                eprintln!("boostsearch: transport could not listen on {bind}: {e}");
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
     // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true
-    let node_settings = tls::node_settings();
     let tls_settings = tls::TlsSettings::read(&node_settings);
     if tls_settings.enabled {
         eprintln!("boostsearch listening on https://{addr}");

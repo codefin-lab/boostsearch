@@ -39,10 +39,10 @@ pub(crate) async fn cat_by_name(
         "health" => cat_health(State(store), Query(p)).await,
         "master" | "cluster_manager" => cat_render(
             vec![vec![
-                ("id", "node-0".into()),
+                ("id", crate::cluster::identity().id.as_str().into()),
                 ("host", "127.0.0.1".into()),
                 ("ip", "127.0.0.1".into()),
-                ("node", "boostsearch".into()),
+                ("node", crate::cluster::identity().name.clone().into()),
             ]],
             &p,
         ),
@@ -53,9 +53,10 @@ pub(crate) async fn cat_by_name(
                 (
                     "id",
                     if p.get("full_id").map(|v| v != "false").unwrap_or(false) {
-                        "node-0".to_string()
+                        crate::cluster::identity().id.as_str().to_string()
                     } else {
-                        "node".to_string()
+                        // the short form is the first four characters, as OpenSearch prints it
+                        crate::cluster::identity().id.as_str().chars().take(4).collect()
                     },
                 ),
                 ("ip", "127.0.0.1".into()),
@@ -76,7 +77,7 @@ pub(crate) async fn cat_by_name(
                 ("node.role", "dimr".into()),
                 ("node.roles", "data,ingest".into()),
                 ("cluster_manager", "*".into()),
-                ("name", "boostsearch".into()),
+                ("name", crate::cluster::identity().name.clone().into()),
                 ("diskAvail", "1gb".into()),
                 ("diskTotal", "2gb".into()),
                 ("diskUsed", "1gb".into()),
@@ -217,8 +218,8 @@ pub(crate) async fn cat_by_name(
                         ("docs", if shard == 0 { docs.to_string() } else { "0".into() }),
                         ("store", "0b".into()),
                         ("ip", "127.0.0.1".into()),
-                        ("id", "node-0".into()),
-                        ("node", "boostsearch".into()),
+                        ("id", crate::cluster::identity().id.as_str().into()),
+                        ("node", crate::cluster::identity().name.clone().into()),
                     ]);
                     // a replica has nowhere else to live on a single node, so
                     // it is listed and unassigned
@@ -293,10 +294,10 @@ pub(crate) async fn cat_by_name(
                 }
                 for (field, bytes) in fields {
                     rows.push(vec![
-                        ("id", "node-0".to_string()),
+                        ("id", crate::cluster::identity().id.as_str().to_string()),
                         ("host", "127.0.0.1".to_string()),
                         ("ip", "127.0.0.1".to_string()),
-                        ("node", "boostsearch".to_string()),
+                        ("node", crate::cluster::identity().name.clone()),
                         ("field", field),
                         ("size", readable_bytes(bytes)),
                     ]);
@@ -381,7 +382,7 @@ pub(crate) async fn cat_by_name(
                         ("source_host", "n/a".into()),
                         ("source_node", "n/a".into()),
                         ("target_host", "127.0.0.1".into()),
-                        ("target_node", "boostsearch".into()),
+                        ("target_node", crate::cluster::identity().name.clone().into()),
                         ("repository", "n/a".into()),
                         ("snapshot", "n/a".into()),
                         ("files", "0".into()),
@@ -468,7 +469,7 @@ pub(crate) async fn cat_by_name(
                 .into_iter()
                 .map(|(attr, value)| {
                     vec![
-                        ("node", "boostsearch".to_string()),
+                        ("node", crate::cluster::identity().name.clone()),
                         ("host", "127.0.0.1".to_string()),
                         ("ip", "127.0.0.1".to_string()),
                         ("attr", attr),
