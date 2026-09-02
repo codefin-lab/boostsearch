@@ -454,6 +454,8 @@ pub struct Store {
     /// Snapshots by repository and then by name.
     snapshots: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
     pit_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// who may do what, and whether that is being asked at all
+    pub security: Arc<crate::security::Security>,
 }
 
 impl Store {

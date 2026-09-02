@@ -9,6 +9,8 @@ pub mod api;
 pub mod blockstats;
 pub mod hdr;
 pub mod ingest;
+pub mod tls;
+pub mod security;
 pub mod painless;
 pub mod query;
 pub mod search;

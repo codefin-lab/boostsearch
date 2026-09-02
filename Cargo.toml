@@ -43,6 +43,14 @@ flate2 = "1"
 base64 = "0.22"
 serde_yaml = "0.9"
 bcrypt = "0.15"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+x509-parser = "0.16"
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+tower = { version = "0.5", features = ["util"] }
 fancy-regex = "0.13"
 md5 = "0.7"
 sha3 = "0.10"

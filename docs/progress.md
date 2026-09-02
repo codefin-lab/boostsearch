@@ -352,3 +352,108 @@ Kept as known gaps, each needing more than it is worth:
   regions; our generated algorithm strips it. Two analysis_diff cases.
 - A `char` typed value in an ingest script cannot be told from a one-letter
   string (one ingest-common section).
+
+## Phase 5 -- Security (in progress, 2026-09-02)
+
+Ground truth is the security plugin at tag 3.1.0.0 (`study/security`) and a
+reference container running it (`os-secure`, https 9399). Security is off
+until `plugins.security.disabled: false` (or `BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=false`),
+so every gate that came before runs unchanged.
+
+### 5.1 TLS (done)
+
+- `src/tls.rs`: rustls over the same axum router; `plugins.security.ssl.http.*`
+  from `config/boostsearch.yml` or `BOOSTSEARCH_SSL_HTTP_*`; a self-signed
+  certificate is written to `config/certs/` when none is given; client
+  certificates are accepted when a trust store is named.
+- `_plugins/_security/api/ssl/certs` describes the node's certificates; as
+  in the plugin, a password is refused ("Access denied"), only an admin
+  certificate may read them.
+
+### 5.2 Users, roles, mappings, action groups, tenants (done)
+
+- `src/security/mod.rs`: the configuration model with the plugin's static
+  action groups, roles and tenants embedded and its demo users, roles and
+  mappings as the defaults; persisted as the plugin's YAML under
+  `config/security/`; bcrypt (`$2y$`, 12 rounds) for passwords; wildcard
+  matching (`*`, `?`, `/regex/`); action groups flattened through groups;
+  role mapping by user, backend role, all-of backend roles, and host; a
+  caller's roles listed in Java `HashSet` order, as the plugin lists them.
+- `src/security/api.rs`: `_plugins/_security/api/{internalusers,roles,rolesmapping,actiongroups,tenants}`
+  (GET, PUT, DELETE, PATCH single and whole-kind with JSON Patch),
+  `account` (GET, password change with `current_password`), `authinfo`,
+  `health`, `whoami`, `permissionsinfo`, `securityconfig`, `ssl/certs`;
+  the plugin's words for created/updated/deleted/not found/static/
+  reserved/invalid keys/missing keys; the REST API is open only to the
+  roles in `plugins.security.restapi.roles_enabled`.
+- `src/security/layer.rs`: basic auth with the plugin's 401 (`text/plain`
+  `Unauthorized`, `WWW-Authenticate: Basic realm="OpenSearch Security"`),
+  anonymous auth when `config.yml` allows it, and a per-request `Caller`
+  extension for the handlers.
+- Authentication is cached by a digest of the credentials for
+  `plugins.security.cache.ttl_minutes` (60), emptied on every
+  configuration change, so bcrypt is paid once per credential rather
+  than once per request (without it every request cost ~165 ms).
+
+Checked against the reference: 41 REST API steps (create, update, patch,
+static/reserved refusals, password change, deletion) answer identically;
+0 diffs.
+
+### 5.3 Authorization (done for the REST surface)
+
+- Every request is mapped to the transport action it stands for
+  (`indices:data/read/search`, `indices:admin/mappings/get`, ...) and judged
+  before the handler runs: cluster actions by cluster permissions, index
+  actions by the roles' index patterns (with `${user_name}` and attribute
+  substitution) over the indices the path resolves to; a request naming no
+  index is judged over every index; `do_not_fail_on_forbidden` narrows a
+  partly-allowed request instead of refusing it.
+- A refusal is the plugin's `security_exception`:
+  `no permissions for [action] and User [name=..., backend_roles=[...], requestedTenant=null]`.
+
+Checked against the reference as a limited user (role over `logs-*` with
+`read` and `cluster_composite_ops_ro`): 31 requests across search, get,
+count, write, index create/delete, mapping, settings, `_cat`, cluster,
+bulk/mget/msearch, field_caps, refresh, stats, update, delete_by_query;
+statuses and refusal bodies identical; 0 diffs.
+
+### Still to do in Phase 5
+
+- 5.4 DLS applied inside every query path; 5.5 FLS and field masking
+  across `_source`, fields, docvalue_fields, aggregations, sorts,
+  highlighting, field_caps, mappings and scripts (the role model already
+  carries `dls`, `fls`, `masked_fields`; `IndexRestrictions` computes the
+  caller's view per index).
+- Per-item refusals inside `_bulk`, `_mget`, `_msearch` (today the whole
+  request is judged; the plugin judges each item).
+- 5.6 SAML / OIDC / LDAP; 5.7 audit log; admin client certificates.
+
+### Performance with security on
+
+Measured with `tools/bench_matrix.py` (now taking `BENCH_A`, `BENCH_B` and
+`BENCH_AUTH`): BoostSearch with security on and basic auth on every request,
+against OpenSearch 3.1.0 with no security plugin at all.
+
+| dimension | OpenSearch (plain) | BoostSearch (security, HTTP) | BoostSearch (security, HTTPS) |
+|---|---|---|---|
+| index docs/s | 67,237 / 66,882 | 67,448 | 67,295 |
+| memory | 1.65 GiB | 380 MiB | 365 MiB |
+| match_all p50 | 1.30 ms | 0.42 ms | 0.78 ms |
+| term p50 | 0.98 ms | 0.39 ms | 0.77 ms |
+| match p50 | 1.16 ms | 0.60 ms | 0.95 ms |
+| bool+filter p50 | 1.03 ms | 0.73 ms | 1.03 ms |
+| range p50 | 0.70 ms | 0.57 ms | 0.88 ms |
+| sort_desc p50 | 2.16 ms | 0.99 ms | 1.24 ms |
+| terms_agg p50 | 1.63 ms | 0.67 ms | 0.96 ms |
+| date_histogram p50 | 1.62 ms | 0.88 ms | 1.19 ms |
+| nested_agg p50 | 1.61 ms | 0.80 ms | 1.08 ms |
+| cardinality p50 | 1.56 ms | 0.69 ms | 0.98 ms |
+
+Every dimension won in both runs (the OpenSearch column shows the plain
+reference measured alongside each run; the HTTPS run's OpenSearch latencies
+were within noise of the HTTP run's).
+
+Gates after this work (security off, default): phase1 398/398 (release
+build), modules 820/895 as before. A debug build trips a `debug_assert` in
+BoostCore's `EmptyScorer::seek` during an explain of a cross-fields query;
+release builds are unaffected, and the fix belongs in the fork (filed).
