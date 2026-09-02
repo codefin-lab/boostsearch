@@ -416,6 +416,18 @@ impl Mapping {
         &self.nanos
     }
 
+    /// Whether a path names a keyword sub-field with no normalizer, which is
+    /// served from the raw view of its parent rather than from a copy.
+    pub fn plain_keyword_sub(&self, field: &str) -> bool {
+        let Some((parent, leaf)) = field.rsplit_once('.') else { return false };
+        if self.type_of(field) != Some("keyword") {
+            return false;
+        }
+        let Some(node) = self.raw.pointer(&pointer_of(parent)) else { return false };
+        let Some(sub) = node.get("fields").and_then(|f| f.get(leaf)) else { return false };
+        sub.get("normalizer").is_none()
+    }
+
     /// The format a date path declares, if it declares one.
     pub fn date_format(&self, field: &str) -> Option<&str> {
         self.formats.get(field).map(|s| s.as_str())
@@ -505,6 +517,11 @@ pub(crate) fn collect_normalizers(
                 // a multi-field without a normalizer still needs its own copy
                 // of the value; nothing else populates that path
                 let n = sdef.get("normalizer").and_then(|v| v.as_str()).unwrap_or("");
+                // a plain keyword beside a field holds what the raw view of
+                // the field already holds, and is read from there
+                if n.is_empty() && sdef.get("type").and_then(|t| t.as_str()) == Some("keyword") {
+                    continue;
+                }
                 // the pointer and the full path are worked out here, once,
                 // rather than for every document written
                 let pointer = format!("/{}", path.replace('.', "/"));

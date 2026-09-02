@@ -286,7 +286,7 @@ pub(crate) fn gather_flat_objects(out: &mut Value, mapping: &Mapping) {
     let Some(obj) = out.as_object_mut() else { return };
     for path in flats.iter() {
         let pointer = format!("/{}", path.replace('.', "/"));
-        let Some(node) = obj.get(path.split('.').next().unwrap_or(&path)) else { continue };
+        let Some(node) = obj.get(path.split('.').next().unwrap_or(path)) else { continue };
         let root = Value::Object(obj.clone());
         let Some(node) = root.pointer(&pointer).or(Some(node)) else { continue };
         let mut values = Vec::new();
