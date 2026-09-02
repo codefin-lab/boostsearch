@@ -89,6 +89,7 @@ pub async fn get_source(
         .filter(|_| crate::security::doc_visible(&store, &g, &id))
     {
         Some(mut src) => {
+            crate::security::audit_document_read(&g.name, &id, &src);
             crate::security::narrow_source(&store, &g.name, &mut src);
             axum::Json(filter_source_params(&src, &p)).into_response()
         }

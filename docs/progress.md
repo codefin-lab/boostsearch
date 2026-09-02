@@ -722,3 +722,76 @@ cardinality; two reruns lost four lines each and won cardinality). No
 server change can make a per-request TLS path beat a plaintext one; a
 client that keeps its connection, as every real client does, never sees
 it. Pass 2 is kept for honesty, not as a gate.
+
+### 5.7 Audit log (done, 2026-09-03)
+
+`src/security/audit.rs` writes what the plugin writes, in its fields
+(`audit_category`, `audit_request_layer` REST or TRANSPORT,
+`audit_rest_request_method/path/params/headers`,
+`audit_transport_request_type` as the Java request class,
+`audit_request_privilege`, `audit_trace_indices` / `resolved_indices` /
+`doc_id` / `task_id` / `shard_id`, `audit_request_body` with `password`
+bodies as `__SENSITIVE__`, `audit_compliance_*`, `audit_node_*`,
+`@timestamp` as `yyyy-MM-dd'T'HH:mm:ss.SSS+00:00`, `audit_format_version`
+4), for every category: FAILED_LOGIN, AUTHENTICATED, BAD_HEADERS (with the
+plugin's 403), MISSING_PRIVILEGES, GRANTED_PRIVILEGES (REST for the
+security API, TRANSPORT for actions, and the bulk-of-one grant a single
+document write also gets), INDEX_EVENT (with the auto-create and
+auto-put mapping events a first write raises, the mapping added as the
+body), COMPLIANCE_DOC_WRITE (CREATE/UPDATE/DELETE, JSON-patch diffs or
+stored fields), COMPLIANCE_DOC_READ (watched fields' values),
+COMPLIANCE_INTERNAL_CONFIG_READ/WRITE (the kind document with `__HASH__`
+and its diff). `audit.yml` (the plugin's default embedded) is read and
+written under `config/security/`; its filters (`enabled`, disabled
+categories per layer, `ignore_users`, `ignore_requests`, `ignore_headers`,
+`ignore_url_params`, `exclude_sensitive_headers`, `log_request_body`,
+`resolve_indices`, the compliance section) apply as the plugin applies
+them. The API: `GET /_plugins/_security/api/audit` (`_readonly` +
+`config`), `PUT /audit/config` (the plugin's `Could not parse content of
+request.` for unknown keys or categories, `Attempted to update read-only
+property.` for `plugins.security.audit.config.readonly` paths),
+`PATCH /audit` (`No updates required` when nothing changes), and the
+405 bodies for the other methods. Sinks by `plugins.security.audit.type`:
+`internal_opensearch` (the index `'security-auditlog-'YYYY.MM.dd`, or
+`config.index`, written on the sink's own thread and refreshed per
+record), `debug` and `log4j` (stderr), `webhook` (JSON, TEXT, SLACK,
+URL_PARAMETER_GET/POST), `external_opensearch` (HTTP to `http_endpoints`
+with basic auth), `noop`. Every request's body is now read once in the
+middleware so it can be quoted, and put back untouched.
+
+Checked against the reference: 30 record shapes (one per category, layer
+and operation, produced by the same actions on both sides, compared with
+node, timestamp, task id and remote port set aside): 0 diffs; the audit
+API on 13 calls and the filters on 6 scenarios: 0 diffs.
+
+Not carried: `resolve_bulk_requests` per-item records inside a bulk;
+`external_config` (logging the node's config files at start); Kafka sink;
+`plugins.security.audit.endpoints`/`routes` fan-out to several sinks; the
+compliance diff uses add/replace/remove only (the plugin's library can
+also emit move/copy).
+
+Two costs the audit log first put on the write path and then lost again,
+both found by the write A/B: reading every request body into memory to be
+able to quote it (now read only when a record would quote it, or on a
+refusal), and cloning the whole mapping per document to notice a
+dynamic-mapping change (now `learn_dynamic` reports the names it added).
+Three quiet passes after 5.7, security on:
+
+| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+|---|---|---|---|
+| index docs/s | 60,822 / **97,356** | 60,854 / **93,048** | 52,932 / **92,037** |
+| memory | 1.83 GiB / 392 MiB | 1.84 GiB / 395 MiB | 1.95 GiB / 401 MiB |
+| match_all p50 | 1.38 / 0.43 ms | 1.41 / 0.90 ms | 2.88 / 0.83 ms |
+| term p50 | 1.35 / 0.44 ms | 1.41 / 1.11 ms | 3.35 / 0.85 ms |
+| match p50 | 1.78 / 0.68 ms | 1.67 / 1.28 ms | 3.81 / 1.17 ms |
+| bool+filter p50 | 1.64 / 0.90 ms | 1.50 / 1.25 ms | 3.76 / 1.25 ms |
+| range p50 | 1.22 / 0.59 ms | 1.19 / 1.04 ms | 3.33 / 1.01 ms |
+| sort_desc p50 | 2.64 / 1.03 ms | 2.62 / 1.44 ms | 5.06 / 1.43 ms |
+| terms_agg p50 | 1.28 / 0.67 ms | 1.19 / 1.11 ms | 3.46 / 1.21 ms |
+| date_histogram p50 | 1.55 / 0.93 ms | 1.50 / 1.36 ms | 3.77 / 1.50 ms |
+| nested_agg p50 | 1.35 / 0.79 ms | 1.19 / 1.22 ms | 3.27 / 1.35 ms |
+| cardinality p50 | 1.30 / 0.67 ms | 1.19 / 1.14 ms | 3.26 / 1.17 ms |
+
+Passes 1 and 3 win every dimension; pass 2, the transport mismatch, lost
+one line by 0.03 ms. Gates: phase1 398/398, the six security suites and
+the two audit suites at 0 diffs.

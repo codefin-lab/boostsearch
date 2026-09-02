@@ -137,6 +137,7 @@ pub async fn mget(
             .filter(|_| crate::security::doc_visible(&store, &g, &id))
         {
             Some(mut src) => {
+                crate::security::audit_document_read(&g.name, &id, &src);
                 crate::security::narrow_source(&store, &g.name, &mut src);
                 // a doc may carry its own stored_fields; otherwise the request-level
                 // one applies. Either way it suppresses _source unless asked for.

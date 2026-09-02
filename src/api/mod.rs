@@ -25,7 +25,7 @@ mod cluster;
 pub use cluster::*;
 mod datastream;
 pub use datastream::*;
-mod doc;
+pub(crate) mod doc;
 pub use doc::*;
 mod scripts;
 pub use scripts::*;
@@ -262,3 +262,26 @@ pub const CAT_HEALTH_COLS: &[&str] = &[
 // ------------------------------------------------------------- data streams
 
 // --------------------------------------------------------------- nodes & misc
+
+/// Write one audit record into the audit index, making the index when it
+/// is not there; the caller is the audit sink's own thread.
+pub fn index_audit_document(
+    store: &crate::store::Store,
+    index: &str,
+    doc: &serde_json::Value,
+) -> anyhow::Result<()> {
+    if store.get(index).is_none() {
+        store.create(
+            index,
+            &serde_json::json!({"settings": {"number_of_shards": 1, "number_of_replicas": 0}}),
+        )?;
+    }
+    let Some(st) = store.get(index) else { return Ok(()) };
+    let mut g = st.write();
+    let id = g.next_auto_id();
+    let _ = crate::api::doc::write_doc_versioned(&mut g, &id, doc.clone(), "index", None, None)
+        .map_err(|_| anyhow::anyhow!("audit record refused"))?;
+    // a record is for reading as soon as it is written
+    let _ = g.refresh();
+    Ok(())
+}

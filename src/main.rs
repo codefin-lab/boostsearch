@@ -361,6 +361,14 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_security/api/ssl/certs", get(security::api::certs))
         .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
+            "/_plugins/_security/api/audit",
+            get(security::api::audit_get).patch(security::api::audit_patch).fallback(security::api::audit_wrong_method),
+        )
+        .route(
+            "/_plugins/_security/api/audit/config",
+            put(security::api::audit_put).fallback(security::api::audit_wrong_method),
+        )
+        .route(
             "/_plugins/_security/api/account",
             get(security::api::account).put(security::api::change_password),
         )
@@ -406,6 +414,7 @@ async fn main() -> anyhow::Result<()> {
     // in a translog and nowhere else; it goes back into the index before the
     // first request is answered
     api::recover(&store);
+    security::audit::attach_store(&store);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
     // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true

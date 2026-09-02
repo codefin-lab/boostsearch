@@ -218,12 +218,16 @@ pub async fn bulk(
             }}));
             continue;
         }
+        let was_there = store.get(&idx).is_some();
         let st = match store.ensure(&idx) {
             Ok(s) => s,
             Err(e) => {
                 return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
             }
         };
+        if !was_there {
+            crate::security::audit_index_event(&idx, "indices:admin/auto_create", "{}", false);
+        }
         if !touched.contains(&idx) {
             touched.push(idx.clone());
         }

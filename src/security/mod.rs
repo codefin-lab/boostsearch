@@ -19,6 +19,7 @@ use parking_lot::RwLock;
 use serde_json::{Map, Value, json};
 
 pub mod api;
+pub mod audit;
 pub mod authc;
 pub mod layer;
 pub mod saml;
@@ -1009,6 +1010,8 @@ pub struct Security {
     chain_state: authc::ChainState,
     /// `plugins.security.authcz.admin_dn`: certificates that are the admin
     admin_dns: Vec<String>,
+    /// the audit log, and the sink it writes to
+    pub audit: Arc<audit::AuditLog>,
     pub config: RwLock<SecurityConfig>,
     /// the roles that may use the security REST API
     pub restapi_roles: Vec<String>,
@@ -1060,6 +1063,7 @@ impl Security {
             chain: RwLock::new(chain),
             chain_state: authc::ChainState::new(std::time::Duration::from_secs(ttl_minutes * 60)),
             admin_dns,
+            audit: audit::AuditLog::new(settings, !disabled),
             config: RwLock::new(config),
             restapi_roles,
             salt: get("plugins.security.compliance.salt")
@@ -1463,4 +1467,108 @@ pub fn sso_logout_url(security: &Security, caller: &Caller) -> Option<String> {
         caller.attributes.get("attr.jwt.saml_nif").map(|s| s.as_str()),
         caller.attributes.get("attr.jwt.saml_si").map(|s| s.as_str()),
     )
+}
+
+// ---- the audit log, reached from the document paths ------------------------------
+
+fn audit_of() -> Option<(Arc<audit::AuditLog>, Caller)> {
+    let caller = layer::current_caller()?;
+    let store = audit::attached_store()?;
+    if !store.security.enabled {
+        return None;
+    }
+    Some((store.security.audit.clone(), caller))
+}
+
+/// Whether any write is watched at all: a flag, before the caller is
+/// even looked at, so an unwatched bulk costs nothing per document.
+fn writes_watched_anywhere() -> bool {
+    audit::attached_store()
+        .map(|s| s.security.enabled && s.security.audit.any_write_watched())
+        .unwrap_or(false)
+}
+
+fn reads_watched_anywhere() -> bool {
+    audit::attached_store()
+        .map(|s| s.security.enabled && s.security.audit.any_read_watched())
+        .unwrap_or(false)
+}
+
+/// Whether writes to this index are watched for the current caller.
+pub fn audit_watches_write(index: &str) -> bool {
+    if !writes_watched_anywhere() {
+        return false;
+    }
+    audit_of().map(|(a, c)| a.watches_write(index, &c.name)).unwrap_or(false)
+}
+
+/// A document written, for the compliance log.
+pub fn audit_document_written(
+    index: &str,
+    id: &str,
+    version: u64,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    deleted: bool,
+) {
+    if !writes_watched_anywhere() {
+        return;
+    }
+    if let Some((a, c)) = audit_of() {
+        a.document_written(&c, &c.remote_address, index, id, version, before, after, deleted);
+    }
+}
+
+/// A document read, for the compliance log.
+pub fn audit_document_read(index: &str, id: &str, source: &Value) {
+    if !reads_watched_anywhere() {
+        return;
+    }
+    if let Some((a, c)) = audit_of() {
+        a.document_read(&c.name, index, id, source);
+    }
+}
+
+/// Whether any read is watched at all, so search pages need not look.
+pub fn audit_reads_watched(store: &crate::store::Store) -> bool {
+    if !store.security.enabled {
+        return false;
+    }
+    let cfg = store.security.audit.current();
+    cfg.enabled && cfg.compliance.enabled && !cfg.compliance.read_watched_fields.is_empty()
+}
+
+/// An index-level event from inside a write: an index made for a first
+/// document, a mapping grown by one.
+pub fn audit_index_event(index: &str, action: &str, body: &str, with_headers: bool) {
+    if let Some((a, c)) = audit_of() {
+        a.index_event_inner(&c, action, index, body, with_headers);
+    }
+}
+
+/// The mapping the plugin's auto-put carries: the properties just added.
+pub fn mapping_added_body(raw: &Value, names: &[String]) -> String {
+    let empty = serde_json::Map::new();
+    let props = raw.get("properties").and_then(|p| p.as_object()).unwrap_or(&empty);
+    let mut added = serde_json::Map::new();
+    for n in names {
+        if let Some(v) = props.get(n) {
+            added.insert(n.clone(), v.clone());
+        }
+    }
+    json!({"_doc": {"properties": added}}).to_string()
+}
+
+/// The mapping the plugin's auto-put carries: the properties that are new.
+pub fn mapping_change_body(before: &Value, after: &Value) -> String {
+    let empty = serde_json::Map::new();
+    let b = before.get("properties").and_then(|p| p.as_object()).unwrap_or(&empty);
+    let a = after.get("properties").and_then(|p| p.as_object()).unwrap_or(&empty);
+    let mut props = serde_json::Map::new();
+    for (k, v) in a {
+        if b.get(k) != Some(v) {
+            props.insert(k.clone(), v.clone());
+        }
+    }
+    json!({"_doc": {"properties": props}}).to_string()
 }

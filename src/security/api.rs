@@ -388,8 +388,16 @@ pub async fn get_one(
     match one(&cfg, &kind, &name) {
         Some(v) => {
             let mut o = Map::new();
-            o.insert(name, v);
-            ok_json(Value::Object(o))
+            o.insert(name.clone(), v);
+            let entry = Value::Object(o);
+            let whole = cfg.document(&kind);
+            store.security.audit.internal_config_read_with(
+                &caller,
+                &caller.remote_address,
+                &kind,
+                Some(&whole),
+            );
+            ok_json(entry)
         }
         None => not_found(label(&kind), &name),
     }
@@ -424,11 +432,20 @@ pub async fn put_one(
         return r;
     }
     let existed = one(&cfg, &kind, &name).is_some();
+    let before = cfg.document(&kind);
     if let Err(r) = put_entry(&mut cfg, &kind, &name, &body) {
         return r;
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    let after = cfg.document(&kind);
+    store.security.audit.internal_config_written_with(
+        &caller,
+        &caller.remote_address,
+        &kind,
+        Some(&before),
+        Some(&after),
+    );
     if existed { updated(&name) } else { created(&name) }
 }
 
@@ -444,11 +461,20 @@ pub async fn delete_one(
     if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
         return r;
     }
+    let before = cfg.document(&kind);
     if !remove_entry(&mut cfg, &kind, &name) {
         return not_found(label(&kind), &name);
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    let after = cfg.document(&kind);
+    store.security.audit.internal_config_written_with(
+        &caller,
+        &caller.remote_address,
+        &kind,
+        Some(&before),
+        Some(&after),
+    );
     deleted(&name)
 }
 
@@ -551,6 +577,7 @@ pub async fn patch_one(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
     reply(StatusCode::OK, "OK", format!("'{name}' updated."))
 }
 
@@ -625,6 +652,7 @@ pub async fn patch_all(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
     reply(StatusCode::OK, "OK", "Resource updated.")
 }
 
@@ -702,6 +730,7 @@ pub async fn change_password(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    store.security.audit.internal_config_written(&caller, &caller.remote_address, "internalusers");
     reply(StatusCode::OK, "OK", format!("'{}' updated.", caller.name))
 }
 
@@ -912,4 +941,113 @@ pub async fn unknown(
 
 pub fn _unused() -> Response {
     unauthorized()
+}
+
+/// `GET _plugins/_security/api/audit`
+pub async fn audit_get(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+) -> Response {
+    if let Err(r) = admin(&store, &caller) {
+        return r;
+    }
+    store.security.audit.internal_config_read(&caller, &caller.remote_address, "audit");
+    ok_json(store.security.audit.api_view())
+}
+
+/// `PUT _plugins/_security/api/audit/config`
+pub async fn audit_put(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+    body: String,
+) -> Response {
+    if let Err(r) = admin(&store, &caller) {
+        return r;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"status": "error", "reason": "Could not parse content of request."})),
+        )
+            .into_response();
+    };
+    if let Err(why) = super::audit::AuditConfig::validate(&v) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"status": "error", "reason": why})))
+            .into_response();
+    }
+    let next = super::audit::AuditConfig::from_json(&v);
+    if let Some(conflict) = readonly_conflict(&store, &next) {
+        return conflict;
+    }
+    store.security.audit.store(next);
+    store.security.audit.internal_config_written(&caller, &caller.remote_address, "audit");
+    reply(StatusCode::OK, "OK", "'config' updated.")
+}
+
+/// `PATCH _plugins/_security/api/audit`
+pub async fn audit_patch(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+    body: String,
+) -> Response {
+    if let Err(r) = admin(&store, &caller) {
+        return r;
+    }
+    let Ok(ops) = serde_json::from_str::<Value>(&body) else {
+        return bad_request("Could not parse content of request.");
+    };
+    let mut current = store.security.audit.api_view();
+    let before = current.clone();
+    if let Err(e) = apply_patch(&mut current, &ops) {
+        return bad_request(e);
+    }
+    if current == before {
+        return reply(StatusCode::OK, "OK", "No updates required");
+    }
+    let cfg = current.get("config").cloned().unwrap_or(Value::Null);
+    if let Err(why) = super::audit::AuditConfig::validate(&cfg) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"status": "error", "reason": why})))
+            .into_response();
+    }
+    let next = super::audit::AuditConfig::from_json(&cfg);
+    if let Some(conflict) = readonly_conflict(&store, &next) {
+        return conflict;
+    }
+    store.security.audit.store(next);
+    store.security.audit.internal_config_written(&caller, &caller.remote_address, "audit");
+    reply(StatusCode::OK, "OK", "Resource updated.")
+}
+
+/// A read-only path (`plugins.security.audit.config.readonly`) changed.
+fn readonly_conflict(store: &Store, next: &super::audit::AuditConfig) -> Option<Response> {
+    let current = store.security.audit.current().to_json();
+    let proposed = next.to_json();
+    for path in &store.security.audit.readonly {
+        let p = if path.starts_with('/') {
+            path.clone()
+        } else {
+            format!("/{}", path.replace('.', "/"))
+        };
+        if current.pointer(&p) != proposed.pointer(&p) {
+            return Some(reply(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Attempted to update read-only property.",
+            ));
+        }
+    }
+    None
+}
+
+/// The plugin's answer to a method its audit routes do not take.
+pub async fn audit_wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    let allowed = if uri.path().ends_with("/audit/config") { "[PUT]" } else { "[PATCH, GET]" };
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(json!({
+            "error": format!("Incorrect HTTP method for uri [{}] and method [{}], allowed: {allowed}", uri.path(), method),
+            "status": 405,
+        })),
+    )
+        .into_response()
 }

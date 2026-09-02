@@ -98,36 +98,87 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         .unwrap_or_default();
     let peer_dn = req.extensions().get::<PeerDn>().map(|d| d.0.clone());
     let query = req.uri().query().unwrap_or("").to_string();
+    let audit = sec.audit.clone();
+    // a request carrying the plugin's own internal headers is refused, and
+    // that refusal is written down
+    if req.headers().keys().any(|k| {
+        k.as_str().starts_with("_opendistro_security_") || k.as_str().starts_with("_security_")
+    }) {
+        let (req, body_text) = buffered(req).await;
+        let info = request_info(&req, &query, &remote, &body_text);
+        audit.bad_headers(&info);
+        return bad_headers_response();
+    }
     let caller = {
-        let presented =
-            super::authc::Presented { headers: req.headers(), query: &query, remote, peer_dn };
+        let presented = super::authc::Presented {
+            headers: req.headers(),
+            query: &query,
+            remote: remote.clone(),
+            peer_dn,
+        };
         match sec.caller_for(&presented).await {
             Ok(c) => c,
-            Err(super::authc::Refusal::Challenge(ch)) => return unauthorized_with(&ch),
-            Err(super::authc::Refusal::Forbidden) => {
-                return forbidden("Authentication finally failed".into());
+            Err(refusal) => {
+                // the body is read only now, for the record of the failure
+                let name = presented_name(req.headers());
+                let (req, body_text) = buffered(req).await;
+                let info = request_info(&req, &query, &remote, &body_text);
+                if let Some(name) = name {
+                    audit.failed_login(Some(&name), &info);
+                }
+                return match refusal {
+                    super::authc::Refusal::Challenge(ch) => unauthorized_with(&ch),
+                    super::authc::Refusal::Forbidden => {
+                        forbidden("Authentication finally failed".into())
+                    }
+                };
             }
         }
     };
+    // the body is copied for the log only when a record would quote it;
+    // a bulk of a megabyte is otherwise passed straight through
+    let path_now = req.uri().path().to_string();
+    let method_now = req.method().clone();
+    let admin_action = action_for(&method_now, &path_now)
+        .map(|a| {
+            a.starts_with("indices:admin/")
+                && !a.starts_with("indices:admin/get")
+                && !a.starts_with("indices:admin/mappings/get")
+                && !a.starts_with("indices:admin/aliases/get")
+        })
+        .unwrap_or(false);
+    let (req, body_text) =
+        if audit.quotes_bodies(admin_action, path_now.starts_with("/_plugins/_security/api/")) {
+            buffered(req).await
+        } else {
+            (req, String::new())
+        };
+    let info = request_info(&req, &query, &remote, &body_text);
+    audit.authenticated(&caller, &info);
     let path = req.uri().path().to_string();
     let method = req.method().clone();
     // the security API and account endpoints decide for themselves
     if path.starts_with("/_plugins/_security/") {
+        if path.starts_with("/_plugins/_security/api/") && sec.may_administer(&caller) {
+            audit.granted_rest(&caller, &info);
+        }
         return run_as(caller, req, next).await;
     }
     let Some(action) = action_for(&method, &path) else {
         return run_as(caller, req, next).await;
     };
+    let named = indices_of(&path);
+    let mut resolved: Vec<String> = Vec::new();
     // the guard must be gone before the handler is awaited
     let refusal = {
         let cfg = sec.config.read();
-        if is_cluster_action(&action)
-            || indices_of(&path).is_empty() && !action.starts_with("indices:")
-        {
+        if is_cluster_action(&action) || named.is_empty() && !action.starts_with("indices:") {
+            // the plugin resolves a cluster request to every index it touches
+            resolved = store.resolve("*");
+            resolved.sort();
             if cfg.cluster_allowed(&caller, &action) { None } else { Some(action.clone()) }
         } else {
             // an index action naming no index is over every index there is
-            let named = indices_of(&path);
             let indices = if named.is_empty() || named.iter().any(|n| n == "_all") {
                 let mut all = store.resolve("*");
                 all.sort();
@@ -135,6 +186,7 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
             } else {
                 resolve_indices(&store, &named)
             };
+            resolved = indices.clone();
             match cfg.index_verdict(&caller, &action, &indices) {
                 Verdict::Allowed | Verdict::Partial(_) => None,
                 Verdict::Denied { missing } => Some(missing),
@@ -142,9 +194,116 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         }
     };
     if let Some(missing) = refusal {
+        audit.missing_privileges(&caller, &missing, &info, &named, &resolved);
         return no_permissions(&missing, &caller);
     }
+    let admin_action = action.starts_with("indices:admin/")
+        && !action.starts_with("indices:admin/get")
+        && !action.starts_with("indices:admin/mappings/get")
+        && !action.starts_with("indices:admin/aliases/get");
+    // an index-administration action is written down twice, as the
+    // plugin writes it: the grant, and the index event
+    audit.granted_privileges(&caller, &action, &info, &named, &resolved);
+    // a single document write is a bulk of one inside OpenSearch, and the
+    // bulk is granted in its own record
+    if matches!(
+        action.as_str(),
+        "indices:data/write/index" | "indices:data/write/delete" | "indices:data/write/update"
+    ) {
+        let mut bulk_info = info.clone();
+        bulk_info.params.remove("id");
+        audit.granted_privileges(&caller, "indices:data/write/bulk", &bulk_info, &[], &[]);
+    }
+    if admin_action {
+        audit.index_event(&caller, &action, &info, &named, &resolved, Some(&body_text));
+    }
     run_as(caller, req, next).await
+}
+
+/// The request with its body read into memory, and that body as text.
+async fn buffered(req: Request) -> (Request, String) {
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, crate::api::max_content_bytes() as usize)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    (Request::from_parts(parts, axum::body::Body::from(bytes)), text)
+}
+
+/// What the audit log quotes of a request.
+fn request_info(req: &Request, query: &str, remote: &str, body: &str) -> super::audit::RequestInfo {
+    let path = req.uri().path().to_string();
+    let mut params = std::collections::BTreeMap::new();
+    // the route's own names, as OpenSearch's REST handlers name them
+    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if let Some(first) = segs.first().filter(|s| !s.is_empty() && !s.starts_with('_')) {
+        params.insert("index".to_string(), first.to_string());
+        if segs.len() >= 3
+            && matches!(
+                segs[1],
+                "_doc" | "_create" | "_update" | "_source" | "_explain" | "_termvectors"
+            )
+        {
+            params.insert("id".to_string(), segs[2].to_string());
+        }
+    }
+    if path.starts_with("/_plugins/_security/api/") && segs.len() >= 5 {
+        params.insert("name".to_string(), segs[4].to_string());
+    }
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        params.insert(
+            k.to_string(),
+            percent_encoding::percent_decode_str(v).decode_utf8_lossy().replace('+', " "),
+        );
+    }
+    let headers = req
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    super::audit::RequestInfo {
+        method: req.method().as_str().to_string(),
+        path,
+        params,
+        headers,
+        body: if body.is_empty() { None } else { Some(body.to_string()) },
+        remote: remote.to_string(),
+    }
+}
+
+/// The user name a refused request presented, for the failed-login record.
+fn presented_name(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(h) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(b) = h.strip_prefix("Basic ").or_else(|| h.strip_prefix("basic ")) {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b.trim()).ok()?;
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            return Some(text.split_once(':').map(|(n, _)| n.to_string()).unwrap_or(text));
+        }
+        let token = h.trim_start_matches("Bearer ").trim_start_matches("bearer ");
+        return jwt_subject(token);
+    }
+    headers.get("x-proxy-user").and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+}
+
+fn jwt_subject(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let _ = parts.next()?;
+    let payload = parts.next()?;
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("sub").and_then(|s| s.as_str()).map(|s| s.to_string())
+}
+
+/// The plugin's refusal of a request carrying its internal headers.
+fn bad_headers_response() -> Response {
+    let reason = "Illegal parameter in http or transport request found.\nThis means that one node is trying to connect to another with \na non-node certificate (no OID or security.nodes_dn incorrect configured) or that someone \nis spoofing requests. Check your TLS certificate setup as described here: See https://opendistro.github.io/for-elasticsearch-docs/docs/troubleshoot/tls/";
+    (StatusCode::FORBIDDEN, axum::Json(json!({"error": {"status": "error", "reason": reason}})))
+        .into_response()
 }
 
 /// The index expression a path names, split on commas; nothing for

@@ -1299,6 +1299,16 @@ pub fn run(
         return Err(failed);
     }
     let mut page = page;
+    // reads of watched fields are written down before anything is narrowed
+    if crate::security::audit_reads_watched(store) {
+        for hit in page.iter() {
+            let idx = hit.get("_index").and_then(|i| i.as_str()).unwrap_or("");
+            let id = hit.get("_id").and_then(|i| i.as_str()).unwrap_or("");
+            if let Some(src) = hit.get("_source") {
+                crate::security::audit_document_read(idx, id, src);
+            }
+        }
+    }
     // a document-level filter is a real query: nothing ends early under it
     let dls_applied =
         views.values().any(|v| v.dls.is_some()) && body.get("terminate_after").is_none();

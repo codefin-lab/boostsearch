@@ -110,6 +110,12 @@ pub fn write_doc_versioned(
         ));
     }
     let existed = exists_doc(st, id);
+    // the source as it was, for a watched index's record of the change
+    let audit_before: Option<Value> = if existed && crate::security::audit_watches_write(&st.name) {
+        read_source_as_asked(st, id, &Params::new())
+    } else {
+        None
+    };
     if op_type == "create" && existed {
         return Err(err(
             StatusCode::CONFLICT,
@@ -121,6 +127,14 @@ pub fn write_doc_versioned(
         Some(v) => st.bump_to(id, true, v),
         None => st.bump(id, true, existed),
     };
+    crate::security::audit_document_written(
+        &st.name,
+        id,
+        version,
+        audit_before.as_ref(),
+        Some(&source),
+        false,
+    );
     // the shard a write belongs to decides which refresh will show it
     let shard = st.shard_of_doc(id);
     // deleting is only needed when something is actually there to replace;
@@ -172,7 +186,7 @@ pub fn write_doc_versioned(
     if let Some(why) = crate::search::percolator_complaint(st, &source) {
         return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
     }
-    st.mapping.learn_dynamic(&source);
+    let mut newly_mapped = st.mapping.learn_dynamic(&source);
     // what a derived object holds is learned the way a dynamic field is, so
     // its parts can be searched by type; the object itself stays derived
     if st.mapping.derived_fields().iter().any(|(_, d)| d.get("type") == Some(&json!("object"))) {
@@ -183,9 +197,13 @@ pub fn write_doc_versioned(
                 .collect();
         if !made.is_empty() {
             let names: Vec<String> = made.keys().cloned().collect();
-            st.mapping.learn_dynamic(&Value::Object(made));
+            newly_mapped.extend(st.mapping.learn_dynamic(&Value::Object(made)));
             st.mapping.forget_properties(&names);
         }
+    }
+    if !newly_mapped.is_empty() {
+        let body = crate::security::mapping_added_body(&st.mapping.raw, &newly_mapped);
+        crate::security::audit_index_event(&st.name, "indices:admin/mapping/auto_put", &body, true);
     }
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);
@@ -477,10 +495,14 @@ pub(crate) async fn do_index(
             Err(e) => return crate::api::ingest_failure(&e),
         }
     }
+    let was_there = store.get(&index).is_some();
     let st = match store.ensure(&index) {
         Ok(s) => s,
         Err(e) => return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string()),
     };
+    if !was_there {
+        crate::security::audit_index_event(&index, "indices:admin/auto_create", "{}", false);
+    }
     let mut g = st.write();
     let id = id.unwrap_or_else(|| g.next_auto_id());
     // A document written with a routing is only reachable by quoting the same
@@ -547,6 +569,7 @@ pub async fn get_doc(
         .filter(|_| crate::security::doc_visible(&store, &g, &id))
     {
         Some(mut src) => {
+            crate::security::audit_document_read(&g.name, &id, &src);
             crate::security::narrow_source(&store, &g.name, &mut src);
             let fields = stored_fields(&src, &p);
             let mut body = json!({
@@ -632,6 +655,7 @@ pub async fn delete_doc_route(
                 g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
                 g.log_write(&id, None, version, seq, None);
                 g.note_pending(&id, None);
+                crate::security::audit_document_written(&g.name, &id, version, None, None, true);
             }
             g.routing.remove(&id);
             maybe_refresh(&mut g, &p, Some(shard));
@@ -660,6 +684,10 @@ pub async fn delete_doc_route(
     }
     let shard = g.shard_of_doc(&id);
     let (mut body, status) = delete_doc(&mut g, &id);
+    if body.get("result").and_then(|r| r.as_str()) == Some("deleted") {
+        let version = body.get("_version").and_then(|v| v.as_u64()).unwrap_or(0);
+        crate::security::audit_document_written(&g.name, &id, version, None, None, true);
+    }
     g.routing.remove(&id);
     maybe_refresh(&mut g, &p, Some(shard));
     note_forced_refresh(&mut body, &p);
