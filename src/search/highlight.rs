@@ -85,99 +85,112 @@ pub(crate) fn build_highlight(
         }
         // the value lives at the field's own path, or at its parent's when the
         // field is a multi-field of another
-        let text = source
+        let held = source
             .pointer(&format!("/{}", name.replace('.', "/")))
-            .and_then(|v| v.as_str())
+            .filter(|v| v.is_string() || v.is_array())
             .or_else(|| {
                 let (parent, _) = name.rsplit_once('.')?;
-                source.pointer(&format!("/{}", parent.replace('.', "/")))?.as_str()
+                source.pointer(&format!("/{}", parent.replace('.', "/")))
             });
-        let Some(text) = text else { continue };
-
-        // a value longer than `ignore_above` was never indexed, so there is
-        // nothing in it that could have matched
-        if let Some(limit) = mapping.field_option(&name, "ignore_above").and_then(|v| v.as_u64())
-            && text.chars().count() as u64 > limit
-        {
-            continue;
-        }
-        // A per-field cap says how much of the value to analyse. The plain
-        // highlighter returns what it analysed and nothing more; the unified
-        // one still returns the whole field, having looked only that far for
-        // something to mark.
-        let opts = patterns
-            .iter()
-            .find(|(pat, _)| pat == &name || crate::store::glob_match(pat, &name))
-            .map(|(_, o)| o.clone())
-            .unwrap_or(Value::Null);
-        let plain = opts.get("type").and_then(|t| t.as_str()) == Some("plain")
-            || spec.get("type").and_then(|t| t.as_str()) == Some("plain");
-        let text = match opts.get("max_analyzer_offset").and_then(|v| v.as_u64()) {
-            Some(cap) if plain => {
-                let cap = (cap as usize).min(text.len());
-                &text[..cap]
+        // a field holding several values is highlighted one value at a time,
+        // and each that has something to mark is a fragment
+        let texts: Vec<&str> = match held {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(items)) => items.iter().filter_map(|v| v.as_str()).collect(),
+            _ => continue,
+        };
+        let mut fragments: Vec<String> = Vec::new();
+        for text in texts {
+            // a value longer than `ignore_above` was never indexed, so there is
+            // nothing in it that could have matched
+            if let Some(limit) =
+                mapping.field_option(&name, "ignore_above").and_then(|v| v.as_u64())
+                && text.chars().count() as u64 > limit
+            {
+                continue;
             }
-            _ => text,
-        };
-        // a field may be highlighted against a query of its own rather than
-        // against the one that found the document
-        let own = opts
-            .get("highlight_query")
-            .or_else(|| spec.get("highlight_query"))
-            .map(|q| query_terms_by_field(Some(q)));
-        let terms = match own {
-            Some(ref asked) => terms_for_field(asked, &name, require_match),
-            None => terms_for_field(&asked, &name, require_match),
-        };
-        if terms.is_empty() {
-            continue;
-        }
-        // the query's words are read the way a search reads them -- a stem
-        // stacked on its word finds the word's other forms in the text
-        let analyzer = ["search_analyzer", "analyzer"]
-            .iter()
-            .find_map(|key| mapping.field_option(&name, key))
-            .and_then(|v| v.as_str().map(|s| s.to_string()));
-        // how the text was cut is the index analyzer's doing, and decides
-        // whether pieces or words are marked
-        let indexed_with =
-            mapping.field_option(&name, "analyzer").and_then(|v| v.as_str().map(|s| s.to_string()));
-        // a shingle sub-field holds runs of words rather than words, so what
-        // is marked in the text is the run
-        // a field cut into pieces of words matches on the pieces, so what is
-        // marked is each piece wherever it stands inside a word
-        let chain = indexed_with.as_deref().and_then(|named| analysis.get(named));
-        let pieces = chain.as_ref().map(|c| c.cuts_into_ngrams()).unwrap_or(false);
-        // pieces cut out of whole words keep the word's offsets, so a match
-        // on a piece marks the word it came from
-        let within_words = chain.as_ref().map(|c| c.filters_into_ngrams()).unwrap_or(false);
-        let marked = match shingle_width(&name) {
-            Some(width) => mark_runs(text, &terms, width, &pre, &post),
-            None if pieces => mark_pieces(text, &terms, &pre, &post),
-            None if within_words => mark_words_containing(text, &terms, &pre, &post),
-            None => {
-                // the fields a highlight is told to match through lend their
-                // analyzers: a stop word the field drops is still marked when
-                // a plain copy of the field kept it
-                let mut readers: Vec<Option<String>> = vec![analyzer.clone()];
-                for other in opts
-                    .get("matched_fields")
-                    .and_then(|m| m.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str())
-                {
-                    let named = ["search_analyzer", "analyzer"]
-                        .iter()
-                        .find_map(|key| mapping.field_option(other, key))
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    readers.push(named);
+            // A per-field cap says how much of the value to analyse. The plain
+            // highlighter returns what it analysed and nothing more; the unified
+            // one still returns the whole field, having looked only that far for
+            // something to mark.
+            let opts = patterns
+                .iter()
+                .find(|(pat, _)| pat == &name || crate::store::glob_match(pat, &name))
+                .map(|(_, o)| o.clone())
+                .unwrap_or(Value::Null);
+            let plain = opts.get("type").and_then(|t| t.as_str()) == Some("plain")
+                || spec.get("type").and_then(|t| t.as_str()) == Some("plain");
+            let text = match opts.get("max_analyzer_offset").and_then(|v| v.as_u64()) {
+                Some(cap) if plain => {
+                    let cap = (cap as usize).min(text.len());
+                    &text[..cap]
                 }
-                mark_terms(index, text, &terms, &readers, analysis, &pre, &post)
+                _ => text,
+            };
+            // a field may be highlighted against a query of its own rather than
+            // against the one that found the document
+            let own = opts
+                .get("highlight_query")
+                .or_else(|| spec.get("highlight_query"))
+                .map(|q| query_terms_by_field(Some(q)));
+            let terms = match own {
+                Some(ref asked) => terms_for_field(asked, &name, require_match),
+                None => terms_for_field(&asked, &name, require_match),
+            };
+            if terms.is_empty() {
+                continue;
             }
-        };
-        if let Some(marked) = marked {
-            out.insert(name, json!([marked]));
+            // the query's words are read the way a search reads them -- a stem
+            // stacked on its word finds the word's other forms in the text
+            let analyzer = ["search_analyzer", "analyzer"]
+                .iter()
+                .find_map(|key| mapping.field_option(&name, key))
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            // how the text was cut is the index analyzer's doing, and decides
+            // whether pieces or words are marked
+            let indexed_with = mapping
+                .field_option(&name, "analyzer")
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            // a shingle sub-field holds runs of words rather than words, so what
+            // is marked in the text is the run
+            // a field cut into pieces of words matches on the pieces, so what is
+            // marked is each piece wherever it stands inside a word
+            let chain = indexed_with.as_deref().and_then(|named| analysis.get(named));
+            let pieces = chain.as_ref().map(|c| c.cuts_into_ngrams()).unwrap_or(false);
+            // pieces cut out of whole words keep the word's offsets, so a match
+            // on a piece marks the word it came from
+            let within_words = chain.as_ref().map(|c| c.filters_into_ngrams()).unwrap_or(false);
+            let marked = match shingle_width(&name) {
+                Some(width) => mark_runs(text, &terms, width, &pre, &post),
+                None if pieces => mark_pieces(text, &terms, &pre, &post),
+                None if within_words => mark_words_containing(text, &terms, &pre, &post),
+                None => {
+                    // the fields a highlight is told to match through lend their
+                    // analyzers: a stop word the field drops is still marked when
+                    // a plain copy of the field kept it
+                    let mut readers: Vec<Option<String>> = vec![analyzer.clone()];
+                    for other in opts
+                        .get("matched_fields")
+                        .and_then(|m| m.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                    {
+                        let named = ["search_analyzer", "analyzer"]
+                            .iter()
+                            .find_map(|key| mapping.field_option(other, key))
+                            .and_then(|v| v.as_str().map(|s| s.to_string()));
+                        readers.push(named);
+                    }
+                    mark_terms(index, text, &terms, &readers, analysis, &pre, &post)
+                }
+            };
+            if let Some(marked) = marked {
+                fragments.push(marked);
+            }
+        }
+        if !fragments.is_empty() {
+            out.insert(name, json!(fragments));
         }
     }
     (!out.is_empty()).then(|| Value::Object(out))

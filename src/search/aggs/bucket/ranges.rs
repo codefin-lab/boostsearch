@@ -400,10 +400,20 @@ pub(crate) fn run_auto_date_histogram(
 
     // label, the unit the histogram steps by, and roughly how long it is
     const NS: f64 = 1e9;
+    // the steps OpenSearch rounds to: fixed lengths below a day, calendar
+    // units from a day up
     const STEPS: &[(&str, &str, f64)] = &[
-        ("1s", "second", NS),
-        ("1m", "minute", 60.0 * NS),
-        ("1h", "hour", 3600.0 * NS),
+        ("1s", "1s", NS),
+        ("5s", "5s", 5.0 * NS),
+        ("10s", "10s", 10.0 * NS),
+        ("30s", "30s", 30.0 * NS),
+        ("1m", "1m", 60.0 * NS),
+        ("5m", "5m", 300.0 * NS),
+        ("10m", "10m", 600.0 * NS),
+        ("30m", "30m", 1800.0 * NS),
+        ("1h", "1h", 3600.0 * NS),
+        ("3h", "3h", 3.0 * 3600.0 * NS),
+        ("12h", "12h", 12.0 * 3600.0 * NS),
         ("1d", "day", 86_400.0 * NS),
         ("7d", "week_sunday", 604_800.0 * NS),
         ("1M", "month", 2_629_746.0 * NS),
@@ -416,17 +426,37 @@ pub(crate) fn run_auto_date_histogram(
         .map(|(l, u, _)| (*l, *u))
         .unwrap_or(("1y", "year"));
 
+    let fixed = unit.chars().all(|c| c.is_ascii_digit() || matches!(c, 's' | 'm' | 'h'));
     let mut request = json!({
         "date_histogram": {
             "field": field,
-            "calendar_interval": unit,
-            "min_doc_count": 1,
+            (if fixed { "fixed_interval" } else { "calendar_interval" }): unit,
+            // the buckets run unbroken from the first value to the last
+            "min_doc_count": 0,
         },
     });
+    if let Some(f) = spec.get("format") {
+        request["date_histogram"]["format"] = f.clone();
+    }
+    if let Some(z) = spec.get("time_zone") {
+        request["date_histogram"]["time_zone"] = z.clone();
+    }
     if let Some(sa) = sub_aggs {
         request["aggs"] = sa;
     }
     let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
+    // the keys are written the way the request asked for them
+    if let Some(format) = spec.get("format").and_then(|f| f.as_str())
+        && let Some(buckets) = out.get_mut("buckets").and_then(|b| b.as_array_mut())
+    {
+        for b in buckets.iter_mut() {
+            if let Some(ms) = b.get("key").and_then(|k| k.as_i64())
+                && let Some(text) = crate::store::format_millis(ms, format)
+            {
+                b["key_as_string"] = json!(text);
+            }
+        }
+    }
     out["interval"] = json!(label);
     Ok(out)
 }

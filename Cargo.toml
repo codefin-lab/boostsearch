@@ -28,7 +28,7 @@ path = "src/main.rs"
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "e9b7a3366f340e25946c0d02b6fc40746a304235" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "e3be811d14bf5349cc7b2735b27f7fe0bf8ab692" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -40,13 +40,14 @@ parking_lot = "0.12"
 regex = "1"
 sha1 = "0.10"
 flate2 = "1"
+base64 = "0.22"
 sha2 = "0.10"
 rayon = "1"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "e9b7a3366f340e25946c0d02b6fc40746a304235" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "e3be811d14bf5349cc7b2735b27f7fe0bf8ab692" }
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"

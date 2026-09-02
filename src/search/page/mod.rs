@@ -172,7 +172,8 @@ pub(crate) fn write_page(
                 // a flat_object is one value unless the request named a path
                 // inside it, in which case it has to be descended
                 let is_leaf = |p: &str| {
-                    g.mapping.is_leaf_type(p)
+                    // a point written as an object is one value, not two
+                    (g.mapping.is_leaf_type(p) || g.mapping.type_of(p) == Some("geo_point"))
                         && !specs.iter().any(|(n, _)| {
                             n.len() > p.len() && n.starts_with(p) && n.as_bytes()[p.len()] == b'.'
                         })
@@ -189,7 +190,18 @@ pub(crate) fn write_page(
                     .any(|n| g.mapping.is_derived(n))
                     .then(|| crate::store::with_derived(&h.source, &g.mapping));
                 let read_from = derived_source.as_ref().unwrap_or(&h.source);
-                let raw = crate::source::extract_fields(read_from, &names, &is_leaf);
+                let mut raw = crate::source::extract_fields(read_from, &names, &is_leaf);
+                // a derived object asked for by name is the text its script
+                // emitted, not the object read out of that text
+                for name in &names {
+                    if g.mapping.is_derived(name)
+                        && g.mapping.type_of(name) == Some("object")
+                        && let Some(text) =
+                            crate::store::derived_text_of(&h.source, &g.mapping, name)
+                    {
+                        raw.insert(name.clone(), text);
+                    }
+                }
                 // A field may be asked for more than once, each time with its
                 // own format, and each asking adds its values to the one list
                 // the field is reported under.

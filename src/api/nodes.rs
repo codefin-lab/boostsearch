@@ -359,6 +359,7 @@ fn modules() -> Value {
         "analysis-common",
         "geo",
         "lang-mustache",
+        "lang-painless",
         "mapper-extras",
         "opensearch-dashboards",
         "parent-join",

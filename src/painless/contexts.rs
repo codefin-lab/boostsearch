@@ -102,6 +102,8 @@ pub struct Runner {
     /// `_value`: one value of the field an aggregation reads, for the script
     /// that maps it
     pub value: Option<Value>,
+    /// `interval`: the stretch of text an intervals filter script judges
+    pub interval: Option<Value>,
     pub source: Option<Value>,
     /// what `emit(…)` was given, in order
     pub emitted: Rc<RefCell<Vec<Value>>>,
@@ -122,6 +124,7 @@ impl Runner {
             states: None,
             values: None,
             value: None,
+            interval: None,
             source: None,
             emitted: Rc::new(RefCell::new(Vec::new())),
             term_stats: None,
@@ -205,6 +208,7 @@ impl Context for Runner {
             "states" => self.states.clone(),
             "values" => self.values.clone(),
             "_source" => self.source.clone(),
+            "interval" => self.interval.clone(),
             "_value" => self.value.clone().or_else(|| {
                 self.values.as_ref().and_then(|v| match v {
                     Value::List(l) => l.borrow().first().cloned(),
@@ -305,6 +309,13 @@ impl Doc {
             name.strip_suffix(".keyword")
                 .and_then(|base| get_path(&Value::from_json(&self.source), base))
         });
+        // a derived field has no doc values: a script reads it as absent
+        if self.mapping.is_derived(name) {
+            return Value::DocValues(Rc::new(DocValues {
+                field: name.to_string(),
+                values: Vec::new(),
+            }));
+        }
         let kind = self.mapping.type_of(name).unwrap_or("").to_string();
         let mut values: Vec<Value> = match held {
             Some(Value::List(l)) => l.borrow().clone(),
@@ -370,8 +381,15 @@ fn typed(v: Value, kind: &str) -> Value {
             }
             _ => v,
         },
+        // a binary value is kept as base64; a script reads the bytes as text
         "binary" => match &v {
-            Value::Str(s) => Value::str(s),
+            Value::Str(s) => {
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                    Ok(bytes) => Value::str(&String::from_utf8_lossy(&bytes)),
+                    Err(_) => Value::str(s),
+                }
+            }
             _ => v,
         },
         // an address is kept as the hex of its sixteen bytes; a script reads

@@ -454,7 +454,12 @@ pub(crate) fn fetch_profiles(
     let mut entries: Vec<Value> = Vec::new();
     if size > 0 && fetched > 0 {
         let mut children = Vec::new();
-        if body.get("_source").map(|v| v != &json!(false)).unwrap_or(true) {
+        // script fields fetch nothing of the source unless it was asked for
+        let source_wanted = match body.get("_source") {
+            Some(v) => v != &json!(false),
+            None => body.get("script_fields").is_none(),
+        };
+        if source_wanted {
             children.push(child("FetchSourcePhase", fetched));
         }
         if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -477,6 +482,9 @@ pub(crate) fn fetch_profiles(
         }
         if body.get("highlight").is_some() {
             children.push(child("HighlightPhase", fetched));
+        }
+        if body.get("script_fields").is_some() {
+            children.push(child("ScriptFieldsPhase", fetched));
         }
         if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
             children.push(child("FetchScorePhase", fetched));
