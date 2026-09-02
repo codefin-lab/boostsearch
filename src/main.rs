@@ -11,14 +11,14 @@ mod api;
 mod blockstats;
 mod hdr;
 mod ingest;
-mod tls;
-mod security;
 mod painless;
 mod query;
 mod search;
+mod security;
 mod snapshot;
 mod source;
 mod store;
+mod tls;
 mod tz;
 
 use axum::Router;
@@ -357,9 +357,9 @@ fn app(store: Store) -> Router {
         // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
         .route("/_plugins/_security/authinfo", get(security::api::authinfo))
         .route("/_plugins/_security/health", get(security::api::health))
-        .route("/_plugins/_security/whoami", get(security::api::whoami))
         .route("/_plugins/_security/api/permissionsinfo", get(security::api::permissions_info))
         .route("/_plugins/_security/api/ssl/certs", get(security::api::certs))
+        .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
             "/_plugins/_security/api/account",
             get(security::api::account).put(security::api::change_password),
@@ -416,7 +416,11 @@ async fn main() -> anyhow::Result<()> {
         tls::serve_tls(listener, app(store), &tls_settings).await?;
     } else {
         eprintln!("boostsearch listening on {addr}");
-        axum::serve(listener, app(store)).await?;
+        axum::serve(
+            listener,
+            app(store).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
     }
     Ok(())
 }

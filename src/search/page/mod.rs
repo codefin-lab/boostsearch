@@ -127,7 +127,8 @@ pub(crate) fn write_page(
                 let told = (!rescored && sort_keys.is_empty())
                     .then(|| {
                         let g = searchers[h.shard_idx].2.read();
-                        crate::security::with_dls(store, &g.name, query_json.clone()).and_then(|q| explain_document(&g, &q, &h.id))
+                        crate::security::with_dls(store, &g.name, query_json.clone())
+                            .and_then(|q| explain_document(&g, &q, &h.id))
                     })
                     .flatten();
                 hit["_explanation"] = told.unwrap_or_else(|| {

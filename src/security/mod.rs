@@ -19,7 +19,9 @@ use parking_lot::RwLock;
 use serde_json::{Map, Value, json};
 
 pub mod api;
+pub mod authc;
 pub mod layer;
+pub mod saml;
 pub mod view;
 
 /// One internal user, as `internal_users.yml` writes it.
@@ -1002,6 +1004,11 @@ pub struct Security {
     /// bumped on every configuration change, which empties the cache
     generation: std::sync::atomic::AtomicU64,
     cache_ttl: std::time::Duration,
+    /// the authentication domains and authorizers `config.yml` names
+    pub chain: RwLock<Arc<authc::AuthChain>>,
+    chain_state: authc::ChainState,
+    /// `plugins.security.authcz.admin_dn`: certificates that are the admin
+    admin_dns: Vec<String>,
     pub config: RwLock<SecurityConfig>,
     /// the roles that may use the security REST API
     pub restapi_roles: Vec<String>,
@@ -1027,11 +1034,32 @@ impl Security {
         let ttl_minutes = get("plugins.security.cache.ttl_minutes")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(60);
+        let admin_dns: Vec<String> = match settings
+            .pointer("/plugins/security/authcz/admin_dn")
+            .or_else(|| settings.get("plugins.security.authcz.admin_dn"))
+        {
+            Some(Value::Array(a)) => {
+                a.iter().filter_map(|v| v.as_str()).map(normalize_dn).collect()
+            }
+            Some(Value::String(one)) => vec![normalize_dn(one)],
+            _ => get("plugins.security.authcz.admin_dn")
+                .map(|v| {
+                    v.split(';')
+                        .map(|s| normalize_dn(s.trim().trim_matches(['[', ']', '"', '\''])))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let chain = Arc::new(authc::AuthChain::from_dynamic(&config.dynamic));
         Arc::new(Security {
             enabled: !disabled,
             auth_cache: parking_lot::Mutex::new(HashMap::new()),
             generation: std::sync::atomic::AtomicU64::new(0),
             cache_ttl: std::time::Duration::from_secs(ttl_minutes * 60),
+            chain: RwLock::new(chain),
+            chain_state: authc::ChainState::new(std::time::Duration::from_secs(ttl_minutes * 60)),
+            admin_dns,
             config: RwLock::new(config),
             restapi_roles,
             salt: get("plugins.security.compliance.salt")
@@ -1098,9 +1126,57 @@ impl Security {
     }
 
     /// The configuration changed: nothing already checked still holds.
-    pub fn touch(&self) {
+    ///
+    /// The caller passes the configuration it holds: this is called from
+    /// under the configuration's write lock, which must not be taken again.
+    pub fn touch(&self, cfg: &SecurityConfig) {
         self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.auth_cache.lock().clear();
+        self.chain_state.clear();
+        let chain = Arc::new(authc::AuthChain::from_dynamic(&cfg.dynamic));
+        *self.chain.write() = chain;
+    }
+
+    /// The caller a request stands for, by every domain `config.yml`
+    /// names, remembered by what it presented for `cache.ttl_minutes`.
+    pub async fn caller_for(
+        &self,
+        presented: &authc::Presented<'_>,
+    ) -> Result<Caller, authc::Refusal> {
+        if !self.enabled {
+            return Ok(Caller::unrestricted());
+        }
+        // an admin certificate is the admin, before any domain is asked
+        if let Some(dn) = &presented.peer_dn {
+            if self.admin_dns.iter().any(|a| *a == normalize_dn(dn)) {
+                let mut c = Caller::unrestricted();
+                c.name = dn.clone();
+                c.admin_cert = true;
+                c.remote_address = presented.remote.clone();
+                return Ok(c);
+            }
+        }
+        let key = presented_digest(presented);
+        let generation = self.generation.load(std::sync::atomic::Ordering::Acquire);
+        if let Some(hit) = self.auth_cache.lock().get(&key) {
+            if hit.generation == generation && hit.at.elapsed() < self.cache_ttl {
+                return Ok(hit.caller.clone());
+            }
+        }
+        let chain = self.chain.read().clone();
+        // a snapshot of the configuration: the chain awaits on LDAP and the
+        // network, and no lock may be held across that
+        let cfg: Arc<SecurityConfig> = Arc::new(self.config.read().clone());
+        let caller = chain.authenticate(&cfg, &self.chain_state, presented).await?;
+        let mut cache = self.auth_cache.lock();
+        if cache.len() > 10_000 {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            CachedCaller { generation, at: std::time::Instant::now(), caller: caller.clone() },
+        );
+        Ok(caller)
     }
 
     fn anonymous(&self, cfg: &SecurityConfig, remote: &str) -> Caller {
@@ -1123,6 +1199,68 @@ impl Security {
     pub fn may_administer(&self, caller: &Caller) -> bool {
         caller.unrestricted || caller.roles.iter().any(|r| self.restapi_roles.contains(r))
     }
+}
+
+/// A DN with the spaces after its commas dropped, for comparing.
+pub fn normalize_dn(dn: &str) -> String {
+    dn.split(',').map(|p| p.trim()).collect::<Vec<_>>().join(",")
+}
+
+/// Everything a request presents that could tell who it is, digested.
+fn presented_digest(p: &authc::Presented<'_>) -> [u8; 32] {
+    use sha2::Digest as _;
+    static NONCE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let nonce = NONCE.get_or_init(|| {
+        let mut n = [0u8; 16];
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        n.copy_from_slice(&t.to_le_bytes());
+        n
+    });
+    let mut h = sha2::Sha256::new();
+    h.update(nonce);
+    for name in ["authorization", "x-proxy-user", "x-proxy-roles", "x-forwarded-for"] {
+        if let Some(v) = p.headers.get(name) {
+            h.update(name.as_bytes());
+            h.update([0u8]);
+            h.update(v.as_bytes());
+            h.update([0u8]);
+        }
+    }
+    // every header is part of it: a jwt_header or user_header may be anything
+    let mut names: Vec<String> = p.headers.keys().map(|k| k.as_str().to_string()).collect();
+    names.sort();
+    for n in names {
+        if [
+            "accept",
+            "content-type",
+            "content-length",
+            "user-agent",
+            "host",
+            "connection",
+            "accept-encoding",
+        ]
+        .contains(&n.as_str())
+        {
+            continue;
+        }
+        if let Some(v) = p.headers.get(&n) {
+            h.update(n.as_bytes());
+            h.update([1u8]);
+            h.update(v.as_bytes());
+            h.update([1u8]);
+        }
+    }
+    h.update(p.query.as_bytes());
+    h.update([2u8]);
+    h.update(p.remote.as_bytes());
+    h.update([3u8]);
+    if let Some(dn) = &p.peer_dn {
+        h.update(dn.as_bytes());
+    }
+    h.finalize().into()
 }
 
 /// A caller the cache holds, and which configuration it was checked against.
@@ -1303,4 +1441,26 @@ pub fn item_error(reason: &str) -> Value {
         "type": "security_exception",
         "reason": reason,
     })
+}
+
+/// The single-logout URL for a caller that came in through SAML, if the
+/// chain has a SAML domain and the IdP has a logout service.
+pub fn sso_logout_url(security: &Security, caller: &Caller) -> Option<String> {
+    let chain = security.chain.read().clone();
+    let saml = chain.domains.iter().find_map(|d| match &d.authenticator {
+        authc::Authenticator::Saml(s, _) => Some(s.clone()),
+        _ => None,
+    })?;
+    let came_by_saml = caller.attributes.contains_key("attr.jwt.saml_nif")
+        || caller.attributes.contains_key("attr.jwt.saml_si");
+    if !came_by_saml {
+        return None;
+    }
+    let name_id =
+        caller.attributes.get("attr.jwt.saml_ni").cloned().unwrap_or_else(|| caller.name.clone());
+    saml.logout_url(
+        &name_id,
+        caller.attributes.get("attr.jwt.saml_nif").map(|s| s.as_str()),
+        caller.attributes.get("attr.jwt.saml_si").map(|s| s.as_str()),
+    )
 }

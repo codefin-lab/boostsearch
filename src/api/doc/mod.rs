@@ -769,7 +769,10 @@ pub async fn explain(
     if let Some(st) = store.get(&name) {
         let g = st.read();
         if exists_doc(&g, &id) && !crate::security::doc_visible(&store, &g, &id) {
-            return (StatusCode::NOT_FOUND, axum::Json(json!({"_index": name, "_id": id, "matched": false})))
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"_index": name, "_id": id, "matched": false})),
+            )
                 .into_response();
         }
     }
@@ -783,7 +786,8 @@ pub async fn explain(
         .then(|| {
             store.get(&name).and_then(|st| {
                 let g = st.read();
-                let q = crate::security::with_dls(&store, &g.name, Some(q.clone())).unwrap_or(q.clone());
+                let q = crate::security::with_dls(&store, &g.name, Some(q.clone()))
+                    .unwrap_or(q.clone());
                 crate::search::explain_document(&g, &q, &id)
             })
         })

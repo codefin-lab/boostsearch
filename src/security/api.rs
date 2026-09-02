@@ -428,7 +428,7 @@ pub async fn put_one(
         return r;
     }
     let _ = cfg.save();
-    store.security.touch();
+    store.security.touch(&cfg);
     if existed { updated(&name) } else { created(&name) }
 }
 
@@ -448,7 +448,7 @@ pub async fn delete_one(
         return not_found(label(&kind), &name);
     }
     let _ = cfg.save();
-    store.security.touch();
+    store.security.touch(&cfg);
     deleted(&name)
 }
 
@@ -550,7 +550,7 @@ pub async fn patch_one(
         return r;
     }
     let _ = cfg.save();
-    store.security.touch();
+    store.security.touch(&cfg);
     reply(StatusCode::OK, "OK", format!("'{name}' updated."))
 }
 
@@ -575,7 +575,7 @@ pub async fn patch_all(
         }
         cfg.dynamic = current.get("config").cloned().unwrap_or(Value::Object(Map::new()));
         let _ = cfg.save();
-        store.security.touch();
+        store.security.touch(&cfg);
         return reply(StatusCode::OK, "OK", "Resource updated.");
     }
     let mut current = listing(&cfg, &kind);
@@ -624,7 +624,7 @@ pub async fn patch_all(
         }
     }
     let _ = cfg.save();
-    store.security.touch();
+    store.security.touch(&cfg);
     reply(StatusCode::OK, "OK", "Resource updated.")
 }
 
@@ -701,7 +701,7 @@ pub async fn change_password(
         u.hash = hash_password(password);
     }
     let _ = cfg.save();
-    store.security.touch();
+    store.security.touch(&cfg);
     reply(StatusCode::OK, "OK", format!("'{}' updated.", caller.name))
 }
 
@@ -721,28 +721,19 @@ pub async fn authinfo(
         "user": caller.describe(),
         "user_name": caller.name,
         "user_requested_tenant": caller.requested_tenant,
-        "remote_address": if caller.remote_address.is_empty() { Value::Null } else { json!(format!("{}:0", caller.remote_address)) },
+        "remote_address": if caller.remote_address.is_empty() || caller.admin_cert { Value::Null } else { json!(format!("{}:0", caller.remote_address)) },
         "backend_roles": caller.backend_roles,
         "custom_attribute_names": attrs.keys().cloned().collect::<Vec<_>>(),
         "roles": caller.roles,
         "tenants": tenants_of(&cfg, &caller),
         "principal": Value::Null,
         "peer_certificates": "0",
-        "sso_logout_url": Value::Null,
+        "sso_logout_url": super::sso_logout_url(&store.security, &caller),
     }))
 }
 
 pub async fn health() -> Response {
     ok_json(json!({"message": Value::Null, "mode": "strict", "status": "UP"}))
-}
-
-pub async fn whoami(State(store): State<Store>, Extension(caller): Extension<Caller>) -> Response {
-    if !store.security.enabled {
-        return disabled();
-    }
-    ok_json(
-        json!({"dn": Value::Null, "is_admin": store.security.may_administer(&caller), "is_node_certificate_request": false}),
-    )
 }
 
 pub async fn permissions_info(
@@ -752,7 +743,9 @@ pub async fn permissions_info(
     if !store.security.enabled {
         return disabled();
     }
-    let allowed = store.security.may_administer(&caller);
+    // an admin certificate is not a role with REST API access, and the
+    // plugin says so here even though it lets the certificate through
+    let allowed = !caller.admin_cert && store.security.may_administer(&caller);
     ok_json(json!({
         "user": caller.describe(),
         "user_name": caller.name,
@@ -774,7 +767,9 @@ pub async fn certs(State(store): State<Store>, Extension(caller): Extension<Call
     }
     let settings = crate::tls::node_settings();
     let tls = crate::tls::TlsSettings::read(&settings);
-    let list = match tls.cert.as_ref().and_then(|c| std::fs::read(c).ok()) {
+    let cert_path =
+        tls.cert.clone().unwrap_or_else(|| crate::tls::config_dir().join("certs").join("node.pem"));
+    let list = match std::fs::read(&cert_path).ok() {
         Some(pem) => describe_certs(&pem),
         None => Vec::new(),
     };
@@ -785,11 +780,45 @@ fn describe_certs(pem: &[u8]) -> Vec<Value> {
     let mut out = Vec::new();
     for item in x509_parser::pem::Pem::iter_from_buffer(pem).flatten() {
         let Ok(cert) = item.parse_x509() else { continue };
+        // Java lists each name as [type, value]: 2 a DNS name, 7 an address,
+        // 1 an e-mail address, 6 a URI
         let san: Vec<String> = cert
             .subject_alternative_name()
             .ok()
             .flatten()
-            .map(|s| s.value.general_names.iter().map(|g| format!("{g}")).collect())
+            .map(|s| {
+                s.value
+                    .general_names
+                    .iter()
+                    .map(|g| {
+                        use x509_parser::extensions::GeneralName::*;
+                        match g {
+                            DNSName(d) => format!("[2, {d}]"),
+                            IPAddress(b) => format!(
+                                "[7, {}]",
+                                if b.len() == 4 {
+                                    b.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".")
+                                } else {
+                                    b.chunks(2)
+                                        .map(|c| {
+                                            format!(
+                                                "{:x}",
+                                                u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(":")
+                                }
+                            ),
+                            RFC822Name(m) => format!("[1, {m}]"),
+                            URI(u) => format!("[6, {u}]"),
+                            RegisteredID(o) => format!("[8, {o}]"),
+                            DirectoryName(n) => format!("[4, {n}]"),
+                            _ => "[0, ]".to_string(),
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         // ASN1Time prints as `Jan  1 00:00:00 2026 +00:00`; the plugin prints
         // RFC 3339, so the pieces are laid out again
@@ -803,6 +832,40 @@ fn describe_certs(pem: &[u8]) -> Vec<Value> {
         }));
     }
     out
+}
+
+/// A Unix timestamp as `2026-01-01T00:00:00Z`.
+pub fn rfc3339_no_millis(ts: i64) -> String {
+    rfc3339(ts).replace(".000Z", "Z")
+}
+
+/// The SAML token exchange: `{"SAMLResponse": ..., "RequestId": ...}` in,
+/// `{"authorization": "bearer <jwt>"}` out. A response that does not hold
+/// up is refused with an empty 401, as the plugin refuses it; a request
+/// with no response at all fails as the plugin's authentication fails.
+pub async fn authtoken(State(store): State<Store>, body: String) -> Response {
+    if !store.security.enabled {
+        return disabled();
+    }
+    let Some(saml) = store.security.chain.read().clone().saml() else {
+        return (StatusCode::UNAUTHORIZED, "Authentication finally failed").into_response();
+    };
+    let parsed: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, "JSON could not be parsed").into_response(),
+    };
+    match saml.exchange(&parsed) {
+        Ok(token) => ok_json(json!({"authorization": format!("bearer {token}")})),
+        Err((400, _)) => {
+            (StatusCode::UNAUTHORIZED, "Authentication finally failed").into_response()
+        }
+        Err((_, why)) => {
+            if std::env::var("BOOSTSEARCH_AUTH_DEBUG").is_ok() {
+                eprintln!("saml: {why}");
+            }
+            (StatusCode::UNAUTHORIZED, "").into_response()
+        }
+    }
 }
 
 /// A Unix timestamp as `2026-01-01T00:00:00.000Z`.
@@ -828,14 +891,23 @@ fn rfc3339(ts: i64) -> String {
 }
 
 /// Anything under the prefix nothing answers.
-pub async fn unknown(State(store): State<Store>, Extension(caller): Extension<Caller>) -> Response {
+pub async fn unknown(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+) -> Response {
     if !store.security.enabled {
         return disabled();
     }
     if !store.security.may_administer(&caller) {
         return api_forbidden(&caller);
     }
-    (StatusCode::NOT_FOUND, "").into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({"error": format!("no handler found for uri [{}] and method [{}]", uri.path(), method)})),
+    )
+        .into_response()
 }
 
 pub fn _unused() -> Response {

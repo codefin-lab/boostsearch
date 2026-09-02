@@ -1300,7 +1300,8 @@ pub fn run(
     }
     let mut page = page;
     // a document-level filter is a real query: nothing ends early under it
-    let dls_applied = views.values().any(|v| v.dls.is_some()) && body.get("terminate_after").is_none();
+    let dls_applied =
+        views.values().any(|v| v.dls.is_some()) && body.get("terminate_after").is_none();
     if !views.is_empty() {
         for hit in page.iter_mut() {
             let idx = hit.get("_index").and_then(|i| i.as_str()).unwrap_or("").to_string();
@@ -1326,8 +1327,10 @@ pub fn run(
                     let sa = a.get("sort").and_then(|v| v.as_array());
                     let sb = b.get("sort").and_then(|v| v.as_array());
                     for (i, d) in desc.iter().enumerate() {
-                        let x = sa.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
-                        let y = sb.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                        let x =
+                            sa.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                        let y =
+                            sb.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
                         let c = if *d { y.cmp(&x) } else { x.cmp(&y) };
                         if c != std::cmp::Ordering::Equal {
                             return c;
@@ -1443,7 +1446,9 @@ pub fn run(
     // masked keys hashed, hidden hits narrowed, inside every view
     let mut aggs = aggs;
     if !views.is_empty() {
-        if let (Some(a), Some(req)) = (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations"))) {
+        if let (Some(a), Some(req)) =
+            (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+        {
             for view in views.values() {
                 view.post_aggs(req, a);
             }

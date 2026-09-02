@@ -11,7 +11,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use super::{AuthFailure, Caller, Verdict, is_cluster_action};
+use super::{Caller, Verdict, is_cluster_action};
 
 tokio::task_local! {
     /// The caller of the request being handled, visible to everything the
@@ -30,6 +30,24 @@ async fn run_as(caller: Caller, req: Request, next: Next) -> Response {
     CALLER.scope(caller, next.run(req)).await
 }
 use crate::store::Store;
+
+/// The subject DN of the client certificate a connection presented.
+#[derive(Clone, Debug)]
+pub struct PeerDn(pub String);
+
+/// The `401 Unauthorized` the plugin answers, with the challenge asked for.
+pub fn unauthorized_with(challenge: &str) -> Response {
+    // the plugin's basic challenge says `Unauthorized`; its bearer and
+    // SAML challenges say nothing at all
+    let body = if challenge.starts_with("Basic") { "Unauthorized" } else { "" };
+    let mut r = (StatusCode::UNAUTHORIZED, body).into_response();
+    if let Ok(v) = HeaderValue::from_str(challenge) {
+        r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=UTF-8"));
+    r
+}
 
 /// The `401 Unauthorized` the plugin answers.
 pub fn unauthorized() -> Response {
@@ -68,19 +86,28 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     if !sec.enabled {
         return run_as(Caller::unrestricted(), req, next).await;
     }
+    // the SAML token exchange is how a caller gets credentials: it runs
+    // for anyone, as the plugin runs it inside its challenge
+    if req.uri().path().ends_with("/_plugins/_security/api/authtoken") {
+        return run_as(Caller::default(), req, next).await;
+    }
     let remote = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|c| c.0.ip().to_string())
         .unwrap_or_default();
-    let header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let caller = match sec.caller_from_basic(header.as_deref(), &remote) {
-        Ok(c) => c,
-        Err(AuthFailure::Challenge) | Err(AuthFailure::Failed) => return unauthorized(),
+    let peer_dn = req.extensions().get::<PeerDn>().map(|d| d.0.clone());
+    let query = req.uri().query().unwrap_or("").to_string();
+    let caller = {
+        let presented =
+            super::authc::Presented { headers: req.headers(), query: &query, remote, peer_dn };
+        match sec.caller_for(&presented).await {
+            Ok(c) => c,
+            Err(super::authc::Refusal::Challenge(ch)) => return unauthorized_with(&ch),
+            Err(super::authc::Refusal::Forbidden) => {
+                return forbidden("Authentication finally failed".into());
+            }
+        }
     };
     let path = req.uri().path().to_string();
     let method = req.method().clone();

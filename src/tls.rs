@@ -161,8 +161,27 @@ pub async fn serve_tls(
     settings: &TlsSettings,
 ) -> anyhow::Result<()> {
     let (certs, key) = load_or_make(settings)?;
-    let mut config =
-        rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?;
+    // a client certificate is asked for when a trust store is named:
+    // `clientauth_mode` says whether it must be presented
+    let builder = rustls::ServerConfig::builder();
+    let mode = settings.client_auth.to_ascii_uppercase();
+    let mut config = match (&settings.trusted_cas, mode.as_str()) {
+        (Some(ca_path), "OPTIONAL" | "REQUIRE") => {
+            let mut roots = rustls::RootCertStore::empty();
+            let pem = std::fs::read(ca_path)?;
+            for c in rustls_pemfile::certs(&mut &pem[..]).flatten() {
+                let _ = roots.add(c);
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots));
+            let verifier = if mode == "REQUIRE" {
+                verifier.build()?
+            } else {
+                verifier.allow_unauthenticated().build()?
+            };
+            builder.with_client_cert_verifier(verifier).with_single_cert(certs, key)?
+        }
+        _ => builder.with_no_client_auth().with_single_cert(certs, key)?,
+    };
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     // a client that comes back resumes rather than shaking hands again:
     // tickets for TLS 1.3, a session cache for TLS 1.2 (rustls issues
@@ -176,7 +195,7 @@ pub async fn serve_tls(
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(8192);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -184,7 +203,21 @@ pub async fn serve_tls(
         let app = app.clone();
         tokio::spawn(async move {
             let Ok(tls) = acceptor.accept(stream).await else { return };
+            // who the connection is from: the peer address, and the subject
+            // of the client certificate when one was presented
+            let peer_dn = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|chain| chain.first())
+                .and_then(|c| x509_parser::parse_x509_certificate(c.as_ref()).ok())
+                .map(|(_, cert)| crate::security::normalize_dn(&cert.subject().to_string()));
             let io = hyper_util::rt::TokioIo::new(tls);
+            let mut app = app;
+            app = app.layer(axum::Extension(axum::extract::ConnectInfo(peer)));
+            if let Some(dn) = peer_dn {
+                app = app.layer(axum::Extension(crate::security::layer::PeerDn(dn)));
+            }
             let service = hyper_util::service::TowerToHyperService::new(app);
             let _ =
                 hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
