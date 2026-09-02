@@ -364,7 +364,7 @@ pub(crate) fn cluster_state_inner(
                 "templates": store.get_templates(),
                 "indices": Value::Object(indices.clone()),
                 "cluster_coordination": {
-                    "term": 1,
+                    "term": live.term.max(1),
                     "last_committed_config": live.last_committed_config.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
                     "last_accepted_config": live.last_accepted_config.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
                     "voting_config_exclusions": store.voting_exclusions(),

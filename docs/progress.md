@@ -909,3 +909,78 @@ index only the manager holds: the published metadata and routing stand in
 for its store, and the status comes from the manager's placement (yellow
 for a replica no node took), not from local settings. Gates: phase1
 398/398.
+
+### 6.4 Consensus: election, log, commit index, membership change (done)
+
+`src/cluster/coordinator.rs` is OpenSearch's coordination as one
+`NodeLogic`. A node keeps three things on disk (`<data>/_state/`): the
+term it is in, the last state it accepted, the last state it committed.
+The first voting configuration is the nodes named in
+`cluster.initial_cluster_manager_nodes`, set once every one of them is
+known (a node alone bootstraps with itself). A candidate finds peers
+(`internal:discovery/request_peers`; a seed host is dialled again until
+the node behind it is known), asks for pre-votes
+(`internal:cluster/request_pre_vote`, which change nothing and are
+refused by a node that has a manager), and with a quorum of the
+configuration whose accepted states are no fresher than its own starts an
+election after a randomised, growing delay (`cluster.election.*`): a term
+above every term seen, `start_join` to everyone. A node told to join a
+higher term moves to it and answers with a join that carries its one vote
+of the term, for that candidate only -- the join a node sends to a manager
+it merely heard of carries no vote. Joins from nodes whose accepted state
+is fresher are refused; with a quorum of both the committed and the
+accepted configuration the candidate is the manager.
+
+The manager's publications commit on a quorum of both configurations,
+not on every node: a node is told to commit once its acceptance has
+arrived (the simulation reorders messages, and a commit that overtook
+its publication would be refused); a publication that reaches no quorum
+in `cluster.publish.timeout` makes the manager step down. Every message
+carries the term, and a higher term seen anywhere ends leading or
+following. Committing a state commits the configuration it carried, so
+the "log" is the sequence of (term, version) states and the commit index
+the committed one. The voting configuration follows the nodes as
+OpenSearch's reconfigurator has it: the largest odd number of live
+manager-eligible nodes not excluded, at least three unless nodes are
+excluded (with `cluster.auto_shrink_voting_configuration` false it never
+shrinks), one step per publication and only to a configuration the live
+nodes can form a quorum of. `_cluster/voting_config_exclusions` reaches
+the manager through the metadata source; the reply waits for the
+exclusion to leave the committed configuration and otherwise answers
+OpenSearch's `timeout_exception` (compared on a single OpenSearch node
+excluding itself: the same 500 body with `{name}{id}`; `DELETE` with
+`wait_for_removal`).
+
+Held by the simulation: at most one manager per term, and two nodes that
+committed the same term and version committed the same bytes. Tests:
+three nodes elect one manager and agree; one named manager and two that
+join; the manager dies and another is elected in a higher term, the dead
+one stays in the configuration (no shrinking below three) and comes back
+as a follower; a manager cut off from the majority commits nothing,
+steps down, and after the heal follows the new one; five nodes losing two
+shrink the configuration to three, losing a third keep it at three with
+two live; an excluded manager leaves the vote, keeps managing, and after
+its crash the rest elect without it; versions only rise under 20% loss
+and the seed repeats; six seeds of crashes, restarts and loss keep the
+invariants and settle on one manager. Two bugs the simulation found:
+a stale manager hint kept a candidate from ever pre-voting, and late
+pre-vote answers started a second election in the same instant.
+
+Live, three processes started at once (`n1,n2,n3` named, each seeded
+with all three): they bootstrap, elect, `_cat/nodes` stars the manager
+(`h=master` now aliases `cluster_manager`); killing the manager gives a
+new one in a higher term within ten seconds; the old one restarts, is
+brought to the term and follows. This found the transport keeping one
+connection per peer: two nodes dialling each other at once replaced each
+other's queue and a closing connection took the survivor's entry with it,
+so every connection fell in a cascade. `src/cluster/tcp.rs` now keeps
+every open connection to a peer and a connection removes only its own
+queue on close; its reconnect handle is the transport's own weak `Arc`
+rather than a thread-local only the main thread had (test:
+`three_nodes_dial_each_other_at_once_and_all_pairs_talk_both_ways`).
+`BOOSTSEARCH_CLUSTER_DEBUG=2` traces every input and output through the
+runtime. Gates: unit 39/39, phase1 398/398; bench after 6.4 wins all
+twelve dimensions against plain OpenSearch (index 100,454 vs 63,464 docs/s,
+383MiB vs 1.96GiB, every query p50 lower) and against os-secure (index
+100,665 vs 59,329 docs/s, p50s 2.5-4x lower); the TLS-vs-plain pass stays
+the documented transport mismatch, not a gate.

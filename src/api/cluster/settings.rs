@@ -31,11 +31,82 @@ pub async fn post_voting_config_exclusions(
             );
         }
     };
-    store.add_voting_exclusions(entries);
-    (StatusCode::OK, axum::Json(json!({}))).into_response()
+    // an exclusion names a node; the ones that name nobody are recorded as they are
+    let live = crate::cluster::current_state();
+    let entries: Vec<Value> = entries
+        .into_iter()
+        .map(|e| {
+            let id = e["node_id"].as_str().unwrap_or("_absent_");
+            let name = e["node_name"].as_str().unwrap_or("_absent_");
+            match live.nodes.values().find(|n| n.id.as_str() == id || n.name == name) {
+                Some(n) => json!({"node_id": n.id.as_str(), "node_name": n.name}),
+                None => e,
+            }
+        })
+        .collect();
+    store.add_voting_exclusions(entries.clone());
+    // the reply waits for the exclusions to take effect: the excluded nodes
+    // out of the committed voting configuration
+    let timeout = p
+        .get("timeout")
+        .and_then(|t| parse_time_ms(t))
+        .unwrap_or(30_000);
+    let started = std::time::Instant::now();
+    loop {
+        let live = crate::cluster::current_state();
+        let pending: Vec<&Value> = entries
+            .iter()
+            .filter(|e| live.last_committed_config.iter().any(|n| n.as_str() == e["node_id"].as_str().unwrap_or("")))
+            .collect();
+        if pending.is_empty() {
+            return (StatusCode::OK, axum::Json(json!({}))).into_response();
+        }
+        if started.elapsed().as_millis() as u64 >= timeout {
+            let list: Vec<String> = pending
+                .iter()
+                .map(|e| format!("{{{}}}{{{}}}", e["node_name"].as_str().unwrap_or(""), e["node_id"].as_str().unwrap_or("")))
+                .collect();
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "timeout_exception",
+                &format!("timed out waiting for voting config exclusions [{}] to take effect", list.join(", ")),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
-pub async fn delete_voting_config_exclusions(State(store): State<Store>) -> Response {
+pub async fn delete_voting_config_exclusions(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+) -> Response {
+    // `wait_for_removal` waits for the excluded nodes to have left the cluster
+    let wait = p.get("wait_for_removal").map(|v| v != "false").unwrap_or(true);
+    let timeout = p
+        .get("timeout")
+        .and_then(|t| parse_time_ms(t))
+        .unwrap_or(30_000);
+    let excluded = store.voting_exclusions();
+    let started = std::time::Instant::now();
+    while wait {
+        let live = crate::cluster::current_state();
+        let still: Vec<String> = excluded
+            .iter()
+            .filter(|e| live.nodes.contains_key(&crate::cluster::NodeId(e["node_id"].as_str().unwrap_or("").to_string())))
+            .map(|e| format!("{{{}}}{{{}}}", e["node_name"].as_str().unwrap_or(""), e["node_id"].as_str().unwrap_or("")))
+            .collect();
+        if still.is_empty() {
+            break;
+        }
+        if started.elapsed().as_millis() as u64 >= timeout {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "timeout_exception",
+                &format!("timed out waiting for removal of nodes; if nodes should not be removed, set waitForRemoval to false. [{}]", still.join(", ")),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     store.clear_voting_exclusions();
     (StatusCode::OK, axum::Json(json!({}))).into_response()
 }
@@ -167,4 +238,23 @@ pub async fn cluster_settings_put(
             "transient": echo("transient"),
         }),
     )
+}
+
+/// A time value (`30s`, `500ms`, `2m`, a bare number of milliseconds) in milliseconds.
+fn parse_time_ms(t: &str) -> Option<u64> {
+    let t = t.trim();
+    let (num, unit) = match t.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => (&t[..i], &t[i..]),
+        None => (t, "ms"),
+    };
+    let n: f64 = num.trim().parse().ok()?;
+    let mult = match unit {
+        "ms" => 1.0,
+        "s" => 1_000.0,
+        "m" => 60_000.0,
+        "h" => 3_600_000.0,
+        "d" => 86_400_000.0,
+        _ => return None,
+    };
+    Some((n * mult) as u64)
 }

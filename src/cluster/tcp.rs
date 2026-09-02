@@ -37,8 +37,11 @@ pub struct TcpTransport {
     me: Hello,
     /// addresses known for peers, learned from seeds, handshakes and state
     addresses: RwLock<HashMap<NodeId, String>>,
-    /// one outbound queue per connected peer
-    peers: Mutex<HashMap<NodeId, mpsc::UnboundedSender<Envelope>>>,
+    /// the outbound queues of the connections open to each peer: two nodes
+    /// that dial each other at once hold two, and either serves
+    peers: Mutex<HashMap<NodeId, Vec<mpsc::UnboundedSender<Envelope>>>>,
+    /// the transport's own handle, so `send` can open a connection
+    self_weak: std::sync::Weak<TcpTransport>,
     handler: RwLock<Option<Arc<dyn Handler>>>,
     /// peers seen through a handshake, with what they said
     known: RwLock<HashMap<NodeId, Hello>>,
@@ -46,7 +49,8 @@ pub struct TcpTransport {
 
 impl TcpTransport {
     pub fn new(identity: &NodeIdentity) -> Arc<TcpTransport> {
-        Arc::new(TcpTransport {
+        Arc::new_cyclic(|weak| TcpTransport {
+            self_weak: weak.clone(),
             me: Hello {
                 node_id: identity.id.clone(),
                 ephemeral_id: identity.ephemeral_id.clone(),
@@ -126,7 +130,7 @@ impl TcpTransport {
         self.addresses.write().insert(peer_id.clone(), peer.transport_address.clone());
         self.known.write().insert(peer_id.clone(), peer.clone());
         let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
-        self.peers.lock().insert(peer_id.clone(), tx);
+        self.peers.lock().entry(peer_id.clone()).or_default().push(tx.clone());
         if let Some(t) = tell {
             let _ = t.send(peer.clone());
         }
@@ -154,26 +158,41 @@ impl TcpTransport {
         };
         reader.await;
         writer.abort();
-        self.peers.lock().remove(&peer_id);
+        // this connection's queue goes, and no other's
+        {
+            let mut peers = self.peers.lock();
+            if let Some(list) = peers.get_mut(&peer_id) {
+                list.retain(|s| !s.same_channel(&tx));
+                if list.is_empty() {
+                    peers.remove(&peer_id);
+                }
+            }
+        }
+        if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false) {
+            eprintln!("transport {}: connection with {peer_id} closed", self.me.node_id);
+        }
         Ok(())
     }
 
     /// A connection to the node, opened if there is none and its address
     /// is known.
+    /// A live queue to the node, if a connection is open.
+    fn queue_to(&self, to: &NodeId) -> Option<mpsc::UnboundedSender<Envelope>> {
+        self.peers.lock().get(to).and_then(|list| list.iter().find(|s| !s.is_closed()).cloned())
+    }
+
     async fn ensure_peer(
         self: Arc<Self>,
         to: &NodeId,
     ) -> Result<mpsc::UnboundedSender<Envelope>, SendError> {
-        if let Some(tx) = self.peers.lock().get(to) {
-            return Ok(tx.clone());
+        if let Some(tx) = self.queue_to(to) {
+            return Ok(tx);
         }
         let Some(addr) = self.addresses.read().get(to).cloned() else {
             return Err(SendError::Unreachable(to.clone()));
         };
         match self.clone().connect(&addr).await {
-            Ok(_) => {
-                self.peers.lock().get(to).cloned().ok_or_else(|| SendError::Unreachable(to.clone()))
-            }
+            Ok(_) => self.queue_to(to).ok_or_else(|| SendError::Unreachable(to.clone())),
             Err(_) => Err(SendError::Unreachable(to.clone())),
         }
     }
@@ -185,7 +204,7 @@ impl Transport for TcpTransport {
     }
 
     fn send(&self, to: &NodeId, envelope: Envelope) -> Result<(), SendError> {
-        if let Some(tx) = self.peers.lock().get(to) {
+        if let Some(tx) = self.queue_to(to) {
             return tx.send(envelope).map_err(|_| SendError::Closed);
         }
         // no connection yet: open one on the runtime and send when it is up
@@ -208,22 +227,17 @@ impl Transport for TcpTransport {
 }
 
 impl TcpTransport {
-    /// The transport keeps a weak handle to itself so `send` can spawn.
+    /// The transport's own handle, so `send` can spawn a connection.
     fn self_arc(&self) -> Option<Arc<TcpTransport>> {
-        SELF.with(|s| s.borrow().as_ref().and_then(|w| w.upgrade()))
+        self.self_weak.upgrade()
     }
 
-    /// Remember the handle, once, after construction.
+    /// Make this the node's transport, the one `global()` hands out.
     pub fn register(self: &Arc<Self>) {
-        SELF.with(|s| *s.borrow_mut() = Some(Arc::downgrade(self)));
-        let weak = Arc::downgrade(self);
-        *GLOBAL.lock() = Some(weak);
+        *GLOBAL.lock() = Some(Arc::downgrade(self));
     }
 }
 
-thread_local! {
-    static SELF: std::cell::RefCell<Option<std::sync::Weak<TcpTransport>>> = const { std::cell::RefCell::new(None) };
-}
 static GLOBAL: Mutex<Option<std::sync::Weak<TcpTransport>>> = Mutex::new(None);
 
 /// The node's transport, from anywhere on the process.
@@ -261,6 +275,64 @@ mod tests {
     impl Handler for Seen {
         fn handle(&self, e: Envelope) {
             self.0.lock().push(e);
+        }
+    }
+
+    #[tokio::test]
+    async fn three_nodes_dial_each_other_at_once_and_all_pairs_talk_both_ways() {
+        let ports = [39311u16, 39312, 39313];
+        let names = ["a", "b", "c"];
+        let ts: Vec<Arc<TcpTransport>> =
+            (0..3).map(|i| TcpTransport::new(&identity(names[i], ports[i]))).collect();
+        let seen: Vec<Arc<Seen>> = (0..3).map(|_| Arc::new(Seen(Mutex::new(Vec::new())))).collect();
+        for i in 0..3 {
+            ts[i].set_handler(seen[i].clone());
+            let l = ts[i].clone();
+            tokio::spawn(async move {
+                let _ = l.listen(&format!("127.0.0.1:{}", ports[i])).await;
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // everyone dials everyone else at the same moment
+        let mut dials = Vec::new();
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    let t = ts[i].clone();
+                    dials.push(tokio::spawn(async move {
+                        t.connect(&format!("127.0.0.1:{}", ports[j])).await.unwrap()
+                    }));
+                }
+            }
+        }
+        for d in dials {
+            d.await.unwrap();
+        }
+        // then every pair talks both ways, twice, with a pause between
+        for round in 0..2u64 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            for i in 0..3 {
+                for j in 0..3 {
+                    if i != j {
+                        ts[i]
+                            .send(
+                                &ts[j].local(),
+                                Envelope::request("internal:ping", ts[i].local(), round * 10 + i as u64, vec![]),
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        for _ in 0..100 {
+            if seen.iter().all(|s| s.0.lock().len() == 4) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        for (i, s) in seen.iter().enumerate() {
+            let got = s.0.lock();
+            assert_eq!(got.len(), 4, "{} got {:?}", names[i], got.iter().map(|e| (e.from.clone(), e.request_id)).collect::<Vec<_>>());
         }
     }
 

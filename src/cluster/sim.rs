@@ -56,6 +56,8 @@ pub enum Input {
     Start,
     Message(Envelope),
     Timer(u64),
+    /// a node the runtime reached by dialling an address it was asked to
+    Peer(super::state::DiscoveryNode),
 }
 
 /// What a node asks for.
@@ -72,6 +74,15 @@ pub enum Output {
     },
     /// something the invariant checks may read
     Note(String),
+    /// a node learned of, with the address it is reached at (the
+    /// production transport keeps it; the simulation routes by id)
+    Peer {
+        id: NodeId,
+        address: String,
+    },
+    /// an address to dial, for a seed host whose node is not yet known
+    /// (the simulation knows every node by id and ignores it)
+    Dial(String),
 }
 
 /// State a node keeps across a crash: what it wrote to disk.
@@ -255,6 +266,7 @@ impl Sim {
                     let at = self.now() + after;
                     self.push(at, What::Timer { node: from.clone(), id, epoch });
                 }
+                Output::Peer { .. } | Output::Dial(_) => {}
                 Output::Note(text) => {
                     self.trace.push(format!("{} note {from} {text}", self.now()));
                     self.notes.push((self.now(), from.clone(), text));
@@ -488,7 +500,7 @@ mod tests {
                     },
                     Output::Timer { id: 1, after: 100 },
                 ],
-                Input::Timer(_) => vec![],
+                Input::Timer(_) | Input::Peer(_) => vec![],
                 Input::Message(e) if e.kind == super::super::transport::Kind::Request => {
                     vec![Output::Send {
                         to: e.from.clone(),

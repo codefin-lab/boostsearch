@@ -39,22 +39,37 @@ impl Handler for Inbox {
 }
 
 /// Durable state kept in the data directory as one file per key.
+const DURABLE_KEYS: [&str; 3] = [
+    super::coordinator::D_COMMITTED,
+    super::coordinator::D_ACCEPTED,
+    super::coordinator::D_TERM,
+];
+
 fn load_durable(dir: Option<&std::path::Path>) -> Durable {
     let mut d = Durable::default();
     if let Some(dir) = dir {
-        if let Ok(bytes) = std::fs::read(dir.join("_state").join("cluster_state.json")) {
-            d.entries.insert("cluster_state".into(), bytes);
+        for key in DURABLE_KEYS {
+            if let Ok(bytes) = std::fs::read(dir.join("_state").join(format!("{key}.json"))) {
+                d.entries.insert(key.into(), bytes);
+            }
         }
     }
     d
 }
 
-fn save_durable(dir: Option<&std::path::Path>, d: &Durable) {
+/// Write what changed since the last save, and nothing else.
+fn save_durable(dir: Option<&std::path::Path>, d: &Durable, written: &mut BTreeMap<String, Vec<u8>>) {
     let Some(dir) = dir else { return };
-    if let Some(bytes) = d.entries.get("cluster_state") {
-        let path = dir.join("_state").join("cluster_state.json");
+    for key in DURABLE_KEYS {
+        let Some(bytes) = d.entries.get(key) else { continue };
+        if written.get(key) == Some(bytes) {
+            continue;
+        }
+        let path = dir.join("_state").join(format!("{key}.json"));
         let _ = std::fs::create_dir_all(path.parent().unwrap_or(dir));
-        let _ = std::fs::write(path, bytes);
+        if std::fs::write(&path, bytes).is_ok() {
+            written.insert(key.into(), bytes.clone());
+        }
     }
 }
 
@@ -74,9 +89,13 @@ impl Runtime {
         });
         let rt = Arc::new(Runtime { inputs: tx.clone(), shared: shared.clone() });
         let timers: Arc<Mutex<BTreeMap<u64, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
+        // seed hosts reached, and those being dialled right now
+        let dialled: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
+        let dialling: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
         let me = transport.local();
         tokio::spawn(async move {
             let mut durable = load_durable(data_dir.as_deref());
+            let mut written: BTreeMap<String, Vec<u8>> = durable.entries.clone();
             let mut epoch: u64 = 0;
             // the start input, then the loop
             let mut pending: Vec<Input> = vec![Input::Start];
@@ -88,14 +107,40 @@ impl Runtime {
                         None => break,
                     },
                 };
+                let trace = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false);
+                if trace {
+                    let what = match &input {
+                        Input::Start => "start".to_string(),
+                        Input::Timer(id) => format!("timer {id}"),
+                        Input::Peer(n) => format!("peer {}", n.id),
+                        Input::Message(e) => format!("{:?} {} from {}", e.kind, e.action, e.from),
+                    };
+                    eprintln!("cluster {me} <- {what}");
+                }
                 let outputs = logic.handle(input, clock.as_ref(), &mut durable);
-                save_durable(data_dir.as_deref(), &durable);
+                if trace {
+                    for o in &outputs {
+                        let what = match o {
+                            Output::Send { to, envelope } => format!("{:?} {} to {to}", envelope.kind, envelope.action),
+                            Output::Timer { id, after } => format!("timer {id} in {after}ms"),
+                            Output::Note(t) => format!("note {t}"),
+                            Output::Peer { id, address } => format!("peer {id} at {address}"),
+                            Output::Dial(a) => format!("dial {a}"),
+                        };
+                        eprintln!("cluster {me} -> {what}");
+                    }
+                }
+                save_durable(data_dir.as_deref(), &durable, &mut written);
                 *shared.state.write() = logic.state().clone();
                 *shared.mode.write() = format!("{:?}", logic.mode);
                 for o in outputs {
                     match o {
                         Output::Send { to, envelope } => {
-                            let _ = transport.send(&to, envelope);
+                            if let Err(e) = transport.send(&to, envelope) {
+                                if trace {
+                                    eprintln!("cluster {me}: send to {to} failed: {e:?}");
+                                }
+                            }
                         }
                         Output::Timer { id, after } => {
                             epoch += 1;
@@ -109,6 +154,32 @@ impl Runtime {
                                 if timers.lock().get(&id) == Some(&my_epoch) {
                                     let _ = tx.send(Input::Timer(id));
                                 }
+                            });
+                        }
+                        Output::Peer { id, address } => {
+                            transport.learn_address(id, address);
+                        }
+                        Output::Dial(address) => {
+                            if dialled.lock().contains(&address) || !dialling.lock().insert(address.clone()) {
+                                continue;
+                            }
+                            let t = transport.clone();
+                            let tx = tx.clone();
+                            let dialled = dialled.clone();
+                            let dialling = dialling.clone();
+                            tokio::spawn(async move {
+                                if let Ok(h) = t.connect(&address).await {
+                                    dialled.lock().insert(address.clone());
+                                    let _ = tx.send(Input::Peer(super::state::DiscoveryNode {
+                                        id: h.node_id,
+                                        name: h.name,
+                                        ephemeral_id: h.ephemeral_id,
+                                        transport_address: h.transport_address,
+                                        roles: h.roles,
+                                        attributes: BTreeMap::new(),
+                                    }));
+                                }
+                                dialling.lock().remove(&address);
                             });
                         }
                         Output::Note(text) => {

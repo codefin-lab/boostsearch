@@ -439,38 +439,36 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    // the coordinator: this node is the manager when the settings name it
-    // (or name nothing and give no seeds); otherwise it joins the manager
-    // the seed hosts lead to
+    // the coordinator: the nodes named in cluster.initial_cluster_manager_nodes
+    // form the first voting configuration (this node alone when nothing is
+    // named and no seed hosts are given); the manager is elected among them
     {
         let me = cluster::discovery_node();
-        let names_me = identity
-            .initial_cluster_manager_nodes
-            .iter()
-            .any(|n| *n == identity.name || *n == identity.id.0);
         let alone = identity.single_node
             || (identity.seed_hosts.is_empty()
                 && identity.initial_cluster_manager_nodes.is_empty());
         let seeds = cluster::runtime::discover_seeds(transport.clone(), &identity.seed_hosts).await;
-        let configured = if names_me || alone {
-            Some(identity.id.clone())
+        let initial_names = if alone {
+            vec![identity.name.clone()]
         } else {
-            // the manager is whichever seed carries the configured name
-            let want = identity.initial_cluster_manager_nodes.clone();
-            transport
-                .known_peers()
-                .into_iter()
-                .find(|h| want.iter().any(|w| *w == h.name || *w == h.node_id.0))
-                .map(|h| h.node_id)
-                .or_else(|| seeds.first().cloned())
+            identity.initial_cluster_manager_nodes.clone()
         };
         let mut coordinator = cluster::coordinator::Coordinator::new(
             me,
             &identity.cluster_name,
             &cluster::cluster_uuid(),
-            configured,
+            initial_names,
             seeds,
         );
+        coordinator.seed_hosts = identity
+            .seed_hosts
+            .iter()
+            .map(|h| if h.contains(':') { h.clone() } else { format!("{h}:9300") })
+            .collect();
+        coordinator.auto_shrink =
+            tls::node_setting(&node_settings, "cluster.auto_shrink_voting_configuration")
+                .map(|v| v != "false")
+                .unwrap_or(true);
         coordinator.metadata =
             Some(std::sync::Arc::new(cluster::metadata::StoreSource(store.clone())));
         let rt = cluster::runtime::Runtime::start(

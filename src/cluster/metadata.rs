@@ -19,6 +19,10 @@ use super::transport::NodeId;
 /// Where index metadata comes from: the store in production, a map in tests.
 pub trait MetadataSource: Send + Sync {
     fn snapshot(&self) -> BTreeMap<String, IndexMetadata>;
+    /// `_cluster/voting_config_exclusions`, as (node id, node name)
+    fn voting_exclusions(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// A fingerprint of a snapshot: the same metadata gives the same number.
@@ -122,6 +126,17 @@ pub fn with_terms(mut m: IndexMetadata, routing: &RoutingTable) -> IndexMetadata
 pub struct StoreSource(pub crate::store::Store);
 
 impl MetadataSource for StoreSource {
+    fn voting_exclusions(&self) -> Vec<(String, String)> {
+        self.0
+            .voting_exclusions()
+            .iter()
+            .map(|e| {
+                let get = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("_absent_").to_string();
+                (get("node_id"), get("node_name"))
+            })
+            .collect()
+    }
+
     fn snapshot(&self) -> BTreeMap<String, IndexMetadata> {
         let mut out = BTreeMap::new();
         for name in self.0.resolve("*") {
