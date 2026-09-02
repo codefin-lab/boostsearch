@@ -846,6 +846,7 @@ pub fn run(
                     nested: None,
                     nested_filter: None,
                     numeric_type: None,
+                    script: None,
                 })
                 .collect();
             (!keys.is_empty()).then_some(keys)
@@ -1030,6 +1031,10 @@ pub fn run(
     // fail the filter has no value at all, and sorts with the missing ones.
     if nested_filtered {
         sort_by_filtered_nested(store, &targets, &mut cands, &searchers, &sort_keys);
+    }
+    // a `_script` sort reads each candidate through its script
+    if sort_keys.iter().any(|k| k.script.is_some()) {
+        crate::search::sort_by_script(&mut cands, &searchers, &sort_keys)?;
     }
     // `function_score` says what a document's score should be, given what the
     // query scored it and what the document itself holds

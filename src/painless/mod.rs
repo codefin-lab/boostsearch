@@ -22,7 +22,7 @@ use std::rc::Rc;
 #[derive(Clone, Debug)]
 pub struct Script {
     pub source: String,
-    program: Rc<ast::Program>,
+    program: std::sync::Arc<ast::Program>,
 }
 
 /// Why a script could not be run: it could not be read, or it failed while
@@ -96,7 +96,7 @@ impl Script {
                 cause: "illegal_argument_exception".into(),
             });
         }
-        Ok(Script { source: source.to_string(), program: Rc::new(program) })
+        Ok(Script { source: source.to_string(), program: std::sync::Arc::new(program) })
     }
 
     pub fn run(&self, context: &mut dyn Context) -> Result<Value, ScriptError> {

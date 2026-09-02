@@ -104,6 +104,8 @@ pub struct Runner {
     pub value: Option<Value>,
     /// `interval`: the stretch of text an intervals filter script judges
     pub interval: Option<Value>,
+    /// `token`: the token an analysis script judges
+    pub token: Option<Value>,
     pub source: Option<Value>,
     /// what `emit(…)` was given, in order
     pub emitted: Rc<RefCell<Vec<Value>>>,
@@ -125,6 +127,7 @@ impl Runner {
             values: None,
             value: None,
             interval: None,
+            token: None,
             source: None,
             emitted: Rc::new(RefCell::new(Vec::new())),
             term_stats: None,
@@ -209,6 +212,7 @@ impl Context for Runner {
             "values" => self.values.clone(),
             "_source" => self.source.clone(),
             "interval" => self.interval.clone(),
+            "token" => self.token.clone(),
             "_value" => self.value.clone().or_else(|| {
                 self.values.as_ref().and_then(|v| match v {
                     Value::List(l) => l.borrow().first().cloned(),
@@ -460,6 +464,24 @@ pub fn update_ctx(
 }
 
 /// What an update script left in `ctx`.
+/// The keys a script added to `ctx` that no update context has.
+pub fn ctx_extra_keys(ctx: &Value) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "_index",
+        "_id",
+        "_version",
+        "_routing",
+        "_source",
+        "_now",
+        "op",
+        "_type",
+        "_seq_no",
+        "_primary_term",
+    ];
+    let Value::Map(m) = ctx else { return Vec::new() };
+    m.borrow().iter().map(|(k, _)| k.as_text()).filter(|k| !KNOWN.contains(&k.as_str())).collect()
+}
+
 /// What the script left in `ctx`: the operation, the source, and the id
 /// and routing if it set them. `Err` where the source has come to hold
 /// itself, which cannot be written.

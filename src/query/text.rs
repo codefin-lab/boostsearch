@@ -100,6 +100,37 @@ pub(crate) fn build_interval_rule(ctx: &Ctx, field: &str, rule: &Value) -> Resul
 
 pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
+    // a date, a number, a boolean or an address is one value, not text to
+    // cut into words: matching it is asking for that value
+    if kind == "match"
+        && matches!(
+            ctx.mapping.type_of(&field),
+            Some(
+                "date"
+                    | "date_nanos"
+                    | "long"
+                    | "integer"
+                    | "short"
+                    | "byte"
+                    | "double"
+                    | "float"
+                    | "half_float"
+                    | "scaled_float"
+                    | "unsigned_long"
+                    | "boolean"
+                    | "ip"
+            )
+        )
+        && !val.is_null()
+    {
+        // a value is there or not: the score is one; the boost the clause
+        // carries is applied by the caller, as for every clause
+        let spec = serde_json::json!({ field.clone(): { "value": val.clone() } });
+        return Ok(Box::new(ConstScore::new(
+            build(ctx, &serde_json::json!({ "term": spec }))?,
+            1.0,
+        )));
+    }
     let (f, path, view) = ctx.resolve(&field, true);
     let text = match &val {
         Value::String(s) => s.clone(),
