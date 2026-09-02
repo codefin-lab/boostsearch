@@ -51,6 +51,7 @@ impl Store {
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
+            graveyard: Arc::new(RwLock::new(Vec::new())),
             repositories: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -85,6 +86,7 @@ impl Store {
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
+            graveyard: Arc::new(RwLock::new(Vec::new())),
             repositories: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             pit_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -468,6 +470,21 @@ impl Store {
             targets.iter().filter_map(|t| guard.remove(t)).collect()
         };
         let any = !dropped.is_empty();
+        // what was dropped is remembered by name and uuid
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let mut grave = self.graveyard.write();
+            for st in &dropped {
+                let g = st.read();
+                grave.push(serde_json::json!({
+                    "index": {"index_name": g.name, "index_uuid": g.uuid},
+                    "delete_date_in_millis": now,
+                }));
+            }
+        }
         drop(dropped);
         for t in &targets {
             if let Some(path) = self.index_path(t) {
@@ -475,5 +492,12 @@ impl Store {
             }
         }
         any
+    }
+}
+
+impl Store {
+    /// The indices deleted since the node came up.
+    pub fn tombstones(&self) -> Value {
+        Value::Array(self.graveyard.read().clone())
     }
 }

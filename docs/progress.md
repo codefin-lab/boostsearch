@@ -323,3 +323,32 @@ in a script, which this engine cannot tell from a one-letter string),
 search-pipeline-common 11/11, ingest-user-agent 5/5, search_diff 92/92.
 ingest-geoip 1/8 stays out: it needs MaxMind databases that are not in the
 tree.
+
+### Leftovers cleared before Phase 5 (2026-09-02)
+
+- `common` query: words that share a place (a word and its synonyms) are one
+  clause; `minimum_should_match` as a number or `{low_freq, high_freq}`;
+  with no rare words the low-frequency minimum applies to the common ones.
+- A keyword sub-field with `ignore_above` gets its own copy, cut to the limit,
+  rather than being served from its parent's raw view.
+- A script that fails inside a search (the `script` query, and the searches
+  a reindex or update_by_query walks) is reported as a shard failure with
+  the script's own exception inside, reason "Partial shards failure".
+- `_cluster/state/metadata` lists composable templates under
+  `index_template`, ingest pipelines under `ingest`, and the deleted indices
+  in the graveyard.
+- The Thai analyzer keeps a Latin word whole across a hyphen or an
+  apostrophe, as Java's break iterator does.
+
+Kept as known gaps, each needing more than it is worth:
+
+- `common` query with stacked synonyms: OpenSearch splits rare from common
+  by the document frequency of the *segment* a term is read in, so the two
+  remaining sections depend on how three writes landed in segments. The
+  query is deprecated; the per-place clause grouping above is the honest
+  part.
+- Estonian stemming of words with an apostrophe (`don't` -> `don'`, `it's`
+  kept): Snowball's Estonian treats the apostrophe as a letter in its
+  regions; our generated algorithm strips it. Two analysis_diff cases.
+- A `char` typed value in an ingest script cannot be told from a one-letter
+  string (one ingest-common section).

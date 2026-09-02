@@ -423,6 +423,8 @@ pub struct Store {
     /// how often each ingest pipeline ran, failed, and how long it took, in
     /// nanoseconds; the empty name is the total
     pub ingest_stats: Arc<RwLock<HashMap<String, (u64, u64, u64)>>>,
+    /// the indices deleted since the node came up: name, uuid and when
+    pub graveyard: Arc<RwLock<Vec<Value>>>,
     /// Snapshot repositories by name.
     repositories: Arc<RwLock<HashMap<String, Value>>>,
     /// Snapshots by repository and then by name.

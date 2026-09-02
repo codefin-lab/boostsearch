@@ -470,7 +470,7 @@ impl Mapping {
         }
         let Some(node) = self.raw.pointer(&pointer_of(parent)) else { return false };
         let Some(sub) = node.get("fields").and_then(|f| f.get(leaf)) else { return false };
-        sub.get("normalizer").is_none()
+        sub.get("normalizer").is_none() && sub.get("ignore_above").is_none()
     }
 
     /// The format a date path declares, if it declares one.
@@ -572,8 +572,12 @@ pub(crate) fn collect_normalizers(
                 // of the value; nothing else populates that path
                 let n = sdef.get("normalizer").and_then(|v| v.as_str()).unwrap_or("");
                 // a plain keyword beside a field holds what the raw view of
-                // the field already holds, and is read from there
-                if n.is_empty() && sdef.get("type").and_then(|t| t.as_str()) == Some("keyword") {
+                // the field already holds, and is read from there -- unless it
+                // refuses long values, in which case it holds only the short
+                if n.is_empty()
+                    && sdef.get("type").and_then(|t| t.as_str()) == Some("keyword")
+                    && sdef.get("ignore_above").is_none()
+                {
                     continue;
                 }
                 // the pointer and the full path are worked out here, once,

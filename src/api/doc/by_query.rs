@@ -576,7 +576,7 @@ pub async fn update_by_query(
             let mut runner =
                 crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
             if let Err(e) = runner.run(&compiled.script) {
-                return crate::api::script_failure(e);
+                return crate::search::search_script_failure_partial(e, &seen.index);
             }
             match scripted_change(&ctx, &seen.id) {
                 Ok((changed_op, source)) => {
@@ -723,7 +723,7 @@ pub async fn reindex(
             let mut runner =
                 crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
             if let Err(e) = runner.run(&compiled.script) {
-                return crate::api::script_failure(e);
+                return crate::search::search_script_failure_partial(e, &seen.index);
             }
             let extra = crate::painless::contexts::ctx_extra_keys(&ctx);
             if let Some(junk) = extra.first() {

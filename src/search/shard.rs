@@ -324,13 +324,7 @@ pub(crate) fn search_one_shard(
     };
     let (count, shard_cands, shard_agg) = match searched {
         Ok(v) => v,
-        Err(e) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "search_phase_execution_exception",
-                e.to_string(),
-            ));
-        }
+        Err(e) => return Err(search_error_response(&e.to_string(), name)),
     };
     if let Some(res) = shard_agg {
         agg_acc = Some(res);
@@ -436,4 +430,35 @@ impl boostcore::collector::SegmentCollector for MaybeAggSegment {
     fn harvest(self) -> Self::Fruit {
         self.0.map(|c| c.harvest())
     }
+}
+
+/// A failure while a shard was searched, as a response. A script that failed
+/// carries its own error, which is reported as that shard's failure.
+pub(crate) fn search_error_response(text: &str, index: &str) -> Response {
+    if let Some(detail) = text.split_once("script_exception:").map(|(_, d)| d)
+        && let Ok(detail) = serde_json::from_str::<Value>(detail)
+    {
+        let mut root = detail.clone();
+        if let Some(o) = root.as_object_mut() {
+            o.remove("caused_by");
+        }
+        let body = json!({
+            "error": {
+                "root_cause": [root],
+                "type": "search_phase_execution_exception",
+                "reason": "Partial shards failure",
+                "phase": "query",
+                "grouped": true,
+                "failed_shards": [{
+                    "shard": 0, "index": index, "node": "node0", "reason": detail,
+                }],
+            },
+            "status": 400,
+        });
+        return axum::response::IntoResponse::into_response((
+            StatusCode::BAD_REQUEST,
+            axum::Json(body),
+        ));
+    }
+    err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", text.to_string())
 }

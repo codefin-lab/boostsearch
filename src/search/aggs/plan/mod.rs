@@ -530,9 +530,10 @@ pub(crate) fn filtered_count(
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let searcher = g.reader.searcher();
-        total += searcher.search(&q, &Count).map_err(|e| {
-            err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
-        })? as u64;
+        total += searcher
+            .search(&q, &Count)
+            .map_err(|e| crate::search::search_error_response(&e.to_string(), name))?
+            as u64;
 
         if let Some(sa) = sub_aggs {
             let mut rewritten = sa.clone();
