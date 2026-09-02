@@ -139,7 +139,8 @@ pub struct Mapping {
     /// The multi-fields with a normalizer, worked out once when the mapping
     /// changes: every document would otherwise walk the whole mapping looking
     /// for them, and most mappings have none.
-    subs: Vec<(String, String, String)>,
+    /// (parent, sub, normalizer, JSON pointer to the parent, full sub path)
+    subs: Vec<(String, String, String, String, String)>,
     /// A field declared as an `alias` and the field it stands for. Asking the
     /// mapping what type a path holds is done once per node of every document
     /// written, and reading that out of the mapping tree -- a formatted string
@@ -156,6 +157,12 @@ pub struct Mapping {
     /// Whether any field holds queries, which is what decides if a document
     /// is checked for what its queries would fail on.
     has_percolator: bool,
+    /// The fields of a few kinds every document is looked over for, listed
+    /// once rather than found among all the types on every write.
+    ranges: Vec<(String, String)>,
+    flats: Vec<String>,
+    shingled: Vec<String>,
+    nanos: Vec<String>,
 }
 
 impl Mapping {}
@@ -586,8 +593,10 @@ fn walk_malformed(
         Value::Null => {}
         leaf => {
             let Some(ty) = mapping.type_of(path) else { return Ok(()) };
-            let fmt = mapping.field_option(path, "format");
-            let fmt = fmt.as_ref().and_then(|v| v.as_str());
+            // the format is read from what the mapping worked out once: this
+            // runs for every leaf of every document written, and a walk of
+            // the mapping tree per leaf was most of the cost of indexing
+            let fmt = mapping.date_format(path);
             if value_is_valid(leaf, ty, fmt) {
                 return Ok(());
             }

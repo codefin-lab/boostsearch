@@ -20,6 +20,10 @@ impl Mapping {
             copies: Vec::new(),
             flat_objects: Default::default(),
             has_percolator: false,
+            ranges: Vec::new(),
+            flats: Vec::new(),
+            shingled: Vec::new(),
+            nanos: Vec::new(),
         };
         m.remember_subfields();
         m
@@ -142,7 +146,7 @@ impl Mapping {
         }
         let Some(obj) = source.as_object() else { return };
         let mut learned: Vec<(String, Value)> = Vec::new();
-        self.sniff_fields(obj, "", &mut learned);
+        self.sniff_fields(obj, &mut String::new(), &mut learned);
         if learned.is_empty() {
             return;
         }
@@ -182,25 +186,28 @@ impl Mapping {
     fn sniff_fields(
         &self,
         node: &Map<String, Value>,
-        prefix: &str,
+        path: &mut String,
         out: &mut Vec<(String, Value)>,
     ) {
+        // runs on every document written, so the path is one buffer grown
+        // and cut back rather than a string per node
         for (name, value) in node {
             if name.starts_with('_') {
                 continue;
             }
-            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+            let base = path.len();
+            if base > 0 {
+                path.push('.');
+            }
+            path.push_str(name);
+            let kind = self.types.get(path.as_str()).map(|s| s.as_str());
             // nothing under a flat_object is a field of its own, and a query
             // stored in a percolator field is a query, not a set of fields
-            if self
-                .types
-                .get(&path)
-                .map(|t| t == "flat_object" || t == "percolator")
-                .unwrap_or(false)
-            {
+            if matches!(kind, Some("flat_object" | "percolator")) {
+                path.truncate(base);
                 continue;
             }
-            let known = self.types.contains_key(&path);
+            let known = kind.is_some();
             // a value that is an object, or a list of them, is looked into
             // even where the object itself is mapped: its fields may not be
             let inner: Option<&Map<String, Value>> = match value {
@@ -211,55 +218,64 @@ impl Mapping {
             if let Some(inner) = inner {
                 // an object told to hold no objects of its own maps what is
                 // under it as leaves named by their whole path
-                let flat = self.flat_objects.contains(&path);
-                if flat {
+                if self.flat_objects.contains(path.as_str()) {
+                    let here = path.clone();
                     let mut leaves: Vec<(String, Value)> = Vec::new();
-                    self.sniff_fields(inner, &path, &mut leaves);
+                    let mut under = here.clone();
+                    self.sniff_fields(inner, &mut under, &mut leaves);
                     for (leaf, def) in leaves {
                         if def.get("properties").is_some() {
                             continue;
                         }
-                        let under = leaf[path.len() + 1..].to_string();
-                        out.push((
-                            format!("{path}.{under}"),
-                            json!({"__leaf__": under, "def": def}),
-                        ));
+                        let rest = leaf[here.len() + 1..].to_string();
+                        out.push((format!("{here}.{rest}"), json!({"__leaf__": rest, "def": def})));
                     }
+                    path.truncate(base);
                     continue;
                 }
-                if !known && self.raw.pointer(&pointer_of(&path)).is_none() {
+                if !known && self.raw.pointer(&pointer_of(path)).is_none() {
                     out.push((path.clone(), json!({"properties": {}})));
                 }
-                let nested = self.types.get(&path).map(|t| t == "nested").unwrap_or(false);
-                if !nested {
-                    self.sniff_fields(inner, &path, out);
+                if kind != Some("nested") {
+                    self.sniff_fields(inner, path, out);
                 }
+                path.truncate(base);
                 continue;
             }
-            if known || self.raw.pointer(&pointer_of(&path)).is_some() {
+            if known || self.raw.pointer(&pointer_of(path)).is_some() {
+                path.truncate(base);
                 continue;
             }
             let leaf = match value {
                 Value::Array(items) => match items.iter().find(|v| !v.is_null()) {
                     Some(first) => first,
-                    None => continue,
+                    None => {
+                        path.truncate(base);
+                        continue;
+                    }
                 },
-                Value::Null => continue,
+                Value::Null => {
+                    path.truncate(base);
+                    continue;
+                }
                 other => other,
             };
             let def = match json_mapping_type(leaf) {
-                "date" => json!({"type": "date"}),
-                "string" => json!({
+                "date" => Some(json!({"type": "date"})),
+                "string" => Some(json!({
                     "type": "text",
                     "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                }),
-                "long" => json!({"type": "long"}),
+                })),
+                "long" => Some(json!({"type": "long"})),
                 // a floating point number nobody mapped is a float, not a double
-                "double" => json!({"type": "float"}),
-                "boolean" => json!({"type": "boolean"}),
-                _ => continue,
+                "double" => Some(json!({"type": "float"})),
+                "boolean" => Some(json!({"type": "boolean"})),
+                _ => None,
             };
-            out.push((path, def));
+            if let Some(def) = def {
+                out.push((path.clone(), def));
+            }
+            path.truncate(base);
         }
     }
 
@@ -337,7 +353,7 @@ impl Mapping {
         node.get("fields")?.get(sub)?.get("normalizer")?.as_str().map(|s| s.to_string())
     }
 
-    pub fn normalized_subfields(&self) -> &[(String, String, String)] {
+    pub fn normalized_subfields(&self) -> &[(String, String, String, String, String)] {
         &self.subs
     }
 
@@ -364,6 +380,40 @@ impl Mapping {
             })
             .collect();
         self.has_percolator = self.types.values().any(|kind| kind == "percolator");
+        let of = |keep: &dyn Fn(&str) -> bool| -> Vec<(String, String)> {
+            let mut found: Vec<(String, String)> = self
+                .types
+                .iter()
+                .filter(|(_, t)| keep(t))
+                .map(|(p, t)| (p.clone(), t.clone()))
+                .collect();
+            found.sort();
+            found
+        };
+        self.ranges = of(&|t| t.ends_with("_range"));
+        self.flats = of(&|t| t == "flat_object").into_iter().map(|(p, _)| p).collect();
+        self.shingled = of(&|t| t == "search_as_you_type").into_iter().map(|(p, _)| p).collect();
+        self.nanos = of(&|t| t == "date_nanos").into_iter().map(|(p, _)| p).collect();
+    }
+
+    /// The range fields, as (path, type).
+    pub fn range_fields(&self) -> &[(String, String)] {
+        &self.ranges
+    }
+
+    /// The flat_object fields.
+    pub fn flat_object_fields(&self) -> &[String] {
+        &self.flats
+    }
+
+    /// The search_as_you_type fields.
+    pub fn shingled_fields(&self) -> &[String] {
+        &self.shingled
+    }
+
+    /// The date_nanos fields.
+    pub fn nanos_fields(&self) -> &[String] {
+        &self.nanos
     }
 
     /// The format a date path declares, if it declares one.
@@ -446,7 +496,7 @@ impl Mapping {
 pub(crate) fn collect_normalizers(
     props: &Map<String, Value>,
     prefix: &str,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<(String, String, String, String, String)>,
 ) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
@@ -455,7 +505,11 @@ pub(crate) fn collect_normalizers(
                 // a multi-field without a normalizer still needs its own copy
                 // of the value; nothing else populates that path
                 let n = sdef.get("normalizer").and_then(|v| v.as_str()).unwrap_or("");
-                out.push((path.clone(), sub.clone(), n.to_string()));
+                // the pointer and the full path are worked out here, once,
+                // rather than for every document written
+                let pointer = format!("/{}", path.replace('.', "/"));
+                let full = format!("{path}.{sub}");
+                out.push((path.clone(), sub.clone(), n.to_string(), pointer, full));
             }
         }
         if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {

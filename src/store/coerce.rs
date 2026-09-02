@@ -221,13 +221,7 @@ pub(crate) fn coerce_leaves(node: &mut Value, path: &mut String, mapping: &Mappi
 /// comparison against a missing sub-field cannot express. The open side is
 /// filled with the extreme its type allows, in the indexing view only.
 pub(crate) fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
-    let ranges: Vec<(String, String)> = mapping
-        .types
-        .iter()
-        .filter(|(_, t)| t.ends_with("_range"))
-        .map(|(p, t)| (p.clone(), t.clone()))
-        .collect();
-    for (path, ty) in ranges {
+    for (path, ty) in mapping.range_fields().iter() {
         let pointer = format!("/{}", path.replace('.', "/"));
         let dated = ty.starts_with("date");
         let Some(node) = out.pointer_mut(&pointer).and_then(|n| n.as_object_mut()) else {
@@ -285,14 +279,12 @@ pub(crate) fn fill_open_ranges(out: &mut Value, mapping: &Mapping) {
 /// it has to live somewhere addressable. They are gathered into one list
 /// alongside, in the indexing view only.
 pub(crate) fn gather_flat_objects(out: &mut Value, mapping: &Mapping) {
-    let flats: Vec<String> = mapping
-        .types
-        .iter()
-        .filter(|(_, t)| t.as_str() == "flat_object")
-        .map(|(p, _)| p.clone())
-        .collect();
+    let flats = mapping.flat_object_fields();
+    if flats.is_empty() {
+        return;
+    }
     let Some(obj) = out.as_object_mut() else { return };
-    for path in flats {
+    for path in flats.iter() {
         let pointer = format!("/{}", path.replace('.', "/"));
         let Some(node) = obj.get(path.split('.').next().unwrap_or(&path)) else { continue };
         let root = Value::Object(obj.clone());
@@ -394,23 +386,21 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     if subs.is_empty() {
         return out;
     }
-    let source = &out.clone();
-    let Some(obj) = out.as_object_mut() else { return out };
-    for (parent, sub, normalizer) in subs.iter() {
-        let Some(v) = source.pointer(&format!("/{}", parent.replace('.', "/"))).cloned() else {
-            continue;
-        };
-        let normalizer = normalizer.clone();
-        let normalized = match &v {
+    // the copies are read out of the document before any is written in, so
+    // the document is not cloned whole for the sake of a few fields
+    let mut copies: Vec<(String, Value)> = Vec::with_capacity(subs.len());
+    for (parent, sub, normalizer, pointer, full) in subs.iter() {
+        let Some(v) = out.pointer(pointer) else { continue };
+        let normalized = match v {
             Value::Array(items) => {
                 let mapped: Vec<Value> =
-                    items.iter().filter_map(|x| normalize(x, &normalizer)).collect();
+                    items.iter().filter_map(|x| normalize(x, normalizer)).collect();
                 if mapped.is_empty() {
                     continue;
                 }
                 Value::Array(mapped)
             }
-            other => match normalize(other, &normalizer) {
+            other => match normalize(other, normalizer) {
                 Some(n) => n,
                 None => continue,
             },
@@ -419,7 +409,8 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
         // milliseconds and a date_nanos is nanoseconds, and the copy carries
         // the number the parent was coerced to
         let mut normalized = normalized;
-        let step = match (mapping.type_of(parent), mapping.type_of(&format!("{parent}.{sub}"))) {
+        let _ = sub;
+        let step = match (mapping.type_of(parent), mapping.type_of(full)) {
             (Some("date"), Some("date_nanos")) => 1_000_000i64,
             (Some("date_nanos"), Some("date")) => -1_000_000,
             _ => 0,
@@ -435,7 +426,12 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
                 other => rescale(other),
             }
         }
-        obj.insert(format!("{parent}.{sub}"), normalized);
+        copies.push((full.clone(), normalized));
+    }
+    if let Some(obj) = out.as_object_mut() {
+        for (key, value) in copies {
+            obj.insert(key, value);
+        }
     }
     out
 }
@@ -513,18 +509,14 @@ fn copy_fields(document: &mut Value, mapping: &Mapping) {
 }
 
 fn add_shingles(document: &mut Value, mapping: &Mapping) {
-    let typed: Vec<String> = mapping
-        .types
-        .iter()
-        .filter(|(_, kind)| *kind == "search_as_you_type")
-        .map(|(path, _)| path.clone())
-        .collect();
+    let typed = mapping.shingled_fields();
     if typed.is_empty() {
         return;
     }
     let Some(obj) = document.as_object_mut() else { return };
-    for path in typed {
-        let Some(text) = obj.get(&path).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+    for path in typed.iter() {
+        let Some(text) = obj.get(path.as_str()).and_then(|v| v.as_str()).map(|s| s.to_string())
+        else {
             continue;
         };
         let words: Vec<&str> = text.split_whitespace().collect();
