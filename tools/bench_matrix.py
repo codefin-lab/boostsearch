@@ -45,7 +45,9 @@ QUERIES={
  "nested_agg":{"size":0,"aggs":{"a":{"terms":{"field":"region"},"aggs":{"s":{"avg":{"field":"response_ms"}}}}}},
  "cardinality":{"size":0,"aggs":{"c":{"cardinality":{"field":"request.keyword" if False else "region"}}}},
 }
-def latency(base,name,body,n=60):
+def latency(base,name,body,n=150):
+    # a few unmeasured requests first: connection setup, caches, JIT on the other side
+    for _ in range(15): req(base,"POST",f"/{name}/_search",body)
     ts=[]
     for _ in range(n):
         t=time.time(); req(base,"POST",f"/{name}/_search",body); ts.append((time.time()-t)*1000)
@@ -113,7 +115,9 @@ QUERIES={
  "nested_agg":{"size":0,"aggs":{"a":{"terms":{"field":"region"},"aggs":{"s":{"avg":{"field":"response_ms"}}}}}},
  "cardinality":{"size":0,"aggs":{"c":{"cardinality":{"field":"request.keyword" if False else "region"}}}},
 }
-def latency(base,name,body,n=60):
+def latency(base,name,body,n=150):
+    # a few unmeasured requests first: connection setup, caches, JIT on the other side
+    for _ in range(15): req(base,"POST",f"/{name}/_search",body)
     ts=[]
     for _ in range(n):
         t=time.time(); req(base,"POST",f"/{name}/_search",body); ts.append((time.time()-t)*1000)

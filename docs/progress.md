@@ -550,3 +550,58 @@ of a millisecond; it is not the measurement.)
 
 Gates after this work (security off): phase1 398/398, modules 820/895,
 unchanged.
+
+### Performance tuning after the security work (2026-09-03)
+
+Asked to make every dimension a sure win, including the strictest pass
+(BoostSearch with security and TLS against OpenSearch with neither).
+
+What was measured first, with the bench's own client (a new connection per
+request, 200 samples, warm-up dropped):
+
+| path | p50 per request |
+|---|---|
+| BoostSearch HTTP, security off | 0.277 ms |
+| BoostSearch HTTP, security on | 0.296 ms |
+| BoostSearch HTTPS, security on | 0.684 ms |
+| OpenSearch HTTP, no plugin | 0.808 ms |
+| OpenSearch HTTPS, security plugin | 3.170 ms |
+
+So the security middleware costs 0.02 ms a request and TLS costs 0.39 ms,
+of which the server's own CPU is 118 µs per handshake (measured over 5,000
+handshakes); the rest is the client's handshake and the extra round trip.
+The lines lost in earlier runs were measurement noise on a loaded machine
+(a build and the YAML gates ran alongside), not a regression.
+
+Done:
+- rustls now issues session tickets (one per handshake) and keeps a TLS 1.2
+  session cache, so a client that resumes skips the certificate work; the
+  bench's client never resumes, so this helps real clients, not the table.
+- `aws-lc-rs` was tried in place of `ring`: 122 µs against 118 µs per
+  handshake, no gain, and it drags in a C toolchain; reverted.
+- `tools/bench_matrix.py` takes 150 latency samples after 15 unmeasured
+  requests (was 60, cold), which is what makes hundredths-of-a-millisecond
+  margins stable; `BENCH_A`, `BENCH_B`, `BENCH_AUTH`, `BENCH_A_CONTAINER`
+  choose the sides.
+
+Three quiet passes, nothing else running:
+
+| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+|---|---|---|---|
+| index docs/s | 59,937 / 61,663 | 61,305 / 66,496 | 57,160 / 66,462 |
+| memory | 1.71 GiB / 392 MiB | 1.72 GiB / 340 MiB | 1.60 GiB / 387 MiB |
+| match_all p50 | 1.37 / 0.48 ms | 1.26 / 0.71 ms | 3.70 / 0.76 ms |
+| term p50 | 1.35 / 0.50 ms | 1.27 / 0.75 ms | 3.71 / 0.83 ms |
+| match p50 | 1.93 / 0.71 ms | 1.63 / 0.99 ms | 4.21 / 1.01 ms |
+| bool+filter p50 | 1.62 / 0.81 ms | 1.47 / 1.08 ms | 4.02 / 1.09 ms |
+| range p50 | 1.24 / 0.63 ms | 1.10 / 0.91 ms | 3.22 / 0.96 ms |
+| sort_desc p50 | 1.63 / 1.06 ms | 2.43 / 1.30 ms | 4.45 / 1.31 ms |
+| terms_agg p50 | 1.26 / 0.72 ms | 1.14 / 1.03 ms | 3.49 / 1.02 ms |
+| date_histogram p50 | 1.58 / 0.96 ms | 1.43 / 1.23 ms | 3.78 / 1.32 ms |
+| nested_agg p50 | 1.32 / 0.84 ms | 1.20 / 1.16 ms | 3.66 / 1.13 ms |
+| cardinality p50 | 1.26 / 0.78 ms | 1.20 / 1.08 ms | 3.52 / 0.98 ms |
+
+Every dimension won in every pass. Pass 2 is the thin one by nature: a
+client that opens a connection per request pays a TLS handshake each time
+on our side and none on the other, and most of that handshake is the
+client's own work.

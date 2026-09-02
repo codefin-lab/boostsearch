@@ -164,6 +164,16 @@ pub async fn serve_tls(
     let mut config =
         rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // a client that comes back resumes rather than shaking hands again:
+    // tickets for TLS 1.3, a session cache for TLS 1.2 (rustls issues
+    // neither unless told to)
+    if let Ok(ticketer) = rustls::crypto::ring::Ticketer::new() {
+        config.ticketer = ticketer;
+    }
+    // one ticket is enough for a client that will resume; a second is a
+    // record the client must read and decrypt for nothing
+    config.send_tls13_tickets = 1;
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(8192);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     loop {
         let (stream, _peer) = match listener.accept().await {
