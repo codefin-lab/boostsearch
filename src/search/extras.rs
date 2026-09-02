@@ -147,6 +147,7 @@ pub(crate) fn settle_by_value(
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
             let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let src = derived_copy(src, &g.mapping);
             let Some(here) = src.pointer(&path) else { return false };
             // a field may hold one point or several; a pair of numbers is one
             let points: Vec<&Value> = match here {
@@ -168,6 +169,7 @@ pub(crate) fn settle_by_value(
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
             let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
+            let src = derived_copy(src, &g.mapping);
             let Some(text) = src.pointer(&path) else { return false };
             let text = match text {
                 Value::String(s) => s.clone(),
@@ -206,6 +208,7 @@ pub(crate) fn settle_by_value(
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
             let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+            let src = derived_copy(src, &g.mapping);
             let Some(value) = src.pointer(&path) else { continue };
             let distance = if geo {
                 geo_distance_metres(&origin, value)
@@ -218,5 +221,14 @@ pub(crate) fn settle_by_value(
                 _ => {}
             }
         }
+    }
+}
+
+/// The source with its derived fields in, where the mapping has any.
+fn derived_copy(src: Value, mapping: &crate::store::Mapping) -> Value {
+    if mapping.derived_fields().is_empty() {
+        src
+    } else {
+        crate::store::with_derived(&src, mapping)
     }
 }

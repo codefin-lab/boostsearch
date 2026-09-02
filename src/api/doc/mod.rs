@@ -174,6 +174,20 @@ pub fn write_doc_versioned(
         return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
     }
     st.mapping.learn_dynamic(&source);
+    // what a derived object holds is learned the way a dynamic field is, so
+    // its parts can be searched by type; the object itself stays derived
+    if st.mapping.derived_fields().iter().any(|(_, d)| d.get("type") == Some(&json!("object"))) {
+        let made: serde_json::Map<String, Value> =
+            crate::store::derived_values(&source, &st.mapping)
+                .into_iter()
+                .filter(|(n, _)| st.mapping.type_of(n) == Some("object"))
+                .collect();
+        if !made.is_empty() {
+            let names: Vec<String> = made.keys().cloned().collect();
+            st.mapping.learn_dynamic(&Value::Object(made));
+            st.mapping.forget_properties(&names);
+        }
+    }
     // normalized multi-fields are indexed alongside, but never stored
     let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);
     // the kinds a query narrows against have to be the kinds actually indexed,

@@ -212,7 +212,11 @@ pub fn get_field(t: &Value, name: &str) -> Result<Value, String> {
         Value::Map(m) => Ok(map_get(m, &Value::str(name)).unwrap_or(Value::Null)),
         Value::Native(n) => n.get(name).ok_or_else(|| format!("unknown field [{name}]")),
         Value::DocValues(d) => match name {
-            "value" => Ok(d.values.first().cloned().unwrap_or(Value::Null)),
+            "value" => d.values.first().cloned().ok_or_else(|| {
+                "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check \
+                 if a document is missing a field!"
+                    .to_string()
+            }),
             "values" => Ok(Value::list(d.values.clone())),
             "length" | "size" => Ok(Value::Int(d.values.len() as i64)),
             "empty" => Ok(Value::Bool(d.values.is_empty())),

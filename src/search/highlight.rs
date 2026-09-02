@@ -47,6 +47,14 @@ pub(crate) fn build_highlight(
     let require_match = spec.get("require_field_match").and_then(|v| v.as_bool()).unwrap_or(true);
 
     let asked = query_terms_by_field(query.as_ref());
+    // a derived field's text is made from the source, not read out of it
+    let derived_copy;
+    let source = if mapping.derived_fields().is_empty() {
+        source
+    } else {
+        derived_copy = crate::store::with_derived(source, mapping);
+        &derived_copy
+    };
     // every path the mapping knows, plus whatever the document itself carries
     let mut candidates: Vec<String> = mapping.types.keys().cloned().collect();
     if let Some(o) = source.as_object() {

@@ -183,7 +183,13 @@ pub(crate) fn write_page(
                     .map(|(n, _)| n.clone())
                     .filter(|n| g.mapping.field_option(n, "doc_values") != Some(json!(false)))
                     .collect();
-                let raw = crate::source::extract_fields(&h.source, &names, &is_leaf);
+                // a derived field is not in the source: it is made from it
+                let derived_source = names
+                    .iter()
+                    .any(|n| g.mapping.is_derived(n))
+                    .then(|| crate::store::with_derived(&h.source, &g.mapping));
+                let read_from = derived_source.as_ref().unwrap_or(&h.source);
+                let raw = crate::source::extract_fields(read_from, &names, &is_leaf);
                 // A field may be asked for more than once, each time with its
                 // own format, and each asking adds its values to the one list
                 // the field is reported under.

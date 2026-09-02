@@ -394,6 +394,7 @@ pub(crate) fn peelable_here(def: &Value) -> bool {
         || def.get("date_histogram").map(walked_here).unwrap_or(false)
         // a script makes the keys, which no engine reads from a field
         || def.pointer("/terms/script").is_some()
+        || def.get("scripted_metric").is_some()
 }
 
 /// A date histogram this engine has to walk itself, a bucket at a time: one

@@ -503,7 +503,17 @@ pub fn run(
     body: &Value,
     p: &Params,
 ) -> std::result::Result<Outcome, Response> {
+    // a `derived` section defines fields for this search alone: the
+    // documents are copied into a scratch index mapped with them, and the
+    // search runs there
+    if let Some(defs) = body.get("derived").and_then(|d| d.as_object())
+        && !defs.is_empty()
+        && !expr.starts_with("_derived")
+    {
+        return run_with_derived(store, expr, body, p, defs);
+    }
     const BODY_KEYS: &[&str] = &[
+        "derived",
         "query",
         "from",
         "size",
@@ -1389,4 +1399,64 @@ pub fn run(
         suggest,
         failures,
     })
+}
+
+/// Run a search whose body defines derived fields of its own.
+fn run_with_derived(
+    store: &Store,
+    expr: &str,
+    body: &Value,
+    p: &Params,
+    defs: &serde_json::Map<String, Value>,
+) -> std::result::Result<Outcome, Response> {
+    let targets = store.resolve(expr);
+    let Some(first) = targets.first().and_then(|n| store.get(n)) else {
+        return run(store, expr, &without_derived(body), p);
+    };
+    let scratch = Store::new();
+    let Ok(st) = scratch.ensure("_derived") else {
+        return run(store, expr, &without_derived(body), p);
+    };
+    {
+        let mut raw = first.read().mapping.raw.clone();
+        let slot = raw
+            .as_object_mut()
+            .map(|o| o.entry("derived".to_string()).or_insert_with(|| json!({})));
+        if let Some(existing) = slot.and_then(|d| d.as_object_mut()) {
+            for (k, v) in defs {
+                existing.insert(k.clone(), v.clone());
+            }
+        }
+        let settings = first.read().settings.clone();
+        let mut g = st.write();
+        g.mapping = crate::store::Mapping::from_body(&raw);
+        g.settings = settings;
+        g.apply_analysis();
+    }
+    // every document of the index, written into the scratch one as it was
+    let all = json!({"query": {"match_all": {}}, "size": 10_000});
+    let found = run(store, expr, &all, &Params::new())?;
+    {
+        let mut g = st.write();
+        for hit in &found.hits {
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+            let source = hit.get("_source").cloned().unwrap_or(json!({}));
+            let _ = crate::api::write_doc_raw(&mut g, id, source, "index", None);
+        }
+        let _ = g.refresh();
+    }
+    let mut out = run(&scratch, "_derived", &without_derived(body), p)?;
+    let name = targets.first().cloned().unwrap_or_else(|| expr.to_string());
+    for hit in out.hits.iter_mut() {
+        hit["_index"] = json!(name);
+    }
+    Ok(out)
+}
+
+fn without_derived(body: &Value) -> Value {
+    let mut b = body.clone();
+    if let Some(o) = b.as_object_mut() {
+        o.remove("derived");
+    }
+    b
 }

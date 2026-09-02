@@ -318,7 +318,17 @@ pub(crate) fn format_terms_keys(
                 .and_then(|t| t.get("field"))
                 .and_then(|f| f.as_str())
                 .unwrap_or("");
-            let base = field.strip_suffix(".keyword").unwrap_or(field);
+            let base = match field.strip_suffix(".keyword") {
+                Some(parent)
+                    if !matches!(
+                        types.get(parent).map(|s| s.as_str()),
+                        Some("object" | "nested")
+                    ) =>
+                {
+                    parent
+                }
+                _ => field,
+            };
             let ty = types.get(base).cloned();
             let listed = |key: &str| -> Option<Vec<String>> {
                 let v = defo.get("terms")?.get(key)?;

@@ -341,3 +341,81 @@ pub(crate) fn run_mad_agg(
     let mut values = collect_field_values(store, targets, &query, &field, missing)?;
     Ok(json!({ "value": crate::hdr::median_absolute_deviation(&mut values) }))
 }
+
+/// `scripted_metric`: four scripts and a `state` they share -- one to set
+/// the state up, one run over each document, one to fold the state down,
+/// and one over the folded states of every shard.
+pub(crate) fn run_scripted_metric_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    use crate::painless::contexts::{Compiled, Runner};
+    let spec = def.get("scripted_metric").cloned().unwrap_or(json!({}));
+    let index = targets.first().cloned().unwrap_or_default();
+    let params = spec.get("params").cloned().unwrap_or_else(|| json!({}));
+    let compile = |key: &str| -> std::result::Result<Option<Compiled>, Response> {
+        let Some(script) = spec.get(key) else { return Ok(None) };
+        let mut script = script.clone();
+        // the aggregation's own params are every script's params
+        if let Some(o) = script.as_object_mut()
+            && !o.contains_key("params")
+        {
+            o.insert("params".into(), params.clone());
+        }
+        if script.is_string() {
+            script = json!({"source": script, "params": params});
+        }
+        Compiled::of(&script, &|id| store.stored_script(id))
+            .map(Some)
+            .map_err(|e| crate::search::search_script_failure(e, &index))
+    };
+    let init = compile("init_script")?;
+    let map = compile("map_script")?;
+    let combine = compile("combine_script")?;
+    let reduce = compile("reduce_script")?;
+    let Some(map) = map else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "[map_script] must be provided",
+        ));
+    };
+    let failed = |e: crate::painless::ScriptError| crate::search::search_script_failure(e, &index);
+    let state = crate::painless::Value::map(Vec::new());
+    if let Some(init) = &init {
+        Runner::new(&init.params).with_state(state.clone()).run(&init.script).map_err(failed)?;
+    }
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
+    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    for hit in &found.hits {
+        let name = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(st) = store.get(name) else { continue };
+        let mapping = st.read().mapping.clone();
+        let source = hit.get("_source").cloned().unwrap_or(json!({}));
+        let expanded = crate::store::expand_for_indexing(source, &mapping);
+        let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        Runner::new(&map.params)
+            .with_state(state.clone())
+            .with_doc(&expanded, &mapping)
+            .with_score(score)
+            .run(&map.script)
+            .map_err(failed)?;
+    }
+    let combined = match &combine {
+        Some(c) => {
+            Runner::new(&c.params).with_state(state.clone()).run(&c.script).map_err(failed)?
+        }
+        None => state,
+    };
+    let value = match &reduce {
+        Some(r) => Runner::new(&r.params)
+            .with_states(crate::painless::Value::list(vec![combined]))
+            .run(&r.script)
+            .map_err(failed)?,
+        None => crate::painless::Value::list(vec![combined]),
+    };
+    Ok(json!({"value": value.to_json()}))
+}

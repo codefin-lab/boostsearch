@@ -24,6 +24,7 @@ impl Mapping {
             flats: Vec::new(),
             shingled: Vec::new(),
             nanos: Vec::new(),
+            derived: Vec::new(),
         };
         m.remember_subfields();
         m
@@ -163,6 +164,16 @@ impl Mapping {
         }
         // what the flat views know follows the raw mapping, once for the lot
         self.remember_subfields();
+    }
+
+    /// Take fields back out of `properties`, keeping what was learned of
+    /// their types: a derived object is not a property of the mapping.
+    pub fn forget_properties(&mut self, names: &[String]) {
+        if let Some(props) = self.raw.get_mut("properties").and_then(|p| p.as_object_mut()) {
+            for n in names {
+                props.remove(n);
+            }
+        }
     }
 
     /// One leaf written under an object by its whole dotted name.
@@ -394,6 +405,40 @@ impl Mapping {
         self.flats = of(&|t| t == "flat_object").into_iter().map(|(p, _)| p).collect();
         self.shingled = of(&|t| t == "search_as_you_type").into_iter().map(|(p, _)| p).collect();
         self.nanos = of(&|t| t == "date_nanos").into_iter().map(|(p, _)| p).collect();
+        // a derived field is typed like any other, so a query or an
+        // aggregation reads it the way its type says
+        self.derived = self
+            .raw
+            .get("derived")
+            .and_then(|d| d.as_object())
+            .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        for (name, def) in self.derived.clone() {
+            let kind = def.get("type").and_then(|t| t.as_str()).unwrap_or("keyword").to_string();
+            self.types.insert(name.clone(), kind.clone());
+            if kind == "object"
+                && let Some(props) = def.get("properties").and_then(|p| p.as_object())
+            {
+                for (sub, sdef) in props {
+                    // `keyword: keyword` is the short form of `{type: keyword}`
+                    let t = sdef
+                        .as_str()
+                        .or_else(|| sdef.get("type").and_then(|t| t.as_str()))
+                        .unwrap_or("keyword");
+                    self.types.insert(format!("{name}.{sub}"), t.to_string());
+                }
+            }
+        }
+    }
+
+    /// The fields a script makes from the source, as (name, definition).
+    pub fn derived_fields(&self) -> &[(String, Value)] {
+        &self.derived
+    }
+
+    /// Whether a path is a derived field, or lies under a derived object.
+    pub fn is_derived(&self, path: &str) -> bool {
+        self.derived.iter().any(|(n, _)| path == n || path.starts_with(&format!("{n}.")))
     }
 
     /// The range fields, as (path, type).
@@ -495,6 +540,15 @@ impl Mapping {
                                 }
                             }
                         }
+                    }
+                }
+            } else if key == "derived" {
+                // derived fields are added to those already there, and one
+                // named again is redefined
+                let slot = entry_of(&mut self.raw, "derived", || serde_json::json!({}));
+                if let (Some(existing), Some(incoming)) = (slot.as_object_mut(), val.as_object()) {
+                    for (k, v) in incoming {
+                        existing.insert(k.clone(), v.clone());
                     }
                 }
             } else if let Some(o) = self.raw.as_object_mut() {
