@@ -10,6 +10,7 @@ mod analysis;
 mod api;
 mod blockstats;
 mod hdr;
+mod painless;
 mod query;
 mod search;
 mod snapshot;
