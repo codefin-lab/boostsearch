@@ -296,6 +296,21 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                         return Err(c.wrong("add_to_root_conflict_strategy", format!("[add_to_root_conflict_strategy] conflict strategy [{s}] not supported, cannot convert field.")));
                     }
                 }
+                "user_agent" => {
+                    if let Some(f) = c.str_opt("regex_file")? {
+                        super::user_agent::parser(Some(&f))
+                            .map_err(|e| c.wrong("regex_file", e.reason))?;
+                    }
+                    if let Some(props) = c.strings_opt("properties")? {
+                        for p in props {
+                            if !["name", "os", "device", "original", "version"]
+                                .contains(&p.as_str())
+                            {
+                                return Err(c.wrong("properties", format!("[properties] illegal property value [{p}]. valid values are [NAME, OS, DEVICE, ORIGINAL, VERSION]")));
+                            }
+                        }
+                    }
+                }
                 "sort" => {
                     if let Some(o) = c.str_opt("order")?
                         && o != "asc"
@@ -1334,8 +1349,13 @@ fn run_body(
         "user_agent" => {
             let field = field_of(&doc, c, "field")?;
             let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| "user_agent".into());
+            let regex_file = c.str_opt("regex_file")?;
+            let properties = c.strings_opt("properties")?;
             let Some(text) = string_at(&doc, &field, ignore_missing)? else { return Ok(Some(doc)) };
-            doc.set(&target, user_agent(&text)).map_err(IngestError::illegal)?;
+            let parser = super::user_agent::parser(regex_file.as_deref())?;
+            let parsed = parser.parse(&text);
+            doc.set(&target, parsed.to_json(&text, properties.as_deref()))
+                .map_err(IngestError::illegal)?;
         }
         "geoip" => {
             let field = field_of(&doc, c, "field")?;
@@ -1897,25 +1917,6 @@ fn run_community_id(c: &Cfg, doc: &mut IngestDoc, ignore_missing: bool) -> Resul
     let swap = !is_less && (!icmp || !one_way);
     let id = super::hash::community_id(&sip, &dip, sport, dport, proto, seed, swap);
     doc.set(&target, json!(id)).map_err(IngestError::illegal)
-}
-
-/// A user agent read the simplest way: the product before the first
-/// slash, its version, and the operating system named in parentheses.
-fn user_agent(text: &str) -> Value {
-    let mut out = Map::new();
-    let name = text.split(['/', ' ']).next().unwrap_or("Other").to_string();
-    out.insert("name".into(), json!(if name.is_empty() { "Other".to_string() } else { name }));
-    if let Some(v) = text.split('/').nth(1).map(|s| s.split(' ').next().unwrap_or("").to_string()) {
-        out.insert("version".into(), json!(v));
-    }
-    out.insert("original".into(), json!(text));
-    if let Some(start) = text.find('(') {
-        let inside = &text[start + 1..];
-        let os = inside.split([')', ';']).next().unwrap_or("").trim();
-        out.insert("os".into(), json!({"name": os, "full": os}));
-    }
-    out.insert("device".into(), json!({"name": "Other"}));
-    Value::Object(out)
 }
 
 /// Whether a value holds something no document can: a pattern, a lambda,

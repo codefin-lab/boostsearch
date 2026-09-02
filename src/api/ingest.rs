@@ -55,6 +55,11 @@ pub(crate) async fn put_pipeline(
     {
         return ingest_failure(&e);
     }
+    if kind == "search"
+        && let Err(e) = crate::search::pipeline::Pipeline::parse(&name, &body)
+    {
+        return crate::api::pipeline_failure(&e);
+    }
     store.put_pipeline(kind, &name, body);
     respond(&p, json!({"acknowledged": true}))
 }

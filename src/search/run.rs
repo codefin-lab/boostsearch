@@ -895,11 +895,16 @@ pub fn run(
     // after the candidates are in hand, so the page cannot be cut while
     // collecting
     let nested_filtered = sort_keys.iter().any(|k| k.nested_filter.is_some());
-    let page_want = if slice.is_some() || body.get("collapse").is_some() || nested_filtered {
-        65_536
-    } else {
-        from + size
-    };
+    // a score that is only settled once the candidates are in hand cannot
+    // cut the page while collecting either
+    let rescored_later = body.pointer("/query/function_score").is_some()
+        || body.pointer("/query/script_score").is_some();
+    let page_want =
+        if slice.is_some() || body.get("collapse").is_some() || nested_filtered || rescored_later {
+            65_536
+        } else {
+            from + size
+        };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();
