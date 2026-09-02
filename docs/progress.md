@@ -160,3 +160,68 @@ indexing threads, so two documents written by separate requests come back either
 way round. Ordering the segments by the index's own segment list does not fix it
 either -- measured, then reverted. Matching this needs a sequence number stored
 per document, which is memory we spent a while reclaiming.
+
+# ความคืบหน้า Phase 2 — query, aggregation, endpoint, field type
+
+วัดด้วย suite เดิมของ OpenSearch สามชุด กับ diff สามตัวที่รันคู่กับ OpenSearch 3.1.0 จริง
+
+| gate | ก่อน Phase 2 | ปิด Phase 2 |
+|---|---:|---:|
+| core corpus (`/tmp/every_manifest.json`) | 1,427 / 1,427 | **1,427 / 1,427** |
+| phase1 corpus | 398 / 398 | **398 / 398** |
+| module corpus (`tools/modules_manifest.json`) | 346 / 895 | **506 / 895** |
+| `tools/search_diff.py` (query + agg answers) | 67 / 92 | **92 / 92** |
+| `tools/analysis_diff.py` (token for token) | 519 / 522 | 519 / 522 |
+| `tools/shape_diff.py` (answer shapes) | 10 / 29 | 27 / 29 |
+| index docs/s (`tools/bench_matrix.py`) | 77,346 vs 67,141 | **81,340 vs 67,598** |
+
+## รายโมดูลที่อยู่ในขอบเขต Phase 2
+
+| module | pass / total | ที่เหลือ |
+|---|---:|---|
+| mapper-extras | 100 / 100 | — |
+| parent-join | 14 / 14 | — |
+| aggs-matrix-stats | 15 / 15 | — |
+| geo | 7 / 7 | — |
+| lang-mustache | 21 / 21 | — |
+| rank-eval | 8 / 8 | — |
+| percolator | 1 / 1 | — |
+| analysis-common | 166 / 172 | 4 ต้องการ painless (Phase 3), 2 คือ `common` query กับ `minimum_should_match` ที่ยังหา semantics ของ Lucene ไม่เจอ |
+| reindex | 131 / 166 | 33 ต้องการ script (Phase 3), 2 คือ reindex จาก remote cluster |
+
+385 ที่ยังล้มใน module corpus: lang-painless 106 + ingest-common 100 (Phase 3/4),
+reindex-with-script 33, search-pipeline-common 5 (feature ใหม่ นอกแผน),
+ingest-* / repository-url / smoke-test-ingest ~30 (Phase 4), plugins (phonetic,
+icu collation, kuromoji completion, annotated-text) ~8
+
+## สิ่งที่ลงไปใน Phase 2
+
+- **BM25 ตรง Lucene** — สถิติต่อ path ของ JSON field (BoostCore เขียน docs/tokens ต่อ path),
+  ตัด `(k1+1)` ออกจาก numerator, span query ชั่งน้ำหนักครั้งเดียว (idf รวมทุกคำ)
+- **token graph** — token มี `positionLength`; `synonym_graph` วาง path แบบ Lucene,
+  `flatten_graph` กดกราฟให้แบน, phrase/match/phrase-prefix เดินทุก path
+  และ phrase บนกราฟให้คะแนนเป็น span query เดียว
+- **dynamic mapping** — field ที่ไม่ได้ประกาศถูก map แบบ OpenSearch (text+keyword,
+  long, float, date, boolean, object) และโผล่ใน `_mapping`; keyword sub-field
+  ที่ไม่มี normalizer อ่านจาก raw view ของ parent แทนการ index ซ้ำ
+- **explain tree** — `_explain` และ `explain:true` ให้ต้นไม้แบบ Lucene
+  (`weight(field:term in doc) [PerFieldSimilarity]`, `score(freq=…)`, idf, tf)
+- **by-query walks** — validation ครบ, routing, `_source` filtering, throttling,
+  `slices: auto`, `.tasks`, `wait_for_active_shards`
+- **field types** — percolator, `_size`, `copy_to`, rank_feature negative impact,
+  `match_only_text` scoring (freq 1, ไม่มี norms)
+- **aggregations** — matrix_stats ตามเลขคณิตของ OpenSearch (accumulate ต่อ shard แล้ว merge),
+  children/parent, geohash_grid / geotile_grid, composite over grid sources,
+  ranges เขียนเป็น object
+- **analysis** — shingle, keyword_repeat (stacked stems), Bengali/Persian stemmers,
+  synonym rules ถูกตัดด้วย chain ข้างหน้า, multiplexer, char filter offset map,
+  ngram highlighting, matched_fields, intervals `use_field`
+- **runner** — `catch` regex เทียบกับ `[type=…, reason=…]` แบบ client ของ OpenSearch,
+  body ที่ spec บอกว่า required, `$body.x` ใน assertion
+
+## ข้อจำกัดที่รู้ตัว (ยกไป Phase 3+)
+
+- `common` query กับ `minimum_should_match.low_freq/high_freq` — 2 sections
+- `ignore_above` บน keyword sub-field ที่อ่านจาก raw view: ค่ายาวเกินยังถูกนับใน agg
+- reindex จาก remote cluster ยังไม่ทำ (validation ครบแล้ว)
+- search pipelines (`search-pipeline-common`) นอกขอบเขตแผน
