@@ -101,6 +101,9 @@ impl Store {
 
     pub fn put_pipeline(&self, kind: &str, name: &str, body: Value) {
         self.pipelines.write().entry(kind.to_string()).or_default().insert(name.to_string(), body);
+        if kind == "ingest" {
+            self.any_ingest_pipeline.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Remove the pipelines of one kind whose names a pattern reaches.

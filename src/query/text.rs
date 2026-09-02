@@ -744,10 +744,20 @@ pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         other => other.to_string(),
     };
     let (f, path, view) = ctx.resolve(&field, true);
-    let tokens = analyze_with(ctx, view, &field, &text, None);
-    if tokens.is_empty() {
+    // the words that share a place -- a word and its synonyms -- are one
+    // clause between them: any of them is that word
+    let edges = analyze_graph(ctx, view, &field, &text, None);
+    if edges.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
+    let mut places: Vec<(usize, Vec<String>)> = Vec::new();
+    for e in &edges {
+        match places.iter_mut().find(|(p, _)| *p == e.from) {
+            Some((_, words)) => words.push(e.text.clone()),
+            None => places.push((e.from, vec![e.text.clone()])),
+        }
+    }
+    places.sort_by_key(|(p, _)| *p);
     let searcher = ctx.index.reader()?.searcher();
     let cutoff = opts.get("cutoff_frequency").and_then(|v| v.as_f64()).unwrap_or(0.01);
     let most = match cutoff < 1.0 {
@@ -760,35 +770,88 @@ pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             _ => Occur::Should,
         }
     };
-    let (mut rare, mut common): (Vec<Term>, Vec<Term>) = (Vec::new(), Vec::new());
-    for t in &tokens {
+    let term_of = |t: &str| -> Term {
         let mut term = Term::from_field_json_path(f, &path, true);
         term.append_type_and_str(t);
-        let held = searcher.doc_freq(&term).unwrap_or(0);
+        term
+    };
+    // a place is common where its most frequent word is
+    let (mut rare, mut common): (Vec<Vec<Term>>, Vec<Vec<Term>>) = (Vec::new(), Vec::new());
+    for (_, words) in &places {
+        let terms: Vec<Term> = words.iter().map(|w| term_of(w)).collect();
+        let held = terms.iter().map(|t| searcher.doc_freq(t).unwrap_or(0)).max().unwrap_or(0);
         match held >= most {
-            true => common.push(term),
-            false => rare.push(term),
+            true => common.push(terms),
+            false => rare.push(terms),
         }
     }
-    let clauses_of = |terms: Vec<Term>, occur: Occur| -> Box<dyn Query> {
-        let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+    // how many of the should clauses have to hold, for the rare words and
+    // for the common ones
+    let msm_of = |key: &str, n: usize| -> usize {
+        let spec = opts.get("minimum_should_match");
+        let text = match spec {
+            Some(Value::Object(o)) => o.get(key).map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }),
+            Some(Value::String(s)) if key == "low_freq" => Some(s.clone()),
+            Some(Value::Number(v)) if key == "low_freq" => Some(v.to_string()),
+            _ => None,
+        };
+        match text {
+            Some(t) => crate::query::msm_required(Some(&Value::String(t)), n).unwrap_or(0),
+            None => 0,
+        }
+    };
+    let clauses_of = |groups: Vec<Vec<Term>>, occur: Occur, key: &str| -> Box<dyn Query> {
+        let n = groups.len();
+        let min = if occur == Occur::Should { msm_of(key, n) } else { 0 };
+        let clauses: Vec<(Occur, Box<dyn Query>)> = groups
             .into_iter()
-            .map(|t| {
-                (occur, Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
+            .map(|terms| {
+                let one: Box<dyn Query> = if terms.len() == 1 {
+                    Box::new(TermQuery::new(
+                        terms.into_iter().next().unwrap(),
+                        IndexRecordOption::WithFreqs,
+                    ))
+                } else {
+                    Box::new(BooleanQuery::union(
+                        terms
+                            .into_iter()
+                            .map(|t| {
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>
+                            })
+                            .collect(),
+                    ))
+                };
+                (occur, one)
             })
             .collect();
-        Box::new(BooleanQuery::new(clauses))
+        if min > 0 {
+            Box::new(BooleanQuery::with_minimum_required_clauses(clauses, min))
+        } else {
+            Box::new(BooleanQuery::new(clauses))
+        }
     };
     let low = operator("low_freq_operator");
     let high = operator("high_freq_operator");
     Ok(match (rare.is_empty(), common.is_empty()) {
-        (true, _) => clauses_of(common, high),
-        (_, true) => clauses_of(rare, low),
+        // with no rare words at all, the common ones are the whole query,
+        // and the rare words' minimum is the one that applies to them
+        (true, _) => {
+            let key = match opts.get("minimum_should_match") {
+                Some(Value::Object(o)) if o.get("high_freq").is_some() => "high_freq",
+                _ => "low_freq",
+            };
+            clauses_of(common, high, key)
+        }
+        (_, true) => clauses_of(rare, low, "low_freq"),
         _ => {
             // the rare words are what is asked for; where they are wanted
             // together, the common ones only add to the score
-            let rare_query = clauses_of(rare, low);
-            let common_query = clauses_of(common, high);
+            let rare_query = clauses_of(rare, low, "low_freq");
+            let common_query = clauses_of(common, high, "high_freq");
             let want = match low {
                 Occur::Must => Occur::Must,
                 _ => Occur::Should,

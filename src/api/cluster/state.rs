@@ -58,9 +58,11 @@ pub async fn reroute(
                     "last_accepted_config": ["node-0"],
                     "voting_config_exclusions": [],
                 },
-                "templates": store.get_templates(),
+                "templates": legacy_templates(&store),
                 "indices": Value::Object(indices),
-                "index-graveyard": {"tombstones": []},
+                "index-graveyard": {"tombstones": store.tombstones()},
+                "index_template": {"index_template": composable_templates(&store)},
+                "ingest": {"pipeline": ingest_pipelines(&store)},
             });
         }
         out["state"] = state;
@@ -286,7 +288,9 @@ pub(crate) fn cluster_state_inner(
                 },
                 // the indices that were deleted, so that a node coming back
                 // with one of them knows it is gone
-                "index-graveyard": {"tombstones": []},
+                "index-graveyard": {"tombstones": store.tombstones()},
+                "index_template": {"index_template": composable_templates(&store)},
+                "ingest": {"pipeline": ingest_pipelines(&store)},
             }),
         );
     }
@@ -382,4 +386,45 @@ pub(crate) fn cluster_state_inner(
         out.insert("routing_nodes".into(), json!({"unassigned": [], "nodes": {"node-0": shards}}));
     }
     respond(p, Value::Object(out))
+}
+
+/// The legacy templates alone: a composable one lives under its own key.
+fn legacy_templates(store: &Store) -> Value {
+    let all = store.get_templates();
+    Value::Object(all.into_iter().filter(|(_, v)| v.get("__composable").is_none()).collect())
+}
+
+/// The composable templates, as the state lists them.
+fn composable_templates(store: &Store) -> Value {
+    let all = store.get_templates();
+    Value::Object(
+        all.into_iter()
+            .filter_map(|(k, v)| {
+                v.get("__composable").cloned().map(|mut c| {
+                    if let Some(o) = c.as_object_mut() {
+                        o.entry("composed_of").or_insert_with(|| json!([]));
+                    }
+                    (k, c)
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The ingest pipelines, as the state lists them: each with its id.
+fn ingest_pipelines(store: &Store) -> Value {
+    let all = store.pipelines("ingest");
+    Value::Array(
+        all.into_iter()
+            .map(|(id, def)| {
+                let mut one = json!({"id": id});
+                if let Some(o) = def.as_object() {
+                    for (k, v) in o {
+                        one[k] = v.clone();
+                    }
+                }
+                one
+            })
+            .collect(),
+    )
 }

@@ -72,9 +72,7 @@ impl IdxState {
     /// `index.translog.durability: async` asks for speed over the guarantee:
     /// the record is written but not forced, and a crash may lose it.
     fn durability_is_async(&self) -> bool {
-        self.setting("translog.durability")
-            .map(|v| v.eq_ignore_ascii_case("async"))
-            .unwrap_or(false)
+        self.knobs.durability.clone().map(|v| v.eq_ignore_ascii_case("async")).unwrap_or(false)
     }
 
     /// Everything written is in the index and on disk: the record is spent.

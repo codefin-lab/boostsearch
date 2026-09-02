@@ -2419,6 +2419,41 @@ pub fn call_static(
             }
             Value::Bool(args.len() > 1)
         }
+        ("Processors", "bytes") => {
+            let text = arg(args, 0).as_text();
+            match crate::ingest::bytes_of_text(&text) {
+                Ok(n) => Value::Long(n),
+                Err(e) => return no(e),
+            }
+        }
+        ("Processors", "lowercase") => Value::str(&arg(args, 0).as_text().to_lowercase()),
+        ("Processors", "uppercase") => Value::str(&arg(args, 0).as_text().to_uppercase()),
+        ("Processors", "urlDecode") => Value::str(
+            &percent_encoding::percent_decode_str(&arg(args, 0).as_text().replace('+', " "))
+                .decode_utf8_lossy(),
+        ),
+        ("Processors", "json") => {
+            // json(text) parses; json(map, field) parses the field into the map
+            match (arg(args, 0), args.get(1)) {
+                (Value::Map(m), Some(field)) => {
+                    let text = map_get(m, field).map(|v| v.as_text()).unwrap_or_default();
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(serde_json::Value::Object(o)) => {
+                            for (k, v) in o {
+                                let _ = map_put(m, Value::str(&k), Value::from_json(&v));
+                            }
+                            Value::Null
+                        }
+                        Ok(other) => Value::from_json(&other),
+                        Err(e) => return no(e.to_string()),
+                    }
+                }
+                (v, _) => match serde_json::from_str::<serde_json::Value>(&v.as_text()) {
+                    Ok(parsed) => Value::from_json(&parsed),
+                    Err(e) => return no(e.to_string()),
+                },
+            }
+        }
         ("Pattern", "quote") => Value::str(&format!("\\Q{}\\E", arg(args, 0).as_text())),
         ("Optional", "of") | ("Optional", "ofNullable") => optional_of(arg(args, 0).clone()),
         ("Optional", "empty") => Value::list(Vec::new()),

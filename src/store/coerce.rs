@@ -397,19 +397,37 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     let mut copies: Vec<(String, Value)> = Vec::with_capacity(subs.len());
     for (parent, sub, normalizer, pointer, full) in subs.iter() {
         let Some(v) = out.pointer(pointer) else { continue };
+        // a value longer than the sub-field's `ignore_above` is not written
+        // into it
+        let limit =
+            mapping.field_option(full, "ignore_above").and_then(|l| l.as_u64()).map(|l| l as usize);
+        let within = |x: &Value| -> bool {
+            match (limit, x) {
+                (Some(l), Value::String(s)) => s.chars().count() <= l,
+                _ => true,
+            }
+        };
         let normalized = match v {
             Value::Array(items) => {
-                let mapped: Vec<Value> =
-                    items.iter().filter_map(|x| normalize(x, normalizer)).collect();
+                let mapped: Vec<Value> = items
+                    .iter()
+                    .filter(|x| within(x))
+                    .filter_map(|x| normalize(x, normalizer))
+                    .collect();
                 if mapped.is_empty() {
                     continue;
                 }
                 Value::Array(mapped)
             }
-            other => match normalize(other, normalizer) {
-                Some(n) => n,
-                None => continue,
-            },
+            other => {
+                if !within(other) {
+                    continue;
+                }
+                match normalize(other, normalizer) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            }
         };
         // a multi-field of a date counts in its own resolution: a date is
         // milliseconds and a date_nanos is nanoseconds, and the copy carries

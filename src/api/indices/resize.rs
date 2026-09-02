@@ -200,6 +200,7 @@ pub async fn resize_index(
             let slot = entry_of(&mut set, "index", || json!({}));
             crate::store::deep_merge(slot, &Value::Object(held_back));
             g.settings = set;
+            g.refresh_knobs();
             g.apply_analysis();
             g.save_meta();
         }

@@ -57,6 +57,9 @@ fn language(name: &str) -> Option<Language> {
 enum Source {
     /// letters and digits, which is what OpenSearch's `standard` keeps
     Standard,
+    /// words the way the Thai analyzer cuts them: Thai by dictionary, and a
+    /// Latin word whole across a hyphen, an apostrophe or an underscore
+    Thai,
     /// runs of letters only, and what `simple` and `stop` are built on
     Letter,
     Whitespace,
@@ -542,6 +545,7 @@ impl Chain {
             | Source::UaxUrlEmail
             | Source::PathHierarchy { .. }
             | Source::Icu
+            | Source::Thai
             | Source::Morph { .. }
             | Source::CharGroup(_) => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
             Source::Pattern(p) => match RegexTokenizer::new(p) {
@@ -589,6 +593,7 @@ impl Chain {
             }
             Source::Classic => classic(text),
             Source::Icu => icu_words(text),
+            Source::Thai => thai_words(text),
             Source::Letter => runs(text, |c| c.is_alphabetic()),
             Source::LetterLower => runs(text, |c| c.is_alphabetic())
                 .into_iter()
@@ -1621,6 +1626,32 @@ pub(crate) fn icu_fold(word: &str) -> String {
 /// Unicode says where a break may fall, and for Thai, Lao, Khmer, Burmese,
 /// Chinese and Japanese -- written without spaces between words -- a
 /// dictionary says which of those breaks are real ones.
+/// Words the way Java's break iterator cuts them for the Thai analyzer:
+/// Thai runs by dictionary, and Latin runs whole, a hyphen, an apostrophe
+/// or an underscore between letters being part of the word.
+fn thai_words(text: &str) -> Vec<Token> {
+    let pieces = icu_words(text);
+    let bytes = text.as_bytes();
+    let mut out: Vec<Token> = Vec::new();
+    for (t, _, a, b, l) in pieces {
+        // joined onto the word before it where only a joiner lies between
+        if let Some(last) = out.last_mut()
+            && b > a
+            && last.3 < a
+            && text[last.3..a].chars().all(|c| matches!(c, '-' | '\'' | '\u{2019}'))
+            && text[last.3..a].chars().count() == 1
+            && bytes[last.3 - 1].is_ascii_alphanumeric()
+            && bytes[a].is_ascii_alphanumeric()
+        {
+            last.0 = text[last.2..b].to_string();
+            last.3 = b;
+            continue;
+        }
+        out.push((t, out.len(), a, b, l));
+    }
+    out
+}
+
 fn icu_words(text: &str) -> Vec<Token> {
     use icu_segmenter::WordSegmenter;
     use icu_segmenter::options::WordBreakInvariantOptions;
@@ -3140,7 +3171,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
         },
         "thai" => Chain {
             pre: Vec::new(),
-            source: Source::Standard,
+            source: Source::Thai,
             steps: vec![Step::Lowercase, Step::DecimalDigits],
         },
         "sorani" => Chain {

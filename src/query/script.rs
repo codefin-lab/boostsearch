@@ -50,7 +50,12 @@ impl ScriptQuery {
             match run_on_doc(&self.spec, &expanded, &self.mapping, 0.0) {
                 Ok(v) if v.truthy() == Some(true) => bits.insert(doc),
                 Ok(_) => {}
-                Err(e) => return Err(TantivyError::InvalidArgument(e.message)),
+                Err(e) => {
+                    return Err(TantivyError::InvalidArgument(format!(
+                        "script_exception:{}",
+                        e.to_json()
+                    )));
+                }
             }
         }
         Ok(bits)

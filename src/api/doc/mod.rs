@@ -80,7 +80,7 @@ pub fn write_doc_versioned(
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
     // an index held still refuses writes until the block is lifted
-    if st.setting("blocks.write").as_deref() == Some("true") {
+    if st.knobs.blocks_write {
         return Err(err(
             StatusCode::FORBIDDEN,
             "cluster_block_exception",
@@ -131,8 +131,7 @@ pub fn write_doc_versioned(
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
         return Err(err_caused_by(&kind, &reason, &cause));
     }
-    let default_lenient =
-        st.setting("mapping.ignore_malformed").map(|v| v == "true").unwrap_or(false);
+    let default_lenient = st.knobs.ignore_malformed;
     let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
         Ok(v) => v,
         Err((field, ty)) => {
@@ -340,7 +339,9 @@ pub async fn index_doc(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+    if p.get("pipeline").is_none()
+        && let Some(r) = refuse_unless_alias(&store, &index, &p)
+    {
         return r;
     }
     do_index(store, index, Some(id), p, body, "index").await
@@ -352,7 +353,9 @@ pub async fn index_doc_auto(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if let Some(r) = refuse_unless_alias(&store, &index, &p) {
+    if p.get("pipeline").is_none()
+        && let Some(r) = refuse_unless_alias(&store, &index, &p)
+    {
         return r;
     }
     do_index(store, index, None, p, body, "index").await
@@ -371,7 +374,7 @@ pub(crate) async fn do_index(
     store: Store,
     index: String,
     id: Option<String>,
-    p: Params,
+    mut p: Params,
     body: String,
     default_op: &str,
 ) -> Response {
@@ -394,6 +397,86 @@ pub(crate) async fn do_index(
         );
     }
     let op_type = p.get("op_type").map(|s| s.as_str()).unwrap_or(default_op).to_string();
+    // a pipeline may change the document, its id, its routing, or the index
+    // it goes to -- or drop it
+    let asked_pipeline = p.get("pipeline").map(|s| s.as_str());
+    let mut index = index;
+    let mut id = id;
+    let mut source = source;
+    let mut routing_from_pipeline: Option<Option<String>> = None;
+    if asked_pipeline.is_some() || !crate::api::pipelines_for_write(&store, &index, None).is_empty()
+    {
+        let given_id = id.clone().unwrap_or_default();
+        let routing = p.get("routing").filter(|r| !r.is_empty()).cloned();
+        let given = crate::api::WriteMeta {
+            version: p.get("version").and_then(|v| v.parse().ok()),
+            version_type: p.get("version_type").cloned(),
+            if_seq_no: p.get("if_seq_no").and_then(|v| v.parse().ok()),
+            if_primary_term: p.get("if_primary_term").and_then(|v| v.parse().ok()),
+        };
+        match crate::api::ingest_for_write_with(
+            &store,
+            &index,
+            &given_id,
+            source,
+            asked_pipeline,
+            routing,
+            given,
+        ) {
+            Ok(Some(d)) => {
+                index = d.index.clone();
+                if !d.id.is_empty() {
+                    id = Some(d.id.clone());
+                }
+                routing_from_pipeline = Some(d.routing.clone());
+                // what the script set on the document's metadata is what the
+                // write is asked for
+                if let Some(v) = d.version {
+                    p.insert("version".into(), v.to_string());
+                }
+                if let Some(v) = &d.version_type {
+                    p.insert("version_type".into(), v.clone());
+                }
+                if let Some(v) = d.if_seq_no {
+                    p.insert("if_seq_no".into(), v.to_string());
+                }
+                if let Some(v) = d.if_primary_term {
+                    p.insert("if_primary_term".into(), v.to_string());
+                }
+                source = d.source;
+                // sent to another index: the request's alias rule applies there,
+                // and an alias stands for the index behind it
+                if store.is_alias(&index)
+                    && let Some(behind) = store.resolve(&index).into_iter().next()
+                {
+                    index = behind;
+                } else if p.get("require_alias").map(|v| v != "false").unwrap_or(false)
+                    && !store.is_alias(&index)
+                {
+                    return err(
+                        StatusCode::NOT_FOUND,
+                        "index_not_found_exception",
+                        format!(
+                            "no such index [{index}] and [require_alias] request flag is [true] and \
+                             [{index}] is not an alias"
+                        ),
+                    );
+                }
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "_index": index, "_id": id.unwrap_or_default(), "_version": -3,
+                        "result": "noop", "_shards": {"total": 0, "successful": 0, "failed": 0},
+                        "_seq_no": 0, "_primary_term": 0
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => return crate::api::ingest_failure(&e),
+        }
+    }
     let st = match store.ensure(&index) {
         Ok(s) => s,
         Err(e) => return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string()),
@@ -403,7 +486,10 @@ pub(crate) async fn do_index(
     // A document written with a routing is only reachable by quoting the same
     // routing back, so it has to be remembered -- before the write, because
     // the routing is also what says which shard the write lands on.
-    let routed = p.get("routing").filter(|r| !r.is_empty()).cloned();
+    let routed = match routing_from_pipeline {
+        Some(r) => r,
+        None => p.get("routing").filter(|r| !r.is_empty()).cloned(),
+    };
     match &routed {
         Some(r) => {
             g.routing.insert(id.clone(), r.clone());

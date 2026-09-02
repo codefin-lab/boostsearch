@@ -8,6 +8,7 @@ pub mod analysis;
 pub mod api;
 pub mod blockstats;
 pub mod hdr;
+pub mod ingest;
 pub mod painless;
 pub mod query;
 pub mod search;

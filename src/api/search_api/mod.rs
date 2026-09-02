@@ -43,10 +43,28 @@ pub async fn search(
         return r;
     }
     let scrolling = p.contains_key("scroll");
+    // a search pipeline may change the request before it runs and the
+    // answer after
+    let pipeline = match crate::search::pipeline::resolve(&store, &expr, &body, &p) {
+        Ok(pl) => pl,
+        Err(e) => return pipeline_failure(&e),
+    };
+    crate::search::pipeline::strip(&mut body);
+    let mut request_context = serde_json::Map::new();
+    if let Some(pl) = &pipeline
+        && let Err(e) = crate::search::pipeline::before(&store, pl, &mut body, &mut request_context)
+    {
+        return pipeline_failure(&e);
+    }
     match crate::search::run(&store, &expr, &body, &p) {
         Ok(out) => {
             let n = out.hits.len();
             let mut env = crate::search::envelope(out, &body, &p);
+            if let Some(pl) = &pipeline
+                && let Err(e) = crate::search::pipeline::after(pl, &mut env, &request_context)
+            {
+                return pipeline_failure(&e);
+            }
             if scrolling {
                 let size = scroll_size(&body, &p);
                 let id = store.open_scroll(&expr, &body, n.max(size).min(size.max(n)));
@@ -263,4 +281,10 @@ pub async fn search_shards(
             "shards": shards,
         }),
     )
+}
+
+/// A search pipeline's failure as a response.
+pub(crate) fn pipeline_failure(e: &crate::search::pipeline::PipelineError) -> Response {
+    let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST);
+    (status, axum::Json(json!({"error": e.body(), "status": e.status()}))).into_response()
 }

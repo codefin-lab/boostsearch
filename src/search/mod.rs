@@ -51,6 +51,8 @@ mod routing;
 pub(crate) use routing::*;
 mod sort;
 pub(crate) use sort::*;
+
+pub mod pipeline;
 mod suggest;
 pub(crate) use suggest::*;
 mod phrase_suggest;

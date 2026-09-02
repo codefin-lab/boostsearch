@@ -128,6 +128,36 @@ fn java_double(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e16 { format!("{v:.1}") } else { v.to_string() }
 }
 
+/// The same failure, as a walk over documents reports it: some shards
+/// answered before one did not.
+pub(crate) fn search_script_failure_partial(
+    e: crate::painless::ScriptError,
+    index: &str,
+) -> Response {
+    let detail = e.to_json();
+    let mut root = detail.clone();
+    if let Some(o) = root.as_object_mut() {
+        o.remove("caused_by");
+    }
+    let body = json!({
+        "error": {
+            "root_cause": [root],
+            "type": "search_phase_execution_exception",
+            "reason": "Partial shards failure",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [{
+                "shard": 0,
+                "index": index,
+                "node": "node0",
+                "reason": detail,
+            }],
+        },
+        "status": 400,
+    });
+    axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(body)))
+}
+
 /// A failure of one kind and reason, reported as the shards failing.
 pub(crate) fn search_shard_failure(kind: &str, reason: &str, index: &str) -> Response {
     let body = json!({
@@ -895,11 +925,16 @@ pub fn run(
     // after the candidates are in hand, so the page cannot be cut while
     // collecting
     let nested_filtered = sort_keys.iter().any(|k| k.nested_filter.is_some());
-    let page_want = if slice.is_some() || body.get("collapse").is_some() || nested_filtered {
-        65_536
-    } else {
-        from + size
-    };
+    // a score that is only settled once the candidates are in hand cannot
+    // cut the page while collecting either
+    let rescored_later = body.pointer("/query/function_score").is_some()
+        || body.pointer("/query/script_score").is_some();
+    let page_want =
+        if slice.is_some() || body.get("collapse").is_some() || nested_filtered || rescored_later {
+            65_536
+        } else {
+            from + size
+        };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();

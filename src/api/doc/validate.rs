@@ -4,7 +4,7 @@ use super::*;
 
 /// Write one document. `op_type == "create"` refuses to overwrite.
 pub fn append_only(st: &IdxState) -> bool {
-    st.setting("append_only.enabled").map(|v| v == "true").unwrap_or(false)
+    st.knobs.append_only
 }
 
 /// A version the caller supplied, and what it means for the write.
@@ -72,7 +72,17 @@ pub(crate) fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response>
         return None;
     }
     if !exists_doc(st, id) {
-        return None;
+        // a condition on a document that is not there cannot hold
+        let want = want_seq.unwrap_or(0);
+        let want_term = want_term.unwrap_or(1);
+        return Some(err(
+            StatusCode::CONFLICT,
+            "version_conflict_engine_exception",
+            format!(
+                "[{id}]: version conflict, required seqNo [{want}], primary term [{want_term}]. \
+                 but no document was found"
+            ),
+        ));
     }
     let have = read_seq(st, id).unwrap_or(0);
     // a shard that has never failed over is on its first term, so any other
@@ -148,7 +158,7 @@ pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, Stri
     }
     // a nested field is a list of documents of its own, and an index says how
     // many of them one document may carry
-    let nested_limit = st.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000);
+    let nested_limit = st.knobs.nested_limit;
     let mut nested_count = 0u64;
     for (name, kind) in st.mapping.types.iter() {
         if kind != "nested" {

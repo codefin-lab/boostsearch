@@ -104,16 +104,70 @@ pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
     format_millis_utc(ms, format)
 }
 
-pub(crate) fn format_with_pattern(d: boostcore::time::OffsetDateTime, pattern: &str) -> String {
+pub fn format_with_pattern(d: boostcore::time::OffsetDateTime, pattern: &str) -> String {
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
+        // text in quotes stands for itself
+        if c == '\'' {
+            let mut literal = String::new();
+            let mut closed = false;
+            for n in chars.by_ref() {
+                if n == '\'' {
+                    closed = true;
+                    break;
+                }
+                literal.push(n);
+            }
+            if literal.is_empty() && closed {
+                out.push('\'');
+            } else {
+                out.push_str(&literal);
+            }
+            continue;
+        }
         let mut run = 1;
         while chars.peek() == Some(&c) {
             chars.next();
             run += 1;
         }
+        let offset = d.offset().whole_seconds();
+        let zone_text = |colon: bool, z_for_utc: bool| -> String {
+            if offset == 0 && z_for_utc {
+                return "Z".into();
+            }
+            let sign = if offset < 0 { '-' } else { '+' };
+            let o = offset.abs();
+            if colon {
+                format!("{sign}{:02}:{:02}", o / 3600, (o % 3600) / 60)
+            } else {
+                format!("{sign}{:02}{:02}", o / 3600, (o % 3600) / 60)
+            }
+        };
         match c {
+            'S' => {
+                let nanos = d.nanosecond();
+                let digits = format!("{nanos:09}");
+                out.push_str(&digits[..run.min(9)]);
+            }
+            'X' => out.push_str(&zone_text(run >= 3, true)),
+            'x' => out.push_str(&zone_text(run >= 3, false)),
+            'Z' => out.push_str(&zone_text(run >= 4, false)),
+            'z' | 'V' | 'O' => out.push_str(if offset == 0 { "UTC" } else { "" }),
+            'a' => out.push_str(if d.hour() < 12 { "AM" } else { "PM" }),
+            'h' => {
+                let h = match d.hour() % 12 {
+                    0 => 12,
+                    v => v,
+                };
+                out.push_str(&format!("{:0run$}", h, run = run));
+            }
+            'E' => {
+                let name = format!("{:?}", d.weekday());
+                out.push_str(if run >= 4 { &name } else { &name[..3] });
+            }
+            'D' => out.push_str(&format!("{:0run$}", d.ordinal(), run = run)),
+            'u' => out.push_str(&format!("{:0run$}", d.year(), run = run)),
             'y' => out.push_str(&format!("{:0run$}", d.year(), run = run)),
             'M' => out.push_str(&format!("{:0run$}", d.month() as u8, run = run)),
             'd' => out.push_str(&format!("{:0run$}", d.day(), run = run)),

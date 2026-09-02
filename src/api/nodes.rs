@@ -184,7 +184,7 @@ pub async fn nodes_stats(
                           "tx_count": 0, "tx_size_in_bytes": 0},
             "http": {"current_open": 0, "total_opened": 0},
             "breakers": {}, "script": {"compilations": 0, "cache_evictions": 0},
-            "discovery": {}, "ingest": {"total": zero_time, "pipelines": {}},
+            "discovery": {}, "ingest": crate::api::ingest_stats_json(&store),
             "adaptive_selection": {}, "script_cache": {"sum": {}},
             "indexing_pressure": {"memory": {}},
         }},
@@ -358,6 +358,9 @@ fn modules() -> Value {
         "aggs-matrix-stats",
         "analysis-common",
         "geo",
+        "ingest-common",
+        "ingest-geoip",
+        "ingest-user-agent",
         "lang-mustache",
         "lang-painless",
         "mapper-extras",
@@ -366,6 +369,7 @@ fn modules() -> Value {
         "percolator",
         "rank-eval",
         "reindex",
+        "search-pipeline-common",
         "transport-netty4",
     ];
     Value::Array(
@@ -419,7 +423,11 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                        "allocated_processors": num_cpus()},
                 "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
                             "mlockall": false},
-                "plugins": [], "modules": modules(), "ingest": {"processors": []},
+                "plugins": [], "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
+                "search_pipelines": {
+                    "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
+                    "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
+                },
                 "thread_pool": {}, "transport": {},
                 // where a client -- or another cluster reindexing from this
                 // one -- reaches this node

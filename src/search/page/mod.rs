@@ -184,6 +184,23 @@ pub(crate) fn write_page(
                     .map(|(n, _)| n.clone())
                     .filter(|n| g.mapping.field_option(n, "doc_values") != Some(json!(false)))
                     .collect();
+                // doc values are kept sorted, so a field read as doc values
+                // comes back in that order
+                let docvalue_names: Vec<String> = body
+                    .get("docvalue_fields")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| match v {
+                                Value::String(s) => Some(s.clone()),
+                                Value::Object(o) => {
+                                    o.get("field").and_then(|f| f.as_str()).map(|s| s.to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 // a derived field is not in the source: it is made from it
                 let derived_source = names
                     .iter()
@@ -218,6 +235,21 @@ pub(crate) fn write_page(
                             None => continue,
                         },
                     };
+                    if docvalue_names.iter().any(|n| n == name)
+                        && let Value::Array(items) = &mut values
+                        && body
+                            .get("fields")
+                            .and_then(|f| f.as_array())
+                            .map(|a| !a.iter().any(|v| v.as_str() == Some(name.as_str())))
+                            .unwrap_or(true)
+                    {
+                        items.sort_by(|a, b| match (a.as_f64(), b.as_f64()) {
+                            (Some(x), Some(y)) => {
+                                x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            _ => a.to_string().cmp(&b.to_string()),
+                        });
+                    }
                     if let (Some(fmt), Value::Array(items)) = (fmt, &mut values) {
                         for v in items.iter_mut() {
                             if let Some(text) = crate::source::format_date(v, fmt) {
