@@ -49,6 +49,9 @@ pub const COMMIT: &str = "internal:cluster/coordination/commit_state";
 pub const FOLLOWER_CHECK: &str = "internal:coordination/fault_detection/follower_check";
 pub const LEADER_CHECK: &str = "internal:coordination/fault_detection/leader_check";
 pub const LEAVE: &str = "internal:cluster/coordination/leave";
+pub const SHARD_STARTED: &str = "internal:cluster/shard/started";
+pub const SHARD_FAILED: &str = "internal:cluster/shard/failure";
+pub const REROUTE: &str = "internal:cluster/reroute";
 
 /// What a node keeps across a restart, by durable key.
 pub const D_COMMITTED: &str = "cluster_state";
@@ -62,6 +65,8 @@ const T_LEADER_CHECK: u64 = 3;
 const T_METADATA: u64 = 4;
 const T_ELECTION: u64 = 5;
 const T_PUBLISH: u64 = 6;
+/// a replica's wait for its departed node is over
+const T_ALLOCATE: u64 = 7;
 
 /// The timings, in milliseconds; OpenSearch's defaults where it has them.
 #[derive(Clone, Debug)]
@@ -161,13 +166,31 @@ pub struct Coordinator {
     pub metadata: Option<std::sync::Arc<dyn super::metadata::MetadataSource>>,
     pub metadata_poll: Millis,
     last_fingerprint: u64,
-    allocations: super::metadata::Allocations,
+    /// where this node keeps the copies the manager puts on it
+    pub host: Option<std::sync::Arc<dyn super::metadata::ShardHost>>,
+    /// copies this node has reported started or failed, by allocation id
+    reported: BTreeSet<String>,
+    /// copies this node holds for the manager, by allocation id
+    hosted: BTreeMap<String, (String, u32)>,
+    /// what data nodes reported since the last publication
+    shard_events: Vec<ShardEvent>,
+    /// primary terms, raised when a replica takes over
+    terms: BTreeMap<(String, u32), u64>,
+    /// a table `_cluster/reroute` commands shaped, for the next publication
+    command_table: Option<super::state::RoutingTable>,
     /// `_cluster/voting_config_exclusions`, as (node id, node name)
     exclusions: Vec<(String, String)>,
     /// a publication asked for while one was in flight
     republish_wanted: bool,
     /// the wall time when this node was last handed an input
     last_wall: Millis,
+}
+
+/// A data node's word about a copy the manager put on it.
+#[derive(Clone, Debug)]
+enum ShardEvent {
+    Started { index: String, shard: u32, allocation_id: String },
+    Failed { index: String, shard: u32, allocation_id: String, message: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -253,7 +276,12 @@ impl Coordinator {
             metadata: None,
             metadata_poll: 500,
             last_fingerprint: 0,
-            allocations: super::metadata::Allocations::default(),
+            host: None,
+            reported: BTreeSet::new(),
+            hosted: BTreeMap::new(),
+            shard_events: Vec::new(),
+            terms: BTreeMap::new(),
+            command_table: None,
             exclusions: Vec::new(),
             republish_wanted: false,
             last_wall: 0,
@@ -315,7 +343,8 @@ impl Coordinator {
         if known {
             return vec![];
         }
-        let out = vec![Output::Peer { id: node.id.clone(), address: node.transport_address.clone() }];
+        let out =
+            vec![Output::Peer { id: node.id.clone(), address: node.transport_address.clone() }];
         self.peers.insert(node.id.clone(), node);
         out
     }
@@ -372,10 +401,8 @@ impl Coordinator {
         if !self.accepted.last_accepted_config.is_empty() || !self.eligible() {
             return vec![];
         }
-        let names_me = self
-            .initial_names
-            .iter()
-            .any(|n| *n == self.me.name || *n == self.me.id.as_str());
+        let names_me =
+            self.initial_names.iter().any(|n| *n == self.me.name || *n == self.me.id.as_str());
         if !names_me {
             return vec![];
         }
@@ -418,7 +445,8 @@ impl Coordinator {
         }
         let mut out = Vec::new();
         // a seed host whose node is not known yet is dialled again
-        let known: BTreeSet<&str> = self.peers.values().map(|p| p.transport_address.as_str()).collect();
+        let known: BTreeSet<&str> =
+            self.peers.values().map(|p| p.transport_address.as_str()).collect();
         for h in &self.seed_hosts {
             if !known.contains(h.as_str()) && *h != self.me.transport_address {
                 out.push(Output::Dial(h.clone()));
@@ -431,7 +459,10 @@ impl Coordinator {
         if let Some(l) = self.leader_hint.clone() {
             out.push(self.join(&l));
         }
-        if self.eligible() && !self.accepted.last_accepted_config.is_empty() && !self.election_scheduled {
+        if self.eligible()
+            && !self.accepted.last_accepted_config.is_empty()
+            && !self.election_scheduled
+        {
             out.push(self.schedule_election());
         }
         out.push(Output::Timer { id: T_DISCOVER, after: self.timings.discover_interval });
@@ -461,7 +492,9 @@ impl Coordinator {
     fn schedule_election(&mut self) -> Output {
         self.election_attempt += 1;
         let t = &self.timings;
-        let cap = t.election_max.min(t.election_initial + t.election_backoff * self.election_attempt as u64);
+        let cap = t
+            .election_max
+            .min(t.election_initial + t.election_backoff * self.election_attempt as u64);
         let after = t.election_initial + self.rng.range(0, cap);
         self.election_scheduled = true;
         Output::Timer { id: T_ELECTION, after }
@@ -477,9 +510,15 @@ impl Coordinator {
         self.prevote_rid = rid;
         let body = serde_json::to_vec(&json!({"term": self.current_term})).unwrap_or_default();
         for t in self.everyone() {
-            let eligible = self.peers.get(&t).map(|p| p.is_cluster_manager_eligible()).unwrap_or(true);
+            let eligible =
+                self.peers.get(&t).map(|p| p.is_cluster_manager_eligible()).unwrap_or(true);
             if eligible {
-                out.push(self.send(&t, Envelope::request(PRE_VOTE, self.me.id.clone(), rid, body.clone())));
+                out.push(
+                    self.send(
+                        &t,
+                        Envelope::request(PRE_VOTE, self.me.id.clone(), rid, body.clone()),
+                    ),
+                );
             }
         }
         out
@@ -532,7 +571,8 @@ impl Coordinator {
         let la_term = body.get("last_accepted_term").and_then(|t| t.as_u64()).unwrap_or(0);
         let la_version = body.get("last_accepted_version").and_then(|t| t.as_u64()).unwrap_or(0);
         let vote = body.get("vote").and_then(|v| v.as_bool()).unwrap_or(false);
-        let Some(node) = body.get("node").and_then(|n| serde_json::from_value::<DiscoveryNode>(n.clone()).ok())
+        let Some(node) =
+            body.get("node").and_then(|n| serde_json::from_value::<DiscoveryNode>(n.clone()).ok())
         else {
             return vec![];
         };
@@ -549,7 +589,13 @@ impl Coordinator {
                 };
                 let msg = json!({"term": self.current_term, "leader": who}).to_string();
                 let rid = self.rid();
-                out.push(self.send(from, Envelope::request(JOIN, self.me.id.clone(), rid, vec![]).error(self.me.id.clone(), &msg)));
+                out.push(
+                    self.send(
+                        from,
+                        Envelope::request(JOIN, self.me.id.clone(), rid, vec![])
+                            .error(self.me.id.clone(), &msg),
+                    ),
+                );
             }
             return out;
         }
@@ -557,7 +603,13 @@ impl Coordinator {
             // it has accepted something this node has not: it cannot follow this node
             let msg = json!({"term": self.current_term, "reason": "fresher"}).to_string();
             let rid = self.rid();
-            out.push(self.send(from, Envelope::request(JOIN, self.me.id.clone(), rid, vec![]).error(self.me.id.clone(), &msg)));
+            out.push(
+                self.send(
+                    from,
+                    Envelope::request(JOIN, self.me.id.clone(), rid, vec![])
+                        .error(self.me.id.clone(), &msg),
+                ),
+            );
             return out;
         }
         match self.mode.clone() {
@@ -578,11 +630,19 @@ impl Coordinator {
                 }
                 self.followers.entry(node.id.clone()).or_default().misses = 0;
                 self.pending_removals.remove(&node.id);
-                if self.committed.nodes.get(&node.id) == Some(&node) && !self.lagging.contains(&node.id) {
+                if self.committed.nodes.get(&node.id) == Some(&node)
+                    && !self.lagging.contains(&node.id)
+                {
                     // already in: answer with the state
                     let bytes = serde_json::to_vec(&self.committed).unwrap_or_default();
                     let rid = self.rid();
-                    out.push(self.send(from, Envelope::request(JOIN, self.me.id.clone(), rid, vec![]).response(self.me.id.clone(), bytes)));
+                    out.push(
+                        self.send(
+                            from,
+                            Envelope::request(JOIN, self.me.id.clone(), rid, vec![])
+                                .response(self.me.id.clone(), bytes),
+                        ),
+                    );
                     return out;
                 }
                 self.lagging.remove(&node.id);
@@ -592,7 +652,13 @@ impl Coordinator {
             Mode::Follower(l) => {
                 let msg = json!({"term": self.current_term, "leader": l.as_str()}).to_string();
                 let rid = self.rid();
-                out.push(self.send(from, Envelope::request(JOIN, self.me.id.clone(), rid, vec![]).error(self.me.id.clone(), &msg)));
+                out.push(
+                    self.send(
+                        from,
+                        Envelope::request(JOIN, self.me.id.clone(), rid, vec![])
+                            .error(self.me.id.clone(), &msg),
+                    ),
+                );
             }
         }
         out
@@ -620,31 +686,166 @@ impl Coordinator {
         for n in s.nodes.keys().filter(|n| **n != self.me.id) {
             self.followers.insert(n.clone(), FollowerHealth::default());
         }
-        self.place(&mut s);
+        out.extend(self.place(&mut s));
         out.extend(self.publish(s, durable));
-        out.push(Output::Timer { id: T_FOLLOWER_CHECK, after: self.timings.follower_check_interval });
+        out.push(Output::Timer {
+            id: T_FOLLOWER_CHECK,
+            after: self.timings.follower_check_interval,
+        });
         if self.metadata.is_some() {
             out.push(Output::Timer { id: T_METADATA, after: self.metadata_poll });
         }
         out
     }
 
-    /// Lay the manager's index metadata and shard placement over a state.
-    fn place(&mut self, s: &mut ClusterState) {
-        let Some(src) = self.metadata.clone() else { return };
+    /// Lay the manager's index metadata and shard placement over a state:
+    /// what the data nodes reported, then the deciders and the balancer
+    /// over the table as it was.
+    fn place(&mut self, s: &mut ClusterState) -> Vec<Output> {
+        let Some(src) = self.metadata.clone() else { return vec![] };
         let snapshot = src.snapshot();
-        let manager = self.me.id.clone();
-        let names: Vec<String> = s.indices.keys().cloned().collect();
-        for gone in names.iter().filter(|n| !snapshot.contains_key(*n)) {
-            self.allocations.forget_index(gone);
+        let settings = src.cluster_settings();
+        let cluster = super::allocation::ClusterSettings::from_value(&settings);
+        let mut table = self.command_table.take().unwrap_or_else(|| s.routing.clone());
+        for ev in std::mem::take(&mut self.shard_events) {
+            match ev {
+                ShardEvent::Started { index, shard, allocation_id } => {
+                    super::allocation::shard_started(&mut table, &index, shard, &allocation_id);
+                }
+                ShardEvent::Failed { index, shard, allocation_id, message } => {
+                    super::allocation::shard_failed(
+                        &mut table,
+                        &index,
+                        shard,
+                        &allocation_id,
+                        self.last_wall,
+                        &message,
+                    );
+                }
+            }
         }
-        let routing = super::metadata::build_routing(&snapshot, &manager, &mut self.allocations, self.last_wall);
+        // the manager's own store holds every primary it publishes
+        let home: BTreeMap<String, NodeId> =
+            snapshot.keys().map(|n| (n.clone(), self.me.id.clone())).collect();
+        let ctx = super::allocation::Context {
+            nodes: &s.nodes,
+            indices: &snapshot,
+            cluster: &cluster,
+            primary_home: &home,
+            now: self.last_wall,
+        };
+        let (routing, changes) = super::allocation::reroute(&ctx, &table);
+        let mut out = Vec::new();
+        for (index, shard, _node) in &changes.promoted {
+            *self.terms.entry((index.clone(), *shard)).or_insert(1) += 1;
+        }
+        if self.notes && !changes.is_empty() {
+            out.push(self.note(format!(
+                "allocation: assigned={} unassigned={} promoted={} relocating={}",
+                changes.assigned.len(),
+                changes.unassigned.len(),
+                changes.promoted.len(),
+                changes.relocating.len()
+            )));
+        }
+        if let Some(at) = changes.next_delay_at {
+            out.push(Output::Timer {
+                id: T_ALLOCATE,
+                after: at.saturating_sub(self.last_wall).max(1),
+            });
+        }
         s.indices = snapshot
             .into_iter()
-            .map(|(n, m)| (n, super::metadata::with_terms(m, &routing)))
+            .map(|(n, m)| (n, super::metadata::with_terms(m, &routing, &self.terms)))
             .collect();
+        self.terms.retain(|(i, _), _| s.indices.contains_key(i));
         s.routing = routing;
+        s.cluster_settings = settings;
         self.last_fingerprint = super::metadata::fingerprint(&s.indices);
+        out
+    }
+
+    /// The copies the committed state puts on this node: started here and
+    /// reported to the manager; the ones no longer here let go.
+    fn apply_shards(&mut self) -> Vec<Output> {
+        let mut out = Vec::new();
+        let me = self.me.id.clone();
+        let mine: Vec<super::state::ShardRouting> =
+            self.committed.routing.on_node(&me).cloned().collect();
+        // copies to start
+        for copy in mine.iter().filter(|c| c.state == super::state::ShardState::Initializing) {
+            let Some(aid) = copy.allocation_id.clone() else { continue };
+            if self.reported.contains(&aid) {
+                continue;
+            }
+            self.reported.insert(aid.clone());
+            let meta = self.committed.indices.get(&copy.index).cloned();
+            let result = match (&self.host, meta) {
+                (Some(h), Some(m)) => h.start_shard(&m, copy),
+                _ => Ok(()),
+            };
+            let ev = match result {
+                Ok(()) => {
+                    self.hosted.insert(aid.clone(), (copy.index.clone(), copy.shard));
+                    ShardEvent::Started {
+                        index: copy.index.clone(),
+                        shard: copy.shard,
+                        allocation_id: aid,
+                    }
+                }
+                Err(message) => ShardEvent::Failed {
+                    index: copy.index.clone(),
+                    shard: copy.shard,
+                    allocation_id: aid,
+                    message,
+                },
+            };
+            out.extend(self.report(ev));
+        }
+        // copies that were here and are not any more
+        let still: BTreeSet<String> = mine.iter().filter_map(|c| c.allocation_id.clone()).collect();
+        let gone: Vec<(String, (String, u32))> = self
+            .hosted
+            .iter()
+            .filter(|(aid, _)| !still.contains(*aid))
+            .map(|(a, v)| (a.clone(), v.clone()))
+            .collect();
+        for (aid, (index, shard)) in gone {
+            self.hosted.remove(&aid);
+            self.reported.remove(&aid);
+            // an index the manager still publishes and this node still holds
+            // a copy of keeps its local index
+            let holds_other = self.hosted.values().any(|(i, _)| *i == index);
+            if !holds_other {
+                if let Some(h) = &self.host {
+                    h.remove_shard(&index, shard);
+                }
+            }
+        }
+        out
+    }
+
+    /// Tell the manager about a copy; the manager tells itself.
+    fn report(&mut self, ev: ShardEvent) -> Vec<Output> {
+        let (action, body) = match &ev {
+            ShardEvent::Started { index, shard, allocation_id } => (
+                SHARD_STARTED,
+                json!({"index": index, "shard": shard, "allocation_id": allocation_id}),
+            ),
+            ShardEvent::Failed { index, shard, allocation_id, message } => (
+                SHARD_FAILED,
+                json!({"index": index, "shard": shard, "allocation_id": allocation_id, "message": message}),
+            ),
+        };
+        match self.mode.clone() {
+            Mode::Leader => {
+                self.shard_events.push(ev);
+                self.republish_wanted = true;
+                vec![]
+            }
+            Mode::Follower(l) => vec![self.request(&l, action, body)],
+            Mode::Candidate => vec![],
+        }
     }
 
     /// The voting configuration the nodes call for, from the committed one:
@@ -662,7 +863,8 @@ impl Coordinator {
             .filter(|n| n.is_cluster_manager_eligible() && !excluded(&n.id))
             .map(|n| n.id.clone())
             .collect();
-        let non_retired_current: Vec<NodeId> = current.iter().filter(|id| !excluded(id)).cloned().collect();
+        let non_retired_current: Vec<NodeId> =
+            current.iter().filter(|id| !excluded(id)).cloned().collect();
         let min_enforced = if self.auto_shrink {
             if non_retired_current.len() < 3 { 1 } else { 3 }
         } else {
@@ -684,26 +886,30 @@ impl Coordinator {
     fn publish(&mut self, mut state: ClusterState, durable: &mut Durable) -> Vec<Output> {
         state.term = self.current_term;
         state.cluster_manager = Some(self.me.id.clone());
-        state.voting_config_exclusions = self
-            .exclusions
-            .iter()
-            .map(|(i, n)| json!({"node_id": i, "node_name": n}))
-            .collect();
+        state.voting_config_exclusions =
+            self.exclusions.iter().map(|(i, n)| json!({"node_id": i, "node_name": n})).collect();
         let mut out = Vec::new();
-        let others: Vec<NodeId> = state.nodes.keys().filter(|n| **n != self.me.id).cloned().collect();
+        let others: Vec<NodeId> =
+            state.nodes.keys().filter(|n| **n != self.me.id).cloned().collect();
         let body = serde_json::to_vec(&state).unwrap_or_default();
         let rid = self.rid();
         for n in &others {
-            out.push(self.send(n, Envelope::request(PUBLISH, self.me.id.clone(), rid, body.clone())));
+            out.push(
+                self.send(n, Envelope::request(PUBLISH, self.me.id.clone(), rid, body.clone())),
+            );
         }
         let mut acked = BTreeSet::new();
         acked.insert(self.me.id.clone());
         self.publish_seq += 1;
-        self.publishing = Some(Publication { state: state.clone(), rid, seq: self.publish_seq, acked });
+        self.publishing =
+            Some(Publication { state: state.clone(), rid, seq: self.publish_seq, acked });
         self.accepted = state;
         self.persist_accepted(durable);
         out.push(Output::Timer { id: T_PUBLISH, after: self.timings.publish_timeout });
-        if election_quorum(&self.accepted, &self.publishing.as_ref().map(|p| p.acked.clone()).unwrap_or_default()) {
+        if election_quorum(
+            &self.accepted,
+            &self.publishing.as_ref().map(|p| p.acked.clone()).unwrap_or_default(),
+        ) {
             out.extend(self.commit_publication(durable));
         }
         out
@@ -713,15 +919,19 @@ impl Coordinator {
         let mut out = Vec::new();
         let Some(p) = self.publishing.take() else { return out };
         let state = p.state;
-        let body = serde_json::to_vec(&json!({"term": state.term, "version": state.version})).unwrap_or_default();
+        let body = serde_json::to_vec(&json!({"term": state.term, "version": state.version}))
+            .unwrap_or_default();
         let rid = self.rid();
         // a node is told to commit once it has said it accepted: a commit
         // that overtook its publication would be refused
         for n in state.nodes.keys().filter(|n| **n != self.me.id && p.acked.contains(*n)) {
-            out.push(self.send(n, Envelope::request(COMMIT, self.me.id.clone(), rid, body.clone())));
+            out.push(
+                self.send(n, Envelope::request(COMMIT, self.me.id.clone(), rid, body.clone())),
+            );
         }
         self.lagging = state.nodes.keys().filter(|n| !p.acked.contains(*n)).cloned().collect();
         self.apply_committed(state.clone(), durable);
+        out.extend(self.apply_shards());
         if self.notes {
             out.push(self.note(format!(
                 "committed t{} v{} nodes={} config={}",
@@ -744,7 +954,10 @@ impl Coordinator {
         let joins = std::mem::take(&mut self.waiting_joins);
         let removals = std::mem::take(&mut self.pending_removals);
         let mut s = self.committed.next();
-        let mut changed = !joins.is_empty() || self.republish_wanted;
+        let mut changed = !joins.is_empty()
+            || self.republish_wanted
+            || !self.shard_events.is_empty()
+            || self.command_table.is_some();
         for (id, j) in joins {
             s.nodes.insert(id, j);
         }
@@ -763,11 +976,12 @@ impl Coordinator {
             return vec![];
         }
         self.republish_wanted = false;
-        self.place(&mut s);
+        let mut out = self.place(&mut s);
         for n in s.nodes.keys().filter(|n| **n != self.me.id) {
             self.followers.entry(n.clone()).or_default();
         }
-        self.publish(s, durable)
+        out.extend(self.publish(s, durable));
+        out
     }
 
     fn apply_committed(&mut self, mut state: ClusterState, durable: &mut Durable) {
@@ -847,7 +1061,8 @@ impl NodeLogic for Coordinator {
                 out
             }
             Input::Timer(T_PUBLISH) => {
-                let timed_out = self.publishing.as_ref().map(|p| p.seq == self.publish_seq).unwrap_or(false);
+                let timed_out =
+                    self.publishing.as_ref().map(|p| p.seq == self.publish_seq).unwrap_or(false);
                 if !timed_out || self.mode != Mode::Leader {
                     return vec![];
                 }
@@ -882,16 +1097,23 @@ impl NodeLogic for Coordinator {
                 // the nodes of the latest publication, committed or on its way
                 let followers: Vec<NodeId> =
                     self.accepted.nodes.keys().filter(|n| **n != self.me.id).cloned().collect();
-                let body = serde_json::to_vec(&json!({"term": self.current_term})).unwrap_or_default();
+                let body =
+                    serde_json::to_vec(&json!({"term": self.current_term})).unwrap_or_default();
                 for n in followers {
                     if self.pending_removals.contains(&n) {
                         continue;
                     }
                     let rid = self.rid();
                     self.pending_checks.insert(rid, n.clone());
-                    out.push(self.send(&n, Envelope::request(FOLLOWER_CHECK, self.me.id.clone(), rid, body.clone())));
+                    out.push(self.send(
+                        &n,
+                        Envelope::request(FOLLOWER_CHECK, self.me.id.clone(), rid, body.clone()),
+                    ));
                 }
-                out.push(Output::Timer { id: T_FOLLOWER_CHECK, after: self.timings.follower_check_interval });
+                out.push(Output::Timer {
+                    id: T_FOLLOWER_CHECK,
+                    after: self.timings.follower_check_interval,
+                });
                 out
             }
             Input::Timer(T_METADATA) => {
@@ -916,6 +1138,13 @@ impl NodeLogic for Coordinator {
                 out.push(Output::Timer { id: T_METADATA, after: self.metadata_poll });
                 out
             }
+            Input::Timer(T_ALLOCATE) => {
+                if self.mode != Mode::Leader {
+                    return vec![];
+                }
+                self.republish_wanted = true;
+                self.next_publication(durable)
+            }
             Input::Timer(T_LEADER_CHECK) => {
                 let Mode::Follower(leader) = self.mode.clone() else { return vec![] };
                 let mut out = Vec::new();
@@ -931,8 +1160,14 @@ impl NodeLogic for Coordinator {
                 }
                 let rid = self.rid();
                 self.leader_check_outstanding = Some(rid);
-                out.push(self.send(&leader, Envelope::request(LEADER_CHECK, self.me.id.clone(), rid, vec![])));
-                out.push(Output::Timer { id: T_LEADER_CHECK, after: self.timings.leader_check_interval });
+                out.push(self.send(
+                    &leader,
+                    Envelope::request(LEADER_CHECK, self.me.id.clone(), rid, vec![]),
+                ));
+                out.push(Output::Timer {
+                    id: T_LEADER_CHECK,
+                    after: self.timings.leader_check_interval,
+                });
                 out
             }
             Input::Timer(_) => vec![],
@@ -946,6 +1181,8 @@ impl NodeLogic for Coordinator {
     }
 }
 
+fn out_note_holder(_out: &mut Vec<Output>, _what: &str) {}
+
 fn term_in(body: &[u8]) -> Option<u64> {
     serde_json::from_slice::<Value>(body).ok()?.get("term")?.as_u64()
 }
@@ -956,10 +1193,9 @@ impl Coordinator {
         match (e.action.as_str(), e.kind) {
             (PEERS, Kind::Request) => {
                 let mut out = Vec::new();
-                if let Some(n) = serde_json::from_slice::<Value>(&e.body)
-                    .ok()
-                    .and_then(|v| serde_json::from_value::<DiscoveryNode>(v.get("node")?.clone()).ok())
-                {
+                if let Some(n) = serde_json::from_slice::<Value>(&e.body).ok().and_then(|v| {
+                    serde_json::from_value::<DiscoveryNode>(v.get("node")?.clone()).ok()
+                }) {
                     out.extend(self.learn(n));
                 }
                 let leader = match &self.mode {
@@ -969,7 +1205,8 @@ impl Coordinator {
                 };
                 let mut peers: Vec<&DiscoveryNode> = self.peers.values().collect();
                 peers.push(&self.me);
-                let body = serde_json::to_vec(&json!({"peers": peers, "leader": leader})).unwrap_or_default();
+                let body = serde_json::to_vec(&json!({"peers": peers, "leader": leader}))
+                    .unwrap_or_default();
                 out.push(self.send(&from, e.response(self.me.id.clone(), body)));
                 out
             }
@@ -985,7 +1222,10 @@ impl Coordinator {
                 }
                 if let Some(l) = v.get("leader").and_then(|l| l.as_str()) {
                     let l = NodeId(l.to_string());
-                    if l != self.me.id && self.mode == Mode::Candidate && self.leader_hint.as_ref() != Some(&l) {
+                    if l != self.me.id
+                        && self.mode == Mode::Candidate
+                        && self.leader_hint.as_ref() != Some(&l)
+                    {
                         self.leader_hint = Some(l.clone());
                         out.push(self.join(&l));
                     }
@@ -1020,7 +1260,8 @@ impl Coordinator {
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
                 let term = v.get("term").and_then(|t| t.as_u64()).unwrap_or(0);
                 let la_term = v.get("last_accepted_term").and_then(|t| t.as_u64()).unwrap_or(0);
-                let la_version = v.get("last_accepted_version").and_then(|t| t.as_u64()).unwrap_or(0);
+                let la_version =
+                    v.get("last_accepted_version").and_then(|t| t.as_u64()).unwrap_or(0);
                 self.max_term_seen = self.max_term_seen.max(term);
                 if fresher(la_term, la_version, self.accepted.term, self.accepted.version) {
                     // it has accepted more than this node: this node must not lead
@@ -1087,11 +1328,16 @@ impl Coordinator {
                         let was = self.mode.clone();
                         self.mode = Mode::Follower(from.clone());
                         self.leader_hint = Some(from);
+                        let mut out = self.apply_shards();
                         if was == Mode::Candidate {
                             self.leader_misses = 0;
                             self.leader_check_outstanding = None;
-                            return vec![Output::Timer { id: T_LEADER_CHECK, after: self.timings.leader_check_interval }];
+                            out.push(Output::Timer {
+                                id: T_LEADER_CHECK,
+                                after: self.timings.leader_check_interval,
+                            });
                         }
+                        return out;
                     }
                 }
                 vec![]
@@ -1109,12 +1355,15 @@ impl Coordinator {
                     let msg = refuse("stale", self);
                     return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
                 }
-                if self.committed.cluster_uuid_committed && s.cluster_uuid != self.committed.cluster_uuid {
+                if self.committed.cluster_uuid_committed
+                    && s.cluster_uuid != self.committed.cluster_uuid
+                {
                     let msg = refuse("cluster_uuid", self);
                     return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
                 }
                 let leader = s.cluster_manager.clone().unwrap_or_else(|| from.clone());
-                let body = serde_json::to_vec(&json!({"term": s.term, "version": s.version})).unwrap_or_default();
+                let body = serde_json::to_vec(&json!({"term": s.term, "version": s.version}))
+                    .unwrap_or_default();
                 self.accepted = s;
                 self.persist_accepted(durable);
                 let was_following = self.mode == Mode::Follower(leader.clone());
@@ -1125,7 +1374,10 @@ impl Coordinator {
                 if !was_following {
                     self.leader_misses = 0;
                     self.leader_check_outstanding = None;
-                    out.push(Output::Timer { id: T_LEADER_CHECK, after: self.timings.leader_check_interval });
+                    out.push(Output::Timer {
+                        id: T_LEADER_CHECK,
+                        after: self.timings.leader_check_interval,
+                    });
                 }
                 out
             }
@@ -1153,7 +1405,11 @@ impl Coordinator {
                     && self.committed.nodes.contains_key(&from)
                 {
                     self.lagging.remove(&from);
-                    return vec![self.request(&from, COMMIT, json!({"term": term, "version": version}))];
+                    return vec![self.request(
+                        &from,
+                        COMMIT,
+                        json!({"term": term, "version": version}),
+                    )];
                 }
                 vec![]
             }
@@ -1169,10 +1425,14 @@ impl Coordinator {
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
                 let term = v.get("term").and_then(|t| t.as_u64()).unwrap_or(0);
                 let version = v.get("version").and_then(|t| t.as_u64()).unwrap_or(0);
-                if term == self.current_term && self.accepted.term == term && self.accepted.version == version {
+                if term == self.current_term
+                    && self.accepted.term == term
+                    && self.accepted.version == version
+                {
                     let a = self.accepted.clone();
                     self.apply_committed(a, durable);
                     let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
+                    out.extend(self.apply_shards());
                     if self.notes {
                         out.push(self.note(format!(
                             "committed t{term} v{version} nodes={} config={}",
@@ -1205,10 +1465,14 @@ impl Coordinator {
                         self.leader_misses = 0;
                         self.leader_check_outstanding = None;
                         out.push(self.send(&from, e.response(self.me.id.clone(), vec![])));
-                        out.push(Output::Timer { id: T_LEADER_CHECK, after: self.timings.leader_check_interval });
+                        out.push(Output::Timer {
+                            id: T_LEADER_CHECK,
+                            after: self.timings.leader_check_interval,
+                        });
                     }
                     _ => {
-                        let msg = json!({"term": self.current_term, "reason": "not my manager"}).to_string();
+                        let msg = json!({"term": self.current_term, "reason": "not my manager"})
+                            .to_string();
                         out.push(self.send(&from, e.error(self.me.id.clone(), &msg)));
                     }
                 }
@@ -1230,7 +1494,8 @@ impl Coordinator {
                 if self.mode == Mode::Leader && self.committed.nodes.contains_key(&from) {
                     vec![self.send(&from, e.response(self.me.id.clone(), vec![]))]
                 } else {
-                    let msg = json!({"term": self.current_term, "reason": "not the manager"}).to_string();
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not the manager"}).to_string();
                     vec![self.send(&from, e.error(self.me.id.clone(), &msg))]
                 }
             }
@@ -1251,6 +1516,106 @@ impl Coordinator {
                     if l == from {
                         out.extend(self.become_candidate());
                     }
+                }
+                out
+            }
+            (SHARD_STARTED, Kind::Request) | (SHARD_FAILED, Kind::Request) => {
+                if self.mode != Mode::Leader {
+                    let who = match &self.mode {
+                        Mode::Follower(l) => Some(l.as_str().to_string()),
+                        _ => None,
+                    };
+                    let msg = json!({"term": self.current_term, "leader": who, "reason": "not the manager"}).to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                let index = v.get("index").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let shard = v.get("shard").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                let allocation_id =
+                    v.get("allocation_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let ev = if e.action == SHARD_STARTED {
+                    ShardEvent::Started { index, shard, allocation_id }
+                } else {
+                    let message =
+                        v.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    ShardEvent::Failed { index, shard, allocation_id, message }
+                };
+                if self.notes {
+                    let what = match &ev {
+                        ShardEvent::Started { index, shard, .. } => {
+                            format!("shard started [{index}][{shard}] on {from}")
+                        }
+                        ShardEvent::Failed { index, shard, message, .. } => {
+                            format!("shard failed [{index}][{shard}] on {from}: {message}")
+                        }
+                    };
+                    out_note_holder(&mut Vec::new(), &what);
+                }
+                self.shard_events.push(ev);
+                self.republish_wanted = true;
+                let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
+                out.extend(self.next_publication(durable));
+                out
+            }
+            (REROUTE, Kind::Request) => {
+                if self.mode != Mode::Leader {
+                    let who = match &self.mode {
+                        Mode::Follower(l) => Some(l.as_str().to_string()),
+                        _ => None,
+                    };
+                    let msg = json!({"term": self.current_term, "leader": who, "reason": "not the manager"}).to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                let commands: Vec<Value> =
+                    v.get("commands").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                let dry_run = v.get("dry_run").and_then(|d| d.as_bool()).unwrap_or(false);
+                let explain = v.get("explain").and_then(|d| d.as_bool()).unwrap_or(false);
+                let retry = v.get("retry_failed").and_then(|d| d.as_bool()).unwrap_or(false);
+                let Some(src) = self.metadata.clone() else {
+                    return vec![
+                        self.send(&from, e.error(self.me.id.clone(), "no metadata source")),
+                    ];
+                };
+                let snapshot = src.snapshot();
+                let settings = src.cluster_settings();
+                let cluster = super::allocation::ClusterSettings::from_value(&settings);
+                let home: BTreeMap<String, NodeId> =
+                    snapshot.keys().map(|n| (n.clone(), self.me.id.clone())).collect();
+                let nodes = self.committed.nodes.clone();
+                let ctx = super::allocation::Context {
+                    nodes: &nodes,
+                    indices: &snapshot,
+                    cluster: &cluster,
+                    primary_home: &home,
+                    now: self.last_wall,
+                };
+                let mut table = self.committed.routing.clone();
+                if retry {
+                    super::allocation::retry_failed(&mut table);
+                }
+                let (table, explanations) =
+                    match super::allocation::apply_commands(&ctx, &table, &commands, explain) {
+                        Ok(x) => x,
+                        Err(msg) => {
+                            let body = json!({"reason": msg}).to_string();
+                            return vec![self.send(&from, e.error(self.me.id.clone(), &body))];
+                        }
+                    };
+                // the state as it would be: the commands, then the deciders over them
+                let (after, _) = super::allocation::reroute(&ctx, &table);
+                let mut preview = self.committed.clone();
+                preview.routing = after;
+                let body = serde_json::to_vec(&json!({
+                    "state": preview,
+                    "explanations": explanations,
+                }))
+                .unwrap_or_default();
+                let mut out = vec![self.send(&from, e.response(self.me.id.clone(), body))];
+                if !dry_run {
+                    self.command_table = Some(table);
+                    self.republish_wanted = true;
+                    out.extend(self.next_publication(durable));
                 }
                 out
             }
@@ -1562,7 +1927,8 @@ mod tests {
             sim.add_node(
                 NodeId(n.into()),
                 Box::new(move |_| {
-                    let mut c = Coordinator::new(node(n), "c", "u", vec!["m".into()], seeds.clone());
+                    let mut c =
+                        Coordinator::new(node(n), "c", "u", vec!["m".into()], seeds.clone());
                     c.metadata = Some(src.clone());
                     Box::new(c)
                 }),
@@ -1601,13 +1967,17 @@ mod tests {
             assert!(s.indices.contains_key("logs"), "{id} has no logs");
             let copies: Vec<_> = s.routing.shards_of("logs").collect();
             assert_eq!(copies.len(), 4);
-            assert!(copies.iter().filter(|c| c.primary).all(|c| c.state == ShardState::Started
-                && c.node.as_ref() == Some(&NodeId("m".into()))));
-            assert!(copies
-                .iter()
-                .filter(|c| !c.primary)
-                .all(|c| c.state == ShardState::Unassigned && c.node.is_none()));
-            assert_eq!(s.indices["logs"].in_sync_allocations[&0].len(), 1);
+            assert!(
+                copies.iter().filter(|c| c.primary).all(|c| c.state == ShardState::Started
+                    && c.node.as_ref() == Some(&NodeId("m".into())))
+            );
+            // the replicas went to the other node, started there, and are in sync
+            assert!(
+                copies.iter().filter(|c| !c.primary).all(|c| c.state == ShardState::Started
+                    && c.node.as_ref() == Some(&NodeId("a".into()))),
+                "{copies:?}"
+            );
+            assert_eq!(s.indices["logs"].in_sync_allocations[&0].len(), 2);
         }
         // and goes away
         source.0.lock().clear();
@@ -1615,6 +1985,74 @@ mod tests {
         for id in &ids {
             assert!(committed_of(&sim, id).unwrap().indices.is_empty(), "{id} still has indices");
         }
+    }
+
+    /// Three data nodes, an index with a replica whose node crashes: the
+    /// replica waits out the delay, then is placed again.
+    #[test]
+    fn a_lost_replica_is_placed_again_after_its_delay() {
+        use crate::cluster::metadata::MapSource;
+        use crate::cluster::state::{IndexMetadata, ShardState};
+        let source = std::sync::Arc::new(MapSource(parking_lot::Mutex::new(BTreeMap::new())));
+        source.0.lock().insert(
+            "d".into(),
+            IndexMetadata {
+                name: "d".into(),
+                uuid: "u".into(),
+                version: 1,
+                mapping_version: 1,
+                settings_version: 1,
+                aliases_version: 1,
+                state: "open".into(),
+                settings: json!({"index": {"number_of_shards": "1", "number_of_replicas": "1", "unassigned": {"node_left": {"delayed_timeout": "5s"}}}}),
+                mappings: json!({}),
+                aliases: json!({}),
+                number_of_shards: 1,
+                number_of_replicas: 1,
+                primary_terms: BTreeMap::new(),
+                in_sync_allocations: BTreeMap::new(),
+                creation_date: 0,
+            },
+        );
+        let mut sim = Sim::new(21);
+        let names = ["m", "a", "b"];
+        let ids: Vec<NodeId> = names.iter().map(|n| NodeId((*n).into())).collect();
+        for n in names {
+            let src = source.clone();
+            let seeds: Vec<NodeId> = ids.iter().filter(|i| i.as_str() != n).cloned().collect();
+            sim.add_node(
+                NodeId(n.into()),
+                Box::new(move |_| {
+                    let mut c =
+                        Coordinator::new(node(n), "c", "u", vec!["m".into()], seeds.clone());
+                    if n == "m" {
+                        c.metadata = Some(src.clone());
+                    }
+                    Box::new(c)
+                }),
+            );
+        }
+        sim.run_until(15_000);
+        assert_settled(&sim, &ids);
+        let s = committed_of(&sim, &ids[0]).unwrap();
+        let replica = s.routing.shards_of("d").find(|c| !c.primary).unwrap().clone();
+        assert_eq!(replica.state, ShardState::Started, "{replica:?}");
+        let holder = replica.node.clone().unwrap();
+        assert_ne!(holder, NodeId("m".into()));
+        sim.crash(&holder);
+        // the node is dropped after its checks, then the replica waits
+        sim.run_until(22_000);
+        let s = committed_of(&sim, &ids[0]).unwrap();
+        let replica = s.routing.shards_of("d").find(|c| !c.primary).unwrap().clone();
+        assert_eq!(replica.state, ShardState::Unassigned, "{replica:?}");
+        assert!(replica.unassigned.as_ref().unwrap().delayed);
+        assert_eq!(replica.unassigned.as_ref().unwrap().reason, "NODE_LEFT");
+        // five seconds later it is on the remaining node
+        sim.run_until(40_000);
+        let s = committed_of(&sim, &ids[0]).unwrap();
+        let replica = s.routing.shards_of("d").find(|c| !c.primary).unwrap().clone();
+        assert_eq!(replica.state, ShardState::Started, "{replica:?} {:?}", sim.notes);
+        assert_ne!(replica.node, Some(holder));
     }
 
     #[test]
@@ -1668,7 +2106,11 @@ mod tests {
             assert_settled(&sim, &ids);
             let leaders: BTreeSet<&NodeId> = ids
                 .iter()
-                .filter(|i| committed_of(&sim, i).map(|s| s.cluster_manager.as_ref() == Some(*i)).unwrap_or(false))
+                .filter(|i| {
+                    committed_of(&sim, i)
+                        .map(|s| s.cluster_manager.as_ref() == Some(*i))
+                        .unwrap_or(false)
+                })
                 .collect();
             assert_eq!(leaders.len(), 1, "seed {seed}: {leaders:?}");
         }

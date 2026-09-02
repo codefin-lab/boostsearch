@@ -469,8 +469,9 @@ async fn main() -> anyhow::Result<()> {
             tls::node_setting(&node_settings, "cluster.auto_shrink_voting_configuration")
                 .map(|v| v != "false")
                 .unwrap_or(true);
-        coordinator.metadata =
-            Some(std::sync::Arc::new(cluster::metadata::StoreSource(store.clone())));
+        let source = std::sync::Arc::new(cluster::metadata::StoreSource::new(store.clone()));
+        coordinator.metadata = Some(source.clone());
+        coordinator.host = Some(source);
         let rt = cluster::runtime::Runtime::start(
             transport.clone(),
             cluster::clock(),

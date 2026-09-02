@@ -25,25 +25,38 @@ pub struct Shared {
     pub mode: RwLock<String>,
 }
 
+/// Answers awaited by callers on this node, by request id.
+type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Envelope>>>>;
+
 pub struct Runtime {
     inputs: mpsc::UnboundedSender<Input>,
     pub shared: Arc<Shared>,
+    transport: Arc<TcpTransport>,
+    pending: Pending,
+    next_call: std::sync::atomic::AtomicU64,
 }
 
-struct Inbox(mpsc::UnboundedSender<Input>);
+struct Inbox {
+    inputs: mpsc::UnboundedSender<Input>,
+    pending: Pending,
+}
 
 impl Handler for Inbox {
     fn handle(&self, envelope: Envelope) {
-        let _ = self.0.send(Input::Message(envelope));
+        // an answer someone on this node is waiting for goes to them, not to the logic
+        if envelope.kind != super::transport::Kind::Request {
+            if let Some(tx) = self.pending.lock().remove(&envelope.request_id) {
+                let _ = tx.send(envelope);
+                return;
+            }
+        }
+        let _ = self.inputs.send(Input::Message(envelope));
     }
 }
 
 /// Durable state kept in the data directory as one file per key.
-const DURABLE_KEYS: [&str; 3] = [
-    super::coordinator::D_COMMITTED,
-    super::coordinator::D_ACCEPTED,
-    super::coordinator::D_TERM,
-];
+const DURABLE_KEYS: [&str; 3] =
+    [super::coordinator::D_COMMITTED, super::coordinator::D_ACCEPTED, super::coordinator::D_TERM];
 
 fn load_durable(dir: Option<&std::path::Path>) -> Durable {
     let mut d = Durable::default();
@@ -58,7 +71,11 @@ fn load_durable(dir: Option<&std::path::Path>) -> Durable {
 }
 
 /// Write what changed since the last save, and nothing else.
-fn save_durable(dir: Option<&std::path::Path>, d: &Durable, written: &mut BTreeMap<String, Vec<u8>>) {
+fn save_durable(
+    dir: Option<&std::path::Path>,
+    d: &Durable,
+    written: &mut BTreeMap<String, Vec<u8>>,
+) {
     let Some(dir) = dir else { return };
     for key in DURABLE_KEYS {
         let Some(bytes) = d.entries.get(key) else { continue };
@@ -82,12 +99,19 @@ impl Runtime {
         data_dir: Option<std::path::PathBuf>,
     ) -> Arc<Runtime> {
         let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
-        transport.set_handler(Arc::new(Inbox(tx.clone())));
+        let answers: Pending = Arc::default();
+        transport.set_handler(Arc::new(Inbox { inputs: tx.clone(), pending: answers.clone() }));
         let shared = Arc::new(Shared {
             state: RwLock::new(logic.state().clone()),
             mode: RwLock::new(format!("{:?}", logic.mode)),
         });
-        let rt = Arc::new(Runtime { inputs: tx.clone(), shared: shared.clone() });
+        let rt = Arc::new(Runtime {
+            inputs: tx.clone(),
+            shared: shared.clone(),
+            transport: transport.clone(),
+            pending: answers.clone(),
+            next_call: std::sync::atomic::AtomicU64::new(1 << 40),
+        });
         let timers: Arc<Mutex<BTreeMap<u64, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
         // seed hosts reached, and those being dialled right now
         let dialled: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
@@ -107,7 +131,8 @@ impl Runtime {
                         None => break,
                     },
                 };
-                let trace = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false);
+                let trace =
+                    std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false);
                 if trace {
                     let what = match &input {
                         Input::Start => "start".to_string(),
@@ -121,7 +146,9 @@ impl Runtime {
                 if trace {
                     for o in &outputs {
                         let what = match o {
-                            Output::Send { to, envelope } => format!("{:?} {} to {to}", envelope.kind, envelope.action),
+                            Output::Send { to, envelope } => {
+                                format!("{:?} {} to {to}", envelope.kind, envelope.action)
+                            }
                             Output::Timer { id, after } => format!("timer {id} in {after}ms"),
                             Output::Note(t) => format!("note {t}"),
                             Output::Peer { id, address } => format!("peer {id} at {address}"),
@@ -135,6 +162,17 @@ impl Runtime {
                 *shared.mode.write() = format!("{:?}", logic.mode);
                 for o in outputs {
                     match o {
+                        Output::Send { to, envelope } if to == me => {
+                            // the logic answering a caller on this node
+                            match answers.lock().remove(&envelope.request_id) {
+                                Some(tx) => {
+                                    let _ = tx.send(envelope);
+                                }
+                                None => {
+                                    let _ = tx.send(Input::Message(envelope));
+                                }
+                            }
+                        }
                         Output::Send { to, envelope } => {
                             if let Err(e) = transport.send(&to, envelope) {
                                 if trace {
@@ -160,7 +198,9 @@ impl Runtime {
                             transport.learn_address(id, address);
                         }
                         Output::Dial(address) => {
-                            if dialled.lock().contains(&address) || !dialling.lock().insert(address.clone()) {
+                            if dialled.lock().contains(&address)
+                                || !dialling.lock().insert(address.clone())
+                            {
                                 continue;
                             }
                             let t = transport.clone();
@@ -197,6 +237,34 @@ impl Runtime {
     /// Hand the logic a message from inside the process (a client's request).
     pub fn inject(&self, envelope: Envelope) {
         let _ = self.inputs.send(Input::Message(envelope));
+    }
+
+    /// Ask a node (this one included) and wait for its answer.
+    pub async fn call(
+        &self,
+        to: &NodeId,
+        action: &str,
+        body: Vec<u8>,
+        timeout: std::time::Duration,
+    ) -> Option<Envelope> {
+        let rid = self.next_call.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let me = self.transport.local();
+        let envelope = Envelope::request(action, me.clone(), rid, body);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().insert(rid, tx);
+        if *to == me {
+            let _ = self.inputs.send(Input::Message(envelope));
+        } else if self.transport.send(to, envelope).is_err() {
+            self.pending.lock().remove(&rid);
+            return None;
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(e)) => Some(e),
+            _ => {
+                self.pending.lock().remove(&rid);
+                None
+            }
+        }
     }
 
     pub fn state(&self) -> ClusterState {

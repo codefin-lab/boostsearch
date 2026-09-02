@@ -984,3 +984,69 @@ twelve dimensions against plain OpenSearch (index 100,454 vs 63,464 docs/s,
 383MiB vs 1.96GiB, every query p50 lower) and against os-secure (index
 100,665 vs 59,329 docs/s, p50s 2.5-4x lower); the TLS-vs-plain pass stays
 the documented transport mismatch, not a gate.
+
+### 6.5 Allocation, rebalancing, the deciders (done)
+
+`src/cluster/allocation.rs` is where every copy of every shard goes: one
+pure function from the routing table as it was to the table as it should
+be, given the nodes, the indices and their settings, the cluster settings
+and the time (ADR 0002: no clock, no I/O). Copies on nodes that left
+become unassigned -- a replica waits out
+`index.unassigned.node_left.delayed_timeout` (60s; `delayed` in health and
+`_cat/shards`, `allocation_delayed` in explain), a lost primary is
+replaced by an in-sync replica and the primary term rises -- then
+unassigned copies are placed on the node the deciders allow and the
+balancer weighs lightest (`cluster.routing.allocation.balance.shard`,
+`.index`, `.threshold`, OpenSearch's weights), and once every copy is
+active the balancer moves copies from heavy nodes to light ones, one
+relocation per publication, heaviest source first. The deciders are
+OpenSearch's, in its order and its words (`max_retry`,
+`replica_after_primary_active`, `enable`, `filter` with `_name`/`_ip`/
+`_id`/`_host` and `node.attr.*` over include/exclude/require at cluster
+and index level, `same_shard`, `throttling` with the concurrent and
+initial recovery limits, `shards_limit` per index and cluster,
+`awareness` with forced values, `rebalance_only_when_active`,
+`cluster_rebalance`, `concurrent_rebalance`; `node_version`,
+`disk_threshold`, `snapshot_in_progress`, `restore_in_progress`,
+`load_awareness`, `target_pool`, `remote_store_migration`,
+`search_replica_allocation` say yes with the plugin's sentences), plus one
+of our own, `primary_home`: a primary stays with the store that holds its
+data until peer recovery (6.7) can move it. Failures count against
+`index.allocation.max_retries` (5) and `_cluster/reroute?retry_failed`
+forgets them.
+
+The manager runs it on every publication over the previous table, after
+applying what data nodes reported (`internal:cluster/shard/started`,
+`shard/failure`); a data node given a copy builds a local index from the
+published settings and mappings (`ShardHost`; the store removes only what
+it created) and reports; the manager's own store holds every primary it
+publishes. `_cluster/reroute` (`move`, `allocate_replica`,
+`allocate_empty_primary`, `allocate_stale_primary`, `cancel`, `dry_run`,
+`explain`, `retry_failed`, `metric`) reaches the manager over the
+transport from any node (`Runtime::call`: a request awaited by its id)
+and answers with the state the commands make, in `_cluster/state`'s
+shape. `_cluster/allocation/explain` asks the same deciders on any node;
+`_cat/shards` (relocations as `n3 -> ip id n1`, the unassigned columns),
+`_cat/allocation` and health (`initializing`, `relocating`,
+`delayed_unassigned`, `active_shards_percent_as_number`, per-index and
+per-shard levels) read the live routing.
+
+Compared with OpenSearch on one node, byte for byte after ids and times
+are masked: `_cluster/allocation/explain` for the unassigned replica and
+for the primary with `include_yes_decisions` (every decider, its
+decision and its sentence, in order), `_cluster/reroute` with a bad node
+(400, "failed to resolve [x], no matching nodes"), `dry_run&explain` with
+`allocate_replica` (the explanation entry), the keys of the default
+answer, `retry_failed`, `_cat/allocation` and `_cat/shards`. Tests: nine
+on the allocator (even spread, `same_shard`, filters, `enable`, limits,
+awareness, delay and promotion, retries to the limit and by hand, a new
+node taking copies one at a time, the rebalance verdicts) and one in the
+simulation (a lost replica placed again after its delay). Live, three
+nodes: replicas placed and started on the other nodes within seconds,
+`move` from a follower, the departed node's replica delayed then placed
+on the node left. The live run found the settings lookup missing
+part-nested keys (`{"index": {"unassigned.node_left.delayed_timeout":
+..}}` as the store keeps them), which read the delay as 60s. Gates: unit
+49/49, phase1 398/398; bench after 6.5 wins all twelve dimensions in
+every pass (index 97,210 vs 66,405 docs/s, 394MiB vs 2.0GiB, every query
+p50 lower; against os-secure 94,129 vs 59,462 docs/s, p50s 3-5x lower).

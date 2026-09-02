@@ -150,46 +150,67 @@ pub async fn cat_indices(
 /// One node holds every shard, and the disk figures describe the machine it
 /// is running on rather than a share of a cluster.
 pub async fn cat_allocation(
-    State(store): State<Store>,
+    State(_store): State<Store>,
     node: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    // the path names which node to describe, and there is only one
-    if let Some(Path(want)) = node.as_ref() {
-        // the sole node is also the one leading the cluster, and the one the
-        // request arrived at
-        if !matches!(
-            want.as_str(),
-            "boostsearch"
-                | "node-0"
-                | "node"
-                | "_all"
-                | "*"
-                | "_master"
-                | "_cluster_manager"
-                | "_local"
-        ) {
-            return cat_render_cols(CAT_ALLOCATION_COLS, Vec::new(), &p);
+    use crate::cluster::state::ShardState;
+    // how many copies each node holds, as the manager placed them, and how
+    // many wait for a node; the path names which nodes to describe
+    let live = crate::cluster::current_state();
+    let only: Option<Vec<String>> = node
+        .as_ref()
+        .map(|Path(w)| w.split(',').map(|x| x.trim().to_string()).collect())
+        .filter(|v: &Vec<String>| !v.iter().any(|x| matches!(x.as_str(), "_all" | "*")));
+    let me = crate::cluster::identity();
+    let wanted = |n: &crate::cluster::state::DiscoveryNode| -> bool {
+        match &only {
+            None => true,
+            Some(o) => o.iter().any(|x| {
+                *x == n.name
+                    || *x == n.id.as_str()
+                    || (x == "_local" && n.id == me.id)
+                    || ((x == "_master" || x == "_cluster_manager")
+                        && live.cluster_manager.as_ref() == Some(&n.id))
+                    || (x.contains('*') && crate::store::glob_match(x, &n.name))
+            }),
         }
-    }
-    let shards = store.names().len();
+    };
     // `bytes` asks for the sizes as plain numbers in that unit rather than as
     // text a person would read
     let raw = p.contains_key("bytes");
-    let size = |human: &str, bytes: u64| {
-        if raw { bytes.to_string() } else { human.to_string() }
-    };
-    let rows = vec![vec![
-        ("shards", shards.to_string()),
-        ("disk.indices", size("0b", 0)),
-        ("disk.used", size("1gb", 1_073_741_824)),
-        ("disk.avail", size("1gb", 1_073_741_824)),
-        ("disk.total", size("2gb", 2_147_483_648)),
-        ("disk.percent", "50".to_string()),
-        ("host", "127.0.0.1".to_string()),
-        ("ip", "127.0.0.1".to_string()),
-        ("node", "boostsearch".to_string()),
-    ]];
+    let size = |human: &str, bytes: u64| if raw { bytes.to_string() } else { human.to_string() };
+    let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+    for n in live.nodes.values().filter(|n| n.is_data() && wanted(n)) {
+        let count =
+            live.routing.on_node(&n.id).filter(|c| c.state != ShardState::Unassigned).count();
+        let ip = n.transport_address.split(':').next().unwrap_or("").to_string();
+        rows.push(vec![
+            ("shards", count.to_string()),
+            ("disk.indices", size("0b", 0)),
+            ("disk.used", size("1gb", 1_073_741_824)),
+            ("disk.avail", size("1gb", 1_073_741_824)),
+            ("disk.total", size("2gb", 2_147_483_648)),
+            ("disk.percent", "50".to_string()),
+            ("host", ip.clone()),
+            ("ip", ip),
+            ("node", n.name.clone()),
+        ]);
+    }
+    let unassigned = live.routing.all().filter(|c| c.state == ShardState::Unassigned).count();
+    if unassigned > 0 && only.is_none() {
+        rows.push(vec![
+            ("shards", unassigned.to_string()),
+            ("disk.indices", String::new()),
+            ("disk.used", String::new()),
+            ("disk.avail", String::new()),
+            ("disk.total", String::new()),
+            ("disk.percent", String::new()),
+            ("host", String::new()),
+            ("ip", String::new()),
+            ("node", "UNASSIGNED".to_string()),
+        ]);
+    }
     cat_render_cols(CAT_ALLOCATION_COLS, rows, &p)
 }
 

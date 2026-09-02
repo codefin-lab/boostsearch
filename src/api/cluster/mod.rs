@@ -129,7 +129,8 @@ pub async fn cluster_health(
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
     // an index the cluster manager published that this node does not hold
     // is counted by name too (a follower's view)
-    let published_names: Vec<String> = crate::cluster::current_state().indices.keys().cloned().collect();
+    let published_names: Vec<String> =
+        crate::cluster::current_state().indices.keys().cloned().collect();
     let published_only = |e: &str| -> Vec<String> {
         published_names
             .iter()
@@ -138,7 +139,8 @@ pub async fn cluster_health(
                 store.get(name).is_none()
                     && e.split(',').map(|x| x.trim()).any(|part| {
                         part == name
-                            || (part.contains('*') && crate::store::wildcard_to_regex(part).is_match(name))
+                            || (part.contains('*')
+                                && crate::store::wildcard_to_regex(part).is_match(name))
                     })
             })
             .cloned()
@@ -152,10 +154,7 @@ pub async fn cluster_health(
             .filter(|n| {
                 // a published-only index is open as far as this node knows:
                 // the cluster manager is the one who closes it
-                let closed = store
-                    .get(n)
-                    .map(|st| st.read().closed)
-                    .unwrap_or(false);
+                let closed = store.get(n).map(|st| st.read().closed).unwrap_or(false);
                 if !e.contains('*') {
                     true
                 } else if closed {
@@ -237,9 +236,9 @@ pub async fn cluster_health(
         "discovered_cluster_manager": crate::cluster::current_state().cluster_manager.is_some(),
         "active_primary_shards": live_counts.active_primary, "active_shards": live_counts.active,
         "relocating_shards": live_counts.relocating, "initializing_shards": live_counts.initializing, "unassigned_shards": live_counts.unassigned,
-        "delayed_unassigned_shards": 0, "number_of_pending_tasks": 0,
+        "delayed_unassigned_shards": live_counts.delayed, "number_of_pending_tasks": 0,
         "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
-        "active_shards_percent_as_number": 100.0,
+        "active_shards_percent_as_number": live_counts.active_percent(),
     });
     // `level` says how far down to report: the cluster, each index, or each
     // shard within them
@@ -247,33 +246,85 @@ pub async fn cluster_health(
     if level == "indices" || level == "shards" {
         let mut indices = serde_json::Map::new();
         for name in &names {
-            let Some(st) = store.get(name) else { continue };
-            let replicas = st.read().numeric_setting("number_of_replicas").unwrap_or(0);
-            let shards = st.read().shard_count() as usize;
-            let short = replicas > 0;
-            let mut entry = json!({
-                "status": if short { "yellow" } else { "green" },
-                "number_of_shards": shards, "number_of_replicas": replicas,
-                "active_primary_shards": shards, "active_shards": shards,
-                "relocating_shards": 0, "initializing_shards": 0,
-                "unassigned_shards": shards * replicas as usize,
-            });
+            let (shards, replicas) = match (store.get(name), live.indices.get(name)) {
+                (Some(st), _) => (
+                    st.read().shard_count() as usize,
+                    st.read().numeric_setting("number_of_replicas").unwrap_or(0) as usize,
+                ),
+                (None, Some(m)) => (m.number_of_shards as usize, m.number_of_replicas as usize),
+                _ => continue,
+            };
+            let published = live.routing.indices.contains_key(name);
+            let mut entry = if published {
+                // what the manager placed
+                let only = vec![name.clone()];
+                let c = live.shard_counts(Some(&only));
+                json!({
+                    "status": live.health_status(Some(&only)),
+                    "number_of_shards": shards, "number_of_replicas": replicas,
+                    "active_primary_shards": c.active_primary, "active_shards": c.active,
+                    "relocating_shards": c.relocating, "initializing_shards": c.initializing,
+                    "unassigned_shards": c.unassigned,
+                })
+            } else {
+                let short = replicas > 0;
+                json!({
+                    "status": if short { "yellow" } else { "green" },
+                    "number_of_shards": shards, "number_of_replicas": replicas,
+                    "active_primary_shards": shards, "active_shards": shards,
+                    "relocating_shards": 0, "initializing_shards": 0,
+                    "unassigned_shards": shards * replicas,
+                })
+            };
             if level == "shards" {
+                use crate::cluster::state::ShardState;
                 let mut per = serde_json::Map::new();
                 for shard in 0..shards {
+                    let copies: Vec<_> =
+                        live.routing.shards_of(name).filter(|c| c.shard == shard as u32).collect();
+                    let (mut active, mut reloc, mut init, mut unas) = (0, 0, 0, 0);
+                    let mut primary_active = false;
+                    for c in &copies {
+                        match c.state {
+                            ShardState::Started => active += 1,
+                            ShardState::Relocating => {
+                                active += 1;
+                                reloc += 1;
+                            }
+                            ShardState::Initializing => init += 1,
+                            ShardState::Unassigned => unas += 1,
+                        }
+                        if c.primary
+                            && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                        {
+                            primary_active = true;
+                        }
+                    }
+                    if copies.is_empty() {
+                        active = 1;
+                        unas = replicas;
+                        primary_active = true;
+                    }
+                    let status = if !primary_active {
+                        "red"
+                    } else if unas + init > 0 {
+                        "yellow"
+                    } else {
+                        "green"
+                    };
                     per.insert(
                         shard.to_string(),
                         json!({
-                            "status": if short { "yellow" } else { "green" },
-                            "primary_active": true, "active_shards": 1,
-                            "relocating_shards": 0, "initializing_shards": 0,
-                            "unassigned_shards": replicas,
+                            "status": status,
+                            "primary_active": primary_active, "active_shards": active,
+                            "relocating_shards": reloc, "initializing_shards": init,
+                            "unassigned_shards": unas,
                         }),
                     );
                 }
                 entry["shards"] = Value::Object(per);
             }
-            indices.insert(st.read().name.clone(), entry);
+            indices.insert(name.clone(), entry);
         }
         out["indices"] = Value::Object(indices);
     }

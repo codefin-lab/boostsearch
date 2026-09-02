@@ -47,16 +47,17 @@ pub async fn post_voting_config_exclusions(
     store.add_voting_exclusions(entries.clone());
     // the reply waits for the exclusions to take effect: the excluded nodes
     // out of the committed voting configuration
-    let timeout = p
-        .get("timeout")
-        .and_then(|t| parse_time_ms(t))
-        .unwrap_or(30_000);
+    let timeout = p.get("timeout").and_then(|t| parse_time_ms(t)).unwrap_or(30_000);
     let started = std::time::Instant::now();
     loop {
         let live = crate::cluster::current_state();
         let pending: Vec<&Value> = entries
             .iter()
-            .filter(|e| live.last_committed_config.iter().any(|n| n.as_str() == e["node_id"].as_str().unwrap_or("")))
+            .filter(|e| {
+                live.last_committed_config
+                    .iter()
+                    .any(|n| n.as_str() == e["node_id"].as_str().unwrap_or(""))
+            })
             .collect();
         if pending.is_empty() {
             return (StatusCode::OK, axum::Json(json!({}))).into_response();
@@ -64,12 +65,21 @@ pub async fn post_voting_config_exclusions(
         if started.elapsed().as_millis() as u64 >= timeout {
             let list: Vec<String> = pending
                 .iter()
-                .map(|e| format!("{{{}}}{{{}}}", e["node_name"].as_str().unwrap_or(""), e["node_id"].as_str().unwrap_or("")))
+                .map(|e| {
+                    format!(
+                        "{{{}}}{{{}}}",
+                        e["node_name"].as_str().unwrap_or(""),
+                        e["node_id"].as_str().unwrap_or("")
+                    )
+                })
                 .collect();
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "timeout_exception",
-                &format!("timed out waiting for voting config exclusions [{}] to take effect", list.join(", ")),
+                &format!(
+                    "timed out waiting for voting config exclusions [{}] to take effect",
+                    list.join(", ")
+                ),
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -82,18 +92,25 @@ pub async fn delete_voting_config_exclusions(
 ) -> Response {
     // `wait_for_removal` waits for the excluded nodes to have left the cluster
     let wait = p.get("wait_for_removal").map(|v| v != "false").unwrap_or(true);
-    let timeout = p
-        .get("timeout")
-        .and_then(|t| parse_time_ms(t))
-        .unwrap_or(30_000);
+    let timeout = p.get("timeout").and_then(|t| parse_time_ms(t)).unwrap_or(30_000);
     let excluded = store.voting_exclusions();
     let started = std::time::Instant::now();
     while wait {
         let live = crate::cluster::current_state();
         let still: Vec<String> = excluded
             .iter()
-            .filter(|e| live.nodes.contains_key(&crate::cluster::NodeId(e["node_id"].as_str().unwrap_or("").to_string())))
-            .map(|e| format!("{{{}}}{{{}}}", e["node_name"].as_str().unwrap_or(""), e["node_id"].as_str().unwrap_or("")))
+            .filter(|e| {
+                live.nodes.contains_key(&crate::cluster::NodeId(
+                    e["node_id"].as_str().unwrap_or("").to_string(),
+                ))
+            })
+            .map(|e| {
+                format!(
+                    "{{{}}}{{{}}}",
+                    e["node_name"].as_str().unwrap_or(""),
+                    e["node_id"].as_str().unwrap_or("")
+                )
+            })
             .collect();
         if still.is_empty() {
             break;
@@ -102,7 +119,10 @@ pub async fn delete_voting_config_exclusions(
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "timeout_exception",
-                &format!("timed out waiting for removal of nodes; if nodes should not be removed, set waitForRemoval to false. [{}]", still.join(", ")),
+                &format!(
+                    "timed out waiting for removal of nodes; if nodes should not be removed, set waitForRemoval to false. [{}]",
+                    still.join(", ")
+                ),
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

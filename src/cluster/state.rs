@@ -69,6 +69,12 @@ pub struct UnassignedInfo {
     pub at_millis: u64,
     pub delayed: bool,
     pub allocation_status: String,
+    /// how many times a node failed to start this copy
+    #[serde(default)]
+    pub failed_allocations: u64,
+    /// what the last failure said
+    #[serde(default)]
+    pub details: Option<String>,
 }
 
 /// One copy of one shard.
@@ -98,17 +104,37 @@ impl ShardRouting {
         if let Some(a) = &self.allocation_id {
             o["allocation_id"] = json!({"id": a});
         }
-        if self.state == ShardState::Unassigned {
-            o["recovery_source"] =
-                json!({"type": if self.primary { "EMPTY_STORE" } else { "PEER" }});
+        if matches!(self.state, ShardState::Unassigned | ShardState::Initializing) {
+            let kind = if self.relocating_node.is_some() || !self.primary {
+                "PEER"
+            } else if self.unassigned.as_ref().map(|u| u.reason == "INDEX_CREATED").unwrap_or(true)
+            {
+                "EMPTY_STORE"
+            } else {
+                "EXISTING_STORE"
+            };
+            o["recovery_source"] = json!({"type": kind});
+            if self.state == ShardState::Initializing {
+                o["expected_shard_size_in_bytes"] = json!(0);
+            }
             if let Some(u) = &self.unassigned {
-                o["unassigned_info"] = json!({
+                let mut info = json!({
                     "reason": u.reason,
                     "at": iso_millis(u.at_millis),
                     "delayed": u.delayed,
                     "allocation_status": u.allocation_status,
                 });
+                if u.failed_allocations > 0 {
+                    info["failed_attempts"] = json!(u.failed_allocations);
+                }
+                if let Some(d) = &u.details {
+                    info["details"] = json!(d);
+                }
+                o["unassigned_info"] = info;
             }
+        }
+        if self.state == ShardState::Relocating {
+            o["expected_shard_size_in_bytes"] = json!(0);
         }
         o
     }
@@ -185,6 +211,11 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
+    /// The copies a node holds, whatever their state.
+    pub fn on_node<'a>(&'a self, node: &'a NodeId) -> impl Iterator<Item = &'a ShardRouting> + 'a {
+        self.all().filter(move |c| c.node.as_ref() == Some(node))
+    }
+
     pub fn shards_of(&self, index: &str) -> impl Iterator<Item = &ShardRouting> {
         self.indices.get(index).into_iter().flat_map(|s| s.values().flatten())
     }
@@ -307,7 +338,12 @@ impl ClusterState {
                         c.active_primary += 1;
                     }
                 }
-                ShardState::Unassigned => c.unassigned += 1,
+                ShardState::Unassigned => {
+                    c.unassigned += 1;
+                    if r.unassigned.as_ref().map(|u| u.delayed).unwrap_or(false) {
+                        c.delayed += 1;
+                    }
+                }
             }
         }
         c
@@ -340,6 +376,16 @@ pub struct ShardCounts {
     pub initializing: usize,
     pub relocating: usize,
     pub unassigned: usize,
+    /// unassigned replicas waiting out `index.unassigned.node_left.delayed_timeout`
+    pub delayed: usize,
+}
+
+impl ShardCounts {
+    /// `active_shards_percent_as_number`: active copies over all copies.
+    pub fn active_percent(&self) -> f64 {
+        let total = self.active + self.initializing + self.unassigned;
+        if total == 0 { 100.0 } else { self.active as f64 * 100.0 / total as f64 }
+    }
 }
 
 #[cfg(test)]
@@ -379,7 +425,8 @@ mod tests {
                 active_primary: 1,
                 initializing: 0,
                 relocating: 0,
-                unassigned: 1
+                unassigned: 1,
+                delayed: 0,
             }
         );
         s.routing.indices.get_mut("i").unwrap().get_mut(&0).unwrap()[0].state =

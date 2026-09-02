@@ -220,48 +220,126 @@ pub(crate) async fn cat_by_name(
             cat_render_cols(CAT_TEMPLATE_COLS, rows, &p)
         }
         "shards" => {
-            // the path names which indices to describe
-            let names = match target.as_deref().filter(|t| !t.is_empty()) {
+            use crate::cluster::state::ShardState;
+            // the path names which indices to describe; the manager's
+            // routing says where each copy is
+            let live = crate::cluster::current_state();
+            let matches = |t: &str, n: &str| {
+                t.split(',').any(|part| {
+                    let part = part.trim();
+                    part == n
+                        || part == "_all"
+                        || (part.contains('*') && crate::store::glob_match(part, n))
+                })
+            };
+            let mut names: Vec<String> = match target.as_deref().filter(|t| !t.is_empty()) {
                 Some(t) => store.resolve(t),
                 None => store.names(),
             };
-            // an index is listed shard by shard, and every one of them is
-            // started here since the node holds them all
+            for n in live.routing.indices.keys() {
+                let wanted = target
+                    .as_deref()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| matches(t, n))
+                    .unwrap_or(true);
+                if wanted && !names.contains(n) {
+                    names.push(n.clone());
+                }
+            }
+            let me = crate::cluster::identity();
+            let ip_of = |id: &crate::cluster::NodeId| -> String {
+                live.nodes
+                    .get(id)
+                    .map(|n| n.transport_address.split(':').next().unwrap_or("").to_string())
+                    .unwrap_or_default()
+            };
+            let name_of = |id: &crate::cluster::NodeId| -> String {
+                live.nodes.get(id).map(|n| n.name.clone()).unwrap_or_default()
+            };
+            let blank = |n: &str,
+                         shard: u32,
+                         prirep: &str,
+                         state: &str,
+                         reason: &str|
+             -> Vec<(&'static str, String)> {
+                vec![
+                    ("index", n.to_string()),
+                    ("shard", shard.to_string()),
+                    ("prirep", prirep.into()),
+                    ("state", state.into()),
+                    ("docs", String::new()),
+                    ("store", String::new()),
+                    ("ip", String::new()),
+                    ("id", String::new()),
+                    ("node", String::new()),
+                    ("unassigned.reason", reason.into()),
+                    ("unassigned.at", String::new()),
+                    ("unassigned.for", String::new()),
+                    ("unassigned.details", String::new()),
+                ]
+            };
             let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
             for n in names {
-                let Some(st) = store.get(&n) else { continue };
-                let g = st.read();
-                let docs = g.reader.searcher().num_docs();
-                let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
-                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
-                for shard in 0..shards {
-                    rows.push(vec![
-                        ("index", n.clone()),
-                        ("shard", shard.to_string()),
-                        ("prirep", "p".into()),
-                        ("state", "STARTED".into()),
-                        // the documents all sit in the one shard that exists
-                        ("docs", if shard == 0 { docs.to_string() } else { "0".into() }),
-                        ("store", "0b".into()),
-                        ("ip", "127.0.0.1".into()),
-                        ("id", crate::cluster::identity().id.as_str().into()),
-                        ("node", crate::cluster::identity().name.clone().into()),
-                    ]);
-                    // a replica has nowhere else to live on a single node, so
-                    // it is listed and unassigned
-                    for _ in 0..replicas {
-                        rows.push(vec![
-                            ("index", n.clone()),
-                            ("shard", shard.to_string()),
-                            ("prirep", "r".into()),
-                            ("state", "UNASSIGNED".into()),
-                            ("docs", String::new()),
-                            ("store", String::new()),
-                            ("ip", String::new()),
-                            ("id", String::new()),
-                            ("node", String::new()),
-                        ]);
+                let local_docs =
+                    store.get(&n).map(|st| st.read().reader.searcher().num_docs()).unwrap_or(0);
+                let mut copies: Vec<&crate::cluster::state::ShardRouting> =
+                    live.routing.shards_of(&n).collect();
+                copies.sort_by_key(|c| (c.shard, !c.primary));
+                if copies.is_empty() {
+                    // not published: this node holds it, alone
+                    let Some(st) = store.get(&n) else { continue };
+                    let g = st.read();
+                    let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1) as u32;
+                    let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
+                    for shard in 0..shards {
+                        let mut row = blank(&n, shard, "p", "STARTED", "");
+                        row[4].1 = if shard == 0 { local_docs.to_string() } else { "0".into() };
+                        row[5].1 = "0b".into();
+                        row[6].1 = "127.0.0.1".into();
+                        row[7].1 = me.id.as_str().into();
+                        row[8].1 = me.name.clone();
+                        rows.push(row);
+                        for _ in 0..replicas {
+                            rows.push(blank(&n, shard, "r", "UNASSIGNED", "INDEX_CREATED"));
+                        }
                     }
+                    continue;
+                }
+                for c in copies {
+                    let here = c.node.as_ref() == Some(&me.id);
+                    let prirep = if c.primary { "p" } else { "r" };
+                    let mut row = blank(&n, c.shard, prirep, c.state.as_str(), "");
+                    match (&c.node, &c.relocating_node, c.state) {
+                        (Some(nd), Some(to), ShardState::Relocating) => {
+                            row[6].1 = ip_of(nd);
+                            row[7].1 = nd.as_str().to_string();
+                            row[8].1 = format!(
+                                "{} -> {} {} {}",
+                                name_of(nd),
+                                ip_of(to),
+                                to.as_str(),
+                                name_of(to)
+                            );
+                        }
+                        (Some(nd), _, _) => {
+                            row[6].1 = ip_of(nd);
+                            row[7].1 = nd.as_str().to_string();
+                            row[8].1 = name_of(nd);
+                        }
+                        _ => {}
+                    }
+                    let active = matches!(c.state, ShardState::Started | ShardState::Relocating);
+                    if active {
+                        row[4].1 =
+                            if here && c.shard == 0 { local_docs.to_string() } else { "0".into() };
+                        row[5].1 = "0b".into();
+                    }
+                    if let (Some(u), ShardState::Unassigned) = (&c.unassigned, c.state) {
+                        row[9].1 = u.reason.clone();
+                        row[10].1 = crate::cluster::state::iso_millis(u.at_millis);
+                        row[12].1 = u.details.clone().unwrap_or_default();
+                    }
+                    rows.push(row);
                 }
             }
             rows.sort_by(|a, b| a[0].1.cmp(&b[0].1));
@@ -331,20 +409,14 @@ pub(crate) async fn cat_by_name(
             }
             cat_render_cols(&["id", "host", "ip", "node", "field", "size"], rows, &p)
         }
-        "allocation" => cat_named(
-            &[
-                "shards",
-                "disk.indices",
-                "disk.used",
-                "disk.avail",
-                "disk.total",
-                "disk.percent",
-                "host",
-                "ip",
-                "node",
-            ],
-            &p,
-        ),
+        "allocation" => {
+            cat_allocation(
+                State(store.clone()),
+                target.clone().map(axum::extract::Path),
+                Query(p.clone()),
+            )
+            .await
+        }
         "pending_tasks" => cat_named(&["insertOrder", "timeInQueue", "priority", "source"], &p),
         "plugins" => cat_named(&["name", "component", "version"], &p),
         "thread_pool" => cat_thread_pool(target.map(axum::extract::Path), Query(p)).await,

@@ -317,7 +317,12 @@ mod tests {
                         ts[i]
                             .send(
                                 &ts[j].local(),
-                                Envelope::request("internal:ping", ts[i].local(), round * 10 + i as u64, vec![]),
+                                Envelope::request(
+                                    "internal:ping",
+                                    ts[i].local(),
+                                    round * 10 + i as u64,
+                                    vec![],
+                                ),
                             )
                             .unwrap();
                     }
@@ -332,7 +337,13 @@ mod tests {
         }
         for (i, s) in seen.iter().enumerate() {
             let got = s.0.lock();
-            assert_eq!(got.len(), 4, "{} got {:?}", names[i], got.iter().map(|e| (e.from.clone(), e.request_id)).collect::<Vec<_>>());
+            assert_eq!(
+                got.len(),
+                4,
+                "{} got {:?}",
+                names[i],
+                got.iter().map(|e| (e.from.clone(), e.request_id)).collect::<Vec<_>>()
+            );
         }
     }
 

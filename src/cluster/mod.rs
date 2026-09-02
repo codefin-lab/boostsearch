@@ -6,6 +6,7 @@
 //! one consistency mode shipped and the replication path taking its
 //! acknowledgement policy as a parameter (ADR 0003).
 
+pub mod allocation;
 pub mod clock;
 pub mod coordinator;
 pub mod metadata;
@@ -75,7 +76,23 @@ pub fn runtime() -> Option<Arc<runtime::Runtime>> {
 
 /// The last committed cluster state, or a state of this node alone while
 /// the coordinator has not started (tools, tests).
+thread_local! {
+    static OVERRIDE: std::cell::RefCell<Option<state::ClusterState>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Render with a state that is not the committed one (a `_cluster/reroute`
+/// dry run): `current_state()` answers with it while `f` runs.
+pub fn with_state_override<R>(s: state::ClusterState, f: impl FnOnce() -> R) -> R {
+    OVERRIDE.with(|o| *o.borrow_mut() = Some(s));
+    let r = f();
+    OVERRIDE.with(|o| *o.borrow_mut() = None);
+    r
+}
+
 pub fn current_state() -> state::ClusterState {
+    if let Some(s) = OVERRIDE.with(|o| o.borrow().clone()) {
+        return s;
+    }
     if let Some(rt) = runtime() {
         let s = rt.state();
         if s.version > 0 {
