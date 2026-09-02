@@ -862,3 +862,50 @@ partition loses every message and a heal brings them back; the same seed
 makes the same trace and another seed a different one; a crash loses the
 timers and keeps what was written, and the restart carries on from it;
 skew moves one node's clock and no other's.
+
+### 6.3 Cluster state: versioned metadata, the shard map, join and leave (done)
+
+- `src/cluster/state.rs`: `ClusterState` -- cluster name and uuid, state
+  uuid, version, term, the manager, `DiscoveryNode`s, the coordination
+  configs, `IndexMetadata` (settings, mappings, aliases, the versions,
+  primary terms, in-sync allocations), the `RoutingTable` of
+  `ShardRouting`s (state, primary, node, relocating node, allocation id,
+  unassigned info), blocks -- written in OpenSearch's shapes;
+  `shard_counts` and `health_status` as `_cluster/health` reckons them.
+- `src/cluster/coordinator.rs`: the `NodeLogic` of join and leave with the
+  manager fixed by `cluster.initial_cluster_manager_nodes` (an election
+  takes over in 6.4): a candidate asks the manager (or the seeds) to join;
+  the manager adds it and publishes in two phases (accept, then commit) so
+  no node applies a state the others may never see; followers are checked
+  on a timer and dropped after the retries; a follower that loses its
+  manager goes back to looking; the committed state is durable and a
+  restarted node carries on from it. `internal:cluster/coordination/*`
+  and `internal:coordination/fault_detection/*` name the actions.
+- `src/cluster/metadata.rs`: the manager's store as the source of index
+  metadata, fingerprinted and republished when it changes; placement --
+  every primary started on the manager, every replica unassigned with
+  `INDEX_CREATED` until allocation (6.5); allocation ids stable across
+  publications; in-sync allocations and primary terms from the placement.
+- `src/cluster/runtime.rs`: the same logic on tokio over the TCP
+  transport, timers by epoch so a reset timer never fires, seed-host
+  discovery through the handshake, the committed state shared with the
+  HTTP handlers. `_cluster/state`, `_cluster/health`, `_cat/nodes`,
+  `_cat/shards` and `_nodes` read it; a follower reports the indices the
+  manager published even though its own store does not hold them.
+
+Checked in the simulation: three nodes join and commit one identical
+state at one version; a partitioned follower is dropped by the manager
+and finds it lost, and rejoins on heal at a higher version; a crashed
+follower rejoins from what it kept; versions only rise under 20% loss and
+the seed repeats; index metadata reaches every node when it appears and
+leaves when it goes, with no version churn in between. Checked live: two
+processes form a cluster, agree on the manager and the version, both show
+`_cat/nodes` with the manager starred, the follower shows the manager's
+index in its routing table, and the manager drops a killed follower after
+its checks. `_cluster/state` metadata entries carry OpenSearch's thirteen
+keys; the routing table, `_cat/shards` and health read from the shard
+map. A follower answers `_cluster/state` and `_cluster/health` for an
+index only the manager holds: the published metadata and routing stand in
+for its store, and the status comes from the manager's placement (yellow
+for a replica no node took), not from local settings. Gates: phase1
+398/398.

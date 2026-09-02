@@ -127,24 +127,42 @@ pub async fn cluster_health(
     let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
+    // an index the cluster manager published that this node does not hold
+    // is counted by name too (a follower's view)
+    let published_names: Vec<String> = crate::cluster::current_state().indices.keys().cloned().collect();
+    let published_only = |e: &str| -> Vec<String> {
+        published_names
+            .iter()
+            .filter(|name| {
+                let name: &str = name;
+                store.get(name).is_none()
+                    && e.split(',').map(|x| x.trim()).any(|part| {
+                        part == name
+                            || (part.contains('*') && crate::store::wildcard_to_regex(part).is_match(name))
+                    })
+            })
+            .cloned()
+            .collect()
+    };
     let names: Vec<String> = match expr.as_deref() {
         Some(e) if !e.is_empty() && e != "_all" => store
             .resolve(e)
             .into_iter()
+            .chain(published_only(e))
             .filter(|n| {
-                store
+                // a published-only index is open as far as this node knows:
+                // the cluster manager is the one who closes it
+                let closed = store
                     .get(n)
-                    .map(|st| {
-                        let closed = st.read().closed;
-                        if !e.contains('*') {
-                            true
-                        } else if closed {
-                            want_closed
-                        } else {
-                            want_open
-                        }
-                    })
-                    .unwrap_or(false)
+                    .map(|st| st.read().closed)
+                    .unwrap_or(false);
+                if !e.contains('*') {
+                    true
+                } else if closed {
+                    want_closed
+                } else {
+                    want_open
+                }
             })
             .collect(),
         _ => store.names(),
@@ -156,7 +174,17 @@ pub async fn cluster_health(
         .iter()
         .filter_map(|n| store.get(n))
         .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
-    let status = if unassignable { "yellow" } else { "green" };
+    // what the cluster manager placed decides, once it has placed anything
+    // named here; the store's own settings speak for an index it has not seen
+    let live = crate::cluster::current_state();
+    let placed = names.iter().any(|n| live.routing.indices.contains_key(n));
+    let status = if placed {
+        live.health_status(Some(&names))
+    } else if unassignable {
+        "yellow"
+    } else {
+        "green"
+    };
 
     // a wait this engine cannot satisfy is answered as a timeout rather than
     // by waiting: nothing here is going to change while the request is held
@@ -183,12 +211,32 @@ pub async fn cluster_health(
     let shards_of =
         |name: &str| store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1);
     let n: usize = names.iter().map(|name| shards_of(name)).sum();
+    // what the cluster manager placed: the replicas it could not place are
+    // unassigned, which is what makes an index yellow
+    let names_ref: Vec<String> = names.clone();
+    let mut live_counts = live.shard_counts(Some(&names_ref));
+    if live_counts.active + live_counts.unassigned + live_counts.initializing == 0 {
+        live_counts.active = n;
+        live_counts.active_primary = n;
+    }
+    // a replica the store's settings ask for and no node can hold
+    for name in &names {
+        if !live.routing.indices.contains_key(name) {
+            if let Some(st) = store.get(name) {
+                let g = st.read();
+                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1) as usize;
+                live_counts.unassigned += replicas * shards_of(name);
+            }
+        }
+    }
     let mut out = json!({
-        "cluster_name": "boostsearch", "status": status, "timed_out": !satisfied,
-        "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
-        "discovered_cluster_manager": true,
-        "active_primary_shards": n, "active_shards": n,
-        "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
+        "cluster_name": crate::cluster::identity().cluster_name, "status": status, "timed_out": !satisfied,
+        "number_of_nodes": crate::cluster::current_state().nodes.len(),
+        "number_of_data_nodes": crate::cluster::current_state().data_nodes().len(),
+        "discovered_master": crate::cluster::current_state().cluster_manager.is_some(),
+        "discovered_cluster_manager": crate::cluster::current_state().cluster_manager.is_some(),
+        "active_primary_shards": live_counts.active_primary, "active_shards": live_counts.active,
+        "relocating_shards": live_counts.relocating, "initializing_shards": live_counts.initializing, "unassigned_shards": live_counts.unassigned,
         "delayed_unassigned_shards": 0, "number_of_pending_tasks": 0,
         "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
         "active_shards_percent_as_number": 100.0,

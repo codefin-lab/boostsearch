@@ -47,44 +47,70 @@ pub(crate) async fn cat_by_name(
             &p,
         ),
         "nodes" => {
-            let row: Vec<(&str, String)> = vec![
-                // `full_id` asks for the whole node identifier rather than
-                // the short form a table shows by default
-                (
-                    "id",
-                    if p.get("full_id").map(|v| v != "false").unwrap_or(false) {
-                        crate::cluster::identity().id.as_str().to_string()
-                    } else {
-                        // the short form is the first four characters, as OpenSearch prints it
-                        crate::cluster::identity().id.as_str().chars().take(4).collect()
-                    },
-                ),
-                ("ip", "127.0.0.1".into()),
-                ("file_desc.current", "0".into()),
-                ("file_desc.percent", "0".into()),
-                ("file_desc.max", "0".into()),
-                ("heap.current", "0b".into()),
-                ("heap.percent", "0".into()),
-                ("heap.max", "0b".into()),
-                ("ram.current", "0b".into()),
-                ("ram.percent", "0".into()),
-                ("ram.max", "0b".into()),
-                ("http", "127.0.0.1:9200".into()),
-                ("cpu", "0".into()),
-                ("load_1m", "0.00".into()),
-                ("load_5m", "0.00".into()),
-                ("load_15m", "0.00".into()),
-                ("node.role", "dimr".into()),
-                ("node.roles", "data,ingest".into()),
-                ("cluster_manager", "*".into()),
-                ("name", crate::cluster::identity().name.clone().into()),
-                ("diskAvail", "1gb".into()),
-                ("diskTotal", "2gb".into()),
-                ("diskUsed", "1gb".into()),
-                ("diskUsedPercent", "50.00".into()),
-            ];
+            // one row per node the cluster state holds, the manager starred
+            let live = crate::cluster::current_state();
+            let full = p.get("full_id").map(|v| v != "false").unwrap_or(false);
+            let mut rows_all: Vec<Vec<(&str, String)>> = Vec::new();
+            for (id, n) in &live.nodes {
+                let letters: String = {
+                    let mut l = String::new();
+                    for r in &n.roles {
+                        l.push(match r.as_str() {
+                            "cluster_manager" | "master" => 'm',
+                            "data" => 'd',
+                            "ingest" => 'i',
+                            "remote_cluster_client" => 'r',
+                            "search" => 's',
+                            "warm" => 'w',
+                            _ => continue,
+                        });
+                    }
+                    let mut v: Vec<char> = l.chars().collect();
+                    v.sort();
+                    v.into_iter().collect()
+                };
+                let ip = n
+                    .transport_address
+                    .rsplit_once(':')
+                    .map(|(h, _)| h.to_string())
+                    .unwrap_or_default();
+                let is_manager = live.cluster_manager.as_ref() == Some(id);
+                rows_all.push(vec![
+                    (
+                        "id",
+                        if full {
+                            id.as_str().to_string()
+                        } else {
+                            id.as_str().chars().take(4).collect()
+                        },
+                    ),
+                    ("ip", ip.clone()),
+                    ("file_desc.current", "0".into()),
+                    ("file_desc.percent", "0".into()),
+                    ("file_desc.max", "0".into()),
+                    ("heap.current", "0b".into()),
+                    ("heap.percent", "0".into()),
+                    ("heap.max", "0b".into()),
+                    ("ram.current", "0b".into()),
+                    ("ram.percent", "0".into()),
+                    ("ram.max", "0b".into()),
+                    ("http", format!("{ip}:9200")),
+                    ("cpu", "0".into()),
+                    ("load_1m", "0.00".into()),
+                    ("load_5m", "0.00".into()),
+                    ("load_15m", "0.00".into()),
+                    ("node.role", letters),
+                    ("node.roles", n.roles.join(",")),
+                    ("cluster_manager", if is_manager { "*".into() } else { "-".into() }),
+                    ("name", n.name.clone()),
+                    ("diskAvail", "1gb".into()),
+                    ("diskTotal", "2gb".into()),
+                    ("diskUsed", "1gb".into()),
+                    ("diskUsedPercent", "50.00".into()),
+                ]);
+            }
             let rows = cat_only_default(
-                vec![row],
+                rows_all,
                 &[
                     "ip",
                     "heap.percent",

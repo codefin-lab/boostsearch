@@ -439,6 +439,48 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // the coordinator: this node is the manager when the settings name it
+    // (or name nothing and give no seeds); otherwise it joins the manager
+    // the seed hosts lead to
+    {
+        let me = cluster::discovery_node();
+        let names_me = identity
+            .initial_cluster_manager_nodes
+            .iter()
+            .any(|n| *n == identity.name || *n == identity.id.0);
+        let alone = identity.single_node
+            || (identity.seed_hosts.is_empty()
+                && identity.initial_cluster_manager_nodes.is_empty());
+        let seeds = cluster::runtime::discover_seeds(transport.clone(), &identity.seed_hosts).await;
+        let configured = if names_me || alone {
+            Some(identity.id.clone())
+        } else {
+            // the manager is whichever seed carries the configured name
+            let want = identity.initial_cluster_manager_nodes.clone();
+            transport
+                .known_peers()
+                .into_iter()
+                .find(|h| want.iter().any(|w| *w == h.name || *w == h.node_id.0))
+                .map(|h| h.node_id)
+                .or_else(|| seeds.first().cloned())
+        };
+        let mut coordinator = cluster::coordinator::Coordinator::new(
+            me,
+            &identity.cluster_name,
+            &cluster::cluster_uuid(),
+            configured,
+            seeds,
+        );
+        coordinator.metadata =
+            Some(std::sync::Arc::new(cluster::metadata::StoreSource(store.clone())));
+        let rt = cluster::runtime::Runtime::start(
+            transport.clone(),
+            cluster::clock(),
+            coordinator,
+            data_dir.clone(),
+        );
+        cluster::set_runtime(rt);
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
     // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true

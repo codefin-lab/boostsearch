@@ -7,8 +7,12 @@
 //! acknowledgement policy as a parameter (ADR 0003).
 
 pub mod clock;
+pub mod coordinator;
+pub mod metadata;
 pub mod node;
+pub mod runtime;
 pub mod sim;
+pub mod state;
 pub mod tcp;
 pub mod transport;
 
@@ -57,3 +61,52 @@ pub fn state_uuid() -> String {
 }
 
 static STATE_UUID: OnceLock<String> = OnceLock::new();
+
+static RUNTIME: OnceLock<Arc<runtime::Runtime>> = OnceLock::new();
+
+/// The node's coordinator runtime, once it is up.
+pub fn set_runtime(rt: Arc<runtime::Runtime>) {
+    let _ = RUNTIME.set(rt);
+}
+
+pub fn runtime() -> Option<Arc<runtime::Runtime>> {
+    RUNTIME.get().cloned()
+}
+
+/// The last committed cluster state, or a state of this node alone while
+/// the coordinator has not started (tools, tests).
+pub fn current_state() -> state::ClusterState {
+    if let Some(rt) = runtime() {
+        let s = rt.state();
+        if s.version > 0 {
+            return s;
+        }
+    }
+    let me = identity();
+    let mut s = state::ClusterState::empty(&me.cluster_name, &cluster_uuid());
+    s.version = 1;
+    s.term = 1;
+    s.cluster_uuid_committed = true;
+    s.cluster_manager = Some(me.id.clone());
+    s.nodes.insert(me.id.clone(), discovery_node());
+    s.last_committed_config = vec![me.id.clone()];
+    s.last_accepted_config = vec![me.id.clone()];
+    s
+}
+
+/// This node as the cluster state describes it.
+pub fn discovery_node() -> state::DiscoveryNode {
+    let me = identity();
+    state::DiscoveryNode {
+        id: me.id.clone(),
+        name: me.name.clone(),
+        ephemeral_id: me.ephemeral_id.clone(),
+        transport_address: me.transport_address.clone(),
+        roles: me.roles.clone(),
+        attributes: me
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect(),
+    }
+}
