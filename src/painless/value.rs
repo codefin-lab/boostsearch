@@ -322,11 +322,7 @@ pub fn format_date(millis: i64, offset_secs: i32) -> String {
         let o = offset_secs.abs();
         format!("{sign}{:02}:{:02}", o / 3600, (o % 3600) / 60)
     };
-    if ms == 0 {
-        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}{zone}")
-    } else {
-        format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{ms:03}{zone}")
-    }
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{ms:03}{zone}")
 }
 
 /// Days since 1970-01-01 to a calendar date.

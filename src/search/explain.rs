@@ -29,6 +29,56 @@ pub(crate) fn explain_document(g: &IdxState, query: &Value, id: &str) -> Option<
         kinds_complete: g.kinds_complete,
         stats: &g.stats,
     };
+    // a script score is explained as the script's value over the inner
+    // query's own explanation, boosted once
+    if let Some(spec) = query.get("script_score") {
+        let inner = spec.get("query")?;
+        let mut under = explain_document(g, inner, id)?;
+        let score = under.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (_, source) = crate::search::source_of(&searcher, g, *addr)?;
+        let expanded = crate::store::expand_for_indexing(source, &g.mapping);
+        let script = spec.get("script")?;
+        let made = crate::painless::contexts::run_on_doc(script, &expanded, &g.mapping, score)
+            .ok()?
+            .as_f64()
+            .unwrap_or(0.0);
+        let boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let text = match script {
+            Value::String(s) => s.clone(),
+            other => other.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        };
+        let params = script
+            .get("params")
+            .and_then(|p| p.as_object())
+            .map(|p| {
+                p.iter()
+                    .map(|(k, v)| format!("{k}={}", v.to_string().trim_matches('"')))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        under["description"] = json!("_score: ");
+        let scripted = json!({
+            "value": made as f32,
+            "description": format!(
+                "script score function, computed with script:\"Script{{type=inline, \
+                 lang='painless', idOrCode='{text}', options={{}}, params={{{params}}}}}\""
+            ),
+            "details": [under],
+        });
+        return Some(if boost != 1.0 {
+            json!({
+                "value": (made * boost) as f32,
+                "description": "Boosted score, product of:",
+                "details": [
+                    {"value": boost as f32, "description": "boost", "details": []},
+                    scripted,
+                ],
+            })
+        } else {
+            scripted
+        });
+    }
     let built = crate::query::build(&ctx, query).ok()?;
     let explanation = built.explain(&searcher, *addr).ok()?;
     let mut tree = serde_json::to_value(&explanation).ok()?;

@@ -284,7 +284,10 @@ pub fn date_number(v: &Value, format: Option<&str>, nanos: bool) -> Option<i64> 
     };
     let unit: i128 = if nanos { 1 } else { 1_000_000 };
     let read = |s: &str| -> Option<i64> {
-        let dt = parse_date_lenient(s)?;
+        // a mapping's own pattern is tried before the general readings
+        let dt = format
+            .and_then(|f| f.split("||").find_map(|pattern| parse_with_pattern(s, pattern.trim())))
+            .or_else(|| parse_date_lenient(s))?;
         i64::try_from(dt.unix_timestamp_nanos() / unit).ok()
     };
     match v {
@@ -355,4 +358,148 @@ pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Opti
         dt.second(),
         dt.millisecond(),
     ))
+}
+
+/// Read a date the way a Java pattern spells it: `yyyy/MM/dd`,
+/// `dd-MM-yyyy HH:mm:ss`, with letters standing for fields and anything in
+/// quotes or outside the letters standing for itself. A named format is not
+/// a pattern and reads as nothing here.
+pub fn parse_with_pattern(s: &str, pattern: &str) -> Option<boostcore::time::OffsetDateTime> {
+    use boostcore::time::{Date, Month, OffsetDateTime, Time};
+    if !pattern.chars().any(|c| c.is_ascii_uppercase() || c == 'y' || c == 'd')
+        || pattern.contains('_')
+    {
+        return None;
+    }
+    let text: Vec<char> = s.chars().collect();
+    let pat: Vec<char> = pattern.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut year, mut month, mut day) = (1970i64, 1i64, 1i64);
+    let (mut hour, mut minute, mut second, mut nanos) = (0i64, 0i64, 0i64, 0i64);
+    let mut offset_secs = 0i64;
+    let mut pm: Option<bool> = None;
+    while j < pat.len() {
+        let c = pat[j];
+        if c == '\'' {
+            j += 1;
+            while j < pat.len() && pat[j] != '\'' {
+                if i >= text.len() || text[i] != pat[j] {
+                    return None;
+                }
+                i += 1;
+                j += 1;
+            }
+            j += 1;
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            if i >= text.len() || text[i] != c {
+                return None;
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+        let mut width = 0;
+        while j + width < pat.len() && pat[j + width] == c {
+            width += 1;
+        }
+        j += width;
+        // the digits this field takes: exactly `width` where the pattern is
+        // strict about it, else as many as stand there
+        let digits = |i: &mut usize, most: usize| -> Option<i64> {
+            let start = *i;
+            while *i < text.len() && text[*i].is_ascii_digit() && *i - start < most {
+                *i += 1;
+            }
+            if *i == start {
+                return None;
+            }
+            text[start..*i].iter().collect::<String>().parse().ok()
+        };
+        match c {
+            'y' | 'u' => year = digits(&mut i, if width == 2 { 2 } else { 9 })?,
+            'M' => {
+                if width >= 3 {
+                    let start = i;
+                    while i < text.len() && text[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    let name: String = text[start..i].iter().collect::<String>().to_lowercase();
+                    month = 1 + [
+                        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+                        "nov", "dec",
+                    ]
+                    .iter()
+                    .position(|m| name.starts_with(m))? as i64;
+                } else {
+                    month = digits(&mut i, 2)?;
+                }
+            }
+            'd' => day = digits(&mut i, 2)?,
+            'H' | 'k' => hour = digits(&mut i, 2)?,
+            'h' | 'K' => hour = digits(&mut i, 2)?,
+            'm' => minute = digits(&mut i, 2)?,
+            's' => second = digits(&mut i, 2)?,
+            'S' => {
+                let start = i;
+                let frac = digits(&mut i, 9)?;
+                let mut scale = frac;
+                for _ in (i - start)..9 {
+                    scale *= 10;
+                }
+                nanos = scale;
+            }
+            'a' => {
+                let start = i;
+                while i < text.len() && text[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                let word: String = text[start..i].iter().collect::<String>().to_lowercase();
+                pm = Some(word == "pm");
+            }
+            'X' | 'Z' | 'x' | 'z' | 'V' | 'O' => {
+                if i < text.len() && text[i] == 'Z' {
+                    i += 1;
+                } else if i < text.len() && (text[i] == '+' || text[i] == '-') {
+                    let sign = if text[i] == '-' { -1 } else { 1 };
+                    i += 1;
+                    let hh = digits(&mut i, 2)?;
+                    if i < text.len() && text[i] == ':' {
+                        i += 1;
+                    }
+                    let mm = digits(&mut i, 2).unwrap_or(0);
+                    offset_secs = sign * (hh * 3600 + mm * 60);
+                } else {
+                    // a zone name is not read here
+                    while i < text.len() && text[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                }
+            }
+            'E' => {
+                while i < text.len() && text[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+            }
+            _ => return None,
+        }
+    }
+    if i != text.len() {
+        return None;
+    }
+    if let Some(afternoon) = pm {
+        hour %= 12;
+        if afternoon {
+            hour += 12;
+        }
+    }
+    if year < 100 && pattern.contains("yy") && !pattern.contains("yyy") {
+        year += 2000;
+    }
+    let date = Date::from_calendar_date(year as i32, Month::try_from(month as u8).ok()?, day as u8)
+        .ok()?;
+    let time = Time::from_hms_nano(hour as u8, minute as u8, second as u8, nanos as u32).ok()?;
+    let local = OffsetDateTime::new_utc(date, time);
+    Some(local - boostcore::time::Duration::seconds(offset_secs))
 }

@@ -85,6 +85,17 @@ impl Script {
             source: source.to_string(),
             cause: "illegal_argument_exception".into(),
         })?;
+        if let Some(at) = endless_loop(&program.body)
+            .or_else(|| program.functions.iter().find_map(|f| endless_loop(&f.body)))
+        {
+            return Err(ScriptError {
+                kind: "compile error",
+                message: "no paths escape from while loop".into(),
+                offset: at,
+                source: source.to_string(),
+                cause: "illegal_argument_exception".into(),
+            });
+        }
         Ok(Script { source: source.to_string(), program: Rc::new(program) })
     }
 
@@ -261,8 +272,12 @@ mod tests {
         let mut ctx = Bindings::new().with("params", params);
         let e = script.run(&mut ctx).unwrap_err();
         assert_eq!(e.cause, "unsupported_operation_exception");
+        // a loop with no way out is refused before it runs
+        let e = Script::compile("while (true) {}").unwrap_err();
+        assert_eq!(e.message, "no paths escape from while loop");
+        // one that could end but does not is stopped by the step limit
         let mut ctx = Bindings::new();
-        let e = Script::compile("while (true) {}").unwrap().run(&mut ctx).unwrap_err();
+        let e = Script::compile("int x = 0; while (x < 1) {}").unwrap().run(&mut ctx).unwrap_err();
         assert!(e.message.contains("maximum number of statements"));
     }
 
@@ -277,4 +292,49 @@ mod tests {
             "4"
         );
     }
+}
+
+/// Where a loop can never end -- `while (true)` with no way out of its
+/// body -- which a script is refused for before it runs.
+fn endless_loop(stmts: &[ast::Stmt]) -> Option<usize> {
+    use ast::{Expr, Stmt};
+    fn escapes(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Break | Stmt::Return(..) | Stmt::Throw(..) => true,
+            Stmt::If { then, otherwise, .. } => {
+                escapes(then) || otherwise.as_ref().map(|o| escapes(o)).unwrap_or(false)
+            }
+            Stmt::Block(b) | Stmt::Try { body: b, .. } => escapes(b),
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. } => {
+                // a break in an inner loop leaves only that loop
+                body.iter().any(|s| matches!(s, Stmt::Return(..) | Stmt::Throw(..)))
+            }
+            _ => false,
+        })
+    }
+    for s in stmts {
+        let found = match s {
+            Stmt::While { cond: Expr::Bool(true), body } if !escapes(body) => Some(0),
+            Stmt::For { cond: None, body, .. } if !escapes(body) => Some(0),
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::Block(body) => endless_loop(body),
+            Stmt::If { then, otherwise, .. } => {
+                endless_loop(then).or_else(|| otherwise.as_ref().and_then(|o| endless_loop(o)))
+            }
+            Stmt::Try { body, catch_body, .. } => {
+                endless_loop(body).or_else(|| endless_loop(catch_body))
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }

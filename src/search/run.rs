@@ -96,11 +96,201 @@ fn rescore_by_rank_features(
 /// match it -- and either a weight, or a field whose value stands for how
 /// much the document is worth. `boost_mode` says how what the functions make
 /// meets what the query scored.
+/// A script's failure, reported the way a search reports one: the shards
+/// failed, and the script exception is why.
+pub(crate) fn search_script_failure(e: crate::painless::ScriptError, index: &str) -> Response {
+    let detail = e.to_json();
+    let mut root = detail.clone();
+    if let Some(o) = root.as_object_mut() {
+        o.remove("caused_by");
+    }
+    let body = json!({
+        "error": {
+            "root_cause": [root],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [{
+                "shard": 0,
+                "index": index,
+                "node": "node0",
+                "reason": detail,
+            }],
+        },
+        "status": 400,
+    });
+    axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(body)))
+}
+
+/// A failure of one kind and reason, reported as the shards failing.
+pub(crate) fn search_shard_failure(kind: &str, reason: &str, index: &str) -> Response {
+    let body = json!({
+        "error": {
+            "root_cause": [{"type": kind, "reason": reason}],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [{
+                "shard": 0,
+                "index": index,
+                "node": "node0",
+                "reason": {"type": kind, "reason": reason},
+            }],
+        },
+        "status": 400,
+    });
+    axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(body)))
+}
+
+/// The term statistics a score script asks for, read from the segment the
+/// document sits in: how often a term appears in this document, in how many
+/// documents, and how many tokens the field holds in all.
+fn term_stats_for(
+    searcher: &boostcore::Searcher,
+    st: &IdxState,
+    addr: DocAddress,
+) -> Box<dyn Fn(&str, &str, &str) -> f64> {
+    use boostcore::schema::IndexRecordOption;
+    let reader = searcher.segment_reader(addr.segment_ord).clone();
+    let fields = st.fields;
+    let mapping = st.mapping.clone();
+    let doc = addr.doc_id;
+    Box::new(move |what: &str, field: &str, term: &str| -> f64 {
+        // a keyword is kept whole in the raw view; text is tokenised into
+        // the dynamic one, and a term of it is one lowercased token
+        let kind = mapping.type_of(field).unwrap_or("keyword");
+        let (f, text) = if matches!(kind, "text" | "match_only_text") {
+            (fields.dynamic, term.to_lowercase())
+        } else {
+            (fields.raw, term.to_string())
+        };
+        let mut t = boostcore::schema::Term::from_field_json_path(f, field, true);
+        t.append_type_and_str(&text);
+        let Ok(inverted) = reader.inverted_index(f) else { return 0.0 };
+        match what {
+            "termFreq" => inverted
+                .read_postings(&t, IndexRecordOption::WithFreqs)
+                .ok()
+                .flatten()
+                .map(|mut postings| {
+                    use boostcore::{DocSet, postings::Postings};
+                    if postings.seek(doc) == doc { postings.term_freq() as f64 } else { 0.0 }
+                })
+                .unwrap_or(0.0),
+            "docFreq" => inverted.doc_freq(&t).map(|n| n as f64).unwrap_or(0.0),
+            "totalTermFreq" => inverted
+                .read_postings(&t, IndexRecordOption::WithFreqs)
+                .ok()
+                .flatten()
+                .map(|mut postings| {
+                    use boostcore::{DocSet, postings::Postings};
+                    let mut total = 0.0;
+                    let mut d = postings.doc();
+                    while d != boostcore::TERMINATED {
+                        total += postings.term_freq() as f64;
+                        d = postings.advance();
+                    }
+                    total
+                })
+                .unwrap_or(0.0),
+            // the field's terms sit together in the dictionary, under the
+            // path they share; each one's postings say how often it appears
+            "sumTotalTermFreq" | "sumDocFreq" => {
+                let prefix = boostcore::schema::Term::from_field_json_path(f, field, true);
+                let low = prefix.serialized_value_bytes().to_vec();
+                let mut high = low.clone();
+                high.push(0xff);
+                let Ok(mut stream) = inverted.terms().range().ge(&low).lt(&high).into_stream()
+                else {
+                    return 0.0;
+                };
+                let mut total = 0.0;
+                while stream.advance() {
+                    let info = stream.value().clone();
+                    if what == "sumDocFreq" {
+                        total += info.doc_freq as f64;
+                        continue;
+                    }
+                    if let Ok(mut postings) =
+                        inverted.read_postings_from_terminfo(&info, IndexRecordOption::WithFreqs)
+                    {
+                        use boostcore::{DocSet, postings::Postings};
+                        let mut d = postings.doc();
+                        while d != boostcore::TERMINATED {
+                            total += postings.term_freq() as f64;
+                            d = postings.advance();
+                        }
+                    }
+                }
+                total
+            }
+            _ => 0.0,
+        }
+    })
+}
+
+/// `script_score`: the score is what the script says, given the query's
+/// score and the document.
+fn rescore_by_script(
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    cands: &mut Vec<Cand>,
+    spec: &Value,
+) -> std::result::Result<(), Response> {
+    let Some(script) = spec.get("script") else { return Ok(()) };
+    let min_score = spec.get("min_score").and_then(|v| v.as_f64());
+    let boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    let mut failure = None;
+    cands.retain_mut(|cand| {
+        if failure.is_some() {
+            return true;
+        }
+        let (name, searcher, st) = &searchers[cand.shard];
+        let g = st.read();
+        let Some((_, source)) = source_of(searcher, &g, cand.addr) else { return true };
+        let expanded = crate::store::expand_for_indexing(source, &g.mapping);
+        let stats = term_stats_for(searcher, &g, cand.addr);
+        match crate::painless::contexts::run_on_doc_with(
+            script,
+            &expanded,
+            &g.mapping,
+            cand.score as f64,
+            Some(stats),
+        ) {
+            Ok(v) => {
+                let made = v.as_f64().unwrap_or(0.0);
+                if made < 0.0 {
+                    failure = Some(search_shard_failure(
+                        "illegal_argument_exception",
+                        &format!(
+                            "script score function must not produce negative scores, but got: \
+                             [{made}]"
+                        ),
+                        name,
+                    ));
+                    return true;
+                }
+                cand.score = made as f32 * boost;
+                min_score.map(|m| made >= m).unwrap_or(true)
+            }
+            Err(e) => {
+                failure = Some(search_script_failure(e, name));
+                true
+            }
+        }
+    });
+    match failure {
+        Some(r) => Err(r),
+        None => Ok(()),
+    }
+}
+
 fn rescore_by_functions(
     searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
     cands: &mut [Cand],
     spec: &Value,
-) {
+) -> std::result::Result<(), Response> {
     let mut functions: Vec<Value> =
         spec.get("functions").and_then(|f| f.as_array()).cloned().unwrap_or_default();
     // a single function may be written beside the query rather than in a list
@@ -110,16 +300,18 @@ fn rescore_by_functions(
         }
     }
     if functions.is_empty() {
-        return;
+        return Ok(());
     }
     let score_mode = spec.get("score_mode").and_then(|v| v.as_str()).unwrap_or("multiply");
     let boost_mode = spec.get("boost_mode").and_then(|v| v.as_str()).unwrap_or("multiply");
     let query_boost = spec.get("boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
     for cand in cands.iter_mut() {
-        let (_, searcher, st) = &searchers[cand.shard];
+        let (name, searcher, st) = &searchers[cand.shard];
         let g = st.read();
         let Some((_, source)) = source_of(searcher, &g, cand.addr) else { continue };
         let mut made: Vec<f32> = Vec::new();
+        // the script sees the document as the index read it
+        let mut expanded: Option<Value> = None;
         for function in &functions {
             // a function with a filter counts only where the filter matches
             if let Some(filter) = function.get("filter")
@@ -129,6 +321,36 @@ fn rescore_by_functions(
             }
             let weight = function.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
             let value = match function.get("field_value_factor") {
+                None if function.get("script_score").is_some() => {
+                    let script = function.pointer("/script_score/script").unwrap_or(&Value::Null);
+                    let seen = expanded.get_or_insert_with(|| {
+                        crate::store::expand_for_indexing(source.clone(), &g.mapping)
+                    });
+                    let stats = term_stats_for(searcher, &g, cand.addr);
+                    match crate::painless::contexts::run_on_doc_with(
+                        script,
+                        seen,
+                        &g.mapping,
+                        cand.score as f64,
+                        Some(stats),
+                    ) {
+                        Ok(v) => {
+                            let made = v.as_f64().unwrap_or(0.0);
+                            if made < 0.0 {
+                                return Err(search_shard_failure(
+                                    "illegal_argument_exception",
+                                    &format!(
+                                        "script score function must not produce negative \
+                                         scores, but got: [{made}]"
+                                    ),
+                                    name,
+                                ));
+                            }
+                            made as f32
+                        }
+                        Err(e) => return Err(search_script_failure(e, name)),
+                    }
+                }
                 Some(spec) => {
                     let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("");
                     let factor = spec.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
@@ -182,6 +404,7 @@ fn rescore_by_functions(
             _ => cand.score * combined,
         } * query_boost;
     }
+    Ok(())
 }
 
 /// Whether a document, as it stands, answers a simple filter.
@@ -795,7 +1018,16 @@ pub fn run(
     // `function_score` says what a document's score should be, given what the
     // query scored it and what the document itself holds
     if let Some(spec) = body.pointer("/query/function_score") {
-        rescore_by_functions(&searchers, &mut cands, spec);
+        rescore_by_functions(&searchers, &mut cands, spec)?;
+    }
+    // `script_score` hands each candidate's score to a script and keeps what
+    // it returns; a `min_score` drops those the script rated too low
+    if let Some(spec) = body.pointer("/query/script_score") {
+        let before = cands.len();
+        rescore_by_script(&searchers, &mut cands, spec)?;
+        if cands.len() != before {
+            total = cands.len() as u64;
+        }
     }
     // a rank feature scores by the value of a field, curved the way the query
     // asks for
@@ -971,6 +1203,7 @@ pub fn run(
         std::collections::HashMap::new()
     };
     let named_scores = p.get("include_named_queries_score").map(|v| v != "false").unwrap_or(false);
+    let mut script_error = None;
     let page = write_page(
         store,
         &targets,
@@ -987,7 +1220,11 @@ pub fn run(
         named_scores,
         rescored,
         &extras,
+        &mut script_error,
     );
+    if let Some(failed) = script_error {
+        return Err(failed);
+    }
 
     let filters_results = run_peeled_aggs(store, &targets, &query_json, &filters_aggs, weighted)?;
 

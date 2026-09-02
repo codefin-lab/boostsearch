@@ -6,7 +6,7 @@ use boostcore::query::{
     AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
     FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
 };
-use boostcore::schema::{Field, IndexRecordOption, Term, Type};
+use boostcore::schema::{Field, IndexRecordOption, TantivyDocument, Term, Type, Value as _};
 use boostcore::{Index, TantivyError};
 use boostcore_fst::Regex;
 use serde_json::Value;
@@ -15,6 +15,9 @@ use std::sync::Arc;
 
 mod dispatch;
 pub(crate) use dispatch::*;
+
+mod script;
+pub(crate) use script::*;
 
 mod analyze;
 pub(crate) use analyze::*;

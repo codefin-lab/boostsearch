@@ -65,6 +65,31 @@ impl Compiled {
     }
 }
 
+/// Run a script spec over one document, the way a search does: `doc`,
+/// `params`, `_source` and `_score` are what it sees.
+pub fn run_on_doc(
+    spec: &Json,
+    source: &Json,
+    mapping: &Mapping,
+    score: f64,
+) -> Result<Value, ScriptError> {
+    run_on_doc_with(spec, source, mapping, score, None)
+}
+
+/// As `run_on_doc`, with the term statistics a score script may ask for.
+pub fn run_on_doc_with(
+    spec: &Json,
+    source: &Json,
+    mapping: &Mapping,
+    score: f64,
+    term_stats: Option<Box<dyn Fn(&str, &str, &str) -> f64>>,
+) -> Result<Value, ScriptError> {
+    let compiled = Compiled::of(spec, &|_| None)?;
+    let mut runner = Runner::new(&compiled.params).with_doc(source, mapping).with_score(score);
+    runner.term_stats = term_stats;
+    runner.run(&compiled.script)
+}
+
 /// Everything a script may reach in one run.
 pub struct Runner {
     pub params: Value,
@@ -338,11 +363,34 @@ fn typed(v: Value, kind: &str) -> Value {
             Value::Str(s) => Value::str(s),
             _ => v,
         },
+        // an address is kept as the hex of its sixteen bytes; a script reads
+        // it spelt the usual way
+        "ip" => match &v {
+            Value::Str(s) if s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()) => {
+                match u128::from_str_radix(s, 16) {
+                    Ok(bits) => {
+                        let v6 = std::net::Ipv6Addr::from(bits);
+                        Value::str(&match v6.to_ipv4_mapped() {
+                            Some(v4) => v4.to_string(),
+                            None => v6.to_string(),
+                        })
+                    }
+                    Err(_) => v,
+                }
+            }
+            _ => v,
+        },
         _ => v,
     }
 }
 
+/// A point as doc values hold it: each coordinate is kept as a 32-bit
+/// integer, so what a script reads back is the coordinate at that grain.
 fn geo_point(lat: f64, lon: f64) -> Value {
+    const LAT_STEP: f64 = 180.0 / 4_294_967_296.0;
+    const LON_STEP: f64 = 360.0 / 4_294_967_296.0;
+    let lat = (lat / LAT_STEP).floor() * LAT_STEP;
+    let lon = (lon / LON_STEP).floor() * LON_STEP;
     Value::map(vec![
         (Value::str("lat"), Value::Double(lat)),
         (Value::str("lon"), Value::Double(lon)),

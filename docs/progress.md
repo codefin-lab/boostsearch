@@ -225,3 +225,35 @@ icu collation, kuromoji completion, annotated-text) ~8
 - `ignore_above` บน keyword sub-field ที่อ่านจาก raw view: ค่ายาวเกินยังถูกนับใน agg
 - reindex จาก remote cluster ยังไม่ทำ (validation ครบแล้ว)
 - search pipelines (`search-pipeline-common`) นอกขอบเขตแผน
+
+## Phase 3 -- Painless (in progress)
+
+Landed so far:
+
+- 3.1/3.2 lexer, parser, tree-walking evaluator (`src/painless/`): Java
+  promotion rules, String/List/Map/date methods, Math/Integer/Long/Double/
+  String/Collections/ZonedDateTime/Instant statics, regex literals, lambdas,
+  method refs, try/catch, 5M-statement step limit, `while (true) {}` refused
+  at compile time ("no paths escape from while loop").
+- 3.3 contexts: update (`ctx`, `ctx.op`, `_id` guard, scripted_upsert,
+  self-referencing `_source` refused), `_scripts/painless/_execute`
+  (painless_test / filter / score), script_fields, `script` query (a
+  segment scan with a bitset scorer, `src/query/script.rs`), `script_score`
+  query with boost/min_score and explain, function_score `script_score`
+  functions with termFreq/totalTermFreq/sumTotalTermFreq/docFreq/sumDocFreq,
+  stored scripts compile when put for a context (`PUT _scripts/{id}/{ctx}`),
+  `_scripts/painless/_context` answers from OpenSearch's own whitelists
+  (`src/painless/whitelist/*.json.gz`, plugin classes stripped).
+- Doc values in scripts: dates render with millis, ip from its hex, geo
+  points at Lucene's int32 grain; a mapping's Java date pattern
+  (`yyyy/MM/dd`) is read on write (`parse_with_pattern`).
+
+Gates: core 1427/1427, phase1 398/398, modules 556/895 (was 506),
+lang-painless 60/144, search_diff 92/92.
+
+Next in Phase 3: aggregation scripts (`terms` with `script`/`_value`,
+scripted_metric, bucket_script/selector, moving_fn), sort by script,
+update_by_query/reindex scripts, derived fields, intervals script filter,
+analysis-common script filters. The terms aggregation is answered by
+BoostCore's own engine, so a script-sourced one needs a source-reading path
+beside it.

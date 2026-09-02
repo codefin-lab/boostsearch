@@ -25,6 +25,31 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             }
         }
         "match_none" => Box::new(EmptyQuery),
+        "script" => {
+            let Some(spec) = body.get("script") else {
+                return Err(anyhow!(
+                    "[script] query does not support [{}]",
+                    body.as_object()
+                        .and_then(|o| o.keys().next())
+                        .map(|s| s.as_str())
+                        .unwrap_or("")
+                ));
+            };
+            Box::new(ScriptQuery {
+                spec: spec.clone(),
+                mapping: ctx.mapping.clone(),
+                fields: *ctx.fields,
+            })
+        }
+        // the script's score is settled once the candidates are known; here
+        // the inner query says which documents there are
+        "script_score" => {
+            let Some(inner) = body.get("query") else {
+                return Err(anyhow!("[script_score] query is required"));
+            };
+            body.get("script").ok_or_else(|| anyhow!("[script_score] script is required"))?;
+            build(ctx, inner)?
+        }
         "term" => {
             let (field, val, opts) = field_and_value(&body)?;
             // `_id` is a field of its own, not part of either JSON view, so a
@@ -512,7 +537,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .and_then(|v| v.get("boost"))
         })
         .and_then(|b| b.as_f64())
-        .filter(|_| kind != "match_all" && kind != "constant_score");
+        .filter(|_| kind != "match_all" && kind != "constant_score" && kind != "script_score");
     Ok(match boost {
         Some(b) => Box::new(BoostQuery::new(inner, b as f32)),
         None => inner,
@@ -561,8 +586,6 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
         "range",
         "rank_feature",
         "regexp",
-        "script",
-        "script_score",
         "simple_query_string",
         "span_containing",
         "span_first",

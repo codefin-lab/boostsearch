@@ -40,7 +40,22 @@ pub(crate) fn write_page(
     named_scores: bool,
     rescored: bool,
     extras: &Extras,
+    script_error: &mut Option<Response>,
 ) -> Vec<Value> {
+    let script_fields: Vec<(String, Value, bool)> = body
+        .get("script_fields")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(name, spec)| {
+                    let script = spec.get("script").cloned().unwrap_or(Value::Null);
+                    let ignore =
+                        spec.get("ignore_failure").and_then(|v| v.as_bool()).unwrap_or(false);
+                    (name.clone(), script, ignore)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     all_hits
         .into_iter()
         .map(|h| {
@@ -240,6 +255,39 @@ pub(crate) fn write_page(
                 if let Some(Value::Object(existing)) = hit.get("fields") {
                     for (k, v) in existing {
                         f.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                if !f.is_empty() {
+                    hit["fields"] = Value::Object(f);
+                }
+            }
+            // a script field is whatever its script returns for the document
+            if !script_fields.is_empty() && script_error.is_none() {
+                let g = searchers[h.shard_idx].2.read();
+                let expanded = crate::store::expand_for_indexing(h.source.clone(), &g.mapping);
+                let mut f = match hit.get("fields") {
+                    Some(Value::Object(o)) => o.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                for (name, script, ignore) in &script_fields {
+                    match crate::painless::contexts::run_on_doc(
+                        script,
+                        &expanded,
+                        &g.mapping,
+                        h.score as f64,
+                    ) {
+                        Ok(v) => {
+                            let out = match v.to_json() {
+                                Value::Array(a) => Value::Array(a),
+                                Value::Null => continue,
+                                other => Value::Array(vec![other]),
+                            };
+                            f.insert(name.clone(), out);
+                        }
+                        Err(_) if *ignore => {}
+                        Err(e) => {
+                            *script_error = Some(crate::search::search_script_failure(e, &h.index));
+                        }
                     }
                 }
                 if !f.is_empty() {
