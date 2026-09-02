@@ -123,6 +123,11 @@ pub(crate) fn search_script_failure(e: crate::painless::ScriptError, index: &str
     axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(body)))
 }
 
+/// A double the way Java prints one: `-9.0`, not `-9`.
+fn java_double(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e16 { format!("{v:.1}") } else { v.to_string() }
+}
+
 /// A failure of one kind and reason, reported as the shards failing.
 pub(crate) fn search_shard_failure(kind: &str, reason: &str, index: &str) -> Response {
     let body = json!({
@@ -341,7 +346,8 @@ fn rescore_by_functions(
                                     "illegal_argument_exception",
                                     &format!(
                                         "script score function must not produce negative \
-                                         scores, but got: [{made}]"
+                                         scores, but got: [{}]",
+                                        java_double(made)
                                     ),
                                     name,
                                 ));

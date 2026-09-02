@@ -1472,7 +1472,8 @@ fn moving_function(name: &str, args: &[Value]) -> Result<Value, String> {
     };
     let f = |i: usize| arg(args, i).as_f64().unwrap_or(0.0);
     if values.is_empty() {
-        return Ok(Value::Double(f64::NAN));
+        // a sum of nothing is nought; the rest have no answer
+        return Ok(Value::Double(if name == "sum" { 0.0 } else { f64::NAN }));
     }
     let n = values.len() as f64;
     Ok(Value::Double(match name {

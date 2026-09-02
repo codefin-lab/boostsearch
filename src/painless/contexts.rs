@@ -99,6 +99,9 @@ pub struct Runner {
     pub state: Option<Value>,
     pub states: Option<Value>,
     pub values: Option<Value>,
+    /// `_value`: one value of the field an aggregation reads, for the script
+    /// that maps it
+    pub value: Option<Value>,
     pub source: Option<Value>,
     /// what `emit(…)` was given, in order
     pub emitted: Rc<RefCell<Vec<Value>>>,
@@ -118,6 +121,7 @@ impl Runner {
             state: None,
             states: None,
             values: None,
+            value: None,
             source: None,
             emitted: Rc::new(RefCell::new(Vec::new())),
             term_stats: None,
@@ -175,6 +179,11 @@ impl Runner {
         self
     }
 
+    pub fn with_value(mut self, value: Value) -> Runner {
+        self.value = Some(value);
+        self
+    }
+
     pub fn with_values(mut self, values: Vec<f64>) -> Runner {
         self.values = Some(Value::list(values.into_iter().map(Value::Double).collect()));
         self
@@ -196,9 +205,11 @@ impl Context for Runner {
             "states" => self.states.clone(),
             "values" => self.values.clone(),
             "_source" => self.source.clone(),
-            "_value" => self.values.as_ref().and_then(|v| match v {
-                Value::List(l) => l.borrow().first().cloned(),
-                _ => None,
+            "_value" => self.value.clone().or_else(|| {
+                self.values.as_ref().and_then(|v| match v {
+                    Value::List(l) => l.borrow().first().cloned(),
+                    _ => None,
+                })
             }),
             _ => None,
         }

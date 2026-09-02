@@ -132,6 +132,8 @@ pub(crate) fn run_peeled_agg(
         run_auto_date_histogram(store, targets, query_json, def)
     } else if def.get("date_range").is_some() {
         run_date_range_agg(store, targets, query_json, def)
+    } else if def.pointer("/terms/script").is_some() {
+        run_scripted_terms_agg(store, targets, query_json, def, weighted)
     } else if def
         .get("terms")
         .and_then(|t| t.get("field"))
