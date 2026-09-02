@@ -29,7 +29,7 @@ mod doc;
 pub use doc::*;
 mod scripts;
 pub use scripts::*;
-mod mustache;
+pub(crate) mod mustache;
 pub use mustache::*;
 mod rank_eval;
 pub use rank_eval::*;

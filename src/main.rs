@@ -10,6 +10,7 @@ mod analysis;
 mod api;
 mod blockstats;
 mod hdr;
+mod ingest;
 mod painless;
 mod query;
 mod search;
@@ -170,6 +171,15 @@ fn app(store: Store) -> Router {
             put(api::clone_snapshot).post(api::clone_snapshot),
         )
         // --- pipelines ---
+        .route(
+            "/_ingest/pipeline/_simulate",
+            post(api::simulate_pipeline).get(api::simulate_pipeline),
+        )
+        .route(
+            "/_ingest/pipeline/{name}/_simulate",
+            post(api::simulate_pipeline).get(api::simulate_pipeline),
+        )
+        .route("/_ingest/processor/grok", get(api::grok_patterns))
         .route("/_ingest/pipeline", get(api::get_ingest_pipeline))
         .route(
             "/_ingest/pipeline/{name}",

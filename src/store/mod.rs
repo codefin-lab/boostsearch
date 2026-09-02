@@ -420,6 +420,9 @@ pub struct Store {
     data_streams: Arc<RwLock<HashMap<String, String>>>,
     /// Pipelines by kind ("ingest" or "search") and then by name.
     pipelines: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
+    /// how often each ingest pipeline ran, failed, and how long it took, in
+    /// nanoseconds; the empty name is the total
+    pub ingest_stats: Arc<RwLock<HashMap<String, (u64, u64, u64)>>>,
     /// Snapshot repositories by name.
     repositories: Arc<RwLock<HashMap<String, Value>>>,
     /// Snapshots by repository and then by name.

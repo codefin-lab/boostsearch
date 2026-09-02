@@ -220,6 +220,30 @@ pub async fn update_doc(
             "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
         })
     } else {
+        // a document made by an upsert goes in the way a fresh write does:
+        // through the pipelines the index asks for
+        let mut next = next.clone();
+        if result == "created" {
+            let names = crate::api::pipelines_for_state(&g, p.get("pipeline").map(|s| s.as_str()));
+            if !names.is_empty() {
+                let doc = crate::ingest::IngestDoc::new(&g.name, &id, next.clone());
+                match crate::api::run_named_pipelines(&store, names, doc) {
+                    Ok(Some(d)) => next = d.source,
+                    Ok(None) => {
+                        return (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "_index": g.name, "_id": id, "_version": -3, "result": "noop",
+                                "_shards": {"total": 0, "successful": 0, "failed": 0},
+                                "_seq_no": 0, "_primary_term": 0
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => return crate::api::ingest_failure(&e),
+                }
+            }
+        }
         match write_doc(&mut g, &id, next.clone(), "index") {
             Ok((mut b, _)) => {
                 b["result"] = json!(result);

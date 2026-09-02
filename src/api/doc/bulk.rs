@@ -10,6 +10,15 @@ pub async fn bulk(
     body: String,
 ) -> Response {
     let started = std::time::Instant::now();
+    if let Some(b) = p.get("batch_size")
+        && b.parse::<i64>().map(|n| n < 1).unwrap_or(true)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("Batch size must be greater than 0, but got [{b}]"),
+        );
+    }
     let default_index = index.map(|Path(i)| i);
     let mut items = Vec::new();
     let mut errors = false;
@@ -181,12 +190,102 @@ pub async fn bulk(
         if !touched.contains(&idx) {
             touched.push(idx.clone());
         }
+        let id_was_given_before = id_opt.is_some();
+        let mut id_opt = id_opt;
+        let mut source = source;
+        let mut pipeline_routing: Option<Option<String>> = None;
         // keep the number of live writers bounded across indices
         if !g_has_writer(&st) {
             store.note_writer_opened(&idx);
         }
+        // the pipelines the action or the index asks for run first;
+        // they may change the document or drop it
+        let asked_pipeline = meta
+            .get("pipeline")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| p.get("pipeline").cloned());
+        if matches!(op.as_str(), "index" | "create")
+            && (asked_pipeline.is_some()
+                || !crate::api::pipelines_for_write(&store, &idx, None).is_empty())
+        {
+            let src_now = source.take().unwrap_or_else(|| json!({}));
+            let routing = meta.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
+            // the store is asked while this index's lock is held: the
+            // pipelines live beside it, not under it
+            match crate::api::ingest_for_write(
+                &store,
+                &idx,
+                id_opt.as_deref().unwrap_or(""),
+                src_now,
+                asked_pipeline.as_deref(),
+                routing,
+            ) {
+                Ok(Some(d)) => {
+                    if d.index != idx {
+                        // sent elsewhere: written there instead
+                        let target = match store.ensure(&d.index) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return err(
+                                    StatusCode::BAD_REQUEST,
+                                    "illegal_argument_exception",
+                                    e.to_string(),
+                                );
+                            }
+                        };
+                        if !touched.contains(&d.index) {
+                            touched.push(d.index.clone());
+                        }
+                        let mut tg = target.write();
+                        let new_id = if d.id.is_empty() { tg.next_auto_id() } else { d.id.clone() };
+                        if let Some(r) = &d.routing {
+                            tg.routing.insert(new_id.clone(), r.clone());
+                        }
+                        let item = match write_doc_raw(&mut tg, &new_id, d.source, &op, None) {
+                            Ok((body, status)) => {
+                                let mut b = body;
+                                b["status"] = json!(status.as_u16());
+                                json!({ op.clone(): b })
+                            }
+                            Err(_) => {
+                                errors = true;
+                                json!({ op.clone(): {"_index": d.index, "_id": new_id, "status": 409,
+                                    "error": {"type": "version_conflict_engine_exception",
+                                              "reason": format!("[{new_id}]: version conflict, document already exists")}}})
+                            }
+                        };
+                        items.push(item);
+                        continue;
+                    }
+                    if !d.id.is_empty() {
+                        id_opt = Some(d.id.clone());
+                    }
+                    pipeline_routing = Some(d.routing.clone());
+                    source = Some(d.source);
+                    // the line as sent is not the document any more
+                    doc_raw = None;
+                }
+                Ok(None) => {
+                    items.push(json!({ op.clone(): {
+                        "_index": idx, "_id": id_opt.clone().unwrap_or_default(), "_version": -3, "result": "noop",
+                        "_shards": {"total": 0, "successful": 0, "failed": 0},
+                        "_seq_no": 0, "_primary_term": 0, "status": 200
+                    }}));
+                    continue;
+                }
+                Err(e) => {
+                    errors = true;
+                    items.push(json!({ op.clone(): {
+                        "_index": idx, "_id": id_opt.clone().unwrap_or_default(), "status": e.status(),
+                        "error": e.body()
+                    }}));
+                    continue;
+                }
+            }
+        }
         let mut g = st.write();
-        let id_was_given = id_opt.is_some();
+        let id_was_given = id_was_given_before;
         let id = id_opt.unwrap_or_else(|| g.next_auto_id());
 
         let item = match op.as_str() {
@@ -209,17 +308,6 @@ pub async fn bulk(
                                  `index.append_only.enabled` is enabled for this index: {idx};",
                                 op.to_uppercase()
                             )
-                        }
-                    }}));
-                    continue;
-                }
-                if let Some(pipe) = meta.get("pipeline").and_then(|v| v.as_str()) {
-                    errors = true;
-                    items.push(json!({ op.clone(): {
-                        "_index": idx, "_id": id, "status": 400,
-                        "error": {
-                            "type": "illegal_argument_exception",
-                            "reason": format!("pipeline with id [{pipe}] does not exist")
                         }
                     }}));
                     continue;
@@ -249,9 +337,17 @@ pub async fn bulk(
                 let src = source.unwrap_or_else(|| json!({}));
                 // a routing named on the action line places the document, and
                 // has to be remembered the same way a single write's does
-                match meta.get("routing").and_then(|v| v.as_str()).filter(|r| !r.is_empty()) {
+                let routing_now: Option<String> = match pipeline_routing {
+                    Some(r) => r,
+                    None => meta
+                        .get("routing")
+                        .and_then(|v| v.as_str())
+                        .filter(|r| !r.is_empty())
+                        .map(|s| s.to_string()),
+                };
+                match routing_now {
                     Some(r) => {
-                        g.routing.insert(id.clone(), r.to_string());
+                        g.routing.insert(id.clone(), r);
                     }
                     None => {
                         g.routing.remove(&id);
@@ -358,7 +454,69 @@ pub async fn bulk(
                             .get("upsert")
                             .or_else(|| if as_upsert { patch.get("doc") } else { None });
                         if let Some(ups) = upsert_doc {
-                            let ups = ups.clone();
+                            let mut ups = ups.clone();
+                            // an upsert makes a document, which goes in through
+                            // the index's pipelines like any fresh write
+                            let names = crate::api::pipelines_for_state(
+                                &g,
+                                meta.get("pipeline").and_then(|v| v.as_str()),
+                            );
+                            if !names.is_empty() {
+                                let doc = crate::ingest::IngestDoc::new(&idx, &id, ups.clone());
+                                match crate::api::run_named_pipelines(&store, names, doc) {
+                                    Ok(Some(d)) => ups = d.source,
+                                    Ok(None) => {
+                                        items.push(json!({"update": {"_index": idx, "_id": id, "_version": -3, "result": "noop", "status": 200}}));
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        errors = true;
+                                        items.push(json!({"update": {"_index": idx, "_id": id, "status": e.status(), "error": e.body()}}));
+                                        continue;
+                                    }
+                                }
+                            }
+                            // a scripted upsert runs the script over the upsert
+                            // document before it is written
+                            if patch
+                                .get("scripted_upsert")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                                && let Some(spec) = patch.get("script")
+                            {
+                                match crate::painless::contexts::Compiled::of(spec, &|n| {
+                                    store.stored_script(n)
+                                }) {
+                                    Ok(compiled) => {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as i64)
+                                            .unwrap_or(0);
+                                        let ctx = crate::painless::contexts::update_ctx(
+                                            &idx, &id, 1, &ups, now, "create",
+                                        );
+                                        let mut runner = crate::painless::contexts::Runner::new(
+                                            &compiled.params,
+                                        )
+                                        .with_ctx(ctx.clone());
+                                        if let Err(e) = runner.run(&compiled.script) {
+                                            errors = true;
+                                            items.push(json!({"update": {"_index": idx, "_id": id, "status": 400, "error": e.to_json()}}));
+                                            continue;
+                                        }
+                                        if let Ok((_, src, _, _)) =
+                                            crate::painless::contexts::read_ctx(&ctx)
+                                        {
+                                            ups = src;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        errors = true;
+                                        items.push(json!({"update": {"_index": idx, "_id": id, "status": 400, "error": e.to_json()}}));
+                                        continue;
+                                    }
+                                }
+                            }
                             match write_doc(&mut g, &id, ups.clone(), "index") {
                                 Ok((body, _)) => {
                                     let mut b = body;
@@ -420,6 +578,7 @@ pub async fn bulk(
     }
     axum::Json(json!({
         "took": started.elapsed().as_millis() as u64,
+        "ingest_took": 0,
         "errors": errors,
         "items": items,
     }))
