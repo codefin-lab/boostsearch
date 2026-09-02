@@ -42,7 +42,10 @@ Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup)
 
 def load_api_specs():
     specs = {}
-    for f in API_DIR.glob("*.json"):
+    module_apis = pathlib.Path("study/OpenSearch").glob(
+        "*/*/src/yamlRestTest/resources/rest-api-spec/api/*.json"
+    )
+    for f in [*API_DIR.glob("*.json"), *module_apis]:
         if f.name == "_common.json":
             continue
         try:

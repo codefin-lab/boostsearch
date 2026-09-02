@@ -309,6 +309,7 @@ dependencies = [
  "axum",
  "boostcore",
  "boostcore-common",
+ "flate2",
  "icu_normalizer",
  "icu_properties",
  "icu_segmenter",

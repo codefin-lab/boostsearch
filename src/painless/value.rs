@@ -99,6 +99,47 @@ impl Value {
     }
 
     pub fn to_json(&self) -> Json {
+        self.try_json().unwrap_or(Json::Null)
+    }
+
+    /// As JSON, or `Err` where a list or map holds itself, which no JSON
+    /// can say.
+    pub fn try_json(&self) -> Result<Json, ()> {
+        let mut seen = Vec::new();
+        self.json_within(&mut seen)
+    }
+
+    fn json_within(&self, seen: &mut Vec<usize>) -> Result<Json, ()> {
+        Ok(match self {
+            Value::List(l) => {
+                let addr = Rc::as_ptr(l) as *const () as usize;
+                if seen.contains(&addr) {
+                    return Err(());
+                }
+                seen.push(addr);
+                let out: Result<Vec<Json>, ()> =
+                    l.borrow().iter().map(|v| v.json_within(seen)).collect();
+                seen.pop();
+                Json::Array(out?)
+            }
+            Value::Map(m) => {
+                let addr = Rc::as_ptr(m) as *const () as usize;
+                if seen.contains(&addr) {
+                    return Err(());
+                }
+                seen.push(addr);
+                let mut o = serde_json::Map::new();
+                for (k, v) in m.borrow().iter() {
+                    o.insert(k.as_text(), v.json_within(seen)?);
+                }
+                seen.pop();
+                Json::Object(o)
+            }
+            other => other.flat_json(),
+        })
+    }
+
+    fn flat_json(&self) -> Json {
         match self {
             Value::Null => Json::Null,
             Value::Bool(b) => Json::Bool(*b),
@@ -108,14 +149,7 @@ impl Value {
                 None => Json::Null,
             },
             Value::Str(s) => Json::String(s.to_string()),
-            Value::List(l) => Json::Array(l.borrow().iter().map(|v| v.to_json()).collect()),
-            Value::Map(m) => {
-                let mut o = serde_json::Map::new();
-                for (k, v) in m.borrow().iter() {
-                    o.insert(k.as_text(), v.to_json());
-                }
-                Json::Object(o)
-            }
+            Value::List(_) | Value::Map(_) => self.to_json(),
             Value::Date { .. } => Json::String(self.as_text()),
             Value::DocValues(d) => Json::Array(d.values.iter().map(|v| v.to_json()).collect()),
             Value::Builder(b) => Json::String(b.borrow().clone()),

@@ -82,40 +82,135 @@ pub async fn update_doc(
     }
     let detect_noop = patch.get("detect_noop").and_then(|v| v.as_bool()).unwrap_or(true);
     let doc_as_upsert = patch.get("doc_as_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
+    let scripted_upsert = patch.get("scripted_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let (next, result) = match (existing.clone(), patch.get("doc")) {
-        (Some(base), Some(d)) => {
-            let mut merged = base.clone();
-            merge_into(&mut merged, d);
-            if detect_noop && merged == base {
-                // the write guard is already held here; taking a read on the
-                // same lock would wait for itself
-                g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                (base, "noop")
-            } else {
-                (merged, "updated")
-            }
-        }
-        (Some(base), None) => (base, "noop"),
-        (None, doc) => {
-            let ups = patch
-                .get("upsert")
-                .cloned()
-                .or_else(|| if doc_as_upsert { doc.cloned() } else { None });
-            match ups {
-                Some(u) => (u, "created"),
-                None => {
+    // a script rewrites the document through `ctx._source`, and may say what
+    // to do with it through `ctx.op`
+    let scripted: Option<(Value, &'static str)> = match patch.get("script") {
+        None => None,
+        Some(spec) => {
+            let compiled = match crate::painless::contexts::Compiled::of(spec, &|named| {
+                store.stored_script(named)
+            }) {
+                Ok(c) => c,
+                Err(e) => return script_failure(e),
+            };
+            // without a document there is only the upsert to run over, and
+            // only when asked; otherwise the upsert is written as it stands
+            let (base, fresh) = match (&existing, patch.get("upsert")) {
+                (Some(doc), _) => (doc.clone(), false),
+                (None, Some(up)) if scripted_upsert => (up.clone(), true),
+                (None, Some(up)) => {
+                    let _ = up;
+                    (Value::Null, true)
+                }
+                (None, None) => {
                     return err(
                         StatusCode::NOT_FOUND,
                         "document_missing_exception",
                         format!("[{id}]: document missing"),
                     );
                 }
+            };
+            if base.is_null() {
+                None
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let op = if fresh { "create" } else { "index" };
+                let ctx = crate::painless::contexts::update_ctx(
+                    &g.name,
+                    &id,
+                    g.version_of(&id),
+                    &base,
+                    now,
+                    op,
+                );
+                let mut runner =
+                    crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
+                if let Err(e) = runner.run(&compiled.script) {
+                    return script_failure(e);
+                }
+                let (op, source, changed_id, _) = match crate::painless::contexts::read_ctx(&ctx) {
+                    Ok(read) => read,
+                    Err(reason) => {
+                        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
+                    }
+                };
+                if changed_id.as_deref().map(|c| c != id).unwrap_or(false) {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "Modifying [_id] not allowed",
+                    );
+                }
+                match op.as_str() {
+                    "noop" | "none" => Some((base, "noop")),
+                    "delete" => {
+                        let (_, status) = delete_doc(&mut g, &id);
+                        let _ = status;
+                        Some((source, "deleted"))
+                    }
+                    "index" | "create" => Some((source, if fresh { "created" } else { "updated" })),
+                    other => {
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            "illegal_argument_exception",
+                            format!(
+                                "Operation type [{other}] not allowed, only [noop, index, delete] \
+                                 are allowed"
+                            ),
+                        );
+                    }
+                }
             }
         }
     };
 
-    let mut body_out = if result == "noop" {
+    let (next, result) = match scripted {
+        Some(done) => done,
+        None => match (existing.clone(), patch.get("doc")) {
+            (Some(base), Some(d)) => {
+                let mut merged = base.clone();
+                merge_into(&mut merged, d);
+                if detect_noop && merged == base {
+                    // the write guard is already held here; taking a read on the
+                    // same lock would wait for itself
+                    g.noop_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    (base, "noop")
+                } else {
+                    (merged, "updated")
+                }
+            }
+            (Some(base), None) => (base, "noop"),
+            (None, doc) => {
+                let ups = patch
+                    .get("upsert")
+                    .cloned()
+                    .or_else(|| if doc_as_upsert { doc.cloned() } else { None });
+                match ups {
+                    Some(u) => (u, "created"),
+                    None => {
+                        return err(
+                            StatusCode::NOT_FOUND,
+                            "document_missing_exception",
+                            format!("[{id}]: document missing"),
+                        );
+                    }
+                }
+            }
+        },
+    };
+
+    let mut body_out = if result == "deleted" {
+        json!({
+            "_index": g.name, "_id": id, "_version": g.version_of(&id), "result": "deleted",
+            "_shards": {"total": 1, "successful": 1, "failed": 0},
+            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
+        })
+    } else if result == "noop" {
         let version = g.version_of(&id);
         json!({
             "_index": g.name, "_id": id, "_version": version, "result": "noop",
@@ -155,4 +250,39 @@ pub async fn update_doc(
     note_forced_refresh(&mut body_out, &p);
     let status = if result == "created" { StatusCode::CREATED } else { StatusCode::OK };
     (status, axum::Json(body_out)).into_response()
+}
+
+/// A script that failed, as OpenSearch reports it: a `script_exception`
+/// whose cause names what went wrong, and where.
+pub(crate) fn script_failure(e: crate::painless::ScriptError) -> Response {
+    let detail = e.to_json();
+    let status = match e.cause.as_str() {
+        "resource_not_found_exception" => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let body = json!({
+        "error": {
+            "root_cause": [{
+                "type": "script_exception",
+                "reason": e.kind,
+                "script_stack": detail["script_stack"],
+                "script": detail["script"],
+                "lang": "painless",
+                "position": detail["position"],
+            }],
+            "type": "illegal_argument_exception",
+            "reason": "failed to execute script",
+            "caused_by": {
+                "type": "script_exception",
+                "reason": e.kind,
+                "script_stack": detail["script_stack"],
+                "script": detail["script"],
+                "lang": "painless",
+                "position": detail["position"],
+                "caused_by": detail["caused_by"],
+            },
+        },
+        "status": status.as_u16(),
+    });
+    (status, axum::Json(body)).into_response()
 }

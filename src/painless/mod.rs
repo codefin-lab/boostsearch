@@ -7,6 +7,7 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod contexts;
 pub mod eval;
 pub mod lexer;
 pub mod parser;
@@ -41,14 +42,28 @@ impl ScriptError {
     /// The error as OpenSearch writes it: a `script_exception` whose cause
     /// names the underlying exception, with the position of the failure.
     pub fn to_json(&self) -> serde_json::Value {
-        let end = self.source.len();
+        // the stack shows a window of 25 characters either side of the
+        // fault, with an ellipsis where the script goes on
+        let len = self.source.len();
+        let offset = self.offset.min(len);
+        let start = offset.saturating_sub(25);
+        let end = (offset + 25).min(len);
+        let mut snippet = String::new();
+        if start > 0 {
+            snippet.push_str("... ");
+        }
+        snippet.push_str(&self.source[start..end]);
+        if end < len {
+            snippet.push_str(" ...");
+        }
+        let lead = offset - start + if start > 0 { 4 } else { 0 };
         serde_json::json!({
             "type": "script_exception",
             "reason": self.kind,
-            "script_stack": [self.source.clone(), format!("{}^---- HERE", " ".repeat(self.offset.min(end)))],
+            "script_stack": [snippet, format!("{}^---- HERE", " ".repeat(lead))],
             "script": self.source,
             "lang": "painless",
-            "position": {"offset": self.offset, "start": 0, "end": end},
+            "position": {"offset": offset, "start": start, "end": end},
             "caused_by": {"type": self.cause, "reason": self.message},
         })
     }
@@ -166,6 +181,7 @@ impl NativeObject for Params {
             "__set__" | "put" | "remove" | "clear" => {
                 Some(Err("Unsupported operation: the params map cannot be modified".to_string()))
             }
+            "__all__" => Some(Ok(self.0.clone())),
             "__index__" => Some(Ok(match &self.0 {
                 Value::Map(m) => {
                     value::map_get(m, args.first().unwrap_or(&Value::Null)).unwrap_or(Value::Null)

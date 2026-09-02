@@ -223,7 +223,7 @@ impl Store {
     }
 
     /// Forget a stored script.
-    pub fn forget_script(&self, id: &str) {
-        self.scripts.write().remove(id);
+    pub fn forget_script(&self, id: &str) -> bool {
+        self.scripts.write().remove(id).is_some()
     }
 }

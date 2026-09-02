@@ -58,11 +58,20 @@ fn app(store: Store) -> Router {
         .route("/{index}/_msearch/template", post(api::msearch_template).get(api::msearch_template))
         .route("/{index}/_search/template", post(api::search_template).get(api::search_template))
         .route(
+            "/_scripts/painless/_execute",
+            post(api::painless_execute).get(api::painless_execute),
+        )
+        .route("/_scripts/painless/_context", get(api::painless_contexts))
+        .route(
             "/_scripts/{id}",
             axum::routing::put(api::put_script)
                 .post(api::put_script)
                 .get(api::get_script)
                 .delete(api::delete_script),
+        )
+        .route(
+            "/_scripts/{id}/{context}",
+            axum::routing::put(api::put_script_in_context).post(api::put_script_in_context),
         )
         .route("/_reindex", post(api::reindex))
         .route("/_reindex/{id}/_rethrottle", post(api::rethrottle))
