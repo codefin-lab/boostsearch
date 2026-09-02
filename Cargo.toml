@@ -28,7 +28,7 @@ path = "src/main.rs"
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "e3be811d14bf5349cc7b2735b27f7fe0bf8ab692" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -61,7 +61,7 @@ libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "e3be811d14bf5349cc7b2735b27f7fe0bf8ab692" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"
@@ -74,6 +74,11 @@ lindera = { version = "6.0.0", features = [
     "embed-ko-dic",
     "embed-cc-cedict",
 ], optional = true }
+jsonwebtoken = "9"
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+quick-xml = "0.42.0"
+rsa = { version = "0.9", features = ["sha2", "sha1"] }
 
 [features]
 default = ["cjk"]

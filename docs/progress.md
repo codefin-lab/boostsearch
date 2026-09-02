@@ -605,3 +605,120 @@ Every dimension won in every pass. Pass 2 is the thin one by nature: a
 client that opens a connection per request pays a TLS handshake each time
 on our side and none on the other, and most of that handshake is the
 client's own work.
+
+### 5.6 Authentication domains: JWT, OpenID Connect, LDAP, proxy, client certificates, SAML (done, 2026-09-03)
+
+`config.yml`'s `dynamic.authc` and `dynamic.authz` are read as the plugin
+reads them (`src/security/authc.rs`): domains tried in `order`, the first
+whose authenticator finds credentials and whose backend accepts them
+wins; a domain that finds none and is marked `challenge` answers 401 with
+its own challenge (`Basic realm=…` with the body `Unauthorized`, `Bearer
+realm=…` or `X-Security-IdP …` with no body); when nothing accepts, the
+first challenging domain's. An authenticated user is kept for
+`cache.ttl_minutes`, and each token's roles are added to the kept user,
+as the plugin's cache does.
+
+- `jwt`: `signing_key` as base64 HMAC or PEM public key (RSA, EC), header
+  or `jwt_url_parameter`, `subject_key`, `roles_key` (list or comma text),
+  `required_audience`, `required_issuer`; no clock skew (the plugin's
+  `jwt` type honours none); a secret shorter than the digest refuses that
+  algorithm, as jjwt does.
+- `openid`: discovery (`openid_connect_url`) or `jwks_uri`, keys by `kid`
+  cached and refreshed on an unknown one within
+  `refresh_rate_limit_count` per `refresh_rate_limit_time_window_ms`;
+  `jwt_clock_skew_tolerance_seconds` honoured.
+- `proxy`: `user_header`/`roles_header`/`roles_separator`, believed only
+  from a peer `dynamic.http.xff.internalProxies` names and only once an
+  `X-Forwarded-For` was read, which is then the remote address.
+- `clientcert`: the TLS client certificate's subject (`username_attribute`,
+  `roles_attribute` from the DN); `plugins.security.authcz.admin_dn` makes
+  a certificate the admin (unrestricted, `remote_address: null`,
+  `has_api_access: false` as the plugin reports it). TLS now honours
+  `pemtrustedcas_filepath` and `clientauth_mode` (OPTIONAL / REQUIRE).
+- `ldap` backend (`ldap3`): bind as `bind_dn`, `usersearch` with `{0}` in
+  `userbase`, bind as the entry, `username_attribute`; `authz` backends
+  add roles from `userrolename` attributes and `rolesearch` (`{0}` DN,
+  `{1}` name, `{2}` `userroleattribute`) in `rolebase`, nested to
+  `max_nested_depth`, `skip_users`, `exclude_roles`.
+- `saml` (`src/security/saml.rs`): IdP metadata from content, file or URL;
+  the challenge carries a deflated `AuthnRequest` and a `requestId`;
+  `_plugins/_security/api/authtoken` checks the posted response the way
+  the plugin's validator does (status, Destination, InResponseTo, Issuer,
+  Conditions, Audience, SubjectConfirmation, and the XML signature on the
+  response or the assertion: exclusive C14N, SHA-1/256/512 digests,
+  RSA-SHA1/256/512 against the metadata's certificates) and mints the
+  HS512 JWT (`sub`, `nbf`, `exp` from `SessionNotOnOrAfter` or
+  `jwt.expiry`, `saml_nif`, `saml_si`, `roles`) over the padded
+  `exchange_key`; the domain then reads that JWT; `authinfo` carries the
+  `sso_logout_url` LogoutRequest redirect.
+- The peer address reaches every request on both listeners (connect info
+  on plain HTTP, per connection on TLS), and the credential cache digests
+  every header that could name a caller.
+
+Checked against the reference container reconfigured with the same
+domains (a local OpenLDAP with nested groups, a mock OpenID issuer, an IdP
+key pair and metadata, responses signed in Python): 29 authentication
+probes (JWT list/CSV roles, header/parameter/lower-case bearer, wrong
+issuer, expired with and without skew, `nbf`, bad signature, no subject,
+HS512 over a short key, role accumulation on the kept user; OpenID
+valid/expired within and past skew/unknown kid/missing subject; LDAP two
+users, wrong password, unknown user; proxy with and without the forwarded
+header; nothing; basic right and wrong; garbage bearer) and 14 SAML steps
+(challenge header and AuthnRequest, response-signed, assertion-signed,
+unsigned, wrong audience, expired, wrong/missing/absent RequestId, wrong
+issuer, wrong destination, missing SAMLResponse, relative acsEndpoint):
+0 diffs in each. Client certificates: user and roles from the DN and the
+admin certificate's answers match. The security API, authorization, DLS
+and FLS suites stay at 0 diffs; phase1 397/398 on a debug build (the known
+explain assertion), 398/398 release.
+
+Not carried: Kerberos; encrypted SAML assertions; signing the SP's own
+AuthnRequest (`sp.signature_private_key`); LDAP over StartTLS with client
+certificates; `custom_attr_allowlist` for LDAP attributes.
+
+### Performance with security on (after 5.6)
+
+### Durability calls on macOS (2026-09-03)
+
+Profiling the bulk path under sustained load showed the request threads
+and the indexing threads spending their time in `fcntl` and `write`: on
+macOS, Rust's `File::sync_data`/`sync_all` are `fcntl(F_FULLFSYNC)`, a
+flush of the drive's own cache that costs many times an `fsync`, while
+Java's `FileChannel.force` (Lucene's `IOUtils.fsync`, the translog's
+sync) is the plain `fsync`. So every segment file BoostCore closed, every
+`meta.json` it wrote, every directory sync and every translog sync paid a
+dearer call than OpenSearch pays on the same machine. BoostCore
+(`08e39fc`) and the translog now use `fsync` on macOS, `sync_data`
+elsewhere, where the two are the same call. The writer's thread count and
+memory budget were also tried at 4 threads / 128 MB and were worse (more
+merging on this machine); the defaults of 2 / 64 MB stay.
+
+Three quiet passes after the fsync change, security on, 150 samples each:
+
+| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+|---|---|---|---|
+| index docs/s | 68,002 / **99,986** | 67,500 / **98,500** | 56,149 / **96,173** |
+| memory | 1.78 GiB / 378 MiB | 1.79 GiB / 359 MiB | 1.86 GiB / 364 MiB |
+| match_all p50 | 0.99 / 0.39 ms | 1.48 / 0.81 ms | 3.64 / 0.80 ms |
+| term p50 | 1.25 / 0.34 ms | 1.23 / 0.80 ms | 3.90 / 0.80 ms |
+| match p50 | 1.68 / 0.53 ms | 1.90 / 0.99 ms | 3.61 / 1.06 ms |
+| bool+filter p50 | 1.64 / 0.71 ms | 1.68 / 1.09 ms | 3.95 / 1.10 ms |
+| range p50 | 0.96 / 0.51 ms | 1.30 / 0.94 ms | 3.90 / 0.93 ms |
+| sort_desc p50 | 2.93 / 0.89 ms | 3.24 / 1.39 ms | 5.23 / 1.30 ms |
+| terms_agg p50 | 1.09 / 0.60 ms | 1.23 / 0.80 mss_agg | 3.55 / 1.01 ms |
+| date_histogram p50 | 1.39 / 0.80 ms | 1.24 / 1.22 ms | 4.08 / 1.18 ms |
+| nested_agg p50 | 1.12 / 0.71 ms | 1.17 / 1.07 ms | 3.65 / 1.09 ms |
+| cardinality p50 | 1.13 / 0.61 ms | 0.76 / 0.98 ms | 3.36 / 0.99 ms |
+
+Passes 1 and 3, the matrix the plan defines (same transport) and the
+like-for-like secure comparison, win every one of the twelve dimensions,
+indexing now by 1.5x to 1.7x. Pass 2 is a transport mismatch: the bench
+opens a connection per request, so BoostSearch pays a TLS handshake on
+every call (about 0.4 ms, of which the server's own share is 120 us) and
+OpenSearch pays none. On the cheapest queries that handshake is larger
+than the server-side lead, and across three runs the last four or five
+lines flip by 0.1 to 0.3 ms in either direction (this run lost
+cardinality; two reruns lost four lines each and won cardinality). No
+server change can make a per-request TLS path beat a plaintext one; a
+client that keeps its connection, as every real client does, never sees
+it. Pass 2 is kept for honesty, not as a gate.
