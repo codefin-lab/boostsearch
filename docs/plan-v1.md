@@ -16,7 +16,7 @@ version two (ADR 0006, 0001–0005 for the rest).
 | OpenSearch's own tests | **1,516 of 2,322 sections** (core spec 1,427/1,427, modules 89/895) |
 | Behavioural diff vs OpenSearch 3.1.0 | 122 of 183 canonical requests identical |
 | REST endpoints answered | 141 of 167 |
-| Bench matrix | 11 of 11 dimensions ahead — index 1.15x, memory 4.4x, every query shape 1.6–3.8x |
+| Bench matrix | 12 of 12 dimensions ahead — index 1.15x, memory 4.4x, every one of the ten query shapes 1.6–3.8x |
 
 `tools/yaml_runner.py`, `tools/compat_audit.py` and `tools/bench_matrix.py` are
 how each of those numbers is produced, and they are the gates below.
