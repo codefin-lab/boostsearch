@@ -839,3 +839,26 @@ deliver a message by node id (unit test); `_nodes`, `_cluster/state`,
 `_cat/nodes` and `_tasks` compared with OpenSearch on every identity
 field. Gates unchanged: phase1 398/398, modules 820/895, security and
 audit suites 0 diffs.
+
+### 6.2 The simulation (done)
+
+`src/cluster/sim.rs`: the whole cluster in one thread, on a clock and a
+network a seed drives. A node is a `NodeLogic` -- `handle(Input, &Clock,
+&mut Durable) -> Vec<Output>` -- told to start, given messages and timers,
+answering with sends, timers and notes; nothing in it does I/O, so the
+same logic will run under the production runtime (6.3) and here. The
+scheduler keeps one queue of events by time (deliveries, timers, crashes,
+restarts, heals); the seed (splitmix64) chooses each message's latency
+within `min_latency..=max_latency`, which messages a `drop_rate` loses,
+and everything else that is random. Partitions cut pairs of node sets;
+`crash` throws away a node's logic and pending timers but keeps its
+`Durable` state, and `restart` builds the logic again from it; `skew`
+moves one node's clock off the true time. `SimTransport` lets code
+written against `Transport` run inside it. Every note and every event is
+in a trace, so two runs can be compared.
+
+Checked by tests: pings return in order and time moves only by events; a
+partition loses every message and a heal brings them back; the same seed
+makes the same trace and another seed a different one; a crash loses the
+timers and keeps what was written, and the restart carries on from it;
+skew moves one node's clock and no other's.

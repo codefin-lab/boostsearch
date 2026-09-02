@@ -8,6 +8,7 @@
 
 pub mod clock;
 pub mod node;
+pub mod sim;
 pub mod tcp;
 pub mod transport;
 
