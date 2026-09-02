@@ -542,6 +542,18 @@ pub fn run(
     {
         return run_with_derived(store, expr, body, p, defs);
     }
+    // indices held on other nodes: a coordinator asks each node for its
+    // share and merges; a node answering one, or a request told to stay
+    // here, runs as it always did
+    if !p.contains_key("_native_only") && !p.contains_key("_local_only") {
+        if let Some(plan) =
+            crate::cluster::search::plan(store, expr, p.get("preference").map(|s| s.as_str()))
+        {
+            if plan.spans_nodes() {
+                return crate::cluster::search::run_spanning(store, expr, body, p, plan);
+            }
+        }
+    }
     const BODY_KEYS: &[&str] = &[
         "derived",
         "query",
@@ -1280,6 +1292,9 @@ pub fn run(
     };
     let named_scores = p.get("include_named_queries_score").map(|v| v != "false").unwrap_or(false);
     let mut script_error = None;
+    // the order each hit's write arrived in: what a coordinator merging
+    // pages from several nodes breaks ties by
+    let seqs: Vec<u64> = all_hits.iter().map(|h| h.seq).collect();
     let page = write_page(
         store,
         &targets,
@@ -1355,6 +1370,143 @@ pub fn run(
         }
     }
 
+    // a node answering a coordinator stops here: the page, with the order
+    // each hit's write arrived in, and the aggregations still intermediate
+    if p.contains_key("_native_only") {
+        let mut page = page;
+        for (hit, seq) in page.iter_mut().zip(seqs.iter()) {
+            hit["_seq"] = json!(seq);
+        }
+        let agg_bytes = agg_acc.as_ref().and_then(|a| postcard::to_allocvec(a).ok());
+        let agg_req_json = agg_req.as_ref().and_then(|r| serde_json::to_value(r).ok());
+        return Ok(Outcome {
+            took_ms: started.elapsed().as_millis() as u64,
+            skipped: 0,
+            shards: shards.max(1),
+            total,
+            hits: page,
+            max_score,
+            aggs: None,
+            profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
+            suggest,
+            failures,
+            filtered: dls_applied,
+            native: Some(NativeParts {
+                agg_acc: agg_bytes,
+                agg_req: agg_req_json,
+                agg_meta: agg_meta.clone(),
+                bucket_orders: bucket_orders.clone(),
+                weighted,
+                empty_shards,
+            }),
+        });
+    }
+    finish_search(
+        store,
+        &targets,
+        body,
+        p,
+        Finish {
+            started,
+            page,
+            total,
+            max_score,
+            shards,
+            empty_shards,
+            failures,
+            suggest,
+            agg_acc,
+            agg_req,
+            agg_json,
+            bucket_orders,
+            partitions,
+            agg_meta,
+            weighted,
+            filters_aggs,
+            bucket_pipelines,
+            pipeline_aggs,
+            shard_profiles,
+            query_json,
+            views,
+            dls_applied,
+            extras,
+            named,
+            size,
+            join_inner_hits,
+        },
+    )
+}
+
+/// What the tail of a search needs from the gathering: the page and the
+/// numbers, and the aggregations still intermediate.
+pub(crate) struct Finish {
+    pub(crate) started: std::time::Instant,
+    pub(crate) page: Vec<Value>,
+    pub(crate) total: u64,
+    pub(crate) max_score: Option<f32>,
+    pub(crate) shards: u64,
+    pub(crate) empty_shards: u64,
+    pub(crate) failures: Vec<Value>,
+    pub(crate) suggest: Option<Value>,
+    pub(crate) agg_acc: Option<IntermediateAggregationResults>,
+    pub(crate) agg_req: Option<Aggregations>,
+    pub(crate) agg_json: Option<Value>,
+    pub(crate) bucket_orders: Vec<(String, String, bool)>,
+    pub(crate) partitions: Vec<(String, i64, i64, usize)>,
+    pub(crate) agg_meta: Vec<(String, Value)>,
+    pub(crate) weighted: bool,
+    pub(crate) filters_aggs: Vec<(String, Value)>,
+    pub(crate) bucket_pipelines: Vec<(Vec<String>, String, Value)>,
+    pub(crate) pipeline_aggs: Vec<(String, Value)>,
+    pub(crate) shard_profiles: Vec<Value>,
+    pub(crate) query_json: Option<Value>,
+    pub(crate) views: crate::security::view::Views,
+    pub(crate) dls_applied: bool,
+    pub(crate) extras: Extras,
+    pub(crate) named: std::collections::HashMap<String, Vec<(String, f32)>>,
+    pub(crate) size: usize,
+    pub(crate) join_inner_hits: Vec<(String, String, Value, Value)>,
+}
+
+/// The tail of a search: the engine's own aggregations, the aggregations
+/// rendered, pipelines, the profile and the answer. A coordinator that
+/// merged pages and intermediates from several nodes ends here too.
+pub(crate) fn finish_search(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    p: &Params,
+    f: Finish,
+) -> std::result::Result<Outcome, Response> {
+    let Finish {
+        started,
+        page,
+        total,
+        max_score,
+        shards,
+        empty_shards,
+        failures,
+        suggest,
+        agg_acc,
+        agg_req,
+        agg_json,
+        bucket_orders,
+        partitions,
+        agg_meta,
+        weighted,
+        filters_aggs,
+        bucket_pipelines,
+        pipeline_aggs,
+        mut shard_profiles,
+        query_json,
+        views,
+        dls_applied,
+        extras,
+        named,
+        size,
+        join_inner_hits,
+    } = f;
+    let targets: Vec<String> = targets.to_vec();
     let filters_results = run_peeled_aggs(store, &targets, &query_json, &filters_aggs, weighted)?;
 
     let aggs = finalise_aggs(
@@ -1523,6 +1675,7 @@ pub fn run(
         suggest,
         failures,
         filtered: dls_applied,
+        native: None,
     })
 }
 

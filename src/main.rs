@@ -483,6 +483,7 @@ async fn main() -> anyhow::Result<()> {
         // the data plane: replication and recovery between nodes, and
         // requests carried to the node they belong on
         cluster::replication::install(store.clone());
+        cluster::search::install(store.clone());
         cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;

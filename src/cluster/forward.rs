@@ -86,17 +86,12 @@ pub fn classify(method: &Method, path: &str) -> Target {
             | "_reindex"
             | "_delete_by_query"
             | "_update_by_query" => Target::Manager,
-            "_search" | "_msearch" | "_count" | "_mget" | "_field_caps" | "_search_shards"
-            | "_validate" | "_mtermvectors" | "_rank_eval" | "_render" | "_pit" | "_stats"
-            | "_segments" | "_recovery" | "_shard_stores" | "_mapping" | "_settings"
-            | "_refresh" | "_flush" | "_forcemerge" | "_cache" | "_open" | "_close" => {
-                // no index named: the manager holds every primary and answers for all
-                if head == "_search" && first_segment(rest).0 == "scroll" {
-                    Target::Local
-                } else {
-                    Target::Manager
-                }
-            }
+            // a search is coordinated from the node it reached
+            "_search" | "_msearch" | "_count" | "_search_shards" => Target::Local,
+            "_mget" | "_field_caps" | "_validate" | "_mtermvectors" | "_rank_eval" | "_render"
+            | "_pit" | "_stats" | "_segments" | "_recovery" | "_shard_stores" | "_mapping"
+            | "_settings" | "_refresh" | "_flush" | "_forcemerge" | "_cache" | "_open"
+            | "_close" => Target::Manager,
             _ => Target::Local,
         };
     }
@@ -117,9 +112,9 @@ pub fn classify(method: &Method, path: &str) -> Target {
             }
         }
         "_update_by_query" | "_delete_by_query" => Target::Write(Some(index)),
-        "_search" | "_count" | "_msearch" | "_mget" | "_explain" | "_termvectors"
-        | "_mtermvectors" | "_field_caps" | "_validate" | "_search_shards" | "_rank_eval"
-        | "_analyze" | "_pit" => Target::Read(index),
+        "_search" | "_count" | "_msearch" | "_search_shards" => Target::Local,
+        "_mget" | "_explain" | "_termvectors" | "_mtermvectors" | "_field_caps" | "_validate"
+        | "_rank_eval" | "_analyze" | "_pit" => Target::Read(index),
         // the index's own metadata and maintenance: the node holding its primary
         "_settings"
         | "_mapping"
@@ -176,16 +171,14 @@ fn resolve(state: &ClusterState, store: &Store, expr: &str) -> Vec<String> {
     out
 }
 
-/// Whether this node holds an active copy of every shard of the index.
+/// Whether this node holds an active copy of the index (a copy is a copy
+/// of the index, whichever shard it is counted as).
 fn held_here(state: &ClusterState, me: &NodeId, index: &str) -> bool {
-    let Some(m) = state.indices.get(index) else { return false };
-    (0..m.number_of_shards).all(|s| {
-        state.routing.shards_of(index).any(|c| {
-            c.shard == s
-                && c.node.as_ref() == Some(me)
+    state.indices.contains_key(index)
+        && state.routing.shards_of(index).any(|c| {
+            c.node.as_ref() == Some(me)
                 && matches!(c.state, ShardState::Started | ShardState::Relocating)
         })
-    })
 }
 
 /// The node holding the primary of an index's first shard.
@@ -548,9 +541,11 @@ mod tests {
         assert_eq!(classify(&post, "/_bulk"), Target::Write(None));
         assert_eq!(classify(&post, "/logs/_bulk"), Target::Write(Some("logs".into())));
         assert_eq!(classify(&get, "/logs/_doc/1"), Target::Read("logs".into()));
-        assert_eq!(classify(&get, "/logs,metrics/_search"), Target::Read("logs,metrics".into()));
-        assert_eq!(classify(&post, "/logs/_search"), Target::Read("logs".into()));
-        assert_eq!(classify(&post, "/_search"), Target::Manager);
+        assert_eq!(classify(&get, "/logs,metrics/_search"), Target::Local);
+        assert_eq!(classify(&post, "/logs/_search"), Target::Local);
+        assert_eq!(classify(&post, "/_search"), Target::Local);
+        assert_eq!(classify(&post, "/_count"), Target::Local);
+        assert_eq!(classify(&get, "/logs/_explain/1"), Target::Read("logs".into()));
         assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
         assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);
         assert_eq!(classify(&get, "/_nodes/stats"), Target::Local);

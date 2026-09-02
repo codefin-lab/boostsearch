@@ -1373,6 +1373,19 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
         for (name, shard, i) in pending {
             let copy = t.indices[&name][&shard][i].clone();
             let is = ctx.index_settings(&name);
+            // a primary whose data is lost is not made again out of nothing:
+            // it waits, and the index is red, until `allocate_empty_primary`
+            // with `accept_data_loss` asks for exactly that
+            if copy.primary {
+                let reason = copy.unassigned.as_ref().map(|u| u.reason.clone()).unwrap_or_default();
+                if reason != "INDEX_CREATED" && reason != "FORCED_EMPTY_PRIMARY" {
+                    let copies = t.indices.get_mut(&name).unwrap().get_mut(&shard).unwrap();
+                    if let Some(u) = copies[i].unassigned.as_mut() {
+                        u.allocation_status = "no_valid_shard_copy".into();
+                    }
+                    continue;
+                }
+            }
             // a replica whose node left waits for it to come back
             if let Some(u) = &copy.unassigned {
                 if u.delayed {
@@ -2389,6 +2402,44 @@ mod tests {
             w.table.shards_of("r").find(|c| !c.primary).unwrap().state,
             ShardState::Initializing
         );
+    }
+
+    /// A primary whose only copy is gone stays unassigned, and the index is
+    /// red, until someone accepts the data loss.
+    #[test]
+    fn a_lost_primary_is_not_made_again_out_of_nothing() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("solo", 1, 0, json!({}))],
+            "a",
+        );
+        w.settle();
+        assert_eq!(w.table.primary("solo", 0).unwrap().node, Some(NodeId("a".into())));
+        w.nodes.remove(&NodeId("a".into()));
+        w.home.clear();
+        w.now += 1_000;
+        w.settle();
+        let p = w.table.primary("solo", 0).unwrap().clone();
+        assert_eq!(p.state, ShardState::Unassigned, "{p:?}");
+        assert_eq!(p.unassigned.as_ref().unwrap().allocation_status, "no_valid_shard_copy");
+        let state = ClusterState { routing: w.table.clone(), ..ClusterState::empty("c", "u") };
+        assert_eq!(state.health_status(None), "red");
+        // the command that accepts the loss places an empty one
+        let cmd = json!([{"allocate_empty_primary": {"index": "solo", "shard": 0, "node": "b", "accept_data_loss": true}}]);
+        let (t, _) = apply_commands(&w.ctx(), &w.table, cmd.as_array().unwrap(), false).unwrap();
+        w.table = t;
+        assert_eq!(w.table.primary("solo", 0).unwrap().state, ShardState::Initializing);
+        w.settle();
+        assert_eq!(w.table.primary("solo", 0).unwrap().node, Some(NodeId("b".into())));
+        // without accepting the loss the command is refused
+        let cmd = json!([{"allocate_empty_primary": {"index": "solo", "shard": 0, "node": "b"}}]);
+        let mut fresh = w.table.clone();
+        if let Some(c) = fresh.indices.get_mut("solo").unwrap().get_mut(&0).unwrap().first_mut() {
+            c.state = ShardState::Unassigned;
+            c.node = None;
+            c.unassigned = Some(unassigned_info("NODE_LEFT", 0, "no_valid_shard_copy", 0));
+        }
+        assert!(apply_commands(&w.ctx(), &fresh, cmd.as_array().unwrap(), false).is_err());
     }
 
     #[test]

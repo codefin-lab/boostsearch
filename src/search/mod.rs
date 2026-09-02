@@ -21,6 +21,7 @@ use std::cmp::Ordering;
 
 mod run;
 pub use run::*;
+pub(crate) use run::{Finish, finish_search};
 
 mod calendar;
 pub(crate) use calendar::*;
@@ -527,6 +528,19 @@ const NUMERIC_AGGS: &[&str] = &[
 const DC_SUM: &str = "__bs_dc_sum";
 const DC_CNT: &str = "__bs_dc_count";
 
+/// What a node hands a coordinator besides the page: the aggregations
+/// still intermediate (postcard bytes), and how they were asked.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct NativeParts {
+    pub agg_acc: Option<Vec<u8>>,
+    pub agg_req: Option<Value>,
+    pub agg_meta: Vec<(String, Value)>,
+    pub bucket_orders: Vec<(String, String, bool)>,
+    pub weighted: bool,
+    pub empty_shards: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     pub took_ms: u64,
     pub skipped: u64,
@@ -542,6 +556,9 @@ pub struct Outcome {
     /// a document-level security filter was laid over the query, which
     /// makes it a real query: nothing ends early under it
     pub filtered: bool,
+    /// filled only for a coordinator, by a node answering it
+    #[serde(default)]
+    pub native: Option<NativeParts>,
 }
 
 /// The parts of a query that only a document's own values can settle.

@@ -18,6 +18,7 @@ name = "boostsearch"
 path = "src/main.rs"
 
 [dependencies]
+postcard = { version = "1.0", features = ["alloc"] }
 # BoostCore is the search library this is built on: a fork of tantivy that
 # lives at github.com/codefin-lab/boostcore, so it can be patched where the
 # engine needs it to behave the way OpenSearch does. Pinned to a commit, so a

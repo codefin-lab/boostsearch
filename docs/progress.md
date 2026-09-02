@@ -1169,3 +1169,61 @@ and a re-creation under the same name is a different index. Gates: unit
 passes (index 97,427 vs 66,673 docs/s against plain OpenSearch,
 92,943 vs 59,070 against os-secure; 393MiB vs 2.0GiB; every
 query p50 lower).
+
+### 6.8 The coordinator: fan out a search across nodes, merge, partial results, `_shards` (done)
+
+A search is coordinated from the node it reached (`src/cluster/search.rs`).
+The plan names, for every index the request names, the node that answers
+for it: this node when it holds an active copy (a copy is a copy of the
+index), else the node holding the primary, or the one a `preference`
+picks (`_local`, `_only_nodes:`, a custom string hashed to the same copy
+every time). Each node runs the search as it always did, in a native
+mode that stops before the tail: its page of `from+size` hits with the
+order each write arrived in, and its aggregations still intermediate
+(postcard bytes of BoostCore's intermediate results, which the fork
+serialises for this). The coordinator merges the pages by the request's
+sort -- the same rules as the local page cut: sort values with `missing`
+last, then score, then the node named first, then write order -- cuts
+`from`/`size`, sums totals and shards, keeps the highest score, merges
+the intermediates, and finishes the aggregations once through the tail
+`run` now shares (`finish_search`: rendering, pipelines, `typed_keys`,
+`max_buckets`). `_count` and `_msearch` go the same way, since both are
+searches. `_search_shards` lists every copy of every shard from the
+routing, with the nodes.
+
+A node that does not answer is every shard it answered for, failed in
+`_shards` with `node_not_connected_exception`; an index the cluster knows
+but no node holds an active copy of is `no_shard_available_action_exception`
+per shard; the answer is partial unless `allow_partial_search_results=false`,
+which refuses with `search_phase_execution_exception`. A primary whose
+only copy is lost is not made again out of nothing: it waits as
+`no_valid_shard_copy`, the index is red, and `_cluster/reroute` with
+`allocate_empty_primary` and `accept_data_loss` is what makes an empty
+one (the host builds it from the published metadata) -- the live run had
+found the allocator placing a fresh empty primary on its own. A scroll
+over a spanning search is driven from the coordinator: a point in time
+on every node and how far into each the scroll has read.
+
+The aggregations this engine computes as searches of their own (`filters`,
+`missing`, the geo grids, scripted metrics, `top_hits`, `nested`, and the
+rest listed in `own_aggregations`), and `collapse`, `rescore` and `slice`,
+run whole on one node holding every index named when there is one; when
+no node holds them all the request is refused, naming the aggregation,
+rather than answered wrong. With replicas that node usually exists; the
+gap is stated.
+
+Live, three nodes, one-shard indices each on a different node, the
+coordinator holding none: a search sorted by a field with `from=2 size=3`
+merged in the right order (the shorthand `{"n": "desc"}` was read as
+ascending until the live run showed it); by score with equal scores
+tie-broken; `terms`, `sum` and `histogram` merged across nodes to the
+expected counts; `_count` and `_msearch` spanning; `_search_shards` from
+a node holding nothing; a scroll paging across the nodes in order; the
+only holder of an index killed: the index red, the search partial with
+the failure, refused with partial results disallowed, then
+`allocate_empty_primary` with `accept_data_loss` making it green and
+empty. Gates: unit 58/58, phase1 398/398; bench after 6.8 wins every
+dimension in all three passes (index 91,411 vs 66,060 docs/s against
+plain OpenSearch, 94,466 vs 59,682 against os-secure; 401MiB vs 2.0GiB;
+every query p50 lower): the coordinator's plan is one read of the state
+per search and nothing more on one node.

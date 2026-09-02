@@ -14,6 +14,7 @@ pub mod metadata;
 pub mod node;
 pub mod replication;
 pub mod runtime;
+pub mod search;
 pub mod sim;
 pub mod state;
 pub mod tcp;

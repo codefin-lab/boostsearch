@@ -134,7 +134,22 @@ impl StoreSource {
 impl ShardHost for StoreSource {
     fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
         if copy.primary && copy.relocating_node.is_none() {
-            // a primary placed where its data is (a new index, or a promoted copy)
+            // a primary placed where its data is (a new index, a promoted
+            // copy), or an empty one someone asked for after a loss: made
+            // empty here when nothing is here
+            if self.store.get(&meta.name).is_none() {
+                let mut settings = meta.settings.clone();
+                if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
+                    for k in ["creation_date", "provided_name", "version"] {
+                        idx.remove(k);
+                    }
+                    idx.insert("uuid".into(), json!(meta.uuid));
+                }
+                let body = json!({"settings": settings, "mappings": meta.mappings});
+                self.store.create(&meta.name, &body).map_err(|e| {
+                    format!("could not make an empty primary of [{}]: {e}", meta.name)
+                })?;
+            }
             return Ok(true);
         }
         if self.store.get(&meta.name).is_some() {
