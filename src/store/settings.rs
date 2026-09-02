@@ -201,14 +201,32 @@ impl IdxState {
 
     /// Look a setting up by dotted name, accepting the flat or nested form.
     pub fn setting(&self, key: &str) -> Option<String> {
-        let settings = self.effective_settings();
-        let flat = settings.pointer(&format!("/index/{key}"));
-        let nested = settings.pointer(&format!("/index/{}", key.replace('.', "/")));
-        let prefixed = settings.pointer(&format!("/index/index.{key}"));
-        flat.or(nested).or(prefixed).map(|v| match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        })
+        // read off what was written rather than off the whole view an index
+        // reports of itself: this is asked a few times for every document
+        // written, and building that view each time was a tenth of the cost
+        let written = |v: &Value| match v {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        };
+        if let Some(v) = self.raw_setting(key).and_then(written) {
+            return Some(v);
+        }
+        // a setting written as nested objects, under `index` or not
+        let path = key.replace('.', "/");
+        for pointer in [format!("/index/{path}"), format!("/{path}")] {
+            if let Some(v) = self.settings.pointer(&pointer).and_then(written) {
+                return Some(v);
+            }
+        }
+        // what an index carries whether or not anyone wrote it
+        match key {
+            "number_of_shards" | "number_of_replicas" => Some("1".to_string()),
+            "provided_name" => Some(self.name.clone()),
+            "creation_date" => Some(self.created_ms.to_string()),
+            "uuid" => Some(self.uuid.clone()),
+            _ => None,
+        }
     }
 
     /// `index.max_terms_count` caps how many terms a `terms` query may carry.
