@@ -435,7 +435,10 @@ impl boostcore::collector::SegmentCollector for MaybeAggSegment {
 /// A failure while a shard was searched, as a response. A script that failed
 /// carries its own error, which is reported as that shard's failure.
 pub(crate) fn search_error_response(text: &str, index: &str) -> Response {
-    if let Some(detail) = text.split_once("script_exception:").map(|(_, d)| d)
+    // the engine quotes the message it carries: the JSON ends before the
+    // closing quote
+    if let Some(detail) =
+        text.split_once("script_exception:").map(|(_, d)| d.trim_end_matches('\''))
         && let Ok(detail) = serde_json::from_str::<Value>(detail)
     {
         let mut root = detail.clone();
