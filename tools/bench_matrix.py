@@ -66,7 +66,7 @@ for label,base in (A,B):
     for q,body in QUERIES.items():
         lat[q]=latency(base,"perf",body)
     res[label]["latency"]=lat
-res["OpenSearch"]["rss"]=rss(container="os-compat")
+res["OpenSearch"]["rss"]=rss(container=os.environ.get("BENCH_A_CONTAINER","os-compat"))
 res["BoostSearch"]["rss"]=rss(pid=subprocess.run(["pgrep","-f","release/boostsearch"],capture_output=True,text=True).stdout.split()[0])
 json.dump(res,open('/tmp/matrix.json','w'),indent=1)
 print(f"\n{'dimension':<20}{'OpenSearch':>14}{'BoostSearch':>14}   winner")
@@ -134,7 +134,7 @@ for label,base in (A,B):
     for q,body in QUERIES.items():
         lat[q]=latency(base,"perf",body)
     res[label]["latency"]=lat
-res["OpenSearch"]["rss"]=rss(container="os-compat")
+res["OpenSearch"]["rss"]=rss(container=os.environ.get("BENCH_A_CONTAINER","os-compat"))
 res["BoostSearch"]["rss"]=rss(pid=subprocess.run(["pgrep","-f","release/boostsearch"],capture_output=True,text=True).stdout.split()[0])
 json.dump(res,open('/tmp/matrix.json','w'),indent=1)
 print(f"\n{'dimension':<20}{'OpenSearch':>14}{'BoostSearch':>14}   winner")

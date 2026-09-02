@@ -22,6 +22,8 @@ pub async fn bulk(
     let default_index = index.map(|Path(i)| i);
     let mut items = Vec::new();
     let mut errors = false;
+    // `ingest_took` is reported only when a pipeline ran on the way in
+    let mut ingested = false;
     let mut touched: Vec<String> = Vec::new();
 
     // Split the ndjson into operations first, so the expensive part -- parsing
@@ -76,6 +78,33 @@ pub async fn bulk(
     }
 
     // Parse and build documents in parallel; nothing here touches shared state.
+    // the plugin judges each index's share of the bulk as one shard request:
+    // every action it carries, or none of it
+    let refused: std::collections::HashMap<String, String> = {
+        let mut wanted: Vec<(String, Vec<&str>)> = Vec::new();
+        for o in &ops {
+            let action = match o.op.as_str() {
+                "delete" => "indices:data/write/delete",
+                "update" => "indices:data/write/update",
+                _ => "indices:data/write/index",
+            };
+            match wanted.iter_mut().find(|(i, _)| *i == o.index) {
+                Some((_, list)) => {
+                    if !list.contains(&action) {
+                        list.push(action);
+                    }
+                }
+                None => wanted.push((o.index.clone(), vec!["indices:data/write/bulk[s]", action])),
+            }
+        }
+        wanted
+            .into_iter()
+            .filter_map(|(idx, list)| {
+                let targets = crate::security::layer::indices_for_expr(&store, &idx);
+                crate::security::item_refusal(&store, &list, &targets).map(|why| (idx, why))
+            })
+            .collect()
+    };
     let prepare = |o: &Op| {
         o.doc_line.map(|l| {
             serde_json::from_str::<Value>(l)
@@ -103,6 +132,14 @@ pub async fn bulk(
         let meta = o.meta;
         let idx = o.index;
         let id_opt = o.id;
+        if let Some(why) = refused.get(&idx) {
+            errors = true;
+            items.push(json!({ op.clone(): {
+                "_index": idx, "_id": id_opt, "status": 403,
+                "error": {"type": "security_exception", "reason": why},
+            }}));
+            continue;
+        }
         let meta_source = meta.get("_source").cloned();
         let (source, mut doc_raw): (Option<Value>, Option<String>) = match prep {
             Some(Ok((v, raw))) => (Some(v), Some(raw)),
@@ -213,6 +250,7 @@ pub async fn bulk(
             let routing = meta.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
             // the store is asked while this index's lock is held: the
             // pipelines live beside it, not under it
+            ingested = true;
             match crate::api::ingest_for_write(
                 &store,
                 &idx,
@@ -577,11 +615,13 @@ pub async fn bulk(
             g.sync_translog();
         }
     }
-    axum::Json(json!({
+    let mut out = json!({
         "took": started.elapsed().as_millis() as u64,
-        "ingest_took": 0,
         "errors": errors,
         "items": items,
-    }))
-    .into_response()
+    });
+    if ingested {
+        out["ingest_took"] = json!(0);
+    }
+    axum::Json(out).into_response()
 }

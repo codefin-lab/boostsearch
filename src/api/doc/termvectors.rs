@@ -28,7 +28,8 @@ pub async fn termvectors(
             "Validation Failed: 1: id is missing;",
         );
     };
-    let source = read_source_as_asked(&g, &id, &p);
+    let source =
+        read_source_as_asked(&g, &id, &p).filter(|_| crate::security::doc_visible(&store, &g, &id));
     let Some(source) = source else {
         return respond(
             &p,
@@ -55,7 +56,8 @@ pub async fn termvectors(
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .or_else(|| p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect()));
 
-    let fields = term_vectors_of(&g, &source, want_stats, want_field_stats, only.as_deref());
+    let mut fields = term_vectors_of(&g, &source, want_stats, want_field_stats, only.as_deref());
+    crate::security::narrow_term_vectors(&store, &g.name, &mut fields);
     respond(
         &p,
         json!({
@@ -102,7 +104,13 @@ pub(crate) fn term_vectors_of(
             continue;
         }
         let Some(text) = value.as_str() else { continue };
-        let spans = crate::query::analyze_spans(&g.index, text, None);
+        // a keyword holds its whole value as one term; anything else is cut
+        // by its analyzer
+        let spans = if g.mapping.type_of(name) == Some("keyword") {
+            vec![(text.to_string(), 0usize, 0usize, text.len(), 1usize)]
+        } else {
+            crate::query::analyze_spans(&g.index, text, None)
+        };
         // a chain that hangs the token's kind on it as a payload has it read
         // back here, and the kind of a word is `<ALPHANUM>`
         let payload = g
@@ -249,17 +257,21 @@ pub async fn mtermvectors(
             continue;
         };
         let g = st.read();
-        match read_source_as_asked(&g, &id, &p) {
+        match read_source_as_asked(&g, &id, &p)
+            .filter(|_| crate::security::doc_visible(&store, &g, &id))
+        {
             Some(src) => {
                 let want_stats = body
                     .get("term_statistics")
                     .and_then(|v| v.as_bool())
                     .or_else(|| p.get("term_statistics").map(|v| v == "true"))
                     .unwrap_or(false);
+                let mut tv = term_vectors_of(&g, &src, want_stats, true, None);
+                crate::security::narrow_term_vectors(&store, &g.name, &mut tv);
                 out.push(json!({
                     "_index": g.name, "_id": id, "_version": g.version_of(&id),
                     "found": true, "took": 0,
-                    "term_vectors": term_vectors_of(&g, &src, want_stats, true, None),
+                    "term_vectors": tv,
                 }))
             }
             None => out.push(json!({

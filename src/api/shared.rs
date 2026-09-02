@@ -52,14 +52,25 @@ pub fn add_stack_trace(node: &mut Value, p: &Params, at: &str) {
 
 pub fn err(status: StatusCode, kind: &str, reason: impl Into<String>) -> Response {
     let reason = reason.into();
-    (
+    let mut r = (
         status,
         axum::Json(json!({
             "error": {"type": kind, "reason": reason, "root_cause": [{"type": kind, "reason": reason}]},
             "status": status.as_u16()
         })),
     )
-        .into_response()
+        .into_response();
+    // the error travels with the response, so that whoever catches it can
+    // read what it was without opening the body
+    r.extensions_mut().insert(ErrorKind { kind: kind.to_string(), reason });
+    r
+}
+
+/// What an error response says, kept beside its body.
+#[derive(Clone, Debug)]
+pub struct ErrorKind {
+    pub kind: String,
+    pub reason: String,
 }
 
 /// An error that quotes an inner cause, the shape the search API uses.

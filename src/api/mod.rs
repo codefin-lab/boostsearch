@@ -45,7 +45,7 @@ mod search_api;
 pub use search_api::*;
 mod settings;
 pub use settings::*;
-mod shared;
+pub(crate) mod shared;
 pub use shared::*;
 mod snapshot;
 pub use snapshot::*;

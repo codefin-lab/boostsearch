@@ -542,8 +542,12 @@ pub async fn get_doc(
             ),
         );
     }
-    match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
-        Some(src) => {
+    match read_source_as_asked(&g, &id, &p)
+        .filter(|_| routing_matches(&g, &id, &p))
+        .filter(|_| crate::security::doc_visible(&store, &g, &id))
+    {
+        Some(mut src) => {
+            crate::security::narrow_source(&store, &g.name, &mut src);
             let fields = stored_fields(&src, &p);
             let mut body = json!({
                 "_index": g.name, "_id": id,
@@ -595,7 +599,11 @@ pub async fn head_doc(
     // the same view a `_get` would take, so `realtime=false` says whether a
     // search can see the document rather than whether it was written -- and
     // the wrong routing reaches nothing, here as there
-    if read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)).is_some() {
+    if read_source_as_asked(&g, &id, &p)
+        .filter(|_| routing_matches(&g, &id, &p))
+        .filter(|_| crate::security::doc_visible(&store, &g, &id))
+        .is_some()
+    {
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -758,6 +766,13 @@ pub async fn explain(
             None => json!({"match_all": {}}),
         },
     };
+    if let Some(st) = store.get(&name) {
+        let g = st.read();
+        if exists_doc(&g, &id) && !crate::security::doc_visible(&store, &g, &id) {
+            return (StatusCode::NOT_FOUND, axum::Json(json!({"_index": name, "_id": id, "matched": false})))
+                .into_response();
+        }
+    }
     let scoped = json!({"bool": {"must": [q], "filter": [{"ids": {"values": [id]}}]}});
     let probe = json!({"query": scoped, "size": 1});
     let matched = crate::search::run(&store, &name, &probe, &Params::new())
@@ -766,7 +781,11 @@ pub async fn explain(
 
     let told = matched
         .then(|| {
-            store.get(&name).and_then(|st| crate::search::explain_document(&st.read(), &q, &id))
+            store.get(&name).and_then(|st| {
+                let g = st.read();
+                let q = crate::security::with_dls(&store, &g.name, Some(q.clone())).unwrap_or(q.clone());
+                crate::search::explain_document(&g, &q, &id)
+            })
         })
         .flatten();
     let mut out = json!({

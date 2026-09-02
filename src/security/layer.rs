@@ -12,6 +12,23 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use super::{AuthFailure, Caller, Verdict, is_cluster_action};
+
+tokio::task_local! {
+    /// The caller of the request being handled, visible to everything the
+    /// handler runs on this task.
+    pub static CALLER: Caller;
+}
+
+/// The caller of the request in hand, if a request is in hand.
+pub fn current_caller() -> Option<Caller> {
+    CALLER.try_with(|c| c.clone()).ok()
+}
+
+async fn run_as(caller: Caller, req: Request, next: Next) -> Response {
+    let mut req = req;
+    req.extensions_mut().insert(caller.clone());
+    CALLER.scope(caller, next.run(req)).await
+}
 use crate::store::Store;
 
 /// The `401 Unauthorized` the plugin answers.
@@ -46,11 +63,10 @@ pub fn no_permissions(action: &str, caller: &Caller) -> Response {
 
 /// Work out the caller and put it on the request; refuse what they may
 /// not do before the handler runs.
-pub async fn authenticate(State(store): State<Store>, mut req: Request, next: Next) -> Response {
+pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) -> Response {
     let sec = store.security.clone();
     if !sec.enabled {
-        req.extensions_mut().insert(Caller::unrestricted());
-        return next.run(req).await;
+        return run_as(Caller::unrestricted(), req, next).await;
     }
     let remote = req
         .extensions()
@@ -70,12 +86,10 @@ pub async fn authenticate(State(store): State<Store>, mut req: Request, next: Ne
     let method = req.method().clone();
     // the security API and account endpoints decide for themselves
     if path.starts_with("/_plugins/_security/") {
-        req.extensions_mut().insert(caller);
-        return next.run(req).await;
+        return run_as(caller, req, next).await;
     }
     let Some(action) = action_for(&method, &path) else {
-        req.extensions_mut().insert(caller);
-        return next.run(req).await;
+        return run_as(caller, req, next).await;
     };
     // the guard must be gone before the handler is awaited
     let refusal = {
@@ -103,8 +117,7 @@ pub async fn authenticate(State(store): State<Store>, mut req: Request, next: Ne
     if let Some(missing) = refusal {
         return no_permissions(&missing, &caller);
     }
-    req.extensions_mut().insert(caller);
-    next.run(req).await
+    run_as(caller, req, next).await
 }
 
 /// The index expression a path names, split on commas; nothing for
@@ -121,7 +134,7 @@ pub fn indices_of(path: &str) -> Vec<String> {
 /// Wildcards and aliases resolved to the concrete indices, so that a
 /// pattern is judged by what it reaches; a name that reaches nothing is
 /// judged as itself.
-fn resolve_indices(store: &Store, exprs: &[String]) -> Vec<String> {
+pub(crate) fn resolve_indices(store: &Store, exprs: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for e in exprs {
         let stripped = e.trim_start_matches('-').trim_start_matches('+');
@@ -256,4 +269,17 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
         _ => return None,
     };
     Some(a.to_string())
+}
+
+/// The concrete indices an expression names for a judgement: `_all`, `*`
+/// or nothing at all is every index there is.
+pub fn indices_for_expr(store: &Store, expr: &str) -> Vec<String> {
+    let named: Vec<String> =
+        expr.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if named.is_empty() || named.iter().any(|n| n == "_all" || n == "*") {
+        let mut all = store.resolve("*");
+        all.sort();
+        return all;
+    }
+    resolve_indices(store, &named)
 }

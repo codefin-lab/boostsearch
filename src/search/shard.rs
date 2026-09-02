@@ -73,8 +73,41 @@ pub(crate) fn search_one_shard(
     filters_aggs: &[(String, Value)],
     page_want: usize,
     fanned_out: bool,
+    views: &crate::security::view::Views,
 ) -> std::result::Result<Option<ShardOut>, Response> {
     let Some(st) = store.get(name) else { return Ok(None) };
+    // the caller's view of this index: what the query may ask, what the
+    // aggregations may read, what a sort may order by
+    let view = views.get(name).cloned();
+    let kinds: std::collections::HashMap<String, String> = match view.as_ref() {
+        Some(_) => st.read().all_field_types().into_iter().collect(),
+        None => std::collections::HashMap::new(),
+    };
+    let rewritten_query: Option<Value> =
+        view.as_ref().and_then(|v| query_json.as_ref().map(|q| v.rewrite_query(q, &kinds)));
+    let query_json: &Option<Value> =
+        if rewritten_query.is_some() { &rewritten_query } else { query_json };
+    let rewritten_aggs: Option<Value> =
+        view.as_ref().and_then(|v| agg_json.as_ref().map(|a| v.rewrite_aggs(a, &kinds)));
+    let agg_json: &Option<Value> =
+        if rewritten_aggs.is_some() { &rewritten_aggs } else { agg_json };
+    let narrowed_keys: Vec<SortKey>;
+    let sort_keys: &[SortKey] = match view.as_ref() {
+        Some(v) if sort_keys.iter().any(|k| v.hidden(&k.field)) => {
+            narrowed_keys = sort_keys
+                .iter()
+                .map(|k| {
+                    if v.hidden(&k.field) {
+                        SortKey { field: crate::security::view::HIDDEN.into(), ..k.clone() }
+                    } else {
+                        k.clone()
+                    }
+                })
+                .collect();
+            &narrowed_keys
+        }
+        _ => sort_keys,
+    };
     let g = st.read();
     g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
@@ -118,6 +151,24 @@ pub(crate) fn search_one_shard(
         },
         None => Box::new(boostcore::query::AllQuery),
     };
+    // the caller's document-level security narrows every query on this
+    // index; a filter clause, so scores are untouched
+    let q: Box<dyn boostcore::query::Query> = match view.as_ref().and_then(|v| v.dls.clone()) {
+        Some(dls) => match crate::query::build(&ctx, &dls) {
+            Ok(filter) => Box::new(boostcore::query::BooleanQuery::new(vec![
+                (boostcore::query::Occur::Must, q),
+                (boostcore::query::Occur::Must, filter),
+            ])),
+            Err(e) => {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "security_exception",
+                    format!("Unable to parse DLS query: {e}"),
+                ));
+            }
+        },
+        None => q,
+    };
     // a point in time holds the search to what the index had written when
     // it was opened, which is what makes paging through it stable
     let q: Box<dyn boostcore::query::Query> = match pit_ceiling.get(name) {
@@ -148,7 +199,7 @@ pub(crate) fn search_one_shard(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<serde_json::Map<_, _>>()
             .into();
-        check_agg_types(&peeled, &ctx)?;
+        check_agg_types(&peeled, &ctx).map_err(|e| phase_failure_of(e, name))?;
     }
 
     // aggregations, when asked for, run over the same query
@@ -157,7 +208,7 @@ pub(crate) fn search_one_shard(
     if let Some(aj) = &agg_json {
         let mut rewritten = aj.clone();
         normalize_aggs(&mut rewritten, &mut agg_meta, true);
-        check_agg_types(&rewritten, &ctx)?;
+        check_agg_types(&rewritten, &ctx).map_err(|e| phase_failure_of(e, name))?;
         normalize_agg_dates(&mut rewritten);
         bucket_orders = extract_bucket_orders(&mut rewritten);
         let _ = extract_partitions(&mut rewritten);
@@ -464,4 +515,30 @@ pub(crate) fn search_error_response(text: &str, index: &str) -> Response {
         ));
     }
     err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", text.to_string())
+}
+
+/// An aggregation that cannot read its field fails on the shard, and is
+/// told as OpenSearch tells it: every shard failed, for that reason.
+fn phase_failure_of(e: Response, index: &str) -> Response {
+    let Some(what) = e.extensions().get::<crate::api::shared::ErrorKind>().cloned() else {
+        return e;
+    };
+    if !what.reason.contains("is not supported for aggregation") {
+        return e;
+    }
+    let detail = json!({"type": what.kind, "reason": what.reason});
+    let wrapped = json!({
+        "error": {
+            "root_cause": [detail],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [{"shard": 0, "index": index, "node": "node0", "reason": detail}],
+            // the shard's exception wraps the cause once more
+            "caused_by": {"type": what.kind, "reason": what.reason, "caused_by": detail},
+        },
+        "status": 400,
+    });
+    axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(wrapped)))
 }

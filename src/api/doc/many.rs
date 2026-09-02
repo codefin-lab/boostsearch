@@ -117,13 +117,27 @@ pub async fn mget(
             }));
             continue;
         }
+        if let Some(why) = crate::security::item_refusal(
+            &store,
+            &["indices:data/read/mget[shard]"],
+            &crate::security::layer::indices_for_expr(&store, &idx),
+        ) {
+            docs.push(
+                json!({"_index": idx, "_id": id, "error": crate::security::item_error(&why)}),
+            );
+            continue;
+        }
         let g = st.read();
         let routing_ok = match g.routing.get(&id) {
             Some(have) => want_routing.as_deref() == Some(have.as_str()),
             None => true,
         };
-        match read_source_as_asked(&g, &id, &p).filter(|_| routing_ok) {
-            Some(src) => {
+        match read_source_as_asked(&g, &id, &p)
+            .filter(|_| routing_ok)
+            .filter(|_| crate::security::doc_visible(&store, &g, &id))
+        {
+            Some(mut src) => {
+                crate::security::narrow_source(&store, &g.name, &mut src);
                 // a doc may carry its own stored_fields; otherwise the request-level
                 // one applies. Either way it suppresses _source unless asked for.
                 let per_doc_stored = sel.as_ref().and_then(|s| s.get("__stored")).cloned();

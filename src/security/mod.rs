@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 pub mod api;
 pub mod layer;
+pub mod view;
 
 /// One internal user, as `internal_users.yml` writes it.
 #[derive(Clone, Debug, Default)]
@@ -1089,7 +1090,10 @@ impl Security {
         if cache.len() > 10_000 {
             cache.clear();
         }
-        cache.insert(key, CachedCaller { generation, at: std::time::Instant::now(), caller: caller.clone() });
+        cache.insert(
+            key,
+            CachedCaller { generation, at: std::time::Instant::now(), caller: caller.clone() },
+        );
         Ok(caller)
     }
 
@@ -1165,4 +1169,138 @@ pub enum AuthFailure {
     Challenge,
     /// credentials given but wrong
     Failed,
+}
+
+// ---- the caller's view, for the paths that read documents ---------------------
+
+/// The DLS query the current caller's view of an index is filtered by, if
+/// security is on and their roles filter it. Nothing is read while
+/// security is off.
+pub fn dls_for(store: &crate::store::Store, index: &str) -> Option<Value> {
+    if !store.security.enabled {
+        return None;
+    }
+    let caller = layer::current_caller()?;
+    if caller.unrestricted {
+        return None;
+    }
+    let cfg = store.security.config.read();
+    cfg.restrictions(&caller, index).dls_query()
+}
+
+/// The caller's field rules for an index, if security is on.
+pub fn restrictions_for(store: &crate::store::Store, index: &str) -> Option<IndexRestrictions> {
+    if !store.security.enabled {
+        return None;
+    }
+    let caller = layer::current_caller()?;
+    if caller.unrestricted {
+        return None;
+    }
+    let cfg = store.security.config.read();
+    let r = cfg.restrictions(&caller, index);
+    if !r.reached {
+        return None;
+    }
+    Some(r)
+}
+
+/// A query JSON with the caller's DLS folded in as a filter.
+pub fn with_dls(store: &crate::store::Store, index: &str, query: Option<Value>) -> Option<Value> {
+    let Some(dls) = dls_for(store, index) else { return query };
+    let base = query.unwrap_or_else(|| json!({"match_all": {}}));
+    Some(json!({"bool": {"must": [base], "filter": [dls]}}))
+}
+
+/// Whether one document is inside the caller's view of its index.
+pub fn doc_visible(store: &crate::store::Store, g: &crate::store::IdxState, id: &str) -> bool {
+    let Some(dls) = dls_for(store, &g.name) else { return true };
+    use boostcore::collector::Count;
+    use boostcore::query::{BooleanQuery, Occur, TermQuery};
+    use boostcore::schema::IndexRecordOption;
+    let searcher = g.reader.searcher();
+    let ctx = crate::query::Ctx {
+        fields: &g.fields,
+        mapping: &g.mapping,
+        analysis: &g.analysis,
+        index: &g.index,
+        max_terms_count: g.max_terms_count(),
+        max_regex_length: g.max_regex_length(),
+        allow_expensive: true,
+        observed_kinds: &g.observed_kinds,
+        kinds_complete: g.kinds_complete,
+        stats: &g.stats,
+    };
+    let Ok(filter) = crate::query::build(&ctx, &dls) else { return false };
+    let probe =
+        TermQuery::new(boostcore::Term::from_field_text(g.fields.id, id), IndexRecordOption::Basic);
+    let q = BooleanQuery::new(vec![
+        (Occur::Must, Box::new(probe) as Box<dyn boostcore::query::Query>),
+        (Occur::Must, filter),
+    ]);
+    searcher.search(&q, &Count).map(|n| n > 0).unwrap_or(false)
+}
+
+/// A document's source as the caller may see it (hidden fields gone,
+/// masked ones hashed); the source untouched while security is off.
+pub fn narrow_source(store: &crate::store::Store, index: &str, src: &mut Value) {
+    if let Some(view) = view::view_for(store, index) {
+        view.filter_source(src);
+    }
+}
+
+/// Term vectors as the caller may see them: hidden fields gone, the terms
+/// of masked fields hashed.
+pub fn narrow_term_vectors(store: &crate::store::Store, index: &str, fields: &mut Value) {
+    let Some(view) = view::view_for(store, index) else { return };
+    let Some(o) = fields.as_object_mut() else { return };
+    let names: Vec<String> = o.keys().cloned().collect();
+    for name in names {
+        if view.hidden(&name) {
+            o.remove(&name);
+        } else if view.masked(&name) {
+            if let Some(Value::Object(terms)) = o.get_mut(&name).and_then(|f| f.get_mut("terms")) {
+                let raw: Vec<(String, Value)> =
+                    terms.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                terms.clear();
+                for (k, v) in raw {
+                    terms.insert(view.mask_text(&k), v);
+                }
+            }
+        }
+    }
+}
+
+/// Whether the caller may run every one of these actions over these
+/// indices; the refusal names the whole list, as the plugin's shard-level
+/// check does for a bulk, an mget or an msearch item.
+pub fn item_refusal(
+    store: &crate::store::Store,
+    actions: &[&str],
+    indices: &[String],
+) -> Option<String> {
+    if !store.security.enabled {
+        return None;
+    }
+    let caller = layer::current_caller()?;
+    if caller.unrestricted {
+        return None;
+    }
+    let cfg = store.security.config.read();
+    let denied = actions
+        .iter()
+        .any(|a| matches!(cfg.index_verdict(&caller, a, indices), Verdict::Denied { .. }));
+    if !denied {
+        return None;
+    }
+    Some(format!("no permissions for [{}] and {}", actions.join(", "), caller.describe()))
+}
+
+/// A `security_exception` body for one item of a many-item request.
+pub fn item_error(reason: &str) -> Value {
+    json!({
+        "root_cause": [{"type": "security_exception", "reason": reason}],
+        "type": "security_exception",
+        "reason": reason,
+    })
 }

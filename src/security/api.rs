@@ -575,7 +575,7 @@ pub async fn patch_all(
         }
         cfg.dynamic = current.get("config").cloned().unwrap_or(Value::Object(Map::new()));
         let _ = cfg.save();
-    store.security.touch();
+        store.security.touch();
         return reply(StatusCode::OK, "OK", "Resource updated.");
     }
     let mut current = listing(&cfg, &kind);

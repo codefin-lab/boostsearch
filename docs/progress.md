@@ -417,18 +417,80 @@ count, write, index create/delete, mapping, settings, `_cat`, cluster,
 bulk/mget/msearch, field_caps, refresh, stats, update, delete_by_query;
 statuses and refusal bodies identical; 0 diffs.
 
+### 5.4 Document-level security (done)
+
+- The caller's view of each target index (`src/security/view.rs`) is
+  worked out once per request on the request's own task, then handed into
+  the rayon fan-out; the DLS query is laid over the shard's query as a
+  filter, so scores are untouched and counts, aggregations, scrolls,
+  points in time, `_msearch`, `_count`, explain, update/delete by query and
+  reindex all see the narrowed index. A search that stops early on a
+  size-0 aggregation no longer says so under a filter, as in the plugin.
+- Get, `HEAD`, `_source`, `_mget`, termvectors and explain check the one
+  document against the DLS query: outside the view it is not found
+  (explain: 404 with `matched: false`).
+
+### 5.5 Field-level security and masking (done)
+
+- FLS: `~field` excludes, a plain list includes, wildcards and `/regex/`
+  as the plugin reads them; a hidden field is gone from `_source`,
+  `fields`, `docvalue_fields`, highlight, inner hits, termvectors and
+  field_caps; a query clause over it matches nothing (leaf clauses, field
+  lists of `multi_match`/`query_string`/`simple_query_string`, and
+  `field:` inside a query string's text; a query string with no field
+  searches only the visible fields); an aggregation over it is empty (a
+  metric that cannot read the field's kind still fails as it would in
+  view); a sort by it has no values; a script reads it as missing.
+- Masking: BLAKE2b-256 with `plugins.security.compliance.salt` (the
+  plugin's default `e1ukloTsQlOgPquJ`), hex, applied to `_source`,
+  `fields`, `docvalue_fields`, termvectors terms, script values, sort
+  values (ordered by the hash), and terms-aggregation keys (hashed, then
+  ordered and cut to `size` as the plugin's hashed reader would); a query
+  over a masked field matches nothing; cardinality is unchanged.
+- Three shapes fixed on the way that were wrong with security off too: a
+  missing `_source/{id}` is `resource_not_found_exception`; termvectors of
+  a `keyword` field hold the whole value as one term; a metric over a
+  text/keyword field fails as `search_phase_execution_exception` with the
+  shard failure inside, and `err()` responses now carry their kind and
+  reason as an extension so a caller can re-wrap them without reading the
+  body.
+
+Checked against the reference as the limited user: 25 DLS steps and 40
+FLS/masking steps (fields, docvalue_fields, stored source, terms with
+`_key` order and size on the masked field, hidden terms, exists/term/
+prefix/wildcard/range/terms on hidden and masked, must_not on hidden,
+sorts by masked and hidden, script_fields on both, multi_match mixed and
+hidden-only, query_string with and without a field, highlight on hidden,
+sub-aggregation on masked under terms and filter, top_hits, cardinality
+and value_count, termvectors, `_source_includes`/`_excludes`, `_source`,
+`_mget` with `_source`, `_count?q=`, collapse, nested field_caps); 0
+diffs in each, node ids aside.
+
+### Per-item judgements (done)
+
+`_bulk`, `_mget` and `_msearch` are judged item by item as the plugin
+judges them: each index's share of a bulk as one shard request (refused
+with `indices:data/write/bulk[s]` and every action it carries, in order of
+appearance, `errors: true`), each mget document with
+`indices:data/read/mget[shard]`, each msearch line with
+`indices:data/read/search` over the indices its header names. Two shapes
+fixed on the way that were wrong with security off: `ingest_took` is
+reported only when a pipeline ran, and a bulk item refused sets `errors`.
+4 many-item requests compared against the reference: 0 diffs.
+
 ### Still to do in Phase 5
 
-- 5.4 DLS applied inside every query path; 5.5 FLS and field masking
-  across `_source`, fields, docvalue_fields, aggregations, sorts,
-  highlighting, field_caps, mappings and scripts (the role model already
-  carries `dls`, `fls`, `masked_fields`; `IndexRestrictions` computes the
-  caller's view per index).
-- Per-item refusals inside `_bulk`, `_mget`, `_msearch` (today the whole
-  request is judged; the plugin judges each item).
+- Multi-index searches whose targets carry *different* DLS queries and
+  run aggregations that need a search of their own (`filter`, `global`,
+  scripted terms, top_hits): the shard-level filter is right, the
+  aggregation's own search takes the first target's filter only when all
+  targets share it.
+- Sorting by a masked field orders the page by hash after the shard has
+  ordered by value; a page that is not the whole result may differ from
+  the plugin's.
 - 5.6 SAML / OIDC / LDAP; 5.7 audit log; admin client certificates.
 
-### Performance with security on
+### Performance with security on (after 5.1–5.3)
 
 Measured with `tools/bench_matrix.py` (now taking `BENCH_A`, `BENCH_B` and
 `BENCH_AUTH`): BoostSearch with security on and basic auth on every request,
@@ -457,3 +519,34 @@ Gates after this work (security off, default): phase1 398/398 (release
 build), modules 820/895 as before. A debug build trips a `debug_assert` in
 BoostCore's `EmptyScorer::seek` during an explain of a cross-fields query;
 release builds are unaffected, and the fix belongs in the fork (filed).
+
+### Performance with security on (after 5.4–5.5)
+
+Measured again after DLS, FLS, masking and the per-item judgements, on a
+quiet machine, with `tools/bench_matrix.py` (`BENCH_A`, `BENCH_B`,
+`BENCH_AUTH`, `BENCH_A_CONTAINER`). The HTTPS pass is like for like: the
+bench opens a connection per request, so both sides pay a TLS handshake
+each time, and the reference is the container running the security
+plugin (`os-secure`).
+
+| dimension | OpenSearch plain | BoostSearch security, HTTP | OpenSearch security plugin, HTTPS | BoostSearch security, HTTPS |
+|---|---|---|---|---|
+| index docs/s | 65,063 | 66,267 | 55,355 | 65,058 |
+| memory | 1.69 GiB | 370 MiB | 1.54 GiB | 364 MiB |
+| match_all p50 | 1.45 ms | 0.43 ms | 4.06 ms | 0.74 ms |
+| term p50 | 1.40 ms | 0.44 ms | 3.93 ms | 0.78 ms |
+| match p50 | 2.12 ms | 0.66 ms | 4.74 ms | 0.98 ms |
+| bool+filter p50 | 1.99 ms | 0.75 ms | 4.68 ms | 1.10 ms |
+| range p50 | 1.19 ms | 0.60 ms | 4.00 ms | 0.92 ms |
+| sort_desc p50 | 2.75 ms | 0.97 ms | 5.76 ms | 1.32 ms |
+| terms_agg p50 | 1.37 ms | 0.68 ms | 4.59 ms | 1.05 ms |
+| date_histogram p50 | 1.68 ms | 0.90 ms | 4.53 ms | 1.24 ms |
+| nested_agg p50 | 1.39 ms | 0.79 ms | 3.75 ms | 1.12 ms |
+| cardinality p50 | 1.47 ms | 0.69 ms | 4.34 ms | 1.03 ms |
+
+Every dimension won in both passes. (An earlier pass that ran while a
+build and the YAML gates shared the machine lost two lines by hundredths
+of a millisecond; it is not the measurement.)
+
+Gates after this work (security off): phase1 398/398, modules 820/895,
+unchanged.

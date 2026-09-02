@@ -966,6 +966,22 @@ pub fn run(
                 .collect()
         });
     let fanned_out = targets.len() > 1;
+    // what the caller may see of each target, worked out here on the
+    // request's own task, before any thread that cannot ask
+    let views = crate::security::view::views_for(store, &targets);
+    // the aggregations that run as searches of their own read `query_json`
+    // rather than the shard's query, so where every target is filtered the
+    // same way the filter is folded in here once; each shard folds its own
+    // in as well, and a filter laid twice changes nothing
+    let query_json: Option<Value> = match views.get(&targets[0]).and_then(|v| v.dls.clone()) {
+        Some(dls)
+            if targets.iter().all(|t| views.get(t).and_then(|v| v.dls.as_ref()) == Some(&dls)) =>
+        {
+            let base = query_json.unwrap_or_else(|| json!({"match_all": {}}));
+            Some(json!({"bool": {"must": [base], "filter": [dls]}}))
+        }
+        _ => query_json,
+    };
     let run_shard =
         |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
             search_one_shard(
@@ -982,6 +998,7 @@ pub fn run(
                 &filters_aggs,
                 page_want,
                 fanned_out,
+                &views,
             )
         };
 
@@ -1281,6 +1298,46 @@ pub fn run(
     if let Some(failed) = script_error {
         return Err(failed);
     }
+    let mut page = page;
+    // a document-level filter is a real query: nothing ends early under it
+    let dls_applied = views.values().any(|v| v.dls.is_some()) && body.get("terminate_after").is_none();
+    if !views.is_empty() {
+        for hit in page.iter_mut() {
+            let idx = hit.get("_index").and_then(|i| i.as_str()).unwrap_or("").to_string();
+            if let Some(view) = views.get(&idx) {
+                view.filter_hit(hit);
+                // a sort by a hidden field has no values; one by a masked
+                // field orders by the hash
+                if let Some(Value::Array(sv)) = hit.get_mut("sort") {
+                    for (i, k) in sort_keys.iter().enumerate() {
+                        if i < sv.len() && view.hidden(&k.field) {
+                            sv[i] = Value::Null;
+                        } else if i < sv.len() && view.masked(&k.field) {
+                            sv[i] = view.mask(&sv[i]);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(view) = views.values().next() {
+            if sort_keys.iter().any(|k| view.masked(&k.field)) {
+                let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
+                page.sort_by(|a, b| {
+                    let sa = a.get("sort").and_then(|v| v.as_array());
+                    let sb = b.get("sort").and_then(|v| v.as_array());
+                    for (i, d) in desc.iter().enumerate() {
+                        let x = sa.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                        let y = sb.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                        let c = if *d { y.cmp(&x) } else { x.cmp(&y) };
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+        }
+    }
 
     let filters_results = run_peeled_aggs(store, &targets, &query_json, &filters_aggs, weighted)?;
 
@@ -1383,6 +1440,15 @@ pub fn run(
     // `search.max_buckets` caps how many buckets one request may build. The
     // limit is counted over the whole answer, sub-buckets included, which is
     // what makes a nested terms aggregation the expensive one.
+    // masked keys hashed, hidden hits narrowed, inside every view
+    let mut aggs = aggs;
+    if !views.is_empty() {
+        if let (Some(a), Some(req)) = (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations"))) {
+            for view in views.values() {
+                view.post_aggs(req, a);
+            }
+        }
+    }
     check_max_buckets(store, &aggs)?;
 
     let agg_forces_all = body
@@ -1438,6 +1504,7 @@ pub fn run(
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,
         failures,
+        filtered: dls_applied,
     })
 }
 

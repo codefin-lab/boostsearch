@@ -84,13 +84,19 @@ pub async fn get_source(
             format!("fields [_source] are disabled in the mappings for index [{}]", g.name),
         );
     }
-    match read_source_as_asked(&g, &id, &p).filter(|_| routing_matches(&g, &id, &p)) {
-        Some(src) => axum::Json(filter_source_params(&src, &p)).into_response(),
-        None => (
+    match read_source_as_asked(&g, &id, &p)
+        .filter(|_| routing_matches(&g, &id, &p))
+        .filter(|_| crate::security::doc_visible(&store, &g, &id))
+    {
+        Some(mut src) => {
+            crate::security::narrow_source(&store, &g.name, &mut src);
+            axum::Json(filter_source_params(&src, &p)).into_response()
+        }
+        None => err(
             StatusCode::NOT_FOUND,
-            axum::Json(json!({"_index": g.name, "_id": id, "found": false})),
-        )
-            .into_response(),
+            "resource_not_found_exception",
+            format!("Document not found [{}]/[{id}]", g.name),
+        ),
     }
 }
 

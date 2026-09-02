@@ -127,7 +127,7 @@ pub(crate) fn write_page(
                 let told = (!rescored && sort_keys.is_empty())
                     .then(|| {
                         let g = searchers[h.shard_idx].2.read();
-                        query_json.as_ref().and_then(|q| explain_document(&g, q, &h.id))
+                        crate::security::with_dls(store, &g.name, query_json.clone()).and_then(|q| explain_document(&g, &q, &h.id))
                     })
                     .flatten();
                 hit["_explanation"] = told.unwrap_or_else(|| {
@@ -314,7 +314,9 @@ pub(crate) fn write_page(
             // a script field is whatever its script returns for the document
             if !script_fields.is_empty() && script_error.is_none() {
                 let g = searchers[h.shard_idx].2.read();
-                let expanded = crate::store::expand_for_indexing(h.source.clone(), &g.mapping);
+                let mut seen = h.source.clone();
+                crate::security::narrow_source(store, &h.index, &mut seen);
+                let expanded = crate::store::expand_for_indexing(seen, &g.mapping);
                 let mut f = match hit.get("fields") {
                     Some(Value::Object(o)) => o.clone(),
                     _ => serde_json::Map::new(),
@@ -725,7 +727,7 @@ pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
     let aggregating = body.get("aggs").or_else(|| body.get("aggregations")).is_some();
     if body.get("terminate_after").is_some()
         || p.contains_key("terminate_after")
-        || (asked_size == Some(0) && aggregating)
+        || (asked_size == Some(0) && aggregating && !out.filtered)
     {
         resp["terminated_early"] = json!(true);
     }
