@@ -164,6 +164,9 @@ pub struct Coordinator {
     /// shard events whose reporter is waiting for the state that carries
     /// them to be committed: (the version when it arrived, who, what)
     event_replies: Vec<(u64, NodeId, Envelope)>,
+    /// the primary term this node has already sent its documents out for,
+    /// by index and shard
+    resynced: BTreeMap<(String, u32), u64>,
     leader_check_outstanding: Option<u64>,
     /// nodes that asked to join, and to leave, while a publication was in flight
     waiting_joins: BTreeMap<NodeId, DiscoveryNode>,
@@ -288,6 +291,7 @@ impl Coordinator {
             pending_checks: BTreeMap::new(),
             leader_misses: 0,
             event_replies: Vec::new(),
+            resynced: BTreeMap::new(),
             leader_check_outstanding: None,
             waiting_joins: BTreeMap::new(),
             pending_removals: BTreeSet::new(),
@@ -1138,6 +1142,53 @@ impl Coordinator {
         }
         let mine: Vec<super::state::ShardRouting> =
             self.committed.routing.on_node(&me).cloned().collect();
+        // a primary held here in a term this node has not sent its documents
+        // out for: the copies around it followed the primary before, and one
+        // of them may hold another value for a document nobody writes again
+        for copy in
+            mine.iter().filter(|c| c.primary && c.state == super::state::ShardState::Started)
+        {
+            let term = self
+                .committed
+                .indices
+                .get(&copy.index)
+                .and_then(|m| m.primary_terms.get(&copy.shard).copied())
+                .unwrap_or(1);
+            let key = (copy.index.clone(), copy.shard);
+            if self.resynced.get(&key).copied().unwrap_or(0) >= term {
+                continue;
+            }
+            self.resynced.insert(key, term);
+            let others: Vec<NodeId> = self
+                .committed
+                .routing
+                .shards_of(&copy.index)
+                .filter(|c| {
+                    c.shard == copy.shard
+                        && !c.primary
+                        && matches!(
+                            c.state,
+                            super::state::ShardState::Started
+                                | super::state::ShardState::Relocating
+                        )
+                })
+                .filter_map(|c| c.node.clone())
+                .filter(|n| *n != me)
+                .collect();
+            if !others.is_empty() {
+                if let Some(h) = &self.host {
+                    h.resync(&copy.index, copy.shard, term, &others);
+                }
+                if self.notes {
+                    out.push(self.note(format!(
+                        "[{}][{}]: sending what this node holds to {} copies in term {term}",
+                        copy.index,
+                        copy.shard,
+                        others.len()
+                    )));
+                }
+            }
+        }
         // copies to start
         for copy in mine.iter().filter(|c| c.state == super::state::ShardState::Initializing) {
             let Some(aid) = copy.allocation_id.clone() else { continue };
@@ -1147,7 +1198,14 @@ impl Coordinator {
             self.reported.insert(aid.clone());
             let meta = self.committed.indices.get(&copy.index).cloned();
             let result = match (&self.host, meta) {
-                (Some(h), Some(m)) => h.start_shard(&m, copy),
+                (Some(h), Some(m)) => {
+                    let primary = self
+                        .committed
+                        .routing
+                        .primary(&copy.index, copy.shard)
+                        .and_then(|p| p.node.clone());
+                    h.start_shard(&m, copy, primary.as_ref())
+                }
                 _ => Ok(true),
             };
             self.hosted.insert(aid.clone(), (copy.index.clone(), copy.shard));
@@ -1958,6 +2016,29 @@ impl Coordinator {
                 let shard = v.get("shard").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 let allocation_id =
                     v.get("allocation_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                // a copy speaks for itself when it is filled; a copy that
+                // missed a write or failed is the primary's to report, and
+                // only the node this manager placed the primary on may say
+                // so: a node that thinks it is still the primary would
+                // otherwise take the real one out of the in-sync set and
+                // leave the writes it acknowledged with nobody to hold them
+                if e.action != SHARD_STARTED {
+                    let primary_on =
+                        self.committed.routing.primary(&index, shard).and_then(|p| p.node.clone());
+                    let mine = self
+                        .committed
+                        .routing
+                        .primary(&index, shard)
+                        .and_then(|p| p.allocation_id.clone());
+                    if primary_on.as_ref() != Some(&from)
+                        || mine.as_deref() == Some(allocation_id.as_str())
+                    {
+                        let msg = json!({"term": self.current_term,
+                            "reason": "only the primary reports its copies, and never itself"})
+                        .to_string();
+                        return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                    }
+                }
                 let ev = if e.action == SHARD_STARTED {
                     ShardEvent::Started { index, shard, allocation_id }
                 } else if e.action == SHARD_STALE {

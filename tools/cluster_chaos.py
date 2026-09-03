@@ -418,6 +418,8 @@ def main():
     wrong = 0
     checked = 0
     lost_ids = []
+    # doc id -> the holders that do not have it
+    missing_from = {}
     for n in nodes:
         if n.name not in holders:
             continue
@@ -432,8 +434,7 @@ def main():
             try:
                 st, body = call(f"http://{n.http}/{a.index}/_doc/{doc_id}?preference=_local", timeout=10)
                 if not body.get("found"):
-                    lost += 1
-                    lost_ids.append(doc_id)
+                    missing_from.setdefault(doc_id, []).append(n.name)
                     if lost <= 5:
                         print(f"  LOST {doc_id} on {n.name}")
                 elif body.get("_source", {}).get("v") != value:
@@ -442,10 +443,7 @@ def main():
                         print(f"  WRONG {doc_id} on {n.name}: {body.get('_source')} against v={value}")
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    lost += 1
-                    lost_ids.append(doc_id)
-                    if lost <= 5:
-                        print(f"  LOST {doc_id} on {n.name}")
+                    missing_from.setdefault(doc_id, []).append(n.name)
                 else:
                     print(f"  read of {doc_id} on {n.name}: http {e.code}")
             except Exception as e:
@@ -456,6 +454,25 @@ def main():
         print("memory (RSS MiB) first sample -> last sample per node:")
         for i, n in enumerate(nodes):
             print(f"  {n.name}: {first[i]:.0f} -> {last[i]:.0f}" if first[i] and last[i] else f"  {n.name}: n/a")
+    # an acknowledged write missing from every holder is lost; missing from
+    # some of them is a copy that is behind while the cluster says green
+    behind = {}
+    for doc_id, nodes_without in missing_from.items():
+        if len(nodes_without) >= len(holders):
+            lost += 1
+            lost_ids.append(doc_id)
+        else:
+            for name in nodes_without:
+                behind[name] = behind.get(name, 0) + 1
+    for name, n_behind in sorted(behind.items()):
+        times = sorted(
+            load.acked_at.get(i, (0, "?"))[0]
+            for i, ns in missing_from.items()
+            if name in ns and len(ns) < len(holders)
+        )
+        print(f"  BEHIND {name}: {n_behind} acknowledged writes it does not have, from {times[0]:.1f}s to {times[-1]:.1f}s on the load clock")
+    for doc_id in lost_ids[:5]:
+        print(f"  LOST {doc_id}: on none of {holders}")
     if lost_ids:
         # when the lost writes were acknowledged, and by which node, against the faults
         times = sorted(load.acked_at.get(i, (0, "?")) for i in set(lost_ids))
@@ -477,7 +494,14 @@ def main():
         for t, what in sorted(merged):
             print(f"    {t:6.1f}s {what}")
     print(f"checked {checked} copies of acknowledged documents: {lost} lost, {wrong} wrong")
-    print("RESULT", "LOST" if lost or wrong else "every acknowledged write is on every copy", "|", "settled" if settled is not None else "NOT settled")
+    print(
+        "RESULT",
+        "LOST" if lost or wrong else "no acknowledged write lost",
+        "|",
+        "every copy has them all" if not behind else f"copies behind: {behind}",
+        "|",
+        "settled" if settled is not None else "NOT settled",
+    )
     for n in nodes:
         n.stop_graceful(seconds=10)
     return 1 if lost or wrong or settled is None else 0

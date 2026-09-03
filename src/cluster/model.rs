@@ -119,7 +119,12 @@ impl MetadataSource for ModelSource {
 }
 
 impl ShardHost for ModelSource {
-    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
+    fn start_shard(
+        &self,
+        meta: &IndexMetadata,
+        copy: &ShardRouting,
+        _primary: Option<&NodeId>,
+    ) -> Result<bool, String> {
         if copy.primary && copy.relocating_node.is_none() {
             // where the data is, or an empty primary someone accepted
             self.0.docs.lock().entry(meta.name.clone()).or_default();

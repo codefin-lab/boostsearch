@@ -830,6 +830,7 @@ pub async fn seed_replica(
     index: &str,
     shard: u32,
     allocation_id: &str,
+    primary: &NodeId,
 ) -> Result<(), String> {
     let lock = recovery_lock(index);
     let mut done = lock.lock().await;
@@ -843,7 +844,7 @@ pub async fn seed_replica(
     arrived().lock().insert(index.to_string(), Vec::new());
     let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
     let before = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
-    let r = seed_replica_inner(store, index, shard).await;
+    let r = seed_replica_inner(store, index, shard, primary).await;
     let r = match r {
         Ok(()) => apply_what_waited(store, index).await,
         Err(why) => {
@@ -857,7 +858,8 @@ pub async fn seed_replica(
     if notes {
         let after = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
         eprintln!(
-            "boostsearch: filled [{index}] as {allocation_id}: {before} documents here before, {after} after ({})",
+            "boostsearch: {} filled [{index}] as {allocation_id}: {before} documents here before, {after} after ({})",
+            super::clock().wall(),
             match &r {
                 Ok(()) => "done".to_string(),
                 Err(why) => why.clone(),
@@ -901,42 +903,51 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
     .unwrap_or_else(|e| Err(format!("finishing the recovery of [{index}] panicked: {e}")))
 }
 
-async fn seed_replica_inner(store: &Store, index: &str, shard: u32) -> Result<(), String> {
-    let primary =
-        super::with_state(|s| s.routing.primary(index, shard).and_then(|p| p.node.clone()));
+async fn seed_replica_inner(
+    store: &Store,
+    index: &str,
+    shard: u32,
+    primary: &NodeId,
+) -> Result<(), String> {
     let me = super::runtime().map(|r| r.local());
-    if let (Some(p), Some(me)) = (&primary, &me) {
-        if p != me {
-            match seed_from_files(store, index, p).await {
-                // the files are the primary's last commit; what it took after
-                // that comes over as documents
-                Ok(true) => {
-                    let from = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
-                    return catch_up_by_scan(store, index, shard, from).await;
-                }
-                Ok(false) => {}
-                Err(why) => {
-                    // the files did not come: the documents will
-                    eprintln!("boostsearch: {why}; scanning instead");
-                }
+    if let Some(me) = &me {
+        if primary == me {
+            // the manager placed a copy here and named this node the primary
+            // of it: this node's own state is not what the manager published,
+            // and filling from itself would leave the copy as it stands
+            return Err(format!("[{index}][{shard}]: this node cannot fill a copy from itself"));
+        }
+        match seed_from_files(store, index, primary).await {
+            // the files are the primary's last commit; what it took after
+            // that comes over as documents
+            Ok(true) => {
+                let from = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
+                return catch_up_by_scan(store, index, shard, from, primary).await;
+            }
+            Ok(false) => {}
+            Err(why) => {
+                // the files did not come: the documents will
+                eprintln!("boostsearch: {why}; scanning instead");
             }
         }
     }
-    seed_by_scan(store, index, shard).await
+    seed_by_scan(store, index, shard, primary).await
 }
 
 /// Fill a copy from a scan of the primary's documents, in sequence order,
 /// starting from nothing: what was here before may hold writes the
 /// primary never took.
-pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), String> {
+pub async fn seed_by_scan(
+    store: &Store,
+    index: &str,
+    shard: u32,
+    primary: &NodeId,
+) -> Result<(), String> {
     {
         let meta = super::with_state(|s| s.indices.get(index).cloned());
         let store2 = store.clone();
         let name = index.to_string();
-        let primary_here = super::with_state(|s| {
-            let me = super::runtime().map(|r| r.local());
-            s.routing.primary(index, shard).and_then(|p| p.node.clone()) == me
-        });
+        let primary_here = super::runtime().map(|r| r.local()).as_ref() == Some(primary);
         if !primary_here {
             if let Some(meta) = meta {
                 let _ = tokio::task::spawn_blocking(move || {
@@ -955,7 +966,7 @@ pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), 
             }
         }
     }
-    catch_up_by_scan(store, index, shard, 0).await
+    catch_up_by_scan(store, index, shard, 0, primary).await
 }
 
 /// Ask the primary for everything from a sequence number on, and apply it
@@ -967,17 +978,14 @@ pub async fn catch_up_by_scan(
     index: &str,
     shard: u32,
     from: u64,
+    primary: &NodeId,
 ) -> Result<(), String> {
     let Some(rt) = super::runtime() else { return Ok(()) };
     let me = rt.local();
-    let primary =
-        super::with_state(|s| s.routing.primary(index, shard).and_then(|p| p.node.clone()));
-    let Some(primary) = primary else {
-        return Err(format!("[{index}][{shard}] has no primary to recover from"));
-    };
-    if primary == me {
+    if *primary == me {
         return Ok(());
     }
+    let primary = primary.clone();
     let mut from_seq = from;
     let mut tries = 0;
     loop {
@@ -1155,4 +1163,62 @@ async fn call_while_member(
             }
         }
     }
+}
+
+/// What this node holds, sent to the other copies of a shard it has just
+/// become the primary of.
+///
+/// A copy that followed the primary before this one may hold another value
+/// for a document -- it took a write this node never did, in a term that is
+/// over -- and nothing later would reconcile the two. Every document goes
+/// out under the new term, which wins over whatever version stands on the
+/// copy. Documents the copy has and this node does not are left alone: they
+/// may be writes it took and answered for.
+pub async fn resync(
+    store: &Store,
+    index: &str,
+    shard: u32,
+    term: u64,
+    to: &[NodeId],
+) -> Result<(), String> {
+    let Some(rt) = super::runtime() else { return Ok(()) };
+    let mut from_seq = 0u64;
+    let mut sent = 0usize;
+    loop {
+        let store2 = store.clone();
+        let name = index.to_string();
+        let page = tokio::task::spawn_blocking(move || {
+            let Some(st) = store2.get(&name) else { return (Vec::new(), None) };
+            let g = st.read();
+            crate::api::doc::scan_replicated(&g, u32::MAX, from_seq, 2000)
+        })
+        .await
+        .unwrap_or((Vec::new(), None));
+        let (mut ops, next) = page;
+        if ops.is_empty() && next.is_none() {
+            break;
+        }
+        for op in ops.iter_mut() {
+            op.term = term;
+        }
+        sent += ops.len();
+        let body = serde_json::to_vec(&json!({"index": index, "refresh": "", "ops": ops}))
+            .unwrap_or_default();
+        for node in to {
+            let _ = rt
+                .call(node, REPLICA_WRITE, body.clone(), std::time::Duration::from_secs(60))
+                .await;
+        }
+        match next {
+            Some(n) if n > from_seq => from_seq = n,
+            _ => break,
+        }
+    }
+    if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+        eprintln!(
+            "boostsearch: sent {sent} documents of [{index}][{shard}] to {} copies in term {term}",
+            to.len()
+        );
+    }
+    Ok(())
 }

@@ -315,6 +315,10 @@ pub struct IdxState {
     /// realtime while search still only moves on an explicit refresh.
     pub realtime: IndexReader,
     pub seq_no: u64,
+    /// the highest primary term whose writes this copy has applied: a write
+    /// from a newer primary wins whatever version stands here, since a
+    /// promoted copy counts versions from what it holds, which may be behind
+    pub applied_term: u64,
     /// number of searches served, reported by _stats. Atomic so counting a
     /// search never needs a write lock -- taking one here would deadlock any
     /// caller that already holds the read guard.

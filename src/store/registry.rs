@@ -503,6 +503,7 @@ impl Store {
             pending_bytes: 0,
             realtime,
             seq_no: 0,
+            applied_term: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_groups: RwLock::new(HashMap::new()),

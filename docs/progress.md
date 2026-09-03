@@ -1388,11 +1388,33 @@ or its own idea of the cluster.
     to a node that is down leaves the set before that node returns and is
     handed the primary as though it had everything.
 
-Ten chaos seeds of sixty seconds, five faults apiece: nine settle with
-every acknowledged write on every copy. One seed leaves a replica 420
-writes behind while the cluster says green -- the primary has them all,
-so nothing is lost, but a copy can still be counted in sync while it is
-catching up; that is the next thing to close. Rolling restart, two rounds
+Two more followed, found by the same check once it told a write missing
+everywhere (lost) from a write missing on one copy (a copy behind).
+
+  - **A node that thought it was still the primary poisoned the in-sync
+    set.** Its writes went nowhere the cluster could see, and it then
+    reported every other copy -- the real primary among them -- as having
+    missed them. The manager takes a stale or failed report only from the
+    node it placed the primary on, and never about that primary's own
+    copy; a copy still speaks for itself when it finishes filling.
+  - **Two copies could hold different values for one document.** A copy
+    promoted after a partition counts a document's versions from what it
+    holds, which may be a version behind, so its next write was refused by
+    the copy that had the newer number and the two never agreed again. A
+    write from a newer primary term now wins whatever version stands on a
+    copy, and a node that has just become the primary sends what it holds
+    to the other copies under the new term -- OpenSearch's primary/replica
+    resync, in its simplest form: every document rather than the ones
+    above the global checkpoint. Documents a copy has and the new primary
+    does not are left where they are: they may be writes it took and
+    answered for.
+
+Eleven chaos seeds of sixty seconds, five faults apiece: every one
+settles with every acknowledged write on every copy, and none leaves a
+copy behind. The linearizability harness of 6.10 reads only the nodes the
+cluster says hold a copy now, and over its seeds there is no divergence
+and no lost write; the reads that no linearization explains are the
+shipped mode's, inside the fault windows. Rolling restart, two rounds
 over three nodes: green after every node, nothing lost, and about a fifth
 of the writes refused while the primary moves (OpenSearch refuses fewer,
 and the block is deliberately eager here). A five-minute soak with faults
@@ -1411,4 +1433,8 @@ restart quiet.
 Gates: unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.11
 wins every dimension in all three passes (index 94,280 vs 65,652 docs/s
 and 399MiB vs 2.1GiB against plain OpenSearch; 89,077 vs 56,858 against
-os-secure; the TLS pass 89,427 vs 65,895 with every query row ahead).
+os-secure; the TLS pass 89,427 vs 65,895 with every query row ahead). The
+bench after the two fixes above reads lower on both sides on a machine
+that had been running chaos for hours (72,067 against 63,555 docs/s, and
+the commit before them measures the same there, so nothing in them costs
+throughput); every dimension is still ahead.

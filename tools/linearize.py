@@ -134,6 +134,7 @@ def main():
     a = ap.parse_args()
     nodes = a.nodes.split(",")
     names = a.names.split(",")
+    names_of = dict(zip(nodes, names))
     pids = [int(p) for p in a.pids.split(",")] if a.pids else []
     rng = random.Random(a.seed)
     keys = [f"k{i}" for i in range(a.keys)]
@@ -213,7 +214,23 @@ def main():
     print(f"{total} operations, {len(acked)} writes acknowledged, {sum(1 for o in ops if o['kind']=='write' and not o['ok'])} writes refused or timed out, {sum(1 for o in ops if o['kind']=='read' and not o['ok'])} reads failed")
     for (s, e, d) in windows:
         print(f"  fault {d}: {s:.1f}s .. {e:.1f}s")
-    # final values per key, per node holding a copy
+    # final values per key, per node holding a copy: a node the cluster no
+    # longer places a copy on has an old index or none, and reading it would
+    # be reading something the cluster does not claim to hold
+    holders = set()
+    for node in nodes:
+        try:
+            req = urllib.request.Request(f"http://{node}/_cat/shards/{a.index}?h=node,state")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                rows = [l.split() for l in r.read().decode().splitlines() if l.strip()]
+            names = {row[0] for row in rows if len(row) == 2 and row[1] == "STARTED"}
+            holders = {n for n, name in zip(nodes, a.names.split(",")) if name in names}
+            break
+        except Exception:
+            continue
+    if holders:
+        nodes = [n for n in nodes if n in holders]
+        print(f"copies on {[names_of.get(n, n) for n in nodes]}")
     finals = {}
     for node in nodes:
         finals[node] = {}

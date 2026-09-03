@@ -61,9 +61,23 @@ pub trait ShardHost: Send + Sync {
     /// Make the copy exist here. `Ok(true)` means it is ready now; `Ok(false)`
     /// means the host will say later, through `Input::ShardDone`; an error
     /// fails the allocation.
-    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String>;
+    ///
+    /// `primary` is the node holding the primary in the state that placed
+    /// this copy: the host fills the copy from there rather than from what
+    /// its own node believes, which may be older than the manager's word.
+    fn start_shard(
+        &self,
+        meta: &IndexMetadata,
+        copy: &ShardRouting,
+        primary: Option<&NodeId>,
+    ) -> Result<bool, String>;
     /// The copy is no longer this node's.
     fn remove_shard(&self, index: &str, shard: u32);
+    /// This node has just become the primary of a shard in a new term: send
+    /// what it holds to the other copies, so a copy that followed the old
+    /// primary cannot keep a different value for a document nothing writes
+    /// again. OpenSearch calls this the primary/replica resync.
+    fn resync(&self, _index: &str, _shard: u32, _term: u64, _to: &[NodeId]) {}
 }
 
 /// A fingerprint of a snapshot: the same metadata gives the same number.
@@ -154,14 +168,23 @@ impl StoreSource {
 
     /// Fill a copy from the primary's documents, off this thread; the
     /// runtime hears the result as `Input::ShardDone`.
-    fn seed(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
+    fn seed(
+        &self,
+        meta: &IndexMetadata,
+        copy: &ShardRouting,
+        primary: Option<&NodeId>,
+    ) -> Result<bool, String> {
         let Some(aid) = copy.allocation_id.clone() else { return Ok(true) };
+        let Some(primary) = primary.cloned() else {
+            return Err(format!("[{}] has no primary to fill this copy from", meta.name));
+        };
         let store = self.store.clone();
         let index = meta.name.clone();
         let shard = copy.shard;
         let id = aid.clone();
         tokio::spawn(async move {
-            let result = super::replication::seed_replica(&store, &index, shard, &id).await;
+            let result =
+                super::replication::seed_replica(&store, &index, shard, &id, &primary).await;
             if let Some(rt) = super::runtime() {
                 rt.shard_done(aid, result);
             }
@@ -171,7 +194,12 @@ impl StoreSource {
 }
 
 impl ShardHost for StoreSource {
-    fn start_shard(&self, meta: &IndexMetadata, copy: &ShardRouting) -> Result<bool, String> {
+    fn start_shard(
+        &self,
+        meta: &IndexMetadata,
+        copy: &ShardRouting,
+        primary: Option<&NodeId>,
+    ) -> Result<bool, String> {
         if copy.primary && copy.relocating_node.is_none() {
             // a primary placed where its data is (a new index, a promoted
             // copy), or an empty one someone asked for after a loss: made
@@ -193,7 +221,7 @@ impl ShardHost for StoreSource {
         }
         if self.store.get(&meta.name).is_some() {
             // a copy already built here: caught up from the primary like a new one
-            return self.seed(meta, copy);
+            return self.seed(meta, copy, primary);
         }
         // the index as the manager describes it, minus what the store assigns itself
         let mut settings = meta.settings.clone();
@@ -208,11 +236,22 @@ impl ShardHost for StoreSource {
         self.store.create(&meta.name, &body).map_err(|e| {
             format!("could not create a local copy of [{}][{}]: {e}", meta.name, copy.shard)
         })?;
-        self.seed(meta, copy)
+        self.seed(meta, copy, primary)
     }
 
     fn remove_shard(&self, index: &str, _shard: u32) {
         self.store.drop_local(index);
+    }
+
+    fn resync(&self, index: &str, shard: u32, term: u64, to: &[NodeId]) {
+        let store = self.store.clone();
+        let index = index.to_string();
+        let to = to.to_vec();
+        tokio::spawn(async move {
+            if let Err(why) = super::replication::resync(&store, &index, shard, term, &to).await {
+                eprintln!("boostsearch: {why}");
+            }
+        });
     }
 }
 

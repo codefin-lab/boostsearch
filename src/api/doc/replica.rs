@@ -18,7 +18,13 @@ fn held_version(st: &IdxState, id: &str) -> Option<u64> {
 /// Apply one of the primary's writes here. `false` when the copy already
 /// holds this version or a newer one.
 pub fn apply_replicated(st: &mut IdxState, op: &ReplicaOp) -> bool {
-    if let Some(have) = held_version(st, &op.id) {
+    // a write from a newer primary always wins: the primary that took over
+    // counts a document's versions from the copy it held, which may be a
+    // version behind what is here, and comparing versions across terms would
+    // leave the two copies holding different values for one document for good
+    if op.term > st.applied_term {
+        st.applied_term = op.term;
+    } else if let Some(have) = held_version(st, &op.id) {
         if have >= op.version {
             return false;
         }
