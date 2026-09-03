@@ -9,8 +9,9 @@ aggregation phase: the diff is meant to be empty.
 """
 import json, sys, urllib.request, urllib.error
 
-A = ("OpenSearch", "http://127.0.0.1:9299")
-B = ("BoostSearch", "http://127.0.0.1:9200")
+import os
+A = ("OpenSearch", os.environ.get("DIFF_A", "http://127.0.0.1:9299"))
+B = ("BoostSearch", os.environ.get("DIFF_B", "http://127.0.0.1:9200"))
 INDEX = "diff"
 
 MAPPING = {

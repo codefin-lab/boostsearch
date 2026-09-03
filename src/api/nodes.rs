@@ -82,7 +82,11 @@ pub async fn nodes_stats(
         .unwrap_or_default();
     for m in asked.iter().filter(|m| !m.is_empty() && *m != "stats") {
         // a node id is also allowed in this position, and ours is known
-        if METRICS.contains(&m.as_str()) || matches!(m.as_str(), "node-0" | "_local" | "_all") {
+        if METRICS.contains(&m.as_str())
+            || matches!(m.as_str(), "_local" | "_all")
+            || m == crate::cluster::identity().id.as_str()
+            || *m == crate::cluster::identity().name
+        {
             continue;
         }
         // a near miss is a typo, and naming the metric meant saves a reading
@@ -115,11 +119,12 @@ pub async fn nodes_stats(
     let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
     let mut out = json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": "boostsearch",
-        "nodes": {"node-0": {
-            "timestamp": 0, "name": "boostsearch",
-            "transport_address": "127.0.0.1:9300", "host": "127.0.0.1", "ip": "127.0.0.1",
-            "roles": ["cluster_manager", "data", "ingest"], "attributes": {},
+        "cluster_name": crate::cluster::identity().cluster_name,
+        "nodes": {crate::cluster::identity().id.as_str(): {
+            "timestamp": 0, "name": crate::cluster::identity().name,
+            "transport_address": crate::cluster::identity().transport_address,
+            "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host,
+            "roles": crate::cluster::identity().roles, "attributes": crate::cluster::identity().attributes,
             "indices": {
                 "docs": {"count": docs, "deleted": 0},
                 "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
@@ -191,13 +196,40 @@ pub async fn nodes_stats(
     });
     if !index_metrics.is_empty()
         && !index_metrics.iter().any(|m| m == "_all")
-        && let Some(idx) = out.pointer_mut("/nodes/node-0/indices").and_then(|v| v.as_object_mut())
+        && let Some(idx) = out
+            .pointer_mut(&format!("/nodes/{}/indices", crate::cluster::identity().id))
+            .and_then(|v| v.as_object_mut())
     {
         // the status counter belongs to indexing, and travels with it
         idx.retain(|k, _| {
             index_metrics.iter().any(|m| m == k)
                 || (k == "status_counter" && index_metrics.iter().any(|m| m == "indexing"))
         });
+    }
+    // every other node the cluster holds, with what its identity says
+    {
+        let live = crate::cluster::current_state();
+        let me = crate::cluster::identity();
+        if let Some(nodes) = out.get_mut("nodes").and_then(|n| n.as_object_mut()) {
+            for (id, n) in &live.nodes {
+                if *id == me.id {
+                    continue;
+                }
+                let ip = n
+                    .transport_address
+                    .rsplit_once(':')
+                    .map(|(h, _)| h.to_string())
+                    .unwrap_or_default();
+                nodes.insert(
+                    id.as_str().to_string(),
+                    json!({
+                        "timestamp": 0, "name": n.name, "transport_address": n.transport_address,
+                        "host": ip, "ip": ip, "roles": n.roles, "attributes": n.attributes,
+                    }),
+                );
+            }
+        }
+        out["_nodes"] = json!({"total": live.nodes.len().max(1), "successful": live.nodes.len().max(1), "failed": 0});
     }
     respond(&p, out)
 }
@@ -334,7 +366,8 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
         "CPU_USAGE",
         "MEMORY_USAGE",
     ];
-    let row = ["node-0", "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
+    let me = crate::cluster::identity();
+    let row = [me.id.as_str(), "DEFAULT_WORKLOAD_GROUP", "0", "0", "0", "0", "0"];
     let mut out = String::new();
     if p.get("v").map(|v| v != "false").unwrap_or(false) {
         out.push_str(&cols.join(" "));
@@ -408,35 +441,55 @@ pub fn node_attrs() -> Vec<(String, String)> {
 }
 
 pub async fn nodes_info(Query(p): Query<Params>) -> Response {
-    respond(
-        &p,
-        json!({
-            "_nodes": {"total": 1, "successful": 1, "failed": 0},
-            "cluster_name": "boostsearch",
-            "nodes": {"node-0": {
-                "name": "boostsearch", "transport_address": "127.0.0.1:9300",
-                "host": "127.0.0.1", "ip": "127.0.0.1", "version": "3.9.0",
-                "build_type": "tar", "build_hash": "boostsearch", "roles": ["data", "ingest"],
-                "attributes": {},
-                "os": {"refresh_interval_in_millis": 1000,
-                       "available_processors": num_cpus(),
-                       "allocated_processors": num_cpus()},
-                "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
-                            "mlockall": false},
-                "plugins": [], "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
-                "search_pipelines": {
-                    "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
-                    "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
-                },
-                "thread_pool": {}, "transport": {},
-                // where a client -- or another cluster reindexing from this
-                // one -- reaches this node
-                "http": {
-                    "bound_address": [crate::api::bound_address()],
-                    "publish_address": crate::api::bound_address(),
-                    "max_content_length_in_bytes": crate::api::max_content_bytes(),
-                },
-            }},
-        }),
-    )
+    let live = crate::cluster::current_state();
+    let mut others = serde_json::Map::new();
+    for (id, n) in &live.nodes {
+        if *id == crate::cluster::identity().id {
+            continue;
+        }
+        let ip =
+            n.transport_address.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_default();
+        others.insert(
+            id.as_str().to_string(),
+            json!({
+                "name": n.name, "transport_address": n.transport_address, "host": ip, "ip": ip,
+                "version": "3.9.0", "build_type": "tar", "build_hash": "boostsearch",
+                "roles": n.roles, "attributes": n.attributes,
+            }),
+        );
+    }
+    let mut body = json!({
+        "_nodes": {"total": live.nodes.len().max(1), "successful": live.nodes.len().max(1), "failed": 0},
+        "cluster_name": crate::cluster::identity().cluster_name,
+        "nodes": {crate::cluster::identity().id.as_str(): {
+            "name": crate::cluster::identity().name, "transport_address": crate::cluster::identity().transport_address,
+            "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host, "version": "3.9.0",
+            "build_type": "tar", "build_hash": "boostsearch", "roles": crate::cluster::identity().roles,
+            "attributes": crate::cluster::identity().attributes,
+            "os": {"refresh_interval_in_millis": 1000,
+                   "available_processors": num_cpus(),
+                   "allocated_processors": num_cpus()},
+            "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
+                        "mlockall": false},
+            "plugins": [], "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
+            "search_pipelines": {
+                "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
+                "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
+            },
+            "thread_pool": {}, "transport": {},
+            // where a client -- or another cluster reindexing from this
+            // one -- reaches this node
+            "http": {
+                "bound_address": [crate::api::bound_address()],
+                "publish_address": crate::api::bound_address(),
+                "max_content_length_in_bytes": crate::api::max_content_bytes(),
+            },
+        }},
+    });
+    if let Some(nodes) = body.get_mut("nodes").and_then(|n| n.as_object_mut()) {
+        for (k, v) in others {
+            nodes.insert(k, v);
+        }
+    }
+    respond(&p, body)
 }

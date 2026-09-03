@@ -114,6 +114,9 @@ impl Store {
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
             let learned = (meta.get("dynamic_types").cloned(), meta.get("observed_kinds").cloned());
+            let kept_allocation =
+                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let kept_seq = meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
@@ -121,6 +124,8 @@ impl Store {
                     if let Some(st) = store.get(name) {
                         {
                             let mut g = st.write();
+                            g.allocation_id = kept_allocation.clone();
+                            g.seq_no = g.seq_no.max(kept_seq);
                             if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok())
                             {
                                 g.dynamic_types = v;
@@ -179,6 +184,58 @@ impl Store {
 
     pub fn note_writer_closed(&self, name: &str) {
         self.live_writers.write().retain(|n| n != name);
+    }
+
+    /// Where an index's files live under the data directory.
+    pub fn index_dir(&self, name: &str) -> Option<PathBuf> {
+        self.index_path(name)
+    }
+
+    /// Open an index from files recovery wrote: the directory replaces
+    /// whatever this node held under the name, and what the old copy's
+    /// translog was holding is handed back for replay.
+    pub fn adopt(&self, name: &str, recovered: &std::path::Path) -> Result<Vec<Value>> {
+        let Some(path) = self.index_path(name) else {
+            anyhow::bail!("no data directory to adopt [{name}] into");
+        };
+        // the old copy's unreplayed writes, if it had any
+        let mut held = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(path.join(TRANSLOG)) {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                if let Ok(rec) = serde_json::from_str::<Value>(line) {
+                    held.push(rec);
+                }
+            }
+        }
+        self.drop_local(name);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        std::fs::rename(recovered, &path)?;
+        let raw = std::fs::read_to_string(path.join("_meta.json"))?;
+        let meta: Value = serde_json::from_str(&raw)?;
+        let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
+        self.open_index(name, &body, path)?;
+        if let Some(st) = self.get(name) {
+            let mut g = st.write();
+            if let Some(v) =
+                meta.get("dynamic_types").cloned().and_then(|v| serde_json::from_value(v).ok())
+            {
+                g.dynamic_types = v;
+            }
+            if let Some(v) =
+                meta.get("observed_kinds").cloned().and_then(|v| serde_json::from_value(v).ok())
+            {
+                g.observed_kinds = v;
+            }
+            g.allocation_id =
+                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            g.seq_no = g.seq_no.max(meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0));
+            let (reader, id_field) = (g.realtime.clone(), g.fields.id);
+            let scanned = IdxState::scan_ids(&reader, id_field);
+            g.absorb_ids(scanned);
+        }
+        Ok(held)
     }
 
     fn index_path(&self, name: &str) -> Option<PathBuf> {
@@ -393,7 +450,23 @@ impl Store {
             .get("mappings")
             .map(Mapping::from_body)
             .unwrap_or_else(|| Mapping::from_body(&serde_json::json!({})));
-        let settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut settings = body.get("settings").cloned().unwrap_or_else(|| serde_json::json!({}));
+        // the uuid names this creation of the index: kept if the settings
+        // carry one (a reload, or a copy of an index held elsewhere), and
+        // made fresh otherwise, so an index deleted and made again under the
+        // same name is a different index
+        let uuid: String = settings
+            .pointer("/index/uuid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| settings.get("index.uuid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| crate::cluster::NodeId::random().0);
+        if let Some(o) = settings.as_object_mut() {
+            let idx = o.entry("index").or_insert_with(|| serde_json::json!({}));
+            if let Some(io) = idx.as_object_mut() {
+                io.insert("uuid".into(), serde_json::json!(uuid));
+            }
+        }
         let aliases: HashMap<String, Value> = body
             .get("aliases")
             .and_then(|a| a.as_object())
@@ -417,7 +490,8 @@ impl Store {
             closed: false,
             versions: HashMap::new(),
             routing: HashMap::new(),
-            uuid: index_uuid(name),
+            uuid,
+            allocation_id: None,
             created_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -429,6 +503,7 @@ impl Store {
             pending_bytes: 0,
             realtime,
             seq_no: 0,
+            applied_term: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_groups: RwLock::new(HashMap::new()),
@@ -466,6 +541,29 @@ impl Store {
     }
 
     pub fn delete(&self, name: &str) -> bool {
+        self.delete_with(name, true)
+    }
+
+    /// Let a copy go without remembering it as deleted: the index lives on
+    /// elsewhere and this node merely stops holding it.
+    pub fn drop_local(&self, name: &str) -> bool {
+        self.delete_with(name, false)
+    }
+
+    /// Remember an index as deleted that this store never held: the delete
+    /// was asked of this node while the index lived on another.
+    pub fn tombstone(&self, name: &str, uuid: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.graveyard.write().push(serde_json::json!({
+            "index": {"index_name": name, "index_uuid": uuid},
+            "delete_date_in_millis": now,
+        }));
+    }
+
+    fn delete_with(&self, name: &str, record: bool) -> bool {
         let targets = self.resolve(name);
         // Dropping an index waits for its writer, and its writer waits for
         // whatever it is merging. Held under the map lock that every other
@@ -477,7 +575,7 @@ impl Store {
         };
         let any = !dropped.is_empty();
         // what was dropped is remembered by name and uuid
-        {
+        if record {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

@@ -119,7 +119,36 @@ pub async fn cluster_health(
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let expr = index.map(|Path(i)| i);
+    // a wait on a cluster is a wait: the shards this asks about are being
+    // placed by the manager, and a moment later the answer is different.
+    // (On a single node nothing is going to change while the request is held,
+    // so the first look is also the last.)
+    let waits = ["wait_for_status", "wait_for_nodes", "wait_for_active_shards", "wait_for_events"]
+        .iter()
+        .any(|k| p.get(*k).is_some());
+    let clustered = crate::cluster::runtime().map(|rt| rt.state().nodes.len() > 1).unwrap_or(false);
+    if waits && clustered {
+        let ms = p
+            .get("timeout")
+            .and_then(|t| crate::cluster::allocation::time_ms(t))
+            .unwrap_or(30_000)
+            .min(120_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            let r = health_now(&store, index.as_ref().map(|Path(i)| i.clone()), &p);
+            if !r.1 || std::time::Instant::now() >= deadline {
+                return r.0;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    health_now(&store, index.map(|Path(i)| i), &p).0
+}
+
+/// The health as it stands, and whether the wait the request asked for is
+/// still unmet.
+fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, bool) {
+    let store = store.clone();
     // `expand_wildcards` decides whether a pattern reaches closed indices,
     // which are the ones that make the cluster less than green
     // health looks at every index by default, closed ones included: a closed
@@ -127,24 +156,41 @@ pub async fn cluster_health(
     let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("all");
     let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
     let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
+    // an index the cluster manager published that this node does not hold
+    // is counted by name too (a follower's view)
+    let published_names: Vec<String> =
+        crate::cluster::current_state().indices.keys().cloned().collect();
+    let published_only = |e: &str| -> Vec<String> {
+        published_names
+            .iter()
+            .filter(|name| {
+                let name: &str = name;
+                store.get(name).is_none()
+                    && e.split(',').map(|x| x.trim()).any(|part| {
+                        part == name
+                            || (part.contains('*')
+                                && crate::store::wildcard_to_regex(part).is_match(name))
+                    })
+            })
+            .cloned()
+            .collect()
+    };
     let names: Vec<String> = match expr.as_deref() {
         Some(e) if !e.is_empty() && e != "_all" => store
             .resolve(e)
             .into_iter()
+            .chain(published_only(e))
             .filter(|n| {
-                store
-                    .get(n)
-                    .map(|st| {
-                        let closed = st.read().closed;
-                        if !e.contains('*') {
-                            true
-                        } else if closed {
-                            want_closed
-                        } else {
-                            want_open
-                        }
-                    })
-                    .unwrap_or(false)
+                // a published-only index is open as far as this node knows:
+                // the cluster manager is the one who closes it
+                let closed = store.get(n).map(|st| st.read().closed).unwrap_or(false);
+                if !e.contains('*') {
+                    true
+                } else if closed {
+                    want_closed
+                } else {
+                    want_open
+                }
             })
             .collect(),
         _ => store.names(),
@@ -156,7 +202,17 @@ pub async fn cluster_health(
         .iter()
         .filter_map(|n| store.get(n))
         .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
-    let status = if unassignable { "yellow" } else { "green" };
+    // what the cluster manager placed decides, once it has placed anything
+    // named here; the store's own settings speak for an index it has not seen
+    let live = crate::cluster::current_state();
+    let placed = names.iter().any(|n| live.routing.indices.contains_key(n));
+    let status = if placed {
+        live.health_status(Some(&names))
+    } else if unassignable {
+        "yellow"
+    } else {
+        "green"
+    };
 
     // a wait this engine cannot satisfy is answered as a timeout rather than
     // by waiting: nothing here is going to change while the request is held
@@ -166,10 +222,7 @@ pub async fn cluster_health(
         _ => true,
     } && p
         .get("wait_for_nodes")
-        .map(|v| {
-            let want = v.trim_start_matches(['>', '<', '=']).parse::<i64>().unwrap_or(1);
-            if v.starts_with('>') { 1 > want } else { 1 >= want }
-        })
+        .map(|v| nodes_wait_met(v, live.nodes.len() as i64))
         .unwrap_or(true)
         // a wait for more active shards than the cluster has can never end
         && p.get("wait_for_active_shards")
@@ -183,15 +236,35 @@ pub async fn cluster_health(
     let shards_of =
         |name: &str| store.get(name).map(|st| st.read().shard_count() as usize).unwrap_or(1);
     let n: usize = names.iter().map(|name| shards_of(name)).sum();
+    // what the cluster manager placed: the replicas it could not place are
+    // unassigned, which is what makes an index yellow
+    let names_ref: Vec<String> = names.clone();
+    let mut live_counts = live.shard_counts(Some(&names_ref));
+    if live_counts.active + live_counts.unassigned + live_counts.initializing == 0 {
+        live_counts.active = n;
+        live_counts.active_primary = n;
+    }
+    // a replica the store's settings ask for and no node can hold
+    for name in &names {
+        if !live.routing.indices.contains_key(name) {
+            if let Some(st) = store.get(name) {
+                let g = st.read();
+                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1) as usize;
+                live_counts.unassigned += replicas * shards_of(name);
+            }
+        }
+    }
     let mut out = json!({
-        "cluster_name": "boostsearch", "status": status, "timed_out": !satisfied,
-        "number_of_nodes": 1, "number_of_data_nodes": 1, "discovered_master": true,
-        "discovered_cluster_manager": true,
-        "active_primary_shards": n, "active_shards": n,
-        "relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0,
-        "delayed_unassigned_shards": 0, "number_of_pending_tasks": 0,
+        "cluster_name": crate::cluster::identity().cluster_name, "status": status, "timed_out": !satisfied,
+        "number_of_nodes": crate::cluster::current_state().nodes.len(),
+        "number_of_data_nodes": crate::cluster::current_state().data_nodes().len(),
+        "discovered_master": crate::cluster::current_state().cluster_manager.is_some(),
+        "discovered_cluster_manager": crate::cluster::current_state().cluster_manager.is_some(),
+        "active_primary_shards": live_counts.active_primary, "active_shards": live_counts.active,
+        "relocating_shards": live_counts.relocating, "initializing_shards": live_counts.initializing, "unassigned_shards": live_counts.unassigned,
+        "delayed_unassigned_shards": live_counts.delayed, "number_of_pending_tasks": 0,
         "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
-        "active_shards_percent_as_number": 100.0,
+        "active_shards_percent_as_number": live_counts.active_percent(),
     });
     // `level` says how far down to report: the cluster, each index, or each
     // shard within them
@@ -199,40 +272,92 @@ pub async fn cluster_health(
     if level == "indices" || level == "shards" {
         let mut indices = serde_json::Map::new();
         for name in &names {
-            let Some(st) = store.get(name) else { continue };
-            let replicas = st.read().numeric_setting("number_of_replicas").unwrap_or(0);
-            let shards = st.read().shard_count() as usize;
-            let short = replicas > 0;
-            let mut entry = json!({
-                "status": if short { "yellow" } else { "green" },
-                "number_of_shards": shards, "number_of_replicas": replicas,
-                "active_primary_shards": shards, "active_shards": shards,
-                "relocating_shards": 0, "initializing_shards": 0,
-                "unassigned_shards": shards * replicas as usize,
-            });
+            let (shards, replicas) = match (store.get(name), live.indices.get(name)) {
+                (Some(st), _) => (
+                    st.read().shard_count() as usize,
+                    st.read().numeric_setting("number_of_replicas").unwrap_or(0) as usize,
+                ),
+                (None, Some(m)) => (m.number_of_shards as usize, m.number_of_replicas as usize),
+                _ => continue,
+            };
+            let published = live.routing.indices.contains_key(name);
+            let mut entry = if published {
+                // what the manager placed
+                let only = vec![name.clone()];
+                let c = live.shard_counts(Some(&only));
+                json!({
+                    "status": live.health_status(Some(&only)),
+                    "number_of_shards": shards, "number_of_replicas": replicas,
+                    "active_primary_shards": c.active_primary, "active_shards": c.active,
+                    "relocating_shards": c.relocating, "initializing_shards": c.initializing,
+                    "unassigned_shards": c.unassigned,
+                })
+            } else {
+                let short = replicas > 0;
+                json!({
+                    "status": if short { "yellow" } else { "green" },
+                    "number_of_shards": shards, "number_of_replicas": replicas,
+                    "active_primary_shards": shards, "active_shards": shards,
+                    "relocating_shards": 0, "initializing_shards": 0,
+                    "unassigned_shards": shards * replicas,
+                })
+            };
             if level == "shards" {
+                use crate::cluster::state::ShardState;
                 let mut per = serde_json::Map::new();
                 for shard in 0..shards {
+                    let copies: Vec<_> =
+                        live.routing.shards_of(name).filter(|c| c.shard == shard as u32).collect();
+                    let (mut active, mut reloc, mut init, mut unas) = (0, 0, 0, 0);
+                    let mut primary_active = false;
+                    for c in &copies {
+                        match c.state {
+                            ShardState::Started => active += 1,
+                            ShardState::Relocating => {
+                                active += 1;
+                                reloc += 1;
+                            }
+                            ShardState::Initializing => init += 1,
+                            ShardState::Unassigned => unas += 1,
+                        }
+                        if c.primary
+                            && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                        {
+                            primary_active = true;
+                        }
+                    }
+                    if copies.is_empty() {
+                        active = 1;
+                        unas = replicas;
+                        primary_active = true;
+                    }
+                    let status = if !primary_active {
+                        "red"
+                    } else if unas + init > 0 {
+                        "yellow"
+                    } else {
+                        "green"
+                    };
                     per.insert(
                         shard.to_string(),
                         json!({
-                            "status": if short { "yellow" } else { "green" },
-                            "primary_active": true, "active_shards": 1,
-                            "relocating_shards": 0, "initializing_shards": 0,
-                            "unassigned_shards": replicas,
+                            "status": status,
+                            "primary_active": primary_active, "active_shards": active,
+                            "relocating_shards": reloc, "initializing_shards": init,
+                            "unassigned_shards": unas,
                         }),
                     );
                 }
                 entry["shards"] = Value::Object(per);
             }
-            indices.insert(st.read().name.clone(), entry);
+            indices.insert(name.clone(), entry);
         }
         out["indices"] = Value::Object(indices);
     }
     if !satisfied {
-        return (StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response();
+        return ((StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response(), true);
     }
-    respond(&p, out)
+    (respond(p, out), false)
 }
 
 /// What the indices define for analysis, and what they use of what is built
@@ -356,4 +481,37 @@ fn analysis_stats(store: &Store) -> Value {
         "built_in_filters": listed("built_in_filters"),
         "built_in_analyzers": listed("built_in_analyzers"),
     })
+}
+
+/// `wait_for_nodes` in every form OpenSearch takes it: a number, `>=N`,
+/// `<=N`, `>N`, `<N`, and the `ge(N)`, `le(N)`, `gt(N)`, `lt(N)` spellings.
+fn nodes_wait_met(want: &str, have: i64) -> bool {
+    let want = want.trim();
+    let (op, num) = if let Some(rest) = want.strip_prefix(">=") {
+        (">=", rest)
+    } else if let Some(rest) = want.strip_prefix("<=") {
+        ("<=", rest)
+    } else if let Some(rest) = want.strip_prefix('>') {
+        (">", rest)
+    } else if let Some(rest) = want.strip_prefix('<') {
+        ("<", rest)
+    } else if let Some(rest) = want.strip_prefix("ge(").and_then(|r| r.strip_suffix(')')) {
+        (">=", rest)
+    } else if let Some(rest) = want.strip_prefix("le(").and_then(|r| r.strip_suffix(')')) {
+        ("<=", rest)
+    } else if let Some(rest) = want.strip_prefix("gt(").and_then(|r| r.strip_suffix(')')) {
+        (">", rest)
+    } else if let Some(rest) = want.strip_prefix("lt(").and_then(|r| r.strip_suffix(')')) {
+        ("<", rest)
+    } else {
+        ("==", want)
+    };
+    let Ok(n) = num.trim().parse::<i64>() else { return true };
+    match op {
+        ">=" => have >= n,
+        "<=" => have <= n,
+        ">" => have > n,
+        "<" => have < n,
+        _ => have == n,
+    }
 }

@@ -2,146 +2,161 @@
 
 use super::*;
 
-/// `_cluster/reroute` -- move shards about. There is one node, so there is
-/// nowhere to move them, and the answer is the state as it stands.
+/// `_cluster/reroute` -- move shards about, by asking the cluster manager
+/// to; the answer is the state as it comes out.
 pub async fn reroute(
     State(store): State<Store>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    let _ = parse_body(&body);
-    let mut out = json!({"acknowledged": true, "explanations": []});
-    // `metric` names which parts of the state to send back; without it the
-    // state is left out entirely
-    let metrics: Vec<String> = p
-        .get("metric")
-        .map(|m| m.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-    let want = |name: &str| metrics.iter().any(|m| m == name || m == "_all");
-    if !metrics.is_empty() && !metrics.iter().any(|m| m == "none") {
-        let mut indices = serde_json::Map::new();
-        for n in store.names() {
-            let Some(st) = store.get(&n) else { continue };
-            let g = st.read();
-            indices.insert(
-                g.name.clone(),
-                json!({
-                    "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
-                    "mappings": g.mapping.raw,
-                    "settings": g.effective_settings(),
-                    "state": if g.closed { "close" } else { "open" },
-                }),
-            );
-        }
-        let mut state = json!({
-            "cluster_name": "boostsearch", "cluster_uuid": "_na_",
-            "version": 1, "state_uuid": "_na_",
+    let body: Value = match parse_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let commands = body.get("commands").cloned().unwrap_or(json!([]));
+    if !commands.is_array() {
+        return err(StatusCode::BAD_REQUEST, "parsing_exception", "[commands] must be an array");
+    }
+    let dry_run = flag(&p, "dry_run");
+    let explain = flag(&p, "explain");
+    let retry_failed = flag(&p, "retry_failed");
+    let live = crate::cluster::current_state();
+    let (Some(manager), Some(rt)) = (live.cluster_manager.clone(), crate::cluster::runtime())
+    else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "master_not_discovered_exception", "null");
+    };
+    let ask = json!({"commands": commands, "dry_run": dry_run, "explain": explain, "retry_failed": retry_failed});
+    let answer = rt
+        .call(
+            &manager,
+            crate::cluster::coordinator::REROUTE,
+            serde_json::to_vec(&ask).unwrap_or_default(),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+    let Some(answer) = answer else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "master_not_discovered_exception", "null");
+    };
+    if answer.kind == crate::cluster::transport::Kind::Error {
+        let v: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
+        let reason =
+            v.get("reason").and_then(|r| r.as_str()).unwrap_or("reroute failed").to_string();
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", &reason);
+    }
+    let v: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
+    let Some(state) = v.get("state").and_then(|s| {
+        serde_json::from_value::<crate::cluster::state::ClusterState>(s.clone()).ok()
+    }) else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "exception",
+            "the manager answered with no state",
+        );
+    };
+    // the state as `_cluster/state` shows it, without the metadata unless asked
+    let metrics: String =
+        p.get("metric").filter(|m| !m.is_empty()).cloned().unwrap_or_else(|| {
+            "version,master_node,nodes,routing_table,routing_nodes,blocks".into()
         });
-        if want("master_node") {
-            state["master_node"] = json!("node-0");
+    let mut out = json!({"acknowledged": true});
+    if !metrics.split(',').any(|m| m.trim() == "none") {
+        let mut inner = p.clone();
+        inner.remove("filter_path");
+        let rendered = crate::cluster::with_state_override(state, || {
+            cluster_state_value(&store, &inner, Some(&metrics), None)
+        });
+        match rendered {
+            Ok(st) => out["state"] = st,
+            Err(r) => return r,
         }
-        if want("cluster_manager_node") {
-            state["cluster_manager_node"] = json!("node-0");
-        }
-        if want("nodes") {
-            state["nodes"] = json!({"node-0": {
-                "name": "boostsearch", "ephemeral_id": "_na_",
-                "transport_address": "127.0.0.1:9300", "attributes": {}}});
-        }
-        if want("metadata") {
-            state["metadata"] = json!({
-                "cluster_uuid": "_na_",
-                "cluster_uuid_committed": false,
-                "cluster_coordination": {
-                    "term": 1,
-                    "last_committed_config": ["node-0"],
-                    "last_accepted_config": ["node-0"],
-                    "voting_config_exclusions": [],
-                },
-                "templates": legacy_templates(&store),
-                "indices": Value::Object(indices),
-                "index-graveyard": {"tombstones": store.tombstones()},
-                "index_template": {"index_template": composable_templates(&store)},
-                "ingest": {"pipeline": ingest_pipelines(&store)},
-            });
-        }
-        out["state"] = state;
+    }
+    if explain {
+        out["explanations"] = v.get("explanations").cloned().unwrap_or(json!([]));
     }
     respond(&p, out)
 }
 
-/// `_cluster/allocation/explain` -- why a shard sits where it does.
-///
-/// Every shard is started on the one node, so the only honest explanation is
-/// that it is where it belongs and has nowhere else to go.
+/// `_cluster/allocation/explain` -- why a shard sits where it does: the
+/// deciders asked about the copy, in the plugin's words.
 pub async fn allocation_explain(
     State(store): State<Store>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    use crate::cluster::allocation::{ClusterSettings, Context, explain};
+    use crate::cluster::state::ShardState;
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    // without a shard named, the question is which unassigned shard needs
-    // explaining: an index asking for more replicas than there are nodes has
-    // some, and otherwise there are none to explain
-    let unassigned = store.names().into_iter().find(|n| {
-        store
-            .get(n)
-            .map(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0)
-            .unwrap_or(false)
-    });
+    let live = crate::cluster::current_state();
     let named = body.get("index").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let picked = named.is_none();
-    let Some(index) = named.or(unassigned) else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            "unable to find any unassigned shards to explain [ClusterAllocationExplainRequest[useAnyUnassignedShard=true]]",
-        );
+    let copy = match &named {
+        Some(index) => {
+            if !live.routing.indices.contains_key(index) && store.resolve(index).is_empty() {
+                return no_such_index(index);
+            }
+            let shard = body.get("shard").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(true);
+            let found = live
+                .routing
+                .shards_of(index)
+                .find(|c| c.shard == shard && c.primary == primary)
+                .cloned();
+            match found {
+                Some(c) => c,
+                None => {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        &format!("No shard was found for [{index}][{shard}]"),
+                    );
+                }
+            }
+        }
+        None => {
+            // which unassigned shard needs explaining: the first there is
+            match live.routing.all().find(|c| c.state == ShardState::Unassigned).cloned() {
+                Some(c) => c,
+                None => {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        "unable to find any unassigned shards to explain [ClusterAllocationExplainRequest[useAnyUnassignedShard=true]]",
+                    );
+                }
+            }
+        }
     };
-    let index = index.as_str();
-    if store.resolve(index).is_empty() {
-        return no_such_index(index);
-    }
-    let shard = body.get("shard").and_then(|v| v.as_i64()).unwrap_or(0);
-    // a request that names nothing is asking about whichever shard is waiting
-    // for somewhere to live, and that is a replica, not a primary
-    let primary = body.get("primary").and_then(|v| v.as_bool()).unwrap_or(!picked);
-    let mut out = json!({
-        "index": index,
-        "shard": shard,
-        "primary": primary,
-    });
-    if picked {
-        out["current_state"] = json!("unassigned");
-        out["unassigned_info"] = json!({
-            "reason": "INDEX_CREATED",
-            "at": IdxState::now_iso(),
-            "last_allocation_status": "no_attempt",
-        });
-        out["can_allocate"] = json!("no");
-        out["allocate_explanation"] =
-            json!("cannot allocate because allocation is not permitted to any of the nodes");
-    } else {
-        out["current_state"] = json!("started");
-        out["current_node"] = json!({
-            "id": "node-0", "name": "boostsearch",
-            "transport_address": "127.0.0.1:9300", "weight_ranking": 1,
-        });
-        out["can_remain_on_current_node"] = json!("yes");
-        out["can_rebalance_cluster"] = json!("yes");
-        out["can_rebalance_to_other_node"] = json!("no");
-        out["rebalance_explanation"] = json!(
-            "cannot rebalance as no target node exists that can both allocate this shard \
-             and improve the cluster balance"
-        );
-    }
-    out["node_allocation_decisions"] = json!([]);
+    let cluster = ClusterSettings::from_value(&live.cluster_settings);
+    // a primary is at home where it is
+    let home: std::collections::BTreeMap<String, crate::cluster::NodeId> = live
+        .routing
+        .indices
+        .iter()
+        .filter_map(|(n, shards)| {
+            shards
+                .values()
+                .flatten()
+                .find(|c| c.primary && c.node.is_some())
+                .map(|c| (n.clone(), c.node.clone().unwrap()))
+        })
+        .collect();
+    let held = std::collections::BTreeMap::new();
+    let ctx = Context {
+        nodes: &live.nodes,
+        indices: &live.indices,
+        cluster: &cluster,
+        primary_home: &home,
+        held: &held,
+        now: crate::cluster::clock().wall(),
+    };
+    let mut out = explain(&ctx, &live, &copy, flag(&p, "include_yes_decisions"));
     // `include_disk_info` asks for what the cluster knows about the disks
     if flag(&p, "include_disk_info") {
-        out["cluster_info"] = json!({
-            "nodes": {
-                "node-0": {
-                    "node_name": "boostsearch",
+        let mut nodes = serde_json::Map::new();
+        for n in live.nodes.values() {
+            nodes.insert(
+                n.id.as_str().to_string(),
+                json!({
+                    "node_name": n.name,
                     "least_available": {
                         "path": "/", "total_bytes": 2_147_483_648u64,
                         "used_bytes": 1_073_741_824u64,
@@ -154,11 +169,10 @@ pub async fn allocation_explain(
                         "free_bytes": 1_073_741_824u64, "free_disk_percent": 50.0,
                         "used_disk_percent": 50.0,
                     },
-                }
-            },
-            "shard_sizes": {},
-            "shard_paths": {},
-        });
+                }),
+            );
+        }
+        out["cluster_info"] = json!({"nodes": nodes, "shard_sizes": {}, "shard_paths": {}});
     }
     respond(&p, out)
 }
@@ -187,12 +201,25 @@ pub(crate) fn cluster_state_inner(
     metrics: Option<&str>,
     index_expr: Option<&str>,
 ) -> Response {
+    match cluster_state_value(store, p, metrics, index_expr) {
+        Ok(out) => respond(p, out),
+        Err(r) => r,
+    }
+}
+
+pub(crate) fn cluster_state_value(
+    store: &Store,
+    p: &Params,
+    metrics: Option<&str>,
+    index_expr: Option<&str>,
+) -> Result<Value, Response> {
     let all = metrics.map(|m| m == "_all").unwrap_or(true);
     let wanted: Vec<&str> = metrics.map(|m| m.split(',').collect()).unwrap_or_default();
     let want = |name: &str| all || wanted.contains(&name);
 
     // which indices the metadata should describe; without an expression it is
     // every index there is
+    let live = crate::cluster::current_state();
     let names = match index_expr {
         Some(expr) if expr != "_all" => {
             // `expand_wildcards` names the states a pattern reaches, and
@@ -200,7 +227,7 @@ pub(crate) fn cluster_state_inner(
             let states = p.get("expand_wildcards").map(|v| v.as_str()).unwrap_or("open,closed");
             let want_open = states.split(',').any(|w| matches!(w.trim(), "open" | "all"));
             let want_closed = states.split(',').any(|w| matches!(w.trim(), "closed" | "all"));
-            let found: Vec<String> = store
+            let mut found: Vec<String> = store
                 .resolve(expr)
                 .into_iter()
                 .filter(|n| {
@@ -210,15 +237,29 @@ pub(crate) fn cluster_state_inner(
                         .unwrap_or(false)
                 })
                 .collect();
+            // an index the cluster manager published that this node does not
+            // hold answers by name too (a follower's view)
+            for (name, m) in &live.indices {
+                let closed = m.state == "close";
+                let wanted = if closed { want_closed } else { want_open };
+                let named = expr.split(',').map(|n| n.trim()).any(|part| {
+                    part == name.as_str()
+                        || (part.contains('*')
+                            && crate::store::wildcard_to_regex(part).is_match(name))
+                });
+                if wanted && named && !found.iter().any(|f| f == name) {
+                    found.push(name.clone());
+                }
+            }
             for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
                 if !found.iter().any(|n| n == part) && !ignore_unavailable(p) {
-                    return no_such_index(part);
+                    return Err(no_such_index(part));
                 }
             }
             // a pattern reaching nothing is an error only when the caller said so
             let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
             if found.is_empty() && !allow_none {
-                return no_such_index(expr);
+                return Err(no_such_index(expr));
             }
             found
         }
@@ -235,60 +276,99 @@ pub(crate) fn cluster_state_inner(
         while routing_shards * 2 <= 1024 {
             routing_shards *= 2;
         }
-        indices.insert(
-            g.name.clone(),
-            json!({
+        indices.insert(g.name.clone(), {
+            let mut entry = json!({
                 "aliases": g.aliases.keys().cloned().collect::<Vec<_>>(),
                 "mappings": g.mapping.raw,
                 "settings": g.effective_settings(),
                 "state": if g.closed { "close" } else { "open" },
+                "version": 1,
+                "mapping_version": 1,
+                "settings_version": 1,
+                "aliases_version": 1,
                 "routing_num_shards": routing_shards,
-            }),
-        );
+                "rollover_info": {},
+                "system": false,
+            });
+            if let Some(m) = crate::cluster::current_state().indices.get(&g.name) {
+                let published = m.to_json();
+                for k in [
+                    "primary_terms",
+                    "in_sync_allocations",
+                    "version",
+                    "mapping_version",
+                    "settings_version",
+                    "aliases_version",
+                ] {
+                    if let Some(v) = published.get(k) {
+                        entry[k] = v.clone();
+                    }
+                }
+            } else {
+                let shards = g.shard_count().max(1);
+                entry["primary_terms"] =
+                    Value::Object((0..shards).map(|i| (i.to_string(), json!(1))).collect());
+                entry["in_sync_allocations"] =
+                    Value::Object((0..shards).map(|i| (i.to_string(), json!([]))).collect());
+            }
+            entry
+        });
+    }
+    // an index published but not held here (a follower's view): as published
+    for (name, m) in &live.indices {
+        if !indices.contains_key(name) {
+            indices.insert(name.clone(), m.to_json());
+        }
     }
 
     let mut out = serde_json::Map::new();
-    out.insert("cluster_name".into(), json!("boostsearch"));
-    out.insert("cluster_uuid".into(), json!("_na_"));
+    let manager =
+        live.cluster_manager.clone().unwrap_or_else(|| crate::cluster::identity().id.clone());
+    out.insert("cluster_name".into(), json!(crate::cluster::identity().cluster_name));
+    out.insert("cluster_uuid".into(), json!(live.cluster_uuid));
     if want("version") || all {
-        out.insert("version".into(), json!(1));
-        out.insert("state_uuid".into(), json!("_na_"));
+        out.insert("version".into(), json!(live.version));
+        out.insert("state_uuid".into(), json!(live.state_uuid));
+        out.insert("version".into(), json!(live.version));
     }
     // the two names are the old and new spellings of one thing, but a
     // request naming one does not ask for the other
     if want("master_node") {
-        out.insert("master_node".into(), json!("node-0"));
+        out.insert("master_node".into(), json!(manager.as_str()));
     }
     if want("cluster_manager_node") {
-        out.insert("cluster_manager_node".into(), json!("node-0"));
+        out.insert("cluster_manager_node".into(), json!(manager.as_str()));
     }
     if want("nodes") {
-        out.insert(
-            "nodes".into(),
-            json!({"node-0": {
-            "name": "boostsearch", "ephemeral_id": "_na_",
-            "transport_address": "127.0.0.1:9300", "attributes": {}}}),
-        );
+        out.insert("nodes".into(), live.node_json());
     }
     if want("metadata") {
+        let graveyard = {
+            let live = crate::cluster::current_state();
+            if live.graveyard.is_empty() {
+                store.tombstones()
+            } else {
+                Value::Array(live.graveyard.clone())
+            }
+        };
         out.insert(
             "metadata".into(),
             json!({
-                "cluster_uuid": "_na_",
+                "cluster_uuid": live.cluster_uuid,
                 // whether the cluster's name has been agreed on, and by whom:
                 // one node agrees with itself
-                "cluster_uuid_committed": false,
+                "cluster_uuid_committed": true,
                 "templates": store.get_templates(),
                 "indices": Value::Object(indices.clone()),
                 "cluster_coordination": {
-                    "term": 1,
-                    "last_committed_config": ["node-0"],
-                    "last_accepted_config": ["node-0"],
+                    "term": live.term.max(1),
+                    "last_committed_config": live.last_committed_config.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+                    "last_accepted_config": live.last_accepted_config.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
                     "voting_config_exclusions": store.voting_exclusions(),
                 },
                 // the indices that were deleted, so that a node coming back
                 // with one of them knows it is gone
-                "index-graveyard": {"tombstones": store.tombstones()},
+                "index-graveyard": {"tombstones": graveyard},
                 "index_template": {"index_template": composable_templates(&store)},
                 "ingest": {"pipeline": ingest_pipelines(&store)},
             }),
@@ -360,32 +440,55 @@ pub(crate) fn cluster_state_inner(
             },
         );
     }
-    if want("routing_table") {
-        let mut tables = serde_json::Map::new();
-        for name in indices.keys() {
-            tables.insert(
-                name.clone(),
-                json!({"shards": {"0": [{
-                    "state": "STARTED", "primary": true, "node": "node-0",
-                    "relocating_node": Value::Null, "shard": 0, "index": name,
-                }]}}),
-            );
+    // the shard map the cluster manager published; an index the store
+    // holds but the state has not yet seen is placed the way it will be
+    let placed = live.routing.indices.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let mut routing = live.routing.clone();
+    for name in indices.keys() {
+        if !placed.contains(name) {
+            let shards =
+                store.get(name).map(|st| st.read().shard_count().max(1) as u32).unwrap_or(1);
+            let mut copies = std::collections::BTreeMap::new();
+            for shard in 0..shards {
+                copies.insert(
+                    shard,
+                    vec![crate::cluster::state::ShardRouting {
+                        index: name.clone(),
+                        shard,
+                        primary: true,
+                        state: crate::cluster::state::ShardState::Started,
+                        node: Some(manager.clone()),
+                        relocating_node: None,
+                        allocation_id: None,
+                        unassigned: None,
+                    }],
+                );
+            }
+            routing.indices.insert(name.clone(), copies);
         }
-        out.insert("routing_table".into(), json!({"indices": Value::Object(tables)}));
+    }
+    routing.indices.retain(|n, _| indices.contains_key(n));
+    if want("routing_table") {
+        out.insert("routing_table".into(), routing.to_json());
     }
     if want("routing_nodes") {
-        let shards: Vec<Value> = indices
-            .keys()
-            .map(|name| {
-                json!({
-                    "state": "STARTED", "primary": true, "node": "node-0",
-                    "relocating_node": Value::Null, "shard": 0, "index": name,
-                })
-            })
-            .collect();
-        out.insert("routing_nodes".into(), json!({"unassigned": [], "nodes": {"node-0": shards}}));
+        let (by_node, unassigned) = routing.by_node();
+        let mut nodes = serde_json::Map::new();
+        for (n, copies) in by_node {
+            nodes.insert(
+                n.as_str().to_string(),
+                Value::Array(copies.iter().map(|c| c.to_json()).collect()),
+            );
+        }
+        if !nodes.contains_key(manager.as_str()) {
+            nodes.insert(manager.as_str().to_string(), json!([]));
+        }
+        out.insert(
+            "routing_nodes".into(),
+            json!({"unassigned": unassigned.iter().map(|c| c.to_json()).collect::<Vec<_>>(), "nodes": nodes}),
+        );
     }
-    respond(p, Value::Object(out))
+    Ok(Value::Object(out))
 }
 
 /// The legacy templates alone: a composable one lives under its own key.

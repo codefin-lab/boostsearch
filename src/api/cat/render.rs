@@ -25,6 +25,10 @@ pub(crate) fn cat_render(rows: Vec<Vec<(&str, String)>>, p: &Params) -> Response
 /// `routing.search`.
 /// The short names `_cat` gives columns whose own name is nothing like them.
 pub(crate) fn cat_column_alias(column: &str, asked: &str) -> bool {
+    // `_cat/nodes` still answers to the older name of the cluster manager
+    if column == "cluster_manager" && matches!(asked, "master" | "m") {
+        return true;
+    }
     const ALIASES: &[(&str, &str)] = &[
         // `i` is the index where there is one and the address otherwise; the
         // row's own column order settles which, since a table with an index

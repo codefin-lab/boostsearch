@@ -446,3 +446,69 @@ pub(crate) async fn as_error_body(response: Response) -> Value {
     }
     out
 }
+
+/// Every index the cluster holds, whether or not a copy is on this node.
+///
+/// The store is what this node has; on a cluster an index lives wherever the
+/// manager placed it, and a listing or a wildcard that stopped at the local
+/// store would show one node's share of the cluster as though it were all of
+/// it.
+pub fn cluster_names(store: &crate::store::Store) -> Vec<String> {
+    let mut names = store.names();
+    for n in crate::cluster::current_state().indices.keys() {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
+    names.sort();
+    names
+}
+
+/// As `Store::resolve`, over every index the cluster holds.
+pub fn cluster_resolve(store: &crate::store::Store, expr: &str) -> Vec<String> {
+    let mut names = store.resolve(expr);
+    let state = crate::cluster::current_state();
+    for part in expr.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        if part.starts_with('-') {
+            let pattern = part.trim_start_matches('-');
+            names.retain(|n| !matches_pattern(pattern, n));
+            continue;
+        }
+        for (name, meta) in &state.indices {
+            if names.contains(name) {
+                continue;
+            }
+            let by_alias = meta
+                .aliases
+                .as_object()
+                .map(|a| a.keys().any(|al| matches_pattern(part, al)))
+                .unwrap_or(false);
+            if matches_pattern(part, name) || by_alias {
+                names.push(name.clone());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// `*` and `?` as an index expression means them, and nothing else does.
+fn matches_pattern(pattern: &str, name: &str) -> bool {
+    if pattern == "_all" || pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return pattern == name;
+    }
+    let mut re = String::from("^");
+    for c in pattern.chars() {
+        match c {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    re.push('$');
+    regex::Regex::new(&re).map(|r| r.is_match(name)).unwrap_or(false)
+}

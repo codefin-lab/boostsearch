@@ -159,6 +159,7 @@ pub async fn serve_tls(
     listener: tokio::net::TcpListener,
     app: Router,
     settings: &TlsSettings,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let (certs, key) = load_or_make(settings)?;
     // a client certificate is asked for when a trust store is named:
@@ -194,8 +195,13 @@ pub async fn serve_tls(
     config.send_tls13_tickets = 1;
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(8192);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    tokio::pin!(shutdown);
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            a = listener.accept() => a,
+            _ = &mut shutdown => return Ok(()),
+        };
+        let (stream, peer) = match accepted {
             Ok(s) => s,
             Err(_) => continue,
         };

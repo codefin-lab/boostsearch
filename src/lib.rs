@@ -7,14 +7,15 @@
 pub mod analysis;
 pub mod api;
 pub mod blockstats;
+pub mod cluster;
 pub mod hdr;
 pub mod ingest;
-pub mod tls;
-pub mod security;
 pub mod painless;
 pub mod query;
 pub mod search;
+pub mod security;
 pub mod snapshot;
 pub mod source;
 pub mod store;
+pub mod tls;
 pub mod tz;

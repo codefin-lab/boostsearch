@@ -795,3 +795,744 @@ Three quiet passes after 5.7, security on:
 Passes 1 and 3 win every dimension; pass 2, the transport mismatch, lost
 one line by 0.03 ms. Gates: phase1 398/398, the six security suites and
 the two audit suites at 0 diffs.
+
+## Phase 6 -- Cluster (in progress, 2026-09-03)
+
+Written against a transport and a clock it does not own (ADR 0002), with
+the acknowledgement policy and read routing as parameters (ADR 0003). The
+reference for shapes stays the single OpenSearch node; the reference for
+behaviour under partitions and crashes is the simulation the plan asks
+for, seeded and repeatable.
+
+### 6.1 Transport and clock as traits, framing, node identity (done)
+
+- `src/cluster/clock.rs`: `Clock` (`now` monotonic millis, `wall`),
+  `SystemClock`, and `ManualClock` (advance, set) for the simulation.
+- `src/cluster/transport.rs`: `NodeId` (22 base64url characters of 16
+  random bytes, as OpenSearch names nodes), `Envelope` (kind
+  request/response/error, request id, action name, sender, body), the
+  frame (`u32 length | version | kind | request id | action | from |
+  body`, 512 MiB cap), `Transport` (`local`, `send`, `set_handler`) and
+  `Handler`.
+- `src/cluster/node.rs`: `NodeIdentity` from the settings (`node.name`,
+  `node.roles`, `node.attr.*`, `network.host`, `transport.port`,
+  `transport.bind_host`/`publish_host`, `cluster.name`,
+  `discovery.seed_hosts`, `cluster.initial_cluster_manager_nodes`,
+  `discovery.type`); the node id and the cluster uuid kept under
+  `<data>/_state/`, so a node is the same node after a restart; a fresh
+  ephemeral id each start.
+- `src/cluster/tcp.rs`: the production transport -- a listener on
+  `transport.port` (9300; `BOOSTSEARCH_TRANSPORT_PORT` for tests), one
+  framed connection per peer opened on demand, a handshake
+  (`internal:transport/handshake`) carrying identity and cluster name so
+  a connection is known by the node behind it, delivery by node id.
+- The identity reaches `_nodes`, `_nodes/_local`, `_cluster/state`
+  (`cluster_uuid`, `state_uuid`, `master_node`, the node's entry with its
+  ephemeral id, the coordination configs), `_tasks` (task ids `<node>:n`),
+  `_cat/nodes` (four-character id, `full_id`), `_cat/*` node columns and
+  the audit log's `audit_node_*`.
+
+Checked: framing round-trips and refuses other versions; ids have the
+plugin's shape; the persisted id survives a restart while the ephemeral
+id changes (seen live); two transports on loopback shake hands and
+deliver a message by node id (unit test); `_nodes`, `_cluster/state`,
+`_cat/nodes` and `_tasks` compared with OpenSearch on every identity
+field. Gates unchanged: phase1 398/398, modules 820/895, security and
+audit suites 0 diffs.
+
+### 6.2 The simulation (done)
+
+`src/cluster/sim.rs`: the whole cluster in one thread, on a clock and a
+network a seed drives. A node is a `NodeLogic` -- `handle(Input, &Clock,
+&mut Durable) -> Vec<Output>` -- told to start, given messages and timers,
+answering with sends, timers and notes; nothing in it does I/O, so the
+same logic will run under the production runtime (6.3) and here. The
+scheduler keeps one queue of events by time (deliveries, timers, crashes,
+restarts, heals); the seed (splitmix64) chooses each message's latency
+within `min_latency..=max_latency`, which messages a `drop_rate` loses,
+and everything else that is random. Partitions cut pairs of node sets;
+`crash` throws away a node's logic and pending timers but keeps its
+`Durable` state, and `restart` builds the logic again from it; `skew`
+moves one node's clock off the true time. `SimTransport` lets code
+written against `Transport` run inside it. Every note and every event is
+in a trace, so two runs can be compared.
+
+Checked by tests: pings return in order and time moves only by events; a
+partition loses every message and a heal brings them back; the same seed
+makes the same trace and another seed a different one; a crash loses the
+timers and keeps what was written, and the restart carries on from it;
+skew moves one node's clock and no other's.
+
+### 6.3 Cluster state: versioned metadata, the shard map, join and leave (done)
+
+- `src/cluster/state.rs`: `ClusterState` -- cluster name and uuid, state
+  uuid, version, term, the manager, `DiscoveryNode`s, the coordination
+  configs, `IndexMetadata` (settings, mappings, aliases, the versions,
+  primary terms, in-sync allocations), the `RoutingTable` of
+  `ShardRouting`s (state, primary, node, relocating node, allocation id,
+  unassigned info), blocks -- written in OpenSearch's shapes;
+  `shard_counts` and `health_status` as `_cluster/health` reckons them.
+- `src/cluster/coordinator.rs`: the `NodeLogic` of join and leave with the
+  manager fixed by `cluster.initial_cluster_manager_nodes` (an election
+  takes over in 6.4): a candidate asks the manager (or the seeds) to join;
+  the manager adds it and publishes in two phases (accept, then commit) so
+  no node applies a state the others may never see; followers are checked
+  on a timer and dropped after the retries; a follower that loses its
+  manager goes back to looking; the committed state is durable and a
+  restarted node carries on from it. `internal:cluster/coordination/*`
+  and `internal:coordination/fault_detection/*` name the actions.
+- `src/cluster/metadata.rs`: the manager's store as the source of index
+  metadata, fingerprinted and republished when it changes; placement --
+  every primary started on the manager, every replica unassigned with
+  `INDEX_CREATED` until allocation (6.5); allocation ids stable across
+  publications; in-sync allocations and primary terms from the placement.
+- `src/cluster/runtime.rs`: the same logic on tokio over the TCP
+  transport, timers by epoch so a reset timer never fires, seed-host
+  discovery through the handshake, the committed state shared with the
+  HTTP handlers. `_cluster/state`, `_cluster/health`, `_cat/nodes`,
+  `_cat/shards` and `_nodes` read it; a follower reports the indices the
+  manager published even though its own store does not hold them.
+
+Checked in the simulation: three nodes join and commit one identical
+state at one version; a partitioned follower is dropped by the manager
+and finds it lost, and rejoins on heal at a higher version; a crashed
+follower rejoins from what it kept; versions only rise under 20% loss and
+the seed repeats; index metadata reaches every node when it appears and
+leaves when it goes, with no version churn in between. Checked live: two
+processes form a cluster, agree on the manager and the version, both show
+`_cat/nodes` with the manager starred, the follower shows the manager's
+index in its routing table, and the manager drops a killed follower after
+its checks. `_cluster/state` metadata entries carry OpenSearch's thirteen
+keys; the routing table, `_cat/shards` and health read from the shard
+map. A follower answers `_cluster/state` and `_cluster/health` for an
+index only the manager holds: the published metadata and routing stand in
+for its store, and the status comes from the manager's placement (yellow
+for a replica no node took), not from local settings. Gates: phase1
+398/398.
+
+### 6.4 Consensus: election, log, commit index, membership change (done)
+
+`src/cluster/coordinator.rs` is OpenSearch's coordination as one
+`NodeLogic`. A node keeps three things on disk (`<data>/_state/`): the
+term it is in, the last state it accepted, the last state it committed.
+The first voting configuration is the nodes named in
+`cluster.initial_cluster_manager_nodes`, set once every one of them is
+known (a node alone bootstraps with itself). A candidate finds peers
+(`internal:discovery/request_peers`; a seed host is dialled again until
+the node behind it is known), asks for pre-votes
+(`internal:cluster/request_pre_vote`, which change nothing and are
+refused by a node that has a manager), and with a quorum of the
+configuration whose accepted states are no fresher than its own starts an
+election after a randomised, growing delay (`cluster.election.*`): a term
+above every term seen, `start_join` to everyone. A node told to join a
+higher term moves to it and answers with a join that carries its one vote
+of the term, for that candidate only -- the join a node sends to a manager
+it merely heard of carries no vote. Joins from nodes whose accepted state
+is fresher are refused; with a quorum of both the committed and the
+accepted configuration the candidate is the manager.
+
+The manager's publications commit on a quorum of both configurations,
+not on every node: a node is told to commit once its acceptance has
+arrived (the simulation reorders messages, and a commit that overtook
+its publication would be refused); a publication that reaches no quorum
+in `cluster.publish.timeout` makes the manager step down. Every message
+carries the term, and a higher term seen anywhere ends leading or
+following. Committing a state commits the configuration it carried, so
+the "log" is the sequence of (term, version) states and the commit index
+the committed one. The voting configuration follows the nodes as
+OpenSearch's reconfigurator has it: the largest odd number of live
+manager-eligible nodes not excluded, at least three unless nodes are
+excluded (with `cluster.auto_shrink_voting_configuration` false it never
+shrinks), one step per publication and only to a configuration the live
+nodes can form a quorum of. `_cluster/voting_config_exclusions` reaches
+the manager through the metadata source; the reply waits for the
+exclusion to leave the committed configuration and otherwise answers
+OpenSearch's `timeout_exception` (compared on a single OpenSearch node
+excluding itself: the same 500 body with `{name}{id}`; `DELETE` with
+`wait_for_removal`).
+
+Held by the simulation: at most one manager per term, and two nodes that
+committed the same term and version committed the same bytes. Tests:
+three nodes elect one manager and agree; one named manager and two that
+join; the manager dies and another is elected in a higher term, the dead
+one stays in the configuration (no shrinking below three) and comes back
+as a follower; a manager cut off from the majority commits nothing,
+steps down, and after the heal follows the new one; five nodes losing two
+shrink the configuration to three, losing a third keep it at three with
+two live; an excluded manager leaves the vote, keeps managing, and after
+its crash the rest elect without it; versions only rise under 20% loss
+and the seed repeats; six seeds of crashes, restarts and loss keep the
+invariants and settle on one manager. Two bugs the simulation found:
+a stale manager hint kept a candidate from ever pre-voting, and late
+pre-vote answers started a second election in the same instant.
+
+Live, three processes started at once (`n1,n2,n3` named, each seeded
+with all three): they bootstrap, elect, `_cat/nodes` stars the manager
+(`h=master` now aliases `cluster_manager`); killing the manager gives a
+new one in a higher term within ten seconds; the old one restarts, is
+brought to the term and follows. This found the transport keeping one
+connection per peer: two nodes dialling each other at once replaced each
+other's queue and a closing connection took the survivor's entry with it,
+so every connection fell in a cascade. `src/cluster/tcp.rs` now keeps
+every open connection to a peer and a connection removes only its own
+queue on close; its reconnect handle is the transport's own weak `Arc`
+rather than a thread-local only the main thread had (test:
+`three_nodes_dial_each_other_at_once_and_all_pairs_talk_both_ways`).
+`BOOSTSEARCH_CLUSTER_DEBUG=2` traces every input and output through the
+runtime. Gates: unit 39/39, phase1 398/398; bench after 6.4 wins all
+twelve dimensions against plain OpenSearch (index 100,454 vs 63,464 docs/s,
+383MiB vs 1.96GiB, every query p50 lower) and against os-secure (index
+100,665 vs 59,329 docs/s, p50s 2.5-4x lower); the TLS-vs-plain pass stays
+the documented transport mismatch, not a gate.
+
+### 6.5 Allocation, rebalancing, the deciders (done)
+
+`src/cluster/allocation.rs` is where every copy of every shard goes: one
+pure function from the routing table as it was to the table as it should
+be, given the nodes, the indices and their settings, the cluster settings
+and the time (ADR 0002: no clock, no I/O). Copies on nodes that left
+become unassigned -- a replica waits out
+`index.unassigned.node_left.delayed_timeout` (60s; `delayed` in health and
+`_cat/shards`, `allocation_delayed` in explain), a lost primary is
+replaced by an in-sync replica and the primary term rises -- then
+unassigned copies are placed on the node the deciders allow and the
+balancer weighs lightest (`cluster.routing.allocation.balance.shard`,
+`.index`, `.threshold`, OpenSearch's weights), and once every copy is
+active the balancer moves copies from heavy nodes to light ones, one
+relocation per publication, heaviest source first. The deciders are
+OpenSearch's, in its order and its words (`max_retry`,
+`replica_after_primary_active`, `enable`, `filter` with `_name`/`_ip`/
+`_id`/`_host` and `node.attr.*` over include/exclude/require at cluster
+and index level, `same_shard`, `throttling` with the concurrent and
+initial recovery limits, `shards_limit` per index and cluster,
+`awareness` with forced values, `rebalance_only_when_active`,
+`cluster_rebalance`, `concurrent_rebalance`; `node_version`,
+`disk_threshold`, `snapshot_in_progress`, `restore_in_progress`,
+`load_awareness`, `target_pool`, `remote_store_migration`,
+`search_replica_allocation` say yes with the plugin's sentences), plus one
+of our own, `primary_home`: a primary stays with the store that holds its
+data until peer recovery (6.7) can move it. Failures count against
+`index.allocation.max_retries` (5) and `_cluster/reroute?retry_failed`
+forgets them.
+
+The manager runs it on every publication over the previous table, after
+applying what data nodes reported (`internal:cluster/shard/started`,
+`shard/failure`); a data node given a copy builds a local index from the
+published settings and mappings (`ShardHost`; the store removes only what
+it created) and reports; the manager's own store holds every primary it
+publishes. `_cluster/reroute` (`move`, `allocate_replica`,
+`allocate_empty_primary`, `allocate_stale_primary`, `cancel`, `dry_run`,
+`explain`, `retry_failed`, `metric`) reaches the manager over the
+transport from any node (`Runtime::call`: a request awaited by its id)
+and answers with the state the commands make, in `_cluster/state`'s
+shape. `_cluster/allocation/explain` asks the same deciders on any node;
+`_cat/shards` (relocations as `n3 -> ip id n1`, the unassigned columns),
+`_cat/allocation` and health (`initializing`, `relocating`,
+`delayed_unassigned`, `active_shards_percent_as_number`, per-index and
+per-shard levels) read the live routing.
+
+Compared with OpenSearch on one node, byte for byte after ids and times
+are masked: `_cluster/allocation/explain` for the unassigned replica and
+for the primary with `include_yes_decisions` (every decider, its
+decision and its sentence, in order), `_cluster/reroute` with a bad node
+(400, "failed to resolve [x], no matching nodes"), `dry_run&explain` with
+`allocate_replica` (the explanation entry), the keys of the default
+answer, `retry_failed`, `_cat/allocation` and `_cat/shards`. Tests: nine
+on the allocator (even spread, `same_shard`, filters, `enable`, limits,
+awareness, delay and promotion, retries to the limit and by hand, a new
+node taking copies one at a time, the rebalance verdicts) and one in the
+simulation (a lost replica placed again after its delay). Live, three
+nodes: replicas placed and started on the other nodes within seconds,
+`move` from a follower, the departed node's replica delayed then placed
+on the node left. The live run found the settings lookup missing
+part-nested keys (`{"index": {"unassigned.node_left.delayed_timeout":
+..}}` as the store keeps them), which read the delay as 60s. Gates: unit
+49/49, phase1 398/398; bench after 6.5 wins all twelve dimensions in
+every pass (index 97,210 vs 66,405 docs/s, 394MiB vs 2.0GiB, every query
+p50 lower; against os-secure 94,129 vs 59,462 docs/s, p50s 3-5x lower).
+
+### 6.6 Replication with the mode as a parameter (done)
+
+The mode is two parameters with one value each (ADR 0003;
+`src/cluster/replication.rs`): `AckPolicy::AllInSync` -- a write is
+acknowledged once the primary and every in-sync replica copy have applied
+it, as OpenSearch acknowledges -- and `ReadRouting::AnyActiveCopy` -- a
+read is answered by any active copy, which may be behind. Version two's
+quorum acknowledgement and lease-bound reads are the other values.
+
+A request lands on any node and is carried to the node it belongs on
+(`src/cluster/forward.rs`): writes to the node holding the primary,
+changes to metadata (index create and delete, settings, mappings,
+aliases, templates, pipelines, scripts, snapshots, cluster settings) to
+the cluster manager, and reads answered where the request arrived when
+that node holds an active copy of everything named, else on a node that
+does. The request travels whole over the transport with its caller
+(`internal:http/forward`), runs through the answering node's own router
+as that caller, and the answer comes back whole. `wait_for_active_shards`
+holds a write until enough copies are active and refuses it with the
+plugin's `unavailable_shards_exception` after `timeout`, compared with
+OpenSearch: the same 503 text.
+
+Every write a handler makes (`write_doc_versioned`, `delete_doc`, so
+index, create, update, bulk, update-by-query, reindex) is recorded with
+the version, sequence number, term and shard it was given, in a buffer
+scoped to the request; before the answer leaves, the buffer is copied to
+the replica copies (`indices:data/write/bulk[r]`, one call per node,
+active and initializing copies alike, the answers gathered) and the
+answer's `_shards` say how many copies took it (`total`, `successful`,
+`failed`, `failures`). A copy applies a write only if it is newer than
+what it holds, with the primary's version, sequence and term (`_seq_no`
+and `_primary_term` now come from the manager's published terms). A copy
+that fails a write is reported to the manager, which fails it and places
+it again. A copy the manager places on a node is filled from the primary
+before the node reports it started: a scan of the primary's documents by
+sequence number (`internal:index/recovery/scan`, the pending table read
+over the index), applied in pages, with writes made meanwhile arriving as
+they happen; the host answers the coordinator later through
+`Input::ShardDone`. The runtime grew a data-plane registry: an action
+with a handler runs on its own task and answers over the transport, apart
+from the coordinator.
+
+Live, three nodes: an index created through a follower, documents
+written and bulked through a follower (`_shards.successful: 2`), searched
+and fetched on the replica's node (answered there), counted on the
+manager; `wait_for_active_shards=2` acknowledged and `=3&timeout=1s`
+refused as OpenSearch refuses it; the replica's node killed, the copy
+placed on the third node after its delay and seeded with every document,
+a later write read back on it, an update sent through it forwarded and
+copied back. What is not here yet: a primary lost together with the
+manager (6.7 moves primaries and makes the published metadata the source
+of truth), and searches across nodes are whole-request forwards until 6.8
+fans out by shard. Gates: unit 52/52, phase1 398/398; bench after 6.6
+wins all twelve dimensions against plain OpenSearch (index 101,880 vs
+67,080 docs/s, 372MiB vs 2.0GiB, every query p50 lower) and against
+os-secure (99,810 vs 60,136 docs/s, p50s 3-5x lower): the forwarding
+layer and the write buffer cost nothing on one node.
+
+### 6.7 Peer recovery: seed from a snapshot, replay the translog, catch up, track who is in sync (done)
+
+An index outlives the node that made it. Its metadata belongs to the node
+holding its primary: that node's store for primaries here (and for an
+index not placed yet), the latest report (`internal:cluster/metadata/
+report`, sent by a follower when what it holds a primary of changes) for
+primaries elsewhere, and what was published last for the rest -- so a
+manager that has just taken over publishes every index it never held. A
+deleted index goes to the `index-graveyard` in the state (500 kept), and
+every node holding a copy lets it go; an index deleted through a node
+that holds no copy is deleted by its tombstone. Index uuids are made
+fresh at creation and kept in `index.uuid` (a reload, or a copy, keeps
+the published one), so an index made again under a deleted name is a
+different index -- the name-derived uuid let a graveyard entry bury its
+successor, which the phase1 gate caught as a closed connection. What the
+manager's store keeps besides indices -- templates, component templates,
+pipelines, stored scripts -- rides in the state as `customs`; followers
+take them whole, and take an index's published settings, mappings,
+aliases and state into the copies they hold. Requests about an index's
+own metadata (`_settings`, `_mapping`, `_alias`, `_open`, `_close`,
+`_refresh`, `_flush`, `_stats`, ...) go to the node holding its primary.
+
+A copy is a copy of the index: every node holding one takes every write
+(the logical shards are how copies are counted and routed), and the
+acknowledgement counts follow the shard written to. Recovery is by files:
+the primary commits and lists the files of the commit
+(`internal:index/recovery/files`), the copy takes them in 4 MiB chunks
+(`internal:index/recovery/file`) into a directory beside its own, then
+adopts them in place of what it held, replaying what its own translog
+took in while the files travelled -- writes made during a recovery reach
+the initializing copy as they happen, and are in its translog when the
+files land. A primary not on disk, or files that fail, fall back to the
+scan of documents by sequence number. One recovery per index at a time on
+a node: two copies of one index placed together share the files (the
+live run found the two racing on one directory). The balancer moves
+primaries too (the `primary_home` pin is gone): a moved primary keeps
+being the primary and the copy it came from goes; the term rises only
+when a replica is promoted. The primary tracks each copy's local
+checkpoint from its acknowledgements and the global checkpoint is what
+every in-sync copy has; `_stats?level=shards` shows each copy's routing
+and `seq_no` (`max_seq_no`, `local_checkpoint`, `global_checkpoint`, as
+OpenSearch shows them).
+
+Tests: a primary moved by the balancer stays the primary; an index
+outlives the manager that made it (the next manager publishes it, a
+replica is promoted in term 2, a new copy is placed and started); the
+global checkpoint is what every in-sync copy has; copies of a shard never
+share a node or a zone once primaries move. Live, three nodes: a 4-shard
+index with 3,000 documents settles with a primary moved by files to
+another node (no scan fallback), every node counts 3,000, `_stats` shows
+`max_seq_no 2999` on primary and copy, a write through the moved
+primary's node is acknowledged 2 of 2, killing that node promotes the
+replica and re-places copies (count 3,001 on both survivors); killing the
+manager keeps the index, its documents, mapping, alias and template on
+the next manager; a delete through a follower empties every node's store
+and a re-creation under the same name is a different index. Gates: unit
+55/55, phase1 398/398; bench after 6.7 wins every dimension in all three
+passes (index 97,427 vs 66,673 docs/s against plain OpenSearch,
+92,943 vs 59,070 against os-secure; 393MiB vs 2.0GiB; every
+query p50 lower).
+
+### 6.8 The coordinator: fan out a search across nodes, merge, partial results, `_shards` (done)
+
+A search is coordinated from the node it reached (`src/cluster/search.rs`).
+The plan names, for every index the request names, the node that answers
+for it: this node when it holds an active copy (a copy is a copy of the
+index), else the node holding the primary, or the one a `preference`
+picks (`_local`, `_only_nodes:`, a custom string hashed to the same copy
+every time). Each node runs the search as it always did, in a native
+mode that stops before the tail: its page of `from+size` hits with the
+order each write arrived in, and its aggregations still intermediate
+(postcard bytes of BoostCore's intermediate results, which the fork
+serialises for this). The coordinator merges the pages by the request's
+sort -- the same rules as the local page cut: sort values with `missing`
+last, then score, then the node named first, then write order -- cuts
+`from`/`size`, sums totals and shards, keeps the highest score, merges
+the intermediates, and finishes the aggregations once through the tail
+`run` now shares (`finish_search`: rendering, pipelines, `typed_keys`,
+`max_buckets`). `_count` and `_msearch` go the same way, since both are
+searches. `_search_shards` lists every copy of every shard from the
+routing, with the nodes.
+
+A node that does not answer is every shard it answered for, failed in
+`_shards` with `node_not_connected_exception`; an index the cluster knows
+but no node holds an active copy of is `no_shard_available_action_exception`
+per shard; the answer is partial unless `allow_partial_search_results=false`,
+which refuses with `search_phase_execution_exception`. A primary whose
+only copy is lost is not made again out of nothing: it waits as
+`no_valid_shard_copy`, the index is red, and `_cluster/reroute` with
+`allocate_empty_primary` and `accept_data_loss` is what makes an empty
+one (the host builds it from the published metadata) -- the live run had
+found the allocator placing a fresh empty primary on its own. A scroll
+over a spanning search is driven from the coordinator: a point in time
+on every node and how far into each the scroll has read.
+
+The aggregations this engine computes as searches of their own (`filters`,
+`missing`, the geo grids, scripted metrics, `top_hits`, `nested`, and the
+rest listed in `own_aggregations`), and `collapse`, `rescore` and `slice`,
+run whole on one node holding every index named when there is one; when
+no node holds them all the request is refused, naming the aggregation,
+rather than answered wrong. With replicas that node usually exists; the
+gap is stated.
+
+Live, three nodes, one-shard indices each on a different node, the
+coordinator holding none: a search sorted by a field with `from=2 size=3`
+merged in the right order (the shorthand `{"n": "desc"}` was read as
+ascending until the live run showed it); by score with equal scores
+tie-broken; `terms`, `sum` and `histogram` merged across nodes to the
+expected counts; `_count` and `_msearch` spanning; `_search_shards` from
+a node holding nothing; a scroll paging across the nodes in order; the
+only holder of an index killed: the index red, the search partial with
+the failure, refused with partial results disallowed, then
+`allocate_empty_primary` with `accept_data_loss` making it green and
+empty. Gates: unit 58/58, phase1 398/398; bench after 6.8 wins every
+dimension in all three passes (index 91,411 vs 66,060 docs/s against
+plain OpenSearch, 94,466 vs 59,682 against os-secure; 401MiB vs 2.0GiB;
+every query p50 lower): the coordinator's plan is one read of the state
+per search and nothing more on one node.
+
+### 6.9 Invariants inside the simulation: nothing acknowledged is lost, no two primaries accept writes, no divergence after recovery (done)
+
+`src/cluster/model.rs` is the data path as the simulation runs it: one
+node is the coordinator and a replicated store with the store's rules and
+none of its I/O. A client node writes documents with unique ids to
+whichever node; a node that is not the primary carries the write to the
+node that is; the primary gives it a sequence number and the term it is
+in, applies it, copies it to every copy (in sync or still initializing),
+and answers once every in-sync copy has taken it; a copy that does not
+answer in time is reported to the manager as failed; a copy refuses a
+write from a primary of an older term; a copy the manager places is
+filled from the primary by a scan, from nothing; a copy the manager no
+longer places here is dropped; what a node wrote is on its disk across a
+crash. The three invariants are checks over the whole cluster at the end
+of a run: every acknowledged write is on every active copy with the value
+written; no two nodes accepted different writes as the primary of one
+index in one term with one sequence number; every active copy of an
+index holds the same documents.
+
+Two things the model found. A copy filled by a scan kept the documents
+it had before: an isolated primary had applied writes nobody
+acknowledged, was demoted and crashed, and when the manager placed the
+replica back on it the scan added only what was newer, so the stale
+forty stayed (seed 22). Now a recovery starts from nothing, in the model
+and in the production scan fallback (the file recovery already replaced
+the copy whole), and copies refuse a write from an older term, in the
+model and in the production replica handler. And a lost primary was gone
+for good when its node came back: the node holding the data now says so
+(`held` in the join and in the metadata report), and the allocator gives
+the primary back to a node holding that index uuid, an `EXISTING_STORE`
+recovery -- live, a lone primary's node killed leaves the index red with
+`no_valid_shard_copy`, and its return brings the index green with every
+document.
+
+Tests: writes reach every copy and are acknowledged; the primary crashes
+mid-stream and nothing acknowledged is lost, the promoted copy in a new
+term; a lone primary that crashes comes back with its data; the primary
+is cut off from the others and no acknowledged write is lost; a storm of
+crashes, restarts and partitions over twelve seeds keeps all three; and
+`MODEL_SEEDS=a..b` runs the storm over any range (120 seeds clean),
+`MODEL_SEED=n` replays one with its events and notes. Gates: unit 66/66,
+phase1 398/398; bench after 6.9 wins every dimension against plain
+OpenSearch (index 98,404 vs 64,846 docs/s, 384MiB vs 2.06GiB) and against
+os-secure (95,822 vs 59,726 docs/s); the TLS-vs-plain pass is within noise
+on one row and stays the documented transport mismatch.
+
+### 6.10 Linearizability against real nodes, with real partitions (done)
+
+`tools/linearize.py` works a few keys against three live nodes from six
+threads, recording every operation's call and return times, while it
+cuts partitions and stops processes: a partition through each node's
+`POST /_boost/chaos` switch (`{"cut": [names]}`, `{"heal": true}`; the
+route exists only with `BOOSTSEARCH_CHAOS=1`), which drops frames to and
+from the named peers inside the transport for real, and a stop through
+SIGSTOP/SIGCONT. At the end it waits for the index to be green on all
+three nodes, reads every key from every node with `preference=_local`,
+and judges the history two ways: LOST, an acknowledged write that is not
+the final value on some node with no later write to explain it, and
+STALE, a key whose history no linearization of a register explains
+(Wing and Gong over the operations, a failed write tried both ways). The
+two are kept apart because the shipped consistency mode is OpenSearch's
+(ADR 0003): a read from an active copy may be behind, and the report
+says how many of a stale key's reads fell inside a fault window.
+
+What the live runs found, in order, none of it visible to the
+simulation. A stale primary answered a write with 200 while the copy
+that had refused it was reported failed: the refusal is now the write's
+error. A copy that came back from a partition was handed the primary
+though it had missed writes: `in_sync_allocations` is now carried in
+the index metadata across publications, a copy that misses an
+acknowledged write is reported stale by the primary (`internal:cluster/
+shard/stale`) and retired from the set, a node says which allocation ids
+it holds (`held` in the join and the metadata report, kept in the
+store's `_meta.json`), and a lost primary goes only to a holder of an
+in-sync id, `no_valid_shard_copy` otherwise. A primary cut off from the
+manager acknowledged writes its stale-copy reports never reached: the
+reports are awaited, and a manager that cannot be reached makes the
+write a 503 `unavailable_shards_exception`. A node rejoining dropped the
+only copy of an index because the routing did not place it there: a copy
+is dropped only when a primary is active elsewhere. The health handler
+compared `wait_for_nodes` against one node: it now reads the live count
+in every spelling OpenSearch takes (`3`, `>=3`, `ge(3)`, `lt(2)`, ...).
+And the cut failed a copy write at once, so the replica was placed and
+failed again five times in the seconds before the manager removed the
+node, ending in `ALLOCATION_FAILED` for an operator's `retry_failed`: a
+cut now loses frames silently like a real partition, and a copy write
+waits while its node is a member of the cluster and gives up as "node
+left" when the manager removes it, which is not a copy failure -- what
+OpenSearch's replication does.
+
+Three seeds of 45 seconds each, five faults apiece, on three nodes:
+every run settles green at once, no acknowledged write is lost, no
+divergence between copies; the stale keys are stale inside fault
+windows, as the mode allows. The model gained `SHARD_STALE`, allocation
+ids across restarts and a lone primary coming back with its data. Gates:
+unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.10 wins
+every dimension in all three passes (index 98,421 vs 67,445 docs/s,
+380MiB vs 2.06GiB plain; 93,514 vs 60,731 against os-secure; and the TLS
+pass 94,154 vs 67,127 with every query row ahead).
+
+### 6.11 Chaos, soak, rolling restart (done)
+
+`tools/cluster_chaos.py` starts three nodes itself, so it can kill and
+restart them on their own data directories, drives writers and readers at
+all three, and applies faults on a schedule: a partition through the
+chaos switch, SIGSTOP/SIGCONT, SIGKILL and a start again, a graceful
+SIGTERM restart, and `--mode rolling`, which takes every node down and up
+in turn and waits for green between each. `--mode soak` spaces the faults
+out and samples each node's resident memory. At the end it waits for
+*every* node to say green with every node in the cluster -- asking one
+node is not enough, since a node that never rejoined answers happily
+about the cluster it remembers -- and then reads every acknowledged
+document from every copy: an acknowledged write missing anywhere is the
+run's failure.
+
+That check found seven ways an acknowledged write could be lost, none of
+which the simulation could see, because each is about a node's own store
+or its own idea of the cluster.
+
+  - **The sequence counter started again at zero after a restart.** It was
+    never persisted, so a restarted primary handed new writes numbers old
+    documents already carried. A recovery pages by sequence number and
+    keyed its documents by it, so a copy filled from such a primary was
+    quietly missing everything that collided. The counter is written with
+    the index (`_meta.json`) and taken back from the translog, and the
+    scan keys documents by number *and* id, cutting pages on a number so
+    nothing between two pages is skipped.
+  - **The recovery scan read the search reader.** A write is committed
+    ahead of a refresh when the memory it holds grows too large, and is
+    then in neither the pending table nor the reader search sees: the scan
+    reads the realtime reader now.
+  - **A copy filled from the primary's files stopped at its last commit.**
+    It catches up by scan from where the files end.
+  - **Writes that arrived while a copy was being filled were thrown away**
+    with the copy the seed replaced. They wait in the recovery's queue and
+    go in as the last thing it does, under the lock that closes it.
+  - **A second recovery within thirty seconds was skipped as a duplicate.**
+    It is skipped only for the same allocation id now: another id is
+    another copy, and what is on the node may be a copy the cluster left
+    behind.
+  - **A copy taken out of the in-sync set walked straight back in** at the
+    next publication, because every active copy was added to the set.
+    A stale copy is unassigned as well as retired, so it must be filled
+    again before it counts; a set built from nothing starts with the
+    primary alone; and the answer to a stale or failed report waits for
+    the state that carries it to be committed, so a manager that loses its
+    term does not leave a primary believing a retirement that never
+    happened.
+  - **A node that had lost the cluster manager kept acknowledging writes.**
+    A stopped or partitioned node knows nothing of what the cluster
+    decided while it was away, and the primary it thinks it holds may be
+    somebody else's now. A write is refused with OpenSearch's
+    `no cluster-manager` block unless this node is a follower whose last
+    check of the leader came back, or a leader a quorum of the voting
+    configuration is still answering; a node answering "not my manager"
+    counts against that quorum at once. The in-sync bookkeeping also runs
+    when the primary has no copy to write to, so an in-sync id belonging
+    to a node that is down leaves the set before that node returns and is
+    handed the primary as though it had everything.
+
+Two more followed, found by the same check once it told a write missing
+everywhere (lost) from a write missing on one copy (a copy behind).
+
+  - **A node that thought it was still the primary poisoned the in-sync
+    set.** Its writes went nowhere the cluster could see, and it then
+    reported every other copy -- the real primary among them -- as having
+    missed them. The manager takes a stale or failed report only from the
+    node it placed the primary on, and never about that primary's own
+    copy; a copy still speaks for itself when it finishes filling.
+  - **Two copies could hold different values for one document.** A copy
+    promoted after a partition counts a document's versions from what it
+    holds, which may be a version behind, so its next write was refused by
+    the copy that had the newer number and the two never agreed again. A
+    write from a newer primary term now wins whatever version stands on a
+    copy, and a node that has just become the primary sends what it holds
+    to the other copies under the new term -- OpenSearch's primary/replica
+    resync, in its simplest form: every document rather than the ones
+    above the global checkpoint. Documents a copy has and the new primary
+    does not are left where they are: they may be writes it took and
+    answered for.
+
+Eleven chaos seeds of sixty seconds, five faults apiece: every one
+settles with every acknowledged write on every copy, and none leaves a
+copy behind. The linearizability harness of 6.10 reads only the nodes the
+cluster says hold a copy now, and over its seeds there is no divergence
+and no lost write; the reads that no linearization explains are the
+shipped mode's, inside the fault windows. Rolling restart, two rounds
+over three nodes: green after every node, nothing lost, and about a fifth
+of the writes refused while the primary moves (OpenSearch refuses fewer,
+and the block is deliberately eager here). A five-minute soak with faults
+throughout: 142,420 writes acknowledged, every one on every copy, and
+memory 49 to 156 MiB as the data grew, against OpenSearch's two gigabytes
+for the same corpus.
+
+A refresh, flush, force merge or cache clear now reaches every copy
+rather than the primary's node alone, and its `_shards` counts are the
+sum over the nodes that answered -- what OpenSearch's broadcast actions
+do, and what the check above needs to read a copy honestly. A node
+stopped with SIGTERM tells the manager it is leaving, puts every translog
+on disk and then stops taking connections, which is what makes a rolling
+restart quiet.
+
+Gates: unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.11
+wins every dimension in all three passes (index 94,280 vs 65,652 docs/s
+and 399MiB vs 2.1GiB against plain OpenSearch; 89,077 vs 56,858 against
+os-secure; the TLS pass 89,427 vs 65,895 with every query row ahead). The
+bench after the two fixes above reads lower on both sides on a machine
+that had been running chaos for hours (72,067 against 63,555 docs/s, and
+the commit before them measures the same there, so nothing in them costs
+throughput); every dimension is still ahead.
+
+### 6.12 The corpus and the diff on three nodes; the rolling-upgrade tests (done)
+
+OpenSearch's own suites, run against three nodes rather than one, and the
+same three diffs run against the cluster.
+
+| gate | one node | three nodes |
+|---|---:|---:|
+| core corpus (`/tmp/every_manifest.json`, 1,427 sections) | 1,427 | **1,412** |
+| module corpus (`tools/modules_manifest.json`, 895) | 820 | **813** |
+| `tools/search_diff.py` | 92 / 92 | **92 / 92** |
+| `tools/shape_diff.py` | 27 / 29 | **28 / 29** |
+| `tools/analysis_diff.py` | 519 / 522 | **520 / 522** |
+
+The first run of the core corpus on three nodes passed 554 of 1,427. What
+the difference was, in the order it was found:
+
+  - **A create answered before the node the client was talking to knew the
+    index.** The manager makes it and publishes; the request after it went
+    to a node a publication behind and was told there is no such index.
+    An answer to a request that makes or unmakes an index now waits for
+    this node's own view to hold what the cluster decided, which is what
+    OpenSearch's `acknowledged` means. That alone took a sample chunk from
+    52 of 77 to 76 of 77.
+  - **`_cluster/health` did not wait.** On one node nothing changes while
+    the request is held, so the engine answered at once and said it had
+    timed out; on a cluster the shards being placed are exactly what the
+    wait is for. A health request naming any `wait_for_*` now waits on a
+    cluster, up to its `timeout`.
+  - **Listing and wildcards stopped at the local store.** `_cat/indices`
+    showed one node's share of the cluster as though it were all of it,
+    and `DELETE /*` left the indices held elsewhere standing -- so the
+    tests that assume an empty cluster found leftovers. Both resolve over
+    the cluster's indices now, and a `_cat/indices` row for an index held
+    elsewhere is drawn from what the manager published.
+  - **A refresh, flush or force merge counted its shards once per node.**
+    The broadcast adds up the copies each node answered for, not the
+    tallies each node reported over the whole index.
+  - **A task lived where the work ran.** The index work that leaves a task
+    behind runs on the manager, so `_tasks` is asked of the manager.
+
+Fifteen sections of the core corpus and seven of the module corpus still
+part from the single-node run: `cat.nodeattrs` and `cat.allocation` shapes
+with three nodes in them, three `cluster/allocation_explain` sections, two
+`search_shards` alias sections, a `cluster.put_settings` default, a
+`cluster.reroute` stash, and two `indices.split` sections that time out on
+a cluster. They are named here rather than counted as passing.
+
+`tools/rolling_upgrade.py` takes two builds -- the one the cluster starts
+on and the one it ends on -- and replaces every node in turn while writers
+and readers work, waiting for green between each and searching on each
+node while the versions are mixed. Against 3.9.0 -> 3.9.1 (the same code
+with a different version), every node came back green, search answered on
+a mixed cluster, and every acknowledged write survived; with one build
+given twice it is a rolling restart, and `cluster_chaos.py --mode rolling`
+runs that shape too.
+
+Then the storm was taken from a hundred and twenty seeds to the ten
+thousand the phase asks for, and the last stretch found four more things,
+all of them about a cluster that loses every node and comes back:
+
+  - **A copy kept its place in the in-sync set while its node was away.**
+    The writes the primary takes meanwhile never reach it, so a replica
+    whose node leaves is taken out of the set and filled again when it
+    returns; the primary's own copy keeps its place, since it is the one
+    holding what the others are missing.
+  - **The set could empty, and then any copy at all could be handed the
+    primary.** It is the cluster's memory of where the data is, so it
+    never empties while something was in it.
+  - **A copy finished while the manager was changing hands was never
+    published as started**, and the shard stayed half-made for good. A
+    node says again what it has finished whenever the manager it reports
+    to changes, and forgets the ids of copies that are no longer its own.
+  - **A composite aggregation came back empty** when the index it names is
+    held on another node: it walks its buckets in order and hands back an
+    after key, so it runs whole on a holder like the engine's other own
+    aggregations rather than being merged from pages.
+
+Ten thousand seeds of the storm now keep all three invariants (the
+divergence check reads only the writes the cluster answered for: a write
+that was refused may have been taken by the primary all the same, and
+OpenSearch keeps it too). The core corpus on three nodes reads 1,386 of
+1,427 after this work -- twenty-six fewer than before it, in
+`pit/10_basic` (10), `cat.allocation` (4), `msearch` typed keys (2) and a
+handful of others, all of them the cluster's search and listing paths
+being taken where the placement used to keep the work local. They are
+named here rather than counted as passing.
+
+Gates: unit 67/67, ten-thousand-seed storm clean, phase1 398/398, chaos
+seeds, the rolling restart and the rolling upgrade with no acknowledged
+write lost and no copy behind;
+bench after 6.12 wins every dimension in passes 1 and 3 (index 67,979 vs
+63,103 docs/s and 394MiB vs 2.2GiB against plain OpenSearch; 64,989 vs
+53,722 against os-secure), and in pass 2 -- BoostSearch on TLS against
+OpenSearch on plain HTTP, the documented transport mismatch -- every row
+but `cardinality` (1.07 ms against 0.98 ms). The absolute numbers on both
+sides are lower than 6.10's on this machine, which had been running chaos
+for hours; the commit before these changes measures the same there.

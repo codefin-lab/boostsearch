@@ -9,6 +9,7 @@
 mod analysis;
 mod api;
 mod blockstats;
+mod cluster;
 mod hdr;
 mod ingest;
 mod painless;
@@ -46,6 +47,18 @@ async fn root() -> impl IntoResponse {
         },
         "tagline": "You Know, for Search"
     }))
+}
+
+/// The chaos switch answers only when the process was started for it.
+async fn chaos_or_404(
+    state: axum::extract::State<Store>,
+    body: String,
+) -> axum::response::Response {
+    if std::env::var("BOOSTSEARCH_CHAOS").map(|v| v == "1").unwrap_or(false) {
+        api::chaos(state, body).await
+    } else {
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 fn app(store: Store) -> Router {
@@ -262,6 +275,7 @@ fn app(store: Store) -> Router {
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::reroute))
+        .route("/_boost/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
         .route("/_script_language", get(api::script_languages))
         .route("/_tasks/_cancel", post(api::cancel_tasks))
@@ -362,7 +376,9 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
             "/_plugins/_security/api/audit",
-            get(security::api::audit_get).patch(security::api::audit_patch).fallback(security::api::audit_wrong_method),
+            get(security::api::audit_get)
+                .patch(security::api::audit_patch)
+                .fallback(security::api::audit_wrong_method),
         )
         .route(
             "/_plugins/_security/api/audit/config",
@@ -384,6 +400,7 @@ fn app(store: Store) -> Router {
                 .patch(security::api::patch_one),
         )
         .route("/_plugins/_security/{*rest}", any(security::api::unknown))
+        .layer(axum::middleware::from_fn_with_state(store.clone(), cluster::forward::layer))
         .layer(axum::middleware::from_fn_with_state(store.clone(), security::layer::authenticate))
         .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
         .with_state(store)
@@ -406,6 +423,15 @@ async fn main() -> anyhow::Result<()> {
     let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
     // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
+    // who this node is: the id kept in the data directory, the name, roles
+    // and addresses from the settings -- fixed before anything reads it
+    let node_settings = tls::node_settings();
+    let data_dir = std::env::var("BOOSTSEARCH_DATA")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from);
+    let identity = cluster::NodeIdentity::load(&node_settings, data_dir.as_deref(), &addr);
+    cluster::set_identity(identity.clone());
     let store = match std::env::var("BOOSTSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
@@ -415,21 +441,119 @@ async fn main() -> anyhow::Result<()> {
     // first request is answered
     api::recover(&store);
     security::audit::attach_store(&store);
+    // the transport: other nodes reach this one here
+    let transport = cluster::tcp::TcpTransport::new(&identity);
+    transport.register();
+    {
+        let t = transport.clone();
+        let bind = identity.transport_bind.clone();
+        tokio::spawn(async move {
+            if let Err(e) = t.listen(&bind).await {
+                eprintln!("boostsearch: transport could not listen on {bind}: {e}");
+            }
+        });
+    }
+    // the coordinator: the nodes named in cluster.initial_cluster_manager_nodes
+    // form the first voting configuration (this node alone when nothing is
+    // named and no seed hosts are given); the manager is elected among them
+    {
+        let me = cluster::discovery_node();
+        let alone = identity.single_node
+            || (identity.seed_hosts.is_empty()
+                && identity.initial_cluster_manager_nodes.is_empty());
+        let seeds = cluster::runtime::discover_seeds(transport.clone(), &identity.seed_hosts).await;
+        let initial_names = if alone {
+            vec![identity.name.clone()]
+        } else {
+            identity.initial_cluster_manager_nodes.clone()
+        };
+        let mut coordinator = cluster::coordinator::Coordinator::new(
+            me,
+            &identity.cluster_name,
+            &cluster::cluster_uuid(),
+            initial_names,
+            seeds,
+        );
+        coordinator.seed_hosts = identity
+            .seed_hosts
+            .iter()
+            .map(|h| if h.contains(':') { h.clone() } else { format!("{h}:9300") })
+            .collect();
+        coordinator.auto_shrink =
+            tls::node_setting(&node_settings, "cluster.auto_shrink_voting_configuration")
+                .map(|v| v != "false")
+                .unwrap_or(true);
+        let source = std::sync::Arc::new(cluster::metadata::StoreSource::new(store.clone()));
+        coordinator.metadata = Some(source.clone());
+        coordinator.host = Some(source);
+        let rt = cluster::runtime::Runtime::start(
+            transport.clone(),
+            cluster::clock(),
+            coordinator,
+            data_dir.clone(),
+        );
+        cluster::set_runtime(rt);
+        // the data plane: replication and recovery between nodes, and
+        // requests carried to the node they belong on
+        cluster::replication::install(store.clone());
+        cluster::search::install(store.clone());
+        cluster::forward::install(app(store.clone()));
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
     // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true
-    let node_settings = tls::node_settings();
     let tls_settings = tls::TlsSettings::read(&node_settings);
     if tls_settings.enabled {
         eprintln!("boostsearch listening on https://{addr}");
-        tls::serve_tls(listener, app(store), &tls_settings).await?;
+        tls::serve_tls(listener, app(store.clone()), &tls_settings, shutdown_signal(store)).await?;
     } else {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
             listener,
-            app(store).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app(store.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal(store))
         .await?;
     }
     Ok(())
+}
+
+/// SIGTERM or SIGINT: the node tells the cluster manager it is leaving, so
+/// the manager removes it now rather than after three missed checks, puts
+/// every translog on disk, and then stops taking connections. A rolling
+/// restart is this, one node at a time.
+async fn shutdown_signal(store: Store) {
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = term => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+    eprintln!("boostsearch: stopping");
+    if let Some(rt) = cluster::runtime() {
+        let me = rt.local();
+        if let Some(m) = rt.state().cluster_manager.clone() {
+            if m != me {
+                let _ = rt
+                    .call(
+                        &m,
+                        cluster::coordinator::LEAVE,
+                        vec![],
+                        std::time::Duration::from_secs(2),
+                    )
+                    .await;
+            }
+        }
+    }
+    for name in store.names() {
+        if let Some(st) = store.get(&name) {
+            st.write().sync_translog();
+        }
+    }
 }

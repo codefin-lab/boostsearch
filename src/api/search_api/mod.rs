@@ -170,10 +170,25 @@ pub async fn search_shards(
 ) -> Response {
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let expr = index.map(|Path(i)| i);
-    let names = match expr.as_deref() {
+    // the indices as the cluster knows them, and this node's own besides
+    let published = crate::cluster::current_state();
+    let mut names = match expr.as_deref() {
         Some(e) => store.resolve(e),
         None => store.names(),
     };
+    for n in published.indices.keys() {
+        let wanted = match expr.as_deref() {
+            None => true,
+            Some(e) => e.split(',').map(|x| x.trim()).any(|part| {
+                part == n
+                    || part == "_all"
+                    || (part.contains('*') && crate::store::glob_match(part, n))
+            }),
+        };
+        if wanted && !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
     // an index reached through an alias reports which alias led to it, since
     // an alias may carry a filter the caller needs to know about
     let mut via: Vec<String> = Vec::new();
@@ -210,11 +225,21 @@ pub async fn search_shards(
         v.strip_prefix("_shards:")
             .map(|list| list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect())
     });
+    // each shard as the manager placed its copies; an index the manager has
+    // not placed yet is this node's alone
+    let live = crate::cluster::current_state();
+    let me = crate::cluster::identity();
     let mut listed: Vec<(String, u64)> = Vec::new();
     for n in &names {
-        let count = store
+        let count = live
+            .indices
             .get(n)
-            .map(|st| st.read().numeric_setting("number_of_shards").unwrap_or(1).max(1))
+            .map(|m| m.number_of_shards as u64)
+            .or_else(|| {
+                store
+                    .get(n)
+                    .map(|st| st.read().numeric_setting("number_of_shards").unwrap_or(1).max(1))
+            })
             .unwrap_or(1);
         for shard in 0..count {
             if preferred.as_ref().map(|w| !w.contains(&shard)).unwrap_or(false) {
@@ -225,23 +250,49 @@ pub async fn search_shards(
     }
     // a slice takes every `max`th of what is left, counted by position rather
     // than by shard number -- the two differ once a preference has narrowed it
+    let mut nodes_used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let shards: Vec<Value> = listed
         .into_iter()
         .enumerate()
         .filter(|(i, _)| slice.is_none() || *i as u64 % slice_max == slice_id)
         .map(|(_, (n, shard))| {
-            json!([{
-                "state": "STARTED", "primary": true, "node": "node-0",
-                "relocating_node": null, "shard": shard, "index": n,
-                "allocation_id": {"id": "_na_"}
-            }])
+            let copies: Vec<Value> = live
+                .routing
+                .shards_of(&n)
+                .filter(|c| c.shard as u64 == shard && c.node.is_some())
+                .map(|c| {
+                    if let Some(nd) = &c.node {
+                        nodes_used.insert(nd.as_str().to_string());
+                    }
+                    c.to_json()
+                })
+                .collect();
+            if copies.is_empty() {
+                nodes_used.insert(me.id.as_str().to_string());
+                json!([{
+                    "state": "STARTED", "primary": true, "node": me.id.as_str(),
+                    "relocating_node": null, "shard": shard, "index": n,
+                    "allocation_id": {"id": "_na_"}
+                }])
+            } else {
+                Value::Array(copies)
+            }
         })
         .collect();
+    let mut nodes = serde_json::Map::new();
+    for id in nodes_used {
+        let entry = match live.nodes.get(&crate::cluster::NodeId(id.clone())) {
+            Some(nd) => json!({"name": nd.name, "ephemeral_id": nd.ephemeral_id.as_str(),
+                "transport_address": nd.transport_address, "attributes": nd.attributes}),
+            None => json!({"name": me.name, "ephemeral_id": me.ephemeral_id.as_str(),
+                "transport_address": me.transport_address, "attributes": {}}),
+        };
+        nodes.insert(id, entry);
+    }
     respond(
         &p,
         json!({
-            "nodes": {"node-0": {"name": "boostsearch", "ephemeral_id": "_na_",
-                                 "transport_address": "127.0.0.1:9300", "attributes": {}}},
+            "nodes": nodes,
             "indices": names
                 .iter()
                 .map(|n| {

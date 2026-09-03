@@ -48,6 +48,17 @@ impl IdxState {
         (version, seq)
     }
 
+    /// Take the version and sequence number the primary gave a write, for a
+    /// copy applying it.
+    pub fn set_replicated_version(&mut self, id: &str, version: u64, live: bool, seq: u64) {
+        let fp = id_fingerprint(id);
+        self.versions.insert(id.to_string(), DocMeta { version, live });
+        if live {
+            self.live_ids.insert(fp);
+        }
+        self.seq_no = self.seq_no.max(seq + 1);
+    }
+
     pub fn version_of(&self, id: &str) -> u64 {
         self.versions.get(id).map(|m| m.version).unwrap_or(1)
     }

@@ -483,12 +483,15 @@ impl AuditLog {
             config: RwLock::new(Arc::new(config)),
             readonly,
             sink: sink.clone(),
-            node: NodeInfo {
-                cluster_name: get("cluster.name").unwrap_or_else(|| "boostsearch".into()),
-                node_name: get("node.name").unwrap_or_else(|| "boostsearch".into()),
-                node_id: "node-0".into(),
-                host_address: host.clone(),
-                host_name: host,
+            node: {
+                let me = crate::cluster::identity();
+                NodeInfo {
+                    cluster_name: me.cluster_name.clone(),
+                    node_name: me.name.clone(),
+                    node_id: me.id.as_str().to_string(),
+                    host_address: host.clone(),
+                    host_name: host,
+                }
             },
             tx,
             config_versions: parking_lot::Mutex::new(HashMap::new()),
