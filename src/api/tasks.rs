@@ -47,8 +47,10 @@ pub async fn get_task(
     let node = id.split_once(':').map(|(n, _)| n).unwrap_or("").to_string();
     // a task named after a node that is not here is a task nobody has heard of
     if !node.is_empty()
+        && node != "node-0"
         && node != crate::cluster::identity().id.as_str()
         && node != crate::cluster::identity().name
+        && crate::cluster::current_state().nodes.keys().all(|n| n.as_str() != node)
     {
         return err(
             StatusCode::NOT_FOUND,

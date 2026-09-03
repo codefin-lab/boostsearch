@@ -211,7 +211,10 @@ pub async fn resize_index(
         return respond(
             &p,
             json!({
-                "task": format!("node-0:{kind} from [{source}] to [{target}]")
+                "task": format!(
+                    "{}:{kind} from [{source}] to [{target}]",
+                    crate::cluster::identity().id.as_str()
+                )
             }),
         );
     }

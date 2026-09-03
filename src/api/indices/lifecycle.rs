@@ -274,7 +274,9 @@ pub async fn open_index(
     // `wait_for_completion=false` asks for the work to be tracked rather than
     // waited on; the index is already open, so the task is a finished one
     if p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false) {
-        return respond(&p, json!({"task": format!("node-0:open indices [{index}]")}));
+        // the task is named after the node that ran it, as OpenSearch names it
+        let me = crate::cluster::identity().id.as_str().to_string();
+        return respond(&p, json!({"task": format!("{me}:open indices [{index}]")}));
     }
     respond(&p, json!({"acknowledged": true, "shards_acknowledged": true}))
 }

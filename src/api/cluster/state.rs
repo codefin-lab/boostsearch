@@ -54,10 +54,9 @@ pub async fn reroute(
         );
     };
     // the state as `_cluster/state` shows it, without the metadata unless asked
-    let metrics: String =
-        p.get("metric").filter(|m| !m.is_empty()).cloned().unwrap_or_else(|| {
-            "version,master_node,nodes,routing_table,routing_nodes,blocks".into()
-        });
+    let metrics: String = p.get("metric").filter(|m| !m.is_empty()).cloned().unwrap_or_else(|| {
+        "version,master_node,cluster_manager_node,nodes,routing_table,routing_nodes,blocks".into()
+    });
     let mut out = json!({"acknowledged": true});
     if !metrics.split(',').any(|m| m.trim() == "none") {
         let mut inner = p.clone();
@@ -105,25 +104,36 @@ pub async fn allocation_explain(
                 // the index is there and the manager has not placed this copy
                 // yet: it is unassigned, freshly created, which is what an
                 // explanation of it says
-                None if live.indices.contains_key(index) || store.get(index).is_some() => {
-                    crate::cluster::state::ShardRouting {
-                        index: index.clone(),
-                        shard,
-                        primary,
-                        state: ShardState::Unassigned,
-                        node: None,
-                        relocating_node: None,
-                        allocation_id: None,
-                        unassigned: Some(crate::cluster::state::UnassignedInfo {
-                            reason: "INDEX_CREATED".into(),
-                            at_millis: crate::cluster::clock().wall(),
-                            delayed: false,
-                            allocation_status: "no_attempt".into(),
-                            failed_allocations: 0,
-                            details: None,
-                        }),
-                    }
-                }
+                // held here with nothing published about it (a single node,
+                // or a copy the manager has not placed yet): it is started
+                // here if this node holds it, and unassigned otherwise
+                None if store.get(index).is_some() => crate::cluster::state::ShardRouting {
+                    index: index.clone(),
+                    shard,
+                    primary,
+                    state: ShardState::Started,
+                    node: Some(crate::cluster::identity().id.clone()),
+                    relocating_node: None,
+                    allocation_id: Some("local".into()),
+                    unassigned: None,
+                },
+                None if live.indices.contains_key(index) => crate::cluster::state::ShardRouting {
+                    index: index.clone(),
+                    shard,
+                    primary,
+                    state: ShardState::Unassigned,
+                    node: None,
+                    relocating_node: None,
+                    allocation_id: None,
+                    unassigned: Some(crate::cluster::state::UnassignedInfo {
+                        reason: "INDEX_CREATED".into(),
+                        at_millis: crate::cluster::clock().wall(),
+                        delayed: false,
+                        allocation_status: "no_attempt".into(),
+                        failed_allocations: 0,
+                        details: None,
+                    }),
+                },
                 None => {
                     return err(
                         StatusCode::BAD_REQUEST,
@@ -134,8 +144,41 @@ pub async fn allocation_explain(
             }
         }
         None => {
-            // which unassigned shard needs explaining: the first there is
-            match live.routing.all().find(|c| c.state == ShardState::Unassigned).cloned() {
+            // which unassigned shard needs explaining: the first there is --
+            // and on a node with nothing published, a replica the settings ask
+            // for and no node can hold
+            let from_store = || {
+                store.names().into_iter().find_map(|n| {
+                    let st = store.get(&n)?;
+                    let g = st.read();
+                    (g.numeric_setting("number_of_replicas").unwrap_or(0) > 0).then(|| {
+                        crate::cluster::state::ShardRouting {
+                            index: n.clone(),
+                            shard: 0,
+                            primary: false,
+                            state: ShardState::Unassigned,
+                            node: None,
+                            relocating_node: None,
+                            allocation_id: None,
+                            unassigned: Some(crate::cluster::state::UnassignedInfo {
+                                reason: "INDEX_CREATED".into(),
+                                at_millis: crate::cluster::clock().wall(),
+                                delayed: false,
+                                allocation_status: "no_attempt".into(),
+                                failed_allocations: 0,
+                                details: None,
+                            }),
+                        }
+                    })
+                })
+            };
+            match live
+                .routing
+                .all()
+                .find(|c| c.state == ShardState::Unassigned)
+                .cloned()
+                .or_else(from_store)
+            {
                 Some(c) => c,
                 None => {
                     return err(
@@ -285,7 +328,8 @@ pub(crate) fn cluster_state_value(
             }
             found
         }
-        _ => store.names(),
+        // no expression: every index the cluster holds, not this node's share
+        _ => crate::api::cluster_names(store),
     };
 
     let named = names.clone();

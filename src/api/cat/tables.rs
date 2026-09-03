@@ -99,6 +99,14 @@ pub async fn cat_indices(
             // an index of the cluster whose copies are on other nodes: what
             // the manager published is what there is to say about it here
             let Some(m) = published.indices.get(&n) else { continue };
+            let hidden = m
+                .settings
+                .pointer("/index/hidden")
+                .map(|v| v == "true" || v == true)
+                .unwrap_or(false);
+            if !show_hidden && hidden {
+                continue;
+            }
             let only = vec![n.clone()];
             let health = published.health_status(Some(&only));
             if p.get("health").map(|h| h != health).unwrap_or(false) {
@@ -427,10 +435,20 @@ pub async fn cat_aliases(
         Some(v) => v.split(',').any(|w| matches!(w.trim(), "hidden" | "all")),
     };
     let mut rows = Vec::new();
-    for n in store.names() {
-        let Some(st) = store.get(&n) else { continue };
-        let g = st.read();
-        for (a, def) in &g.aliases {
+    // every index of the cluster, and the aliases it carries: an alias belongs
+    // to the index, wherever its copies are
+    let published = crate::cluster::current_state();
+    for n in crate::api::cluster_names(&store) {
+        let held: std::collections::BTreeMap<String, Value> = match store.get(&n) {
+            Some(st) => st.read().aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            None => published
+                .indices
+                .get(&n)
+                .and_then(|m| m.aliases.as_object().cloned())
+                .map(|o| o.into_iter().collect())
+                .unwrap_or_default(),
+        };
+        for (a, def) in &held {
             let wanted = match filter.as_deref() {
                 None | Some("") | Some("*") | Some("_all") => true,
                 Some(expr) => expr.split(',').any(|pat| {
@@ -441,8 +459,17 @@ pub async fn cat_aliases(
             if !wanted {
                 continue;
             }
-            let hidden = def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false)
-                || g.setting("hidden").map(|v| v == "true").unwrap_or(false);
+            let index_hidden = match store.get(&n) {
+                Some(st) => st.read().setting("hidden").map(|v| v == "true").unwrap_or(false),
+                None => published
+                    .indices
+                    .get(&n)
+                    .and_then(|m| m.settings.pointer("/index/hidden"))
+                    .map(|v| v == "true" || v == true)
+                    .unwrap_or(false),
+            };
+            let hidden =
+                def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false) || index_hidden;
             if hidden && !show_hidden {
                 continue;
             }
