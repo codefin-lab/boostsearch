@@ -1165,6 +1165,9 @@ fn new_allocation_id() -> String {
 /// What one pass of `reroute` did, for the notes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Changes {
+    /// copies that are no longer in sync: their node left, so the writes
+    /// taken since never reached them
+    pub retired: Vec<(String, u32, String)>,
     pub notes: Vec<String>,
     pub assigned: Vec<(String, u32, bool, NodeId)>,
     pub unassigned: Vec<(String, u32, bool, String)>,
@@ -1325,6 +1328,16 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
             for i in gone {
                 let c = &mut copies[i];
                 let was_primary = c.primary;
+                // a copy whose node is gone is no longer in sync: the writes
+                // the primary takes while it is away never reach it, and when
+                // the node comes back the copy has to be filled again. The
+                // primary's own copy keeps its place in the set, since it is
+                // the one holding what everybody else is missing.
+                if !was_primary {
+                    if let Some(a) = &c.allocation_id {
+                        changes.retired.push((name.clone(), *shard, a.clone()));
+                    }
+                }
                 c.state = ShardState::Unassigned;
                 c.node = None;
                 c.relocating_node = None;

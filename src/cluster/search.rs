@@ -315,6 +315,9 @@ fn own_aggregations(body: &Value) -> Vec<String> {
         "top_hits",
         "geo_distance",
         "range_field_histogram",
+        // a composite walks the buckets in order and hands back an after key:
+        // merging two nodes' pages would take the order with it
+        "composite",
     ];
     fn walk(v: &Value, out: &mut Vec<String>) {
         let Some(o) = v.as_object() else { return };

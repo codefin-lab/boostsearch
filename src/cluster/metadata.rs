@@ -148,6 +148,16 @@ pub fn with_terms(
                 in_sync = vec![a.clone()];
             }
         }
+        // the set never empties while something was in it: it is the cluster's
+        // memory of which copy holds the data, and an empty set would let any
+        // copy at all be handed the primary
+        if in_sync.is_empty() {
+            if let Some(before) = previous.get(&shard) {
+                if !before.is_empty() {
+                    in_sync = before.clone();
+                }
+            }
+        }
         m.in_sync_allocations.insert(shard, in_sync);
     }
     m

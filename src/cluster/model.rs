@@ -62,6 +62,11 @@ struct PendingWrite {
     term: u64,
     waiting: BTreeSet<NodeId>,
     in_sync_waiting: BTreeSet<NodeId>,
+    /// stale reports the manager has not answered yet: a write is not
+    /// acknowledged until the cluster has taken the copies that missed it
+    /// out of the in-sync set, which is what the production primary waits
+    /// for as well
+    reports_waiting: BTreeSet<u64>,
     acked: bool,
     deadline: Millis,
 }
@@ -285,14 +290,19 @@ impl ClusterNode {
             term,
             waiting,
             in_sync_waiting,
+            reports_waiting: BTreeSet::new(),
             acked: false,
             deadline: clock.now() + self.timeout,
         };
         if pw.in_sync_waiting.is_empty() {
-            pw.acked = true;
-            out.push(Self::ack(&client, client_rid, &self.me, seq, term));
             let took: BTreeSet<NodeId> = BTreeSet::new();
-            out.extend(self.stale_reports(index, &took));
+            let (reports, rids) = self.stale_reports_tracked(index, &took);
+            out.extend(reports);
+            pw.reports_waiting = rids;
+            if pw.reports_waiting.is_empty() {
+                pw.acked = true;
+                out.push(Self::ack(&client, client_rid, &self.me, seq, term));
+            }
         }
         self.pending.insert(rid, pw);
         out.push(Output::Timer { id: T_TICK, after: 500 });
@@ -324,10 +334,21 @@ impl ClusterNode {
     }
 
     fn stale_reports(&mut self, index: &str, took: &BTreeSet<NodeId>) -> Vec<Output> {
+        self.stale_reports_tracked(index, took).0
+    }
+
+    /// The reports, and the request ids a write must wait for.
+    fn stale_reports_tracked(
+        &mut self,
+        index: &str,
+        took: &BTreeSet<NodeId>,
+    ) -> (Vec<Output>, BTreeSet<u64>) {
         let mut out = Vec::new();
-        let Some(mgr) = self.state().cluster_manager.clone() else { return out };
+        let mut rids = BTreeSet::new();
+        let Some(mgr) = self.state().cluster_manager.clone() else { return (out, rids) };
         for (shard, id) in self.stale_ids(index, took) {
             let r = self.rid();
+            rids.insert(r);
             let body = json!({"index": index, "shard": shard, "allocation_id": id});
             out.push(Output::Send {
                 to: mgr.clone(),
@@ -339,7 +360,7 @@ impl ClusterNode {
                 ),
             });
         }
-        out
+        (out, rids)
     }
 
     fn ack(client: &NodeId, client_rid: u64, me: &NodeId, seq: u64, term: u64) -> Output {
@@ -549,6 +570,44 @@ impl ClusterNode {
                 self.apply_copy(&index, &ops, durable);
                 vec![Output::Send { to: from, envelope: e.response(self.me.clone(), vec![]) }]
             }
+            (super::coordinator::SHARD_STALE, Kind::Response)
+            | (super::coordinator::SHARD_STALE, Kind::Error) => {
+                // the cluster has taken the copy out of the in-sync set (or
+                // says it will not): the write it was holding can be answered
+                let mut out = Vec::new();
+                let failed = e.kind == Kind::Error;
+                let me = self.me.clone();
+                let mut done: Vec<u64> = Vec::new();
+                for (rid, p) in self.pending.iter_mut() {
+                    if !p.reports_waiting.remove(&e.request_id) {
+                        continue;
+                    }
+                    if failed {
+                        // the manager did not take it: this node cannot say
+                        // the write is safe
+                        out.push(Self::refuse(
+                            &p.client,
+                            p.client_rid,
+                            &me,
+                            "the cluster manager did not record the copies that missed this write",
+                        ));
+                        done.push(*rid);
+                    } else if !p.acked
+                        && p.in_sync_waiting.is_empty()
+                        && p.reports_waiting.is_empty()
+                    {
+                        p.acked = true;
+                        out.push(Self::ack(&p.client, p.client_rid, &me, p.seq, p.term));
+                        if p.waiting.is_empty() {
+                            done.push(*rid);
+                        }
+                    }
+                }
+                for rid in done {
+                    self.pending.remove(&rid);
+                }
+                out
+            }
             (COPY_WRITE, Kind::Response) => {
                 let mut out = Vec::new();
                 let mut acked_now: Option<(String, BTreeSet<NodeId>)> = None;
@@ -569,8 +628,6 @@ impl ClusterNode {
                     p.waiting.remove(&from);
                     p.in_sync_waiting.remove(&from);
                     if !p.acked && p.in_sync_waiting.is_empty() {
-                        p.acked = true;
-                        out.push(Self::ack(&p.client, p.client_rid, &me, p.seq, p.term));
                         let mut took: BTreeSet<NodeId> = BTreeSet::new();
                         took.insert(from.clone());
                         for n in &holders {
@@ -580,12 +637,22 @@ impl ClusterNode {
                         }
                         acked_now = Some((p.index.clone(), took));
                     }
-                    if p.waiting.is_empty() {
-                        self.pending.remove(&e.request_id);
-                    }
                 }
                 if let Some((index, took)) = acked_now {
-                    out.extend(self.stale_reports(&index, &took));
+                    let (reports, rids) = self.stale_reports_tracked(&index, &took);
+                    out.extend(reports);
+                    if let Some(p) = self.pending.get_mut(&e.request_id) {
+                        p.reports_waiting = rids;
+                        if p.reports_waiting.is_empty() {
+                            p.acked = true;
+                            out.push(Self::ack(&p.client, p.client_rid, &me, p.seq, p.term));
+                        }
+                    }
+                }
+                if let Some(p) = self.pending.get(&e.request_id) {
+                    if p.waiting.is_empty() && p.acked {
+                        self.pending.remove(&e.request_id);
+                    }
                 }
                 out
             }
@@ -1005,12 +1072,19 @@ pub mod tests {
             .unwrap_or_default()
     }
 
+    /// The newest committed state among the nodes that are up: one of them
+    /// may be a publication behind, and its routing would say the cluster
+    /// holds nothing where the others say it holds everything.
+    fn freshest(lab: &Lab, up: &[NodeId]) -> Option<ClusterState> {
+        up.iter().filter_map(|n| committed(&lab.sim, n)).max_by_key(|s| (s.term, s.version))
+    }
+
     /// Invariant one: every acknowledged write is on every active copy of
     /// its index, and on the primary, with the value that was written.
     pub fn nothing_acknowledged_is_lost(lab: &Lab, index: &str) {
         let acked = lab.acked.lock().clone();
         let up: Vec<NodeId> = lab.nodes.iter().filter(|n| lab.sim.is_up(n)).cloned().collect();
-        let state = committed(&lab.sim, &up[0]).expect("a committed state");
+        let state = freshest(lab, &up).expect("a committed state");
         let holders: Vec<NodeId> = state
             .routing
             .shards_of(index)
@@ -1018,7 +1092,22 @@ pub mod tests {
             .filter_map(|c| c.node.clone())
             .filter(|n| lab.sim.is_up(n))
             .collect();
-        assert!(!holders.is_empty(), "no active copy of {index} at the end");
+        assert!(
+            !holders.is_empty(),
+            "no active copy of {index} at the end: indices={:?} routing={:?} up={:?}",
+            state.indices.keys().collect::<Vec<_>>(),
+            state
+                .routing
+                .shards_of(index)
+                .map(|c| format!(
+                    "{}{:?}@{:?}",
+                    if c.primary { "p" } else { "r" },
+                    c.state,
+                    c.node.as_ref().map(|n| n.as_str().to_string())
+                ))
+                .collect::<Vec<_>>(),
+            up.iter().map(|n| n.as_str().to_string()).collect::<Vec<_>>()
+        );
         for holder in &holders {
             let docs = docs_now(lab, holder);
             let d = docs.get(index).cloned().unwrap_or_default();
@@ -1061,7 +1150,7 @@ pub mod tests {
     /// Invariant three: every active copy of the index holds the same documents.
     pub fn no_divergence(lab: &Lab, index: &str) {
         let up: Vec<NodeId> = lab.nodes.iter().filter(|n| lab.sim.is_up(n)).cloned().collect();
-        let state = committed(&lab.sim, &up[0]).expect("a committed state");
+        let state = freshest(lab, &up).expect("a committed state");
         let holders: Vec<NodeId> = state
             .routing
             .shards_of(index)
@@ -1069,6 +1158,12 @@ pub mod tests {
             .filter_map(|c| c.node.clone())
             .filter(|n| lab.sim.is_up(n))
             .collect();
+        // A write that was refused may have been taken by the primary all the
+        // same -- it was never answered for, so either outcome is legal, and
+        // OpenSearch keeps it too. What must agree is every write the cluster
+        // answered for, so the comparison is over those.
+        let acked: std::collections::BTreeSet<String> =
+            lab.acked.lock().iter().map(|(_, id, _, _, _)| id.clone()).collect();
         let sets: Vec<BTreeMap<String, u64>> = holders
             .iter()
             .map(|h| {
@@ -1077,6 +1172,7 @@ pub mod tests {
                     .cloned()
                     .unwrap_or_default()
                     .iter()
+                    .filter(|(k, _)| acked.contains(*k))
                     .map(|(k, v)| (k.clone(), v.value))
                     .collect()
             })
@@ -1260,7 +1356,9 @@ pub mod tests {
         }
         lab.sim.heal();
         events.push(format!("{t} heal"));
-        quiet(&mut lab, t + 120_000);
+        // long enough for a cluster that lost every node to elect, place the
+        // primary back where its data is, and fill the copies again
+        quiet(&mut lab, t + 240_000);
         (lab, events)
     }
 
@@ -1323,6 +1421,8 @@ pub mod tests {
             }
         }
         eprintln!("acked {} refused {}", lab.acked.lock().len(), lab.refused.lock());
+        nothing_acknowledged_is_lost(&lab, "i");
+        no_two_primaries_accepted_writes(&lab);
         no_divergence(&lab, "i");
     }
 }

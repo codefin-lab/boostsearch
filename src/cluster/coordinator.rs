@@ -167,6 +167,9 @@ pub struct Coordinator {
     /// the primary term this node has already sent its documents out for,
     /// by index and shard
     resynced: BTreeMap<(String, u32), u64>,
+    /// copies this node has finished making, whether or not the manager of
+    /// the moment published them as started
+    started_here: std::collections::BTreeSet<String>,
     leader_check_outstanding: Option<u64>,
     /// nodes that asked to join, and to leave, while a publication was in flight
     waiting_joins: BTreeMap<NodeId, DiscoveryNode>,
@@ -292,6 +295,7 @@ impl Coordinator {
             leader_misses: 0,
             event_replies: Vec::new(),
             resynced: BTreeMap::new(),
+            started_here: Default::default(),
             leader_check_outstanding: None,
             waiting_joins: BTreeMap::new(),
             pending_removals: BTreeSet::new(),
@@ -935,6 +939,16 @@ impl Coordinator {
         for (index, shard, _node) in &changes.promoted {
             *self.terms.entry((index.clone(), *shard)).or_insert(1) += 1;
         }
+        // copies whose nodes left: out of the in-sync set, so a node that
+        // comes back with an old copy is filled again rather than trusted
+        for (index, shard, id) in &changes.retired {
+            if self.notes {
+                out.push(self.note(format!(
+                    "[{index}][{shard}]: {id} is out of the in-sync set, its node left"
+                )));
+            }
+            retired.entry(index.clone()).or_default().push((*shard, id.clone()));
+        }
         if self.notes {
             for n in &changes.notes {
                 out.push(self.note(format!("allocation: {n}")));
@@ -1142,6 +1156,35 @@ impl Coordinator {
         }
         let mine: Vec<super::state::ShardRouting> =
             self.committed.routing.on_node(&me).cloned().collect();
+        // ids of copies that are no longer this node's are forgotten, so a
+        // copy placed here again -- the same id coming back with the store it
+        // belongs to -- is started rather than taken for one already running
+        let here: std::collections::BTreeSet<String> =
+            mine.iter().filter_map(|c| c.allocation_id.clone()).collect();
+        self.reported.retain(|a| here.contains(a));
+        self.started_here.retain(|a| here.contains(a));
+        // a copy this node finished while the manager was changing hands: the
+        // report went to a manager that never published it, so it is made
+        // again to whoever leads now
+        let again: Vec<super::state::ShardRouting> = mine
+            .iter()
+            .filter(|c| {
+                c.state == super::state::ShardState::Initializing
+                    && c.allocation_id
+                        .as_ref()
+                        .map(|a| self.started_here.contains(a))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for copy in again {
+            let Some(aid) = copy.allocation_id.clone() else { continue };
+            out.extend(self.report(ShardEvent::Started {
+                index: copy.index.clone(),
+                shard: copy.shard,
+                allocation_id: aid,
+            }));
+        }
         // a primary held here in a term this node has not sent its documents
         // out for: the copies around it followed the primary before, and one
         // of them may hold another value for a document nobody writes again
@@ -1215,7 +1258,10 @@ impl Coordinator {
                 Ok(true) => ShardEvent::Started {
                     index: copy.index.clone(),
                     shard: copy.shard,
-                    allocation_id: aid,
+                    allocation_id: {
+                        self.started_here.insert(aid.clone());
+                        aid
+                    },
                 },
                 Err(message) => ShardEvent::Failed {
                     index: copy.index.clone(),

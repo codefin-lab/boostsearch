@@ -1495,8 +1495,40 @@ a mixed cluster, and every acknowledged write survived; with one build
 given twice it is a rolling restart, and `cluster_chaos.py --mode rolling`
 runs that shape too.
 
-Gates: unit 67/67, 120-seed storm clean, phase1 398/398, chaos seeds and
-the rolling restart with no acknowledged write lost and no copy behind;
+Then the storm was taken from a hundred and twenty seeds to the ten
+thousand the phase asks for, and the last stretch found four more things,
+all of them about a cluster that loses every node and comes back:
+
+  - **A copy kept its place in the in-sync set while its node was away.**
+    The writes the primary takes meanwhile never reach it, so a replica
+    whose node leaves is taken out of the set and filled again when it
+    returns; the primary's own copy keeps its place, since it is the one
+    holding what the others are missing.
+  - **The set could empty, and then any copy at all could be handed the
+    primary.** It is the cluster's memory of where the data is, so it
+    never empties while something was in it.
+  - **A copy finished while the manager was changing hands was never
+    published as started**, and the shard stayed half-made for good. A
+    node says again what it has finished whenever the manager it reports
+    to changes, and forgets the ids of copies that are no longer its own.
+  - **A composite aggregation came back empty** when the index it names is
+    held on another node: it walks its buckets in order and hands back an
+    after key, so it runs whole on a holder like the engine's other own
+    aggregations rather than being merged from pages.
+
+Ten thousand seeds of the storm now keep all three invariants (the
+divergence check reads only the writes the cluster answered for: a write
+that was refused may have been taken by the primary all the same, and
+OpenSearch keeps it too). The core corpus on three nodes reads 1,386 of
+1,427 after this work -- twenty-six fewer than before it, in
+`pit/10_basic` (10), `cat.allocation` (4), `msearch` typed keys (2) and a
+handful of others, all of them the cluster's search and listing paths
+being taken where the placement used to keep the work local. They are
+named here rather than counted as passing.
+
+Gates: unit 67/67, ten-thousand-seed storm clean, phase1 398/398, chaos
+seeds, the rolling restart and the rolling upgrade with no acknowledged
+write lost and no copy behind;
 bench after 6.12 wins every dimension in passes 1 and 3 (index 67,979 vs
 63,103 docs/s and 394MiB vs 2.2GiB against plain OpenSearch; 64,989 vs
 53,722 against os-secure), and in pass 2 -- BoostSearch on TLS against

@@ -308,9 +308,18 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                     }
                 }
             }
+            // ids that belong to a copy the routing still has: an id left in
+            // the set for a copy that is gone is the cluster's memory of
+            // where the data was, and there is nothing to take out of the set
+            let placed: Vec<String> = state
+                .routing
+                .shards_of(index)
+                .filter(|c| c.state != ShardState::Unassigned)
+                .filter_map(|c| c.allocation_id.clone())
+                .collect();
             for (shard, ids) in &m.in_sync_allocations {
                 for id in ids {
-                    if !fine.contains(id) {
+                    if !fine.contains(id) && placed.contains(id) {
                         let body = json!({"index": index, "shard": shard, "allocation_id": id});
                         let answer = rt
                             .call(
