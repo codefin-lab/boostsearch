@@ -279,6 +279,15 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             )
                             .await;
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                                eprintln!(
+                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    match &answer {
+                                        Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
+                                        None => "no answer".to_string(),
+                                    }
+                                );
+                            }
                             manager_unreachable = true;
                         }
                     }
@@ -330,6 +339,15 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             )
                             .await;
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                                eprintln!(
+                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    match &answer {
+                                        Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
+                                        None => "no answer".to_string(),
+                                    }
+                                );
+                            }
                             manager_unreachable = true;
                         }
                     }
@@ -960,8 +978,13 @@ pub async fn seed_by_scan(
         let primary_here = super::runtime().map(|r| r.local()).as_ref() == Some(primary);
         if !primary_here {
             if let Some(meta) = meta {
-                let _ = tokio::task::spawn_blocking(move || {
+                let made = tokio::task::spawn_blocking(move || {
                     store2.drop_local(&name);
+                    // and the files with it: a directory left half emptied is
+                    // one the new index would try to open and fail on
+                    if let Some(dir) = store2.index_dir(&name) {
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
                     let mut settings = meta.settings.clone();
                     if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
                         for k in ["creation_date", "provided_name", "version"] {
@@ -969,10 +992,26 @@ pub async fn seed_by_scan(
                         }
                         idx.insert("uuid".into(), json!(meta.uuid));
                     }
-                    let _ = store2
-                        .create(&name, &json!({"settings": settings, "mappings": meta.mappings}));
+                    let body = json!({"settings": settings, "mappings": meta.mappings});
+                    // the empty index the documents will be applied to: if it
+                    // cannot be made, the recovery says so rather than failing
+                    // page by page with nothing here to apply them to
+                    match store2.create(&name, &body) {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            // a store that still holds it (a writer that had
+                            // not finished) is what we wanted anyway
+                            if store2.get(&name).is_some() {
+                                Ok(())
+                            } else {
+                                Err(format!("could not make a copy of [{name}] here: {e}"))
+                            }
+                        }
+                    }
                 })
-                .await;
+                .await
+                .unwrap_or_else(|e| Err(format!("making a copy of [{index}] panicked: {e}")));
+                made?;
             }
         }
     }

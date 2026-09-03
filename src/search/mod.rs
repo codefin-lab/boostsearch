@@ -58,7 +58,7 @@ mod suggest;
 pub(crate) use suggest::*;
 mod phrase_suggest;
 pub(crate) use phrase_suggest::*;
-mod aggs;
+pub(crate) mod aggs;
 pub(crate) use aggs::*;
 
 const DEFAULT_TRACK_TOTAL_HITS: u64 = 10_000;

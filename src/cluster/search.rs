@@ -62,7 +62,15 @@ fn resolve(state: &ClusterState, store: &Store, expr: &str) -> Vec<String> {
         } else if state.indices.contains_key(p) {
             vec![p.to_string()]
         } else {
-            store.resolve(p)
+            // an alias the cluster published, whose indices may be anywhere,
+            // and only then what this node happens to hold under that name
+            let by_alias: Vec<String> = state
+                .indices
+                .iter()
+                .filter(|(_, m)| m.aliases.get(p).is_some())
+                .map(|(n, _)| n.clone())
+                .collect();
+            if by_alias.is_empty() { store.resolve(p) } else { by_alias }
         };
         if neg {
             out.retain(|n| !names.contains(n));
@@ -394,6 +402,24 @@ pub fn run_spanning(
     let Some(rt) = super::runtime() else {
         return crate::search::run(store, expr, body, p);
     };
+    // a closed index cannot be searched, wherever its copies are: the answer
+    // says so rather than reporting every copy as a failed shard
+    let lenient = p.get("ignore_unavailable").map(|v| v == "true").unwrap_or(false);
+    if !lenient {
+        let closed: Option<String> = super::with_state(|s| {
+            plan.all
+                .iter()
+                .find(|n| s.indices.get(*n).map(|m| m.state == "close").unwrap_or(false))
+                .cloned()
+        });
+        if let Some(name) = closed {
+            return Err(crate::api::err(
+                StatusCode::BAD_REQUEST,
+                "index_closed_exception",
+                format!("closed index [{name}]"),
+            ));
+        }
+    }
     let own = own_aggregations(body);
     if !own.is_empty() {
         // one node holding everything runs it whole

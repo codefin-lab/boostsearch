@@ -2076,11 +2076,30 @@ impl Coordinator {
                         .routing
                         .primary(&index, shard)
                         .and_then(|p| p.allocation_id.clone());
-                    if primary_on.as_ref() != Some(&from)
-                        || mine.as_deref() == Some(allocation_id.as_str())
-                    {
+                    // The primary's own copy is nobody's to retire: that is
+                    // how a node which still believed itself the primary took
+                    // the real one out of the set. A report from a node that
+                    // holds a copy of the shard is taken all the same: while a
+                    // copy is moving, the node that answers for the index and
+                    // the one the manager calls its primary differ for a
+                    // moment, and refusing then would fail a good write.
+                    let holds = self
+                        .committed
+                        .routing
+                        .shards_of(&index)
+                        .any(|c| c.shard == shard && c.node.as_ref() == Some(&from));
+                    // A report about the copy the manager now calls the
+                    // primary is out of date -- the roles moved while it was
+                    // in flight. It is answered, and nothing is done with it:
+                    // acting on it is what took the real primary out of the
+                    // in-sync set, and refusing it would fail a good write.
+                    if mine.as_deref() == Some(allocation_id.as_str()) {
+                        self.event_replies.push((self.committed.version, from.clone(), e));
+                        return self.next_publication(durable);
+                    }
+                    if !holds && primary_on.as_ref() != Some(&from) {
                         let msg = json!({"term": self.current_term,
-                            "reason": "only the primary reports its copies, and never itself"})
+                            "reason": "a shard's copies are reported by a node holding one, never by anyone about the primary itself"})
                         .to_string();
                         return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
                     }
@@ -2698,10 +2717,11 @@ mod tests {
         (sim, ids)
     }
 
-    /// The balancer moves primaries too: the copy that lands keeps being the
-    /// primary, and the copy it came from is gone.
+    /// An index is held whole (ADR 0003), so its shards are not spread: the
+    /// balancer moves copies of indices between nodes, never a shard away
+    /// from the index it belongs to.
     #[test]
-    fn a_primary_moved_by_the_balancer_stays_the_primary() {
+    fn the_shards_of_an_index_stay_together() {
         use crate::cluster::state::ShardState;
         let (mut sim, ids) = cluster_with_stores(31, &["a", "b", "c"], "a", "m", 6, 0);
         sim.run_until(60_000);
@@ -2710,9 +2730,8 @@ mod tests {
         let copies: Vec<_> = s.routing.shards_of("m").collect();
         assert_eq!(copies.len(), 6, "{copies:?}");
         assert!(copies.iter().all(|c| c.primary && c.state == ShardState::Started), "{copies:?}");
-        let on_a = copies.iter().filter(|c| c.node == Some(NodeId("a".into()))).count();
-        assert!(on_a <= 4, "the balancer moved nothing off a: {copies:?}");
-        assert!(sim.notes.iter().any(|(_, _, t)| t.contains("relocating=1")), "{:?}", sim.notes);
+        let nodes: std::collections::BTreeSet<_> = copies.iter().map(|c| c.node.clone()).collect();
+        assert_eq!(nodes.len(), 1, "the index was split across nodes: {copies:?}");
     }
 
     /// The manager that made an index dies: the next manager still

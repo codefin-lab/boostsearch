@@ -1120,19 +1120,22 @@ pub fn can_remain(
 pub fn weight(ctx: &Context, table: &RoutingTable, index: &str, node: &NodeId) -> f64 {
     let data = ctx.data_nodes();
     let n = data.len().max(1) as f64;
+    // an index is held whole here (ADR 0003), so the weight counts copies of
+    // indices rather than shards: counting shards would make a five-shard
+    // index look five times the load of a one-shard one on the same node, and
+    // the balancer would shuffle whole indices back and forth chasing it
     let counts = |id: &NodeId| -> (f64, f64) {
-        let mut all = 0.0;
+        let mut seen: std::collections::BTreeSet<(&str, bool)> = Default::default();
         let mut of_index = 0.0;
         for c in table.on_node(id) {
             if c.state == ShardState::Unassigned {
                 continue;
             }
-            all += 1.0;
-            if c.index == index {
+            if seen.insert((c.index.as_str(), c.primary)) && c.index == index {
                 of_index += 1.0;
             }
         }
-        (all, of_index)
+        (seen.len() as f64, of_index)
     };
     let total_all: f64 = data.iter().map(|d| counts(&d.id).0).sum();
     let total_index: f64 = data.iter().map(|d| counts(&d.id).1).sum();
@@ -1585,6 +1588,59 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 ));
                 continue 'outer;
             }
+        }
+    }
+
+    // 5. every shard of an index sits where its first shard sits.
+    //
+    // A copy here is a copy of the whole index -- the store holds one index,
+    // not a shard of one (ADR 0003) -- so the routing has to say the same:
+    // a write routed to shard three has to land on the node that answers for
+    // the index, and a copy filled from the primary has to be the primary of
+    // every shard, not of one.
+    for (name, shards) in t.indices.iter_mut() {
+        let Some(first) = shards.get(&0).cloned() else { continue };
+        let keys: Vec<u32> = shards.keys().copied().filter(|s| *s != 0).collect();
+        for shard in keys {
+            let copies = shards.get_mut(&shard).unwrap();
+            for (i, c) in copies.iter_mut().enumerate() {
+                let Some(model) = first.get(i) else { continue };
+                if c.node == model.node && c.state == model.state && c.primary == model.primary {
+                    continue;
+                }
+                let was = c.node.clone();
+                c.primary = model.primary;
+                c.state = model.state;
+                c.node = model.node.clone();
+                c.relocating_node = model.relocating_node.clone();
+                c.unassigned = model.unassigned.clone();
+                if c.allocation_id.is_none() && model.allocation_id.is_some() {
+                    c.allocation_id = Some(new_allocation_id());
+                }
+                if model.node.is_none() {
+                    c.allocation_id = None;
+                }
+                if was != model.node {
+                    if let Some(n) = model.node.clone() {
+                        changes.assigned.push((name.clone(), shard, c.primary, n));
+                    }
+                }
+            }
+            // a shard with fewer copies than the first one gains them
+            while copies.len() < first.len() {
+                let model = &first[copies.len()];
+                copies.push(ShardRouting {
+                    index: name.clone(),
+                    shard,
+                    primary: model.primary,
+                    state: model.state,
+                    node: model.node.clone(),
+                    relocating_node: model.relocating_node.clone(),
+                    allocation_id: model.allocation_id.as_ref().map(|_| new_allocation_id()),
+                    unassigned: model.unassigned.clone(),
+                });
+            }
+            copies.truncate(first.len());
         }
     }
     (t, changes)
@@ -2348,14 +2404,13 @@ mod tests {
                 copies.iter().filter(|c| c.shard == s).map(|c| c.node.clone()).collect();
             assert_eq!(nodes.len(), 2);
         }
-        // eight copies over three nodes: no node holds more than three
-        assert!(
-            w.count("a", "logs") <= 3 && w.count("b", "logs") <= 3 && w.count("c", "logs") <= 3,
-            "a={} b={} c={}",
-            w.count("a", "logs"),
-            w.count("b", "logs"),
-            w.count("c", "logs")
-        );
+        // the shards of an index live together: a copy here is a copy of the
+        // whole index, so the eight copies sit on two nodes, four each, and
+        // the third node holds none of this index
+        let counts = [w.count("a", "logs"), w.count("b", "logs"), w.count("c", "logs")];
+        let mut sorted = counts;
+        sorted.sort();
+        assert_eq!(sorted, [0, 4, 4], "a={} b={} c={}", counts[0], counts[1], counts[2]);
     }
 
     #[test]
@@ -2463,10 +2518,18 @@ mod tests {
             "a",
         );
         w.settle();
+        // whichever node holds the replica copies: an index sits on two of the
+        // three, so the third holds none of it
+        let holder = w
+            .table
+            .shards_of("d")
+            .find(|c| !c.primary)
+            .and_then(|c| c.node.clone())
+            .expect("a replica somewhere");
         let on_b: Vec<(String, u32)> =
-            w.table.on_node(&NodeId("b".into())).map(|c| (c.index.clone(), c.shard)).collect();
+            w.table.on_node(&holder).map(|c| (c.index.clone(), c.shard)).collect();
         assert!(!on_b.is_empty());
-        w.nodes.remove(&NodeId("b".into()));
+        w.nodes.remove(&holder);
         w.now += 1_000;
         let ch = w.reroute();
         assert_eq!(ch.unassigned.len(), on_b.len());
@@ -2484,17 +2547,32 @@ mod tests {
         w.now += 3_000;
         w.settle();
         assert!(w.table.all().all(|c| c.state == ShardState::Started));
-        assert_eq!(w.count("c", "d"), 2);
-        // the primaries' node leaves: the replicas on c take over
-        w.nodes.remove(&NodeId("a".into()));
+        // the copies went to whichever node was free: two shards' worth of one
+        // copy of the index, wherever the allocator put them
+        let elsewhere: usize = w
+            .nodes
+            .keys()
+            .map(|n| w.table.on_node(n).filter(|c| c.index == "d" && !c.primary).count())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(elsewhere, 2);
+        // the primaries' node leaves: the copies elsewhere take over, and
+        // both shards' primaries land on the one node that holds the index
+        let primary_node = w
+            .table
+            .shards_of("d")
+            .find(|c| c.primary)
+            .and_then(|c| c.node.clone())
+            .expect("a primary");
+        w.nodes.remove(&primary_node);
         w.home.clear();
         let ch = w.reroute();
-        assert_eq!(ch.promoted.len(), 2);
+        assert_eq!(ch.promoted.len(), 2, "{ch:?}");
+        let promoted_to: BTreeSet<Option<NodeId>> =
+            w.table.shards_of("d").filter(|c| c.primary).map(|c| c.node.clone()).collect();
+        assert_eq!(promoted_to.len(), 1, "{promoted_to:?}");
         assert!(
-            w.table
-                .all()
-                .filter(|c| c.primary)
-                .all(|c| c.node == Some(NodeId("c".into())) && c.state == ShardState::Started)
+            w.table.shards_of("d").filter(|c| c.primary).all(|c| c.state == ShardState::Started)
         );
     }
 
@@ -2628,26 +2706,30 @@ mod tests {
 
     #[test]
     fn a_new_node_gets_copies_moved_to_it_one_at_a_time() {
+        // two indices, so the third node has something to take: one index with
+        // one replica fills exactly two nodes and has no reason to move
         let mut w = World::new(
             vec![node("a", &[]), node("b", &[])],
-            vec![index("m", 6, 1, json!({}))],
+            vec![index("m", 6, 1, json!({})), index("n", 6, 1, json!({}))],
             "a",
         );
         w.settle();
         assert_eq!(w.count("b", "m"), 6);
         w.nodes.insert(NodeId("c".into()), node("c", &[]));
         let ch = w.reroute();
-        assert_eq!(ch.relocating.len(), 1, "{ch:?}");
+        // one copy is chosen to move, and the index moves with it: a copy is
+        // a copy of the whole index, so every shard of that copy relocates
+        assert!(!ch.relocating.is_empty(), "{ch:?}");
         let (_, _, _, from, to) = &ch.relocating[0];
         assert!(from.as_str() == "a" || from.as_str() == "b", "{from:?}");
         assert_eq!(to.as_str(), "c");
-        assert_eq!(w.table.all().filter(|c| c.state == ShardState::Relocating).count(), 1);
+        assert_eq!(w.table.all().filter(|c| c.state == ShardState::Relocating).count(), 6);
         assert_eq!(
             w.table
                 .all()
                 .filter(|c| c.state == ShardState::Initializing && c.relocating_node.is_some())
                 .count(),
-            1
+            6
         );
         // the explain of a relocating copy names where it goes
         let moving = w.table.all().find(|c| c.state == ShardState::Relocating).unwrap().clone();
@@ -2670,7 +2752,10 @@ mod tests {
             w.count("b", "m"),
             w.count("c", "m")
         );
-        assert!(w.count("a", "m") <= 5 && w.count("b", "m") <= 5 && w.count("c", "m") <= 5);
+        // the index sits on two nodes, six shards' worth of a copy on each
+        let mut counts = [w.count("a", "m"), w.count("b", "m"), w.count("c", "m")];
+        counts.sort();
+        assert_eq!(counts, [0, 6, 6], "{counts:?}");
         for shard in 0..6 {
             let nodes: BTreeSet<_> = w
                 .table

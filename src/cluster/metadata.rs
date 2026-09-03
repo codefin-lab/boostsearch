@@ -210,6 +210,12 @@ impl ShardHost for StoreSource {
         copy: &ShardRouting,
         primary: Option<&NodeId>,
     ) -> Result<bool, String> {
+        // the store holds an index, not a shard of one: the first shard's copy
+        // is what is made or filled here, and the rest of the shards are that
+        // same index under another number
+        if copy.shard > 0 && self.store.get(&meta.name).is_some() {
+            return Ok(true);
+        }
         if copy.primary && copy.relocating_node.is_none() {
             // a primary placed where its data is (a new index, a promoted
             // copy), or an empty one someone asked for after a loss: made

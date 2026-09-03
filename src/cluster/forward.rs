@@ -70,6 +70,15 @@ pub fn classify(method: &Method, path: &str) -> Target {
     if head.starts_with('_') {
         return match head {
             "_bulk" => Target::Write(None),
+            // the tables that count what a node holds are asked of every node
+            "_cat" => match first_segment(rest).0 {
+                "segments" | "fielddata" => {
+                    let (_, after) = first_segment(rest);
+                    let name = first_segment(after).0;
+                    Target::Broadcast((!name.is_empty()).then(|| name.to_string()))
+                }
+                _ => Target::Local,
+            },
             "_cluster" => match first_segment(rest).0 {
                 "settings" | "voting_config_exclusions" if is_write => Target::Manager,
                 "settings" => Target::Manager,
@@ -119,7 +128,12 @@ pub fn classify(method: &Method, path: &str) -> Target {
         }
         "_update_by_query" | "_delete_by_query" => Target::Write(Some(index)),
         "_search" | "_count" | "_msearch" | "_search_shards" => Target::Local,
-        "_refresh" | "_flush" | "_forcemerge" | "_cache" => Target::Broadcast(Some(index)),
+        // opening and closing an index is every holder's work: the copies are
+        // what a search reads, and the node holding the primary is the one
+        // whose metadata says the index is closed
+        "_refresh" | "_flush" | "_forcemerge" | "_cache" | "_open" | "_close" => {
+            Target::Broadcast(Some(index))
+        }
         "_mget" | "_explain" | "_termvectors" | "_mtermvectors" | "_field_caps" | "_validate"
         | "_rank_eval" | "_analyze" | "_pit" => Target::Read(index),
         // the index's own metadata and maintenance: the node holding its primary
@@ -128,8 +142,6 @@ pub fn classify(method: &Method, path: &str) -> Target {
         | "_mappings"
         | "_alias"
         | "_aliases"
-        | "_open"
-        | "_close"
         | "_block"
         | "_stats"
         | "_segments"
@@ -158,8 +170,15 @@ fn resolve(state: &ClusterState, store: &Store, expr: &str) -> Vec<String> {
         } else if state.indices.contains_key(p) {
             vec![p.to_string()]
         } else {
-            // an alias: the store on this node knows what it points at
-            store.resolve(p)
+            // an alias: the cluster's metadata says what it points at,
+            // wherever those indices are held
+            let by_alias: Vec<String> = state
+                .indices
+                .iter()
+                .filter(|(_, m)| m.aliases.get(p).is_some())
+                .map(|(n, _)| n.clone())
+                .collect();
+            if by_alias.is_empty() { store.resolve(p) } else { by_alias }
         };
         if neg {
             out.retain(|n| !names.contains(n));
@@ -321,7 +340,36 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     let query = parse_query(req.uri().query().unwrap_or(""));
     let target = classify(req.method(), &path);
     if let Target::Broadcast(expr) = &target {
-        return broadcast(&rt, &store, expr.as_deref(), req, next).await;
+        // closing or opening an index changes what the cluster says about it,
+        // and the answer waits for that to be published: the request after it
+        // asks about a closed index and must be told it is closed
+        let closing = path.ends_with("/_close").then_some(true);
+        let opening = path.ends_with("/_open").then_some(false);
+        let want_closed = closing.or(opening);
+        let named = expr.clone();
+        let r = broadcast(&rt, &store, expr.as_deref(), req, next).await;
+        if let (Some(closed), Some(e)) = (want_closed, named) {
+            if r.status().is_success() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let settled = super::with_state(|s| {
+                        let names = resolve(s, &store, &e);
+                        !names.is_empty()
+                            && names.iter().all(|n| {
+                                s.indices
+                                    .get(n)
+                                    .map(|m| (m.state == "close") == closed)
+                                    .unwrap_or(true)
+                            })
+                    });
+                    if settled || std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+        return r;
     }
     // what this request will have changed about the cluster's indices, so the
     // answer can wait until this node knows it: a create that answered before
@@ -410,12 +458,28 @@ async fn wait_for_metadata(
         return response;
     }
     // the name may be an alias, or a data stream's backing index
+    // On a cluster it is the published state that counts, routing and all:
+    // the manager makes the index in its own store first, and an answer given
+    // on the strength of that would have the next request find the shards
+    // unplaced. The name may be an alias, or a data stream's backing index.
+    let clustered = super::runtime().map(|rt| rt.state().nodes.len() > 1).unwrap_or(false);
     let known = |store: &Store| {
-        !store.resolve(&index).is_empty()
-            || super::with_state(|s| {
+        let published = super::with_state(|s| {
+            // a delete may name a pattern, and is done when nothing it
+            // reaches is left -- in the metadata or in the routing, which is
+            // what a listing counts
+            let matches =
+                |n: &String| index == "*" || index == "_all" || crate::store::glob_match(&index, n);
+            let named = if index.contains('*') || index == "_all" {
+                s.indices.keys().any(matches) || s.routing.indices.keys().any(matches)
+            } else {
                 s.indices.contains_key(&index)
                     || s.indices.values().any(|m| m.aliases.get(&index).is_some())
-            })
+                    || (!present && s.routing.indices.contains_key(&index))
+            };
+            named
+        });
+        if clustered { published } else { published || !store.resolve(&index).is_empty() }
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while known(store) != present && std::time::Instant::now() < deadline {
@@ -509,6 +573,8 @@ async fn broadcast(
     let mut successful = 0u64;
     let mut failed = 0u64;
     let mut first: Option<(StatusCode, Value)> = None;
+    let mut per_index: std::collections::BTreeMap<String, Value> = Default::default();
+    let mut lines: Vec<String> = Vec::new();
     let mut fold = |copies: usize, r: Response| {
         let status = r.status();
         let body = r.into_body();
@@ -526,6 +592,14 @@ async fn broadcast(
             .await
             .unwrap_or_default();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if v.is_null() && !bytes.is_empty() {
+            // a table rather than an answer of fields: the rows of every node,
+            // with one header between them
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            if status.is_success() {
+                lines.push(text);
+            }
+        }
         // the copies each node answered for, not the tallies it reported: a
         // node counts the shards it knows of, and adding those up would count
         // one shard once per node
@@ -535,12 +609,49 @@ async fn broadcast(
             failed += copies as u64;
         }
         total += copies as u64;
+        if let Some(idx) = v.get("indices").and_then(|i| i.as_object()) {
+            for (k, val) in idx {
+                per_index.insert(k.clone(), val.clone());
+            }
+        }
         if first.is_none()
             || (!first.as_ref().map(|(s, _)| s.is_success()).unwrap_or(false)
                 && status.is_success())
         {
             first = Some((status, v));
         }
+    }
+    if !lines.is_empty() {
+        // the first table's header, then every table's rows
+        let mut header: Option<String> = None;
+        let mut rows: Vec<String> = Vec::new();
+        for table in &lines {
+            let mut ls = table.lines();
+            if let Some(head) = ls.next() {
+                // a header line names columns; a row starts with a value
+                if header.is_none() && head.split_whitespace().count() > 1 && !head.starts_with(' ')
+                {
+                    header = Some(head.to_string());
+                    rows.extend(ls.map(|l| l.to_string()));
+                    continue;
+                }
+                rows.push(head.to_string());
+                rows.extend(ls.map(|l| l.to_string()));
+            }
+        }
+        let mut body = String::new();
+        if let Some(h) = header {
+            body.push_str(&h);
+            body.push('\n');
+        }
+        for r in rows.iter().filter(|r| !r.trim().is_empty()) {
+            body.push_str(r);
+            body.push('\n');
+        }
+        let mut r = Response::new(Body::from(body));
+        r.headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=UTF-8"));
+        return r;
     }
     let Some((status, mut v)) = first else {
         return crate::api::err(
@@ -551,6 +662,11 @@ async fn broadcast(
     };
     if status.is_success() && v.get("_shards").is_some() {
         v["_shards"] = json!({"total": total, "successful": successful, "failed": failed});
+    }
+    // an answer that speaks per index -- a close, an open -- speaks for the
+    // indices every node answered for
+    if status.is_success() && !per_index.is_empty() {
+        v["indices"] = Value::Object(per_index.into_iter().collect());
     }
     let mut r = Response::new(Body::from(serde_json::to_vec(&v).unwrap_or_default()));
     *r.status_mut() = status;

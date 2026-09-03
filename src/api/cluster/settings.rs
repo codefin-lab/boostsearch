@@ -201,8 +201,15 @@ pub async fn cluster_settings_get(State(store): State<Store>, Query(p): Query<Pa
     // the node was started with
     let mut defaults = json!({});
     if flag(&p, "include_defaults") {
+        // what this node was configured with, and what the engine adds
+        for (k, v) in crate::cluster::identity().attributes.iter() {
+            defaults[format!("node.attr.{k}")] = json!(v.as_str().unwrap_or(""));
+        }
         for (k, v) in node_attrs() {
-            defaults[format!("node.attr.{k}")] = json!(v);
+            let key = format!("node.attr.{k}");
+            if defaults.get(&key).is_none() {
+                defaults[key] = json!(v);
+            }
         }
         if !flat {
             defaults = nest_settings(&defaults);

@@ -102,6 +102,28 @@ pub async fn allocation_explain(
                 .cloned();
             match found {
                 Some(c) => c,
+                // the index is there and the manager has not placed this copy
+                // yet: it is unassigned, freshly created, which is what an
+                // explanation of it says
+                None if live.indices.contains_key(index) || store.get(index).is_some() => {
+                    crate::cluster::state::ShardRouting {
+                        index: index.clone(),
+                        shard,
+                        primary,
+                        state: ShardState::Unassigned,
+                        node: None,
+                        relocating_node: None,
+                        allocation_id: None,
+                        unassigned: Some(crate::cluster::state::UnassignedInfo {
+                            reason: "INDEX_CREATED".into(),
+                            at_millis: crate::cluster::clock().wall(),
+                            delayed: false,
+                            allocation_status: "no_attempt".into(),
+                            failed_allocations: 0,
+                            details: None,
+                        }),
+                    }
+                }
                 None => {
                     return err(
                         StatusCode::BAD_REQUEST,
@@ -266,6 +288,7 @@ pub(crate) fn cluster_state_value(
         _ => store.names(),
     };
 
+    let named = names.clone();
     let mut indices = serde_json::Map::new();
     for n in names {
         let Some(st) = store.get(&n) else { continue };
@@ -314,9 +337,10 @@ pub(crate) fn cluster_state_value(
             entry
         });
     }
-    // an index published but not held here (a follower's view): as published
+    // an index published but not held here (a follower's view): as published,
+    // and only if the request asked about it
     for (name, m) in &live.indices {
-        if !indices.contains_key(name) {
+        if !indices.contains_key(name) && named.iter().any(|n| n == name) {
             indices.insert(name.clone(), m.to_json());
         }
     }

@@ -550,6 +550,21 @@ async fn shutdown_signal(store: Store) {
                     .await;
             }
         }
+        // the primaries here are what a write needs, so the node waits for the
+        // manager to put them somewhere else before it stops answering: a
+        // rolling restart then costs a moment of a copy's absence rather than
+        // every write to those indices while the node is down
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let mine = rt.state().routing.on_node(&me).filter(|c| c.primary).count();
+            if mine == 0 || std::time::Instant::now() >= deadline {
+                if mine > 0 {
+                    eprintln!("boostsearch: stopping with {mine} primaries still here");
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
     for name in store.names() {
         if let Some(st) = store.get(&name) {

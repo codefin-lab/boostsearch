@@ -33,7 +33,9 @@ pub async fn get_mapping(
     Query(p): Query<Params>,
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
-    let targets = store.resolve(&expr);
+    // every index the cluster holds, not this node's share: a mapping belongs
+    // to the index, and the manager published it along with the index itself
+    let targets = crate::api::cluster_resolve(&store, &expr);
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&expr);
     }
@@ -51,7 +53,20 @@ pub async fn get_mapping(
         })
     };
     let mut out = serde_json::Map::new();
+    let published = crate::cluster::current_state();
     for n in targets {
+        if store.get(&n).is_none() {
+            // held on another node: what the manager published is the mapping,
+            // and its state decides whether a pattern reaches it
+            if let Some(m) = published.indices.get(&n) {
+                let closed = m.state == "close";
+                if expr.contains('*') && !reach(closed) {
+                    continue;
+                }
+                out.insert(n, json!({"mappings": m.mappings.clone()}));
+            }
+            continue;
+        }
         if let Some(st) = store.get(&n) {
             let g = st.read();
             if expr.contains('*') && !reach(g.closed) {

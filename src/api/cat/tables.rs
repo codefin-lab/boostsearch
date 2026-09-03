@@ -245,21 +245,57 @@ pub async fn cat_allocation(
 
 /// `_cat/nodeattrs` -- the attributes a node was started with.
 pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
-    let rows: Vec<Vec<(&str, String)>> = node_attrs()
-        .into_iter()
-        .map(|(attr, value)| {
-            vec![
-                ("node", "boostsearch".to_string()),
-                ("id", "node-0".to_string()),
+    // every node of the cluster and what it says about itself: the attributes
+    // it was configured with (`node.attr.*`), and the ones the engine adds
+    let live = crate::cluster::current_state();
+    let me = crate::cluster::identity();
+    let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+    let nodes: Vec<(String, String, String, std::collections::BTreeMap<String, String>)> =
+        if live.nodes.is_empty() {
+            vec![(
+                me.name.clone(),
+                me.id.as_str().to_string(),
+                me.transport_address.clone(),
+                me.attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect(),
+            )]
+        } else {
+            live.nodes
+                .iter()
+                .map(|(id, n)| {
+                    (
+                        n.name.clone(),
+                        id.as_str().to_string(),
+                        n.transport_address.clone(),
+                        n.attributes.clone(),
+                    )
+                })
+                .collect()
+        };
+    for (name, id, address, attrs) in nodes {
+        let ip = address.split(':').next().unwrap_or("127.0.0.1").to_string();
+        let port = address.split(':').nth(1).unwrap_or("9300").to_string();
+        let mut all: Vec<(String, String)> = attrs.into_iter().collect();
+        for (k, v) in node_attrs() {
+            if !all.iter().any(|(x, _)| *x == k) {
+                all.push((k, v));
+            }
+        }
+        for (attr, value) in all {
+            rows.push(vec![
+                ("node", name.clone()),
+                ("id", id.clone()),
                 ("pid", std::process::id().to_string()),
-                ("host", "127.0.0.1".to_string()),
-                ("ip", "127.0.0.1".to_string()),
-                ("port", "9300".to_string()),
+                ("host", ip.clone()),
+                ("ip", ip.clone()),
+                ("port", port.clone()),
                 ("attr", attr),
                 ("value", value),
-            ]
-        })
-        .collect();
+            ]);
+        }
+    }
     let rows = cat_only_default(rows, &["node", "host", "ip", "attr", "value"], &p);
     cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
 }
