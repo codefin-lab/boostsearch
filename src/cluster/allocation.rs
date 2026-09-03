@@ -492,8 +492,9 @@ pub struct Context<'a> {
     pub cluster: &'a ClusterSettings,
     /// where an index's primary data lives, for indices the manager holds
     pub primary_home: &'a BTreeMap<String, NodeId>,
-    /// the index copies each node holds on disk, by name and uuid
-    pub held: &'a BTreeMap<NodeId, Vec<(String, String)>>,
+    /// the index copies each node holds on disk: name, uuid and the
+    /// allocation id the copy was given
+    pub held: &'a BTreeMap<NodeId, Vec<(String, String, String)>>,
     pub now: Millis,
 }
 
@@ -1164,6 +1165,7 @@ fn new_allocation_id() -> String {
 /// What one pass of `reroute` did, for the notes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Changes {
+    pub notes: Vec<String>,
     pub assigned: Vec<(String, u32, bool, NodeId)>,
     pub unassigned: Vec<(String, u32, bool, String)>,
     pub promoted: Vec<(String, u32, NodeId)>,
@@ -1384,13 +1386,26 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                     // a node that still holds this index's data (the same uuid)
                     // gets the primary back: an existing-store recovery
                     let uuid = ctx.indices.get(&name).map(|m| m.uuid.clone()).unwrap_or_default();
+                    // ... and only a copy that was in sync: one that missed an
+                    // acknowledged write cannot become the primary on its own
+                    let in_sync: Vec<String> = ctx
+                        .indices
+                        .get(&name)
+                        .and_then(|m| m.in_sync_allocations.get(&shard).cloned())
+                        .unwrap_or_default();
                     let keeper = ctx
                         .data_nodes()
                         .into_iter()
                         .find(|n| {
                             ctx.held
                                 .get(&n.id)
-                                .map(|h| h.iter().any(|(hn, hu)| *hn == name && *hu == uuid))
+                                .map(|h| {
+                                    h.iter().any(|(hn, hu, ha)| {
+                                        *hn == name
+                                            && *hu == uuid
+                                            && in_sync.iter().any(|i| i == ha)
+                                    })
+                                })
                                 .unwrap_or(false)
                                 && overall(&can_allocate(ctx, &t, &copy, n)) == Decision::Yes
                         })
@@ -1406,12 +1421,17 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                             if let Some(u) = c.unassigned.as_mut() {
                                 u.delayed = false;
                             }
+                            changes.notes.push(format!("primary of [{name}] placed back on {node}, which holds its in-sync copy"));
                             changes.assigned.push((name.clone(), shard, true, node));
                         }
                         None => {
                             if let Some(u) = copies[i].unassigned.as_mut() {
                                 u.allocation_status = "no_valid_shard_copy".into();
                             }
+                            changes.notes.push(format!(
+                                "no in-sync copy of [{name}] to place the primary on: in_sync={in_sync:?} held={:?}",
+                                ctx.held
+                            ));
                         }
                     }
                     continue;
@@ -1542,33 +1562,45 @@ pub fn shard_started(
     index: &str,
     shard: u32,
     allocation_id: &str,
-) -> bool {
-    let Some(copies) = table.indices.get_mut(index).and_then(|s| s.get_mut(&shard)) else {
-        return false;
-    };
-    let Some(pos) = copies.iter().position(|c| c.allocation_id.as_deref() == Some(allocation_id))
-    else {
-        return false;
-    };
+) -> Option<Started> {
+    let copies = table.indices.get_mut(index).and_then(|s| s.get_mut(&shard))?;
+    let pos = copies.iter().position(|c| c.allocation_id.as_deref() == Some(allocation_id))?;
     if copies[pos].state != ShardState::Initializing {
-        return false;
+        return None;
     }
     let source = copies[pos].relocating_node.clone();
+    let forced = copies[pos].primary
+        && copies[pos]
+            .unassigned
+            .as_ref()
+            .map(|u| u.reason == "FORCED_EMPTY_PRIMARY")
+            .unwrap_or(false);
     copies[pos].state = ShardState::Started;
     copies[pos].relocating_node = None;
     copies[pos].unassigned = None;
+    let mut retired = None;
     if let Some(src) = source {
         // the relocated copy is here now; the one on the source node ends
         if let Some(sp) = copies
             .iter()
             .position(|c| c.state == ShardState::Relocating && c.node.as_ref() == Some(&src))
         {
+            retired = copies[sp].allocation_id.clone();
             copies.remove(sp);
         }
     }
     // primaries first, as OpenSearch lists them
     copies.sort_by_key(|c| !c.primary);
-    true
+    Some(Started { retired, forced_primary: forced })
+}
+
+/// What starting a copy changed besides its state.
+#[derive(Clone, Debug, Default)]
+pub struct Started {
+    /// the allocation id of a relocation's source, which is no longer in sync
+    pub retired: Option<String>,
+    /// a primary made empty on request: it alone is in sync now
+    pub forced_primary: bool,
 }
 
 /// A data node reports a copy failed: unassigned again, one more failure on it.
@@ -2165,7 +2197,7 @@ mod tests {
         indices: BTreeMap<String, IndexMetadata>,
         cluster: ClusterSettings,
         home: BTreeMap<String, NodeId>,
-        held: BTreeMap<NodeId, Vec<(String, String)>>,
+        held: BTreeMap<NodeId, Vec<(String, String, String)>>,
         table: RoutingTable,
         now: Millis,
     }
@@ -2210,7 +2242,7 @@ mod tests {
                 .map(|c| (c.index.clone(), c.shard, c.allocation_id.clone().unwrap()))
                 .collect();
             for (i, s, a) in starts {
-                assert!(shard_started(&mut self.table, &i, s, &a));
+                assert!(shard_started(&mut self.table, &i, s, &a).is_some());
             }
         }
 
@@ -2492,9 +2524,11 @@ mod tests {
         w.now += 1_000;
         w.settle();
         assert_eq!(w.table.primary("solo", 0).unwrap().state, ShardState::Unassigned);
-        // a returns, and says it still holds the index
+        // a returns, and says it still holds the index, with the copy that was in sync
+        let aid = "aid-a".to_string();
+        w.indices.get_mut("solo").unwrap().in_sync_allocations.insert(0, vec![aid.clone()]);
         w.nodes.insert(NodeId("a".into()), node("a", &[]));
-        w.held.insert(NodeId("a".into()), vec![("solo".into(), uuid)]);
+        w.held.insert(NodeId("a".into()), vec![("solo".into(), uuid.clone(), aid)]);
         let ch = w.reroute();
         assert_eq!(ch.assigned.len(), 1, "{ch:?}");
         let p = w.table.primary("solo", 0).unwrap().clone();
@@ -2512,7 +2546,16 @@ mod tests {
         w2.home.clear();
         w2.now += 1_000;
         w2.settle();
-        w2.held.insert(NodeId("b".into()), vec![("solo".into(), "another-uuid".into())]);
+        w2.held
+            .insert(NodeId("b".into()), vec![("solo".into(), "another-uuid".into(), "x".into())]);
+        w2.reroute();
+        assert_eq!(w2.table.primary("solo", 0).unwrap().state, ShardState::Unassigned);
+        // and a copy of the right index that was not in sync does not count either
+        w2.held.insert(
+            NodeId("b".into()),
+            vec![("solo".into(), w2.indices["solo"].uuid.clone(), "stale".into())],
+        );
+        w2.indices.get_mut("solo").unwrap().in_sync_allocations.insert(0, vec!["fresh".into()]);
         w2.reroute();
         assert_eq!(w2.table.primary("solo", 0).unwrap().state, ShardState::Unassigned);
     }

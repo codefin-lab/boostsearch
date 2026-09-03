@@ -193,10 +193,7 @@ pub async fn cluster_health(
         _ => true,
     } && p
         .get("wait_for_nodes")
-        .map(|v| {
-            let want = v.trim_start_matches(['>', '<', '=']).parse::<i64>().unwrap_or(1);
-            if v.starts_with('>') { 1 > want } else { 1 >= want }
-        })
+        .map(|v| nodes_wait_met(v, live.nodes.len() as i64))
         .unwrap_or(true)
         // a wait for more active shards than the cluster has can never end
         && p.get("wait_for_active_shards")
@@ -455,4 +452,37 @@ fn analysis_stats(store: &Store) -> Value {
         "built_in_filters": listed("built_in_filters"),
         "built_in_analyzers": listed("built_in_analyzers"),
     })
+}
+
+/// `wait_for_nodes` in every form OpenSearch takes it: a number, `>=N`,
+/// `<=N`, `>N`, `<N`, and the `ge(N)`, `le(N)`, `gt(N)`, `lt(N)` spellings.
+fn nodes_wait_met(want: &str, have: i64) -> bool {
+    let want = want.trim();
+    let (op, num) = if let Some(rest) = want.strip_prefix(">=") {
+        (">=", rest)
+    } else if let Some(rest) = want.strip_prefix("<=") {
+        ("<=", rest)
+    } else if let Some(rest) = want.strip_prefix('>') {
+        (">", rest)
+    } else if let Some(rest) = want.strip_prefix('<') {
+        ("<", rest)
+    } else if let Some(rest) = want.strip_prefix("ge(").and_then(|r| r.strip_suffix(')')) {
+        (">=", rest)
+    } else if let Some(rest) = want.strip_prefix("le(").and_then(|r| r.strip_suffix(')')) {
+        ("<=", rest)
+    } else if let Some(rest) = want.strip_prefix("gt(").and_then(|r| r.strip_suffix(')')) {
+        (">", rest)
+    } else if let Some(rest) = want.strip_prefix("lt(").and_then(|r| r.strip_suffix(')')) {
+        ("<", rest)
+    } else {
+        ("==", want)
+    };
+    let Ok(n) = num.trim().parse::<i64>() else { return true };
+    match op {
+        ">=" => have >= n,
+        "<=" => have <= n,
+        ">" => have > n,
+        "<" => have < n,
+        _ => have == n,
+    }
 }

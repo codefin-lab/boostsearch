@@ -12,6 +12,7 @@ impl IdxState {
             "body": {"mappings": self.mapping.raw, "settings": self.settings},
             "dynamic_types": self.dynamic_types,
             "observed_kinds": self.observed_kinds,
+            "allocation_id": self.allocation_id,
         });
         let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
     }

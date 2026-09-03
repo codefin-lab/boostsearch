@@ -114,6 +114,8 @@ impl Store {
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
             let learned = (meta.get("dynamic_types").cloned(), meta.get("observed_kinds").cloned());
+            let kept_allocation =
+                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
@@ -121,6 +123,7 @@ impl Store {
                     if let Some(st) = store.get(name) {
                         {
                             let mut g = st.write();
+                            g.allocation_id = kept_allocation.clone();
                             if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok())
                             {
                                 g.dynamic_types = v;
@@ -223,6 +226,8 @@ impl Store {
             {
                 g.observed_kinds = v;
             }
+            g.allocation_id =
+                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
             let (reader, id_field) = (g.realtime.clone(), g.fields.id);
             let scanned = IdxState::scan_ids(&reader, id_field);
             g.absorb_ids(scanned);
@@ -483,6 +488,7 @@ impl Store {
             versions: HashMap::new(),
             routing: HashMap::new(),
             uuid,
+            allocation_id: None,
             created_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)

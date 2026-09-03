@@ -278,3 +278,40 @@ fn parse_time_ms(t: &str) -> Option<u64> {
     };
     Some((n * mult) as u64)
 }
+
+/// `POST /_boost/chaos` -- a partition made real at this node, for the
+/// chaos and linearizability runs; mounted only under `BOOSTSEARCH_CHAOS=1`.
+/// `{"cut": ["n2", "n3"]}` cuts this node off from those (by name or id);
+/// `{"heal": true}` mends every cut.
+pub async fn chaos(State(_store): State<Store>, body: String) -> Response {
+    let v: Value = parse_body(&body).unwrap_or(json!({}));
+    let Some(t) = crate::cluster::tcp::global() else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "exception", "no transport");
+    };
+    if v.get("heal").and_then(|h| h.as_bool()).unwrap_or(false) {
+        t.heal();
+        return (StatusCode::OK, axum::Json(json!({"healed": true}))).into_response();
+    }
+    let names: Vec<String> = v
+        .get("cut")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let live = crate::cluster::current_state();
+    let ids: Vec<crate::cluster::NodeId> = names
+        .iter()
+        .filter_map(|n| {
+            live.nodes.values().find(|d| d.name == *n || d.id.as_str() == n).map(|d| d.id.clone())
+        })
+        .collect();
+    if ids.len() != names.len() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "a node named is not in the cluster",
+        );
+    }
+    t.cut(&ids);
+    (StatusCode::OK, axum::Json(json!({"cut": ids.iter().map(|i| i.as_str()).collect::<Vec<_>>()})))
+        .into_response()
+}

@@ -42,6 +42,9 @@ pub struct TcpTransport {
     peers: Mutex<HashMap<NodeId, Vec<mpsc::UnboundedSender<Envelope>>>>,
     /// the transport's own handle, so `send` can open a connection
     self_weak: std::sync::Weak<TcpTransport>,
+    /// peers this node is cut off from: a partition made real at this end,
+    /// for the chaos runs (`BOOSTSEARCH_CHAOS=1`)
+    cut: RwLock<std::collections::HashSet<NodeId>>,
     handler: RwLock<Option<Arc<dyn Handler>>>,
     /// peers seen through a handshake, with what they said
     known: RwLock<HashMap<NodeId, Hello>>,
@@ -51,6 +54,7 @@ impl TcpTransport {
     pub fn new(identity: &NodeIdentity) -> Arc<TcpTransport> {
         Arc::new_cyclic(|weak| TcpTransport {
             self_weak: weak.clone(),
+            cut: RwLock::new(std::collections::HashSet::new()),
             me: Hello {
                 node_id: identity.id.clone(),
                 ephemeral_id: identity.ephemeral_id.clone(),
@@ -68,6 +72,30 @@ impl TcpTransport {
 
     pub fn hello(&self) -> &Hello {
         &self.me
+    }
+
+    /// Cut this node off from the named peers: nothing is sent to them,
+    /// nothing read from them, and their connections are closed.
+    pub fn cut(&self, peers: &[NodeId]) {
+        {
+            let mut c = self.cut.write();
+            for p in peers {
+                c.insert(p.clone());
+            }
+        }
+        let mut open = self.peers.lock();
+        for p in peers {
+            open.remove(p);
+        }
+    }
+
+    /// Every cut mended.
+    pub fn heal(&self) {
+        self.cut.write().clear();
+    }
+
+    pub fn is_cut(&self, peer: &NodeId) -> bool {
+        self.cut.read().contains(peer)
     }
 
     /// Tell the transport where a node lives.
@@ -127,6 +155,9 @@ impl TcpTransport {
             anyhow::bail!("peer is in cluster {} not {}", peer.cluster_name, self.me.cluster_name);
         }
         let peer_id = peer.node_id.clone();
+        if self.is_cut(&peer_id) {
+            anyhow::bail!("cut off from {peer_id}");
+        }
         self.addresses.write().insert(peer_id.clone(), peer.transport_address.clone());
         self.known.write().insert(peer_id.clone(), peer.clone());
         let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
@@ -148,6 +179,11 @@ impl TcpTransport {
             loop {
                 match read_frame(&mut rd).await {
                     Ok(env) => {
+                        // a partition made real: a frame from a cut peer is lost
+                        // on the wire, and the connection stays as it would
+                        if me.is_cut(&env.from) {
+                            continue;
+                        }
                         if let Some(h) = me.handler.read().clone() {
                             h.handle(env);
                         }
@@ -178,6 +214,9 @@ impl TcpTransport {
     /// is known.
     /// A live queue to the node, if a connection is open.
     fn queue_to(&self, to: &NodeId) -> Option<mpsc::UnboundedSender<Envelope>> {
+        if self.is_cut(to) {
+            return None;
+        }
         self.peers.lock().get(to).and_then(|list| list.iter().find(|s| !s.is_closed()).cloned())
     }
 
@@ -187,6 +226,9 @@ impl TcpTransport {
     ) -> Result<mpsc::UnboundedSender<Envelope>, SendError> {
         if let Some(tx) = self.queue_to(to) {
             return Ok(tx);
+        }
+        if self.is_cut(to) {
+            return Err(SendError::Unreachable(to.clone()));
         }
         let Some(addr) = self.addresses.read().get(to).cloned() else {
             return Err(SendError::Unreachable(to.clone()));
@@ -204,6 +246,11 @@ impl Transport for TcpTransport {
     }
 
     fn send(&self, to: &NodeId, envelope: Envelope) -> Result<(), SendError> {
+        // a partition loses frames without a word: nothing fails fast, the
+        // way a real one behaves; the follower checks are what notice it
+        if self.is_cut(to) {
+            return Ok(());
+        }
         if let Some(tx) = self.queue_to(to) {
             return tx.send(envelope).map_err(|_| SendError::Closed);
         }

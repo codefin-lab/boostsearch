@@ -45,11 +45,14 @@ pub trait MetadataSource: Send + Sync {
     fn apply_customs(&self, _customs: &Value) {}
     /// Let go of a local index the cluster no longer places here.
     fn drop_local(&self, _index: &str) {}
-    /// The index copies this node holds on disk, by name and uuid: what
-    /// the manager places a lost primary back on.
-    fn held(&self) -> Vec<(String, String)> {
-        self.snapshot().iter().map(|(n, m)| (n.clone(), m.uuid.clone())).collect()
+    /// The index copies this node holds on disk -- name, uuid and the
+    /// allocation id the copy was given: what the manager places a lost
+    /// primary back on, if the copy was in sync.
+    fn held(&self) -> Vec<(String, String, String)> {
+        self.snapshot().iter().map(|(n, m)| (n.clone(), m.uuid.clone(), String::new())).collect()
     }
+    /// The manager gave this node's copy of the index an allocation id.
+    fn note_allocation(&self, _index: &str, _allocation_id: &str) {}
 }
 
 /// What a data node does with the copies the manager puts on it: the store
@@ -85,22 +88,37 @@ pub fn with_terms(
     mut m: IndexMetadata,
     routing: &RoutingTable,
     terms: &BTreeMap<(String, u32), u64>,
+    previous: &BTreeMap<u32, Vec<String>>,
+    retired: &[(u32, String)],
+    reset: &[(u32, String)],
 ) -> IndexMetadata {
     for shard in 0..m.number_of_shards {
         let term = terms.get(&(m.name.clone(), shard)).copied().unwrap_or(1);
         m.primary_terms.insert(shard, term);
-        let in_sync: Vec<String> = routing
-            .indices
-            .get(&m.name)
-            .and_then(|s| s.get(&shard))
-            .map(|copies| {
-                copies
-                    .iter()
-                    .filter(|c| matches!(c.state, ShardState::Started | ShardState::Relocating))
-                    .filter_map(|c| c.allocation_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+        // in sync: what was in sync before and was not retired, and every
+        // copy that is active now; a primary made empty on request stands alone
+        let mut in_sync: Vec<String> = previous.get(&shard).cloned().unwrap_or_default();
+        if let Some(copies) = routing.indices.get(&m.name).and_then(|s| s.get(&shard)) {
+            for c in copies {
+                if matches!(c.state, ShardState::Started | ShardState::Relocating) {
+                    if let Some(a) = &c.allocation_id {
+                        if !in_sync.contains(a) {
+                            in_sync.push(a.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (s, a) in retired {
+            if *s == shard {
+                in_sync.retain(|x| x != a);
+            }
+        }
+        for (s, a) in reset {
+            if *s == shard {
+                in_sync = vec![a.clone()];
+            }
+        }
         m.in_sync_allocations.insert(shard, in_sync);
     }
     m
@@ -238,6 +256,31 @@ impl MetadataSource for StoreSource {
 
     fn drop_local(&self, index: &str) {
         self.store.drop_local(index);
+    }
+
+    fn held(&self) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for name in self.store.resolve("*") {
+            if let Some(st) = self.store.get(&name) {
+                let g = st.read();
+                out.push((
+                    name.clone(),
+                    g.uuid.clone(),
+                    g.allocation_id.clone().unwrap_or_default(),
+                ));
+            }
+        }
+        out
+    }
+
+    fn note_allocation(&self, index: &str, allocation_id: &str) {
+        if let Some(st) = self.store.get(index) {
+            let mut g = st.write();
+            if g.allocation_id.as_deref() != Some(allocation_id) {
+                g.allocation_id = Some(allocation_id.to_string());
+                g.save_meta();
+            }
+        }
     }
 
     fn voting_exclusions(&self) -> Vec<(String, String)> {

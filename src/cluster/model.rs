@@ -76,6 +76,8 @@ struct Recovery {
 /// What the coordinator's host and metadata source share with the model.
 struct Shared {
     docs: parking_lot::Mutex<Docs>,
+    /// the allocation id of each copy here
+    alloc: parking_lot::Mutex<BTreeMap<String, String>>,
     /// copies the coordinator asked the host to start, waiting for the model
     to_start: parking_lot::Mutex<Vec<(IndexMetadata, ShardRouting)>>,
     /// the index metadata every node reads (the cluster's, held in one map)
@@ -94,17 +96,25 @@ impl MetadataSource for ModelSource {
     fn has_tombstones(&self) -> bool {
         self.0.source.has_tombstones()
     }
-    fn held(&self) -> Vec<(String, String)> {
+    fn held(&self) -> Vec<(String, String, String)> {
         let snap = self.0.source.snapshot();
+        let alloc = self.0.alloc.lock();
         self.0
             .docs
             .lock()
             .keys()
-            .filter_map(|n| snap.get(n).map(|m| (n.clone(), m.uuid.clone())))
+            .filter_map(|n| {
+                snap.get(n)
+                    .map(|m| (n.clone(), m.uuid.clone(), alloc.get(n).cloned().unwrap_or_default()))
+            })
             .collect()
+    }
+    fn note_allocation(&self, index: &str, allocation_id: &str) {
+        self.0.alloc.lock().insert(index.to_string(), allocation_id.to_string());
     }
     fn drop_local(&self, index: &str) {
         self.0.docs.lock().remove(index);
+        self.0.alloc.lock().remove(index);
     }
 }
 
@@ -148,6 +158,7 @@ impl ClusterNode {
     ) -> ClusterNode {
         let shared = Arc::new(Shared {
             docs: parking_lot::Mutex::new(Docs::new()),
+            alloc: parking_lot::Mutex::new(BTreeMap::new()),
             to_start: parking_lot::Mutex::new(Vec::new()),
             source,
         });
@@ -183,6 +194,10 @@ impl ClusterNode {
     fn persist(&self, durable: &mut Durable) {
         let docs = self.shared.docs.lock();
         durable.entries.insert(D_DOCS.into(), serde_json::to_vec(&*docs).unwrap_or_default());
+        let alloc = self.shared.alloc.lock();
+        durable
+            .entries
+            .insert("model_alloc".into(), serde_json::to_vec(&*alloc).unwrap_or_default());
     }
 
     fn state(&self) -> &ClusterState {
@@ -271,9 +286,54 @@ impl ClusterNode {
         if pw.in_sync_waiting.is_empty() {
             pw.acked = true;
             out.push(Self::ack(&client, client_rid, &self.me, seq, term));
+            let took: BTreeSet<NodeId> = BTreeSet::new();
+            out.extend(self.stale_reports(index, &took));
         }
         self.pending.insert(rid, pw);
         out.push(Output::Timer { id: T_TICK, after: 500 });
+        out
+    }
+
+    /// In-sync ids of this index that belong to no copy that took the write.
+    fn stale_ids(&self, index: &str, took: &BTreeSet<NodeId>) -> Vec<(u32, String)> {
+        let Some(m) = self.state().indices.get(index) else { return Vec::new() };
+        let mut fine: Vec<String> = Vec::new();
+        for c in self.state().routing.shards_of(index) {
+            let held = c.node.as_ref() == Some(&self.me)
+                || c.node.as_ref().map(|n| took.contains(n)).unwrap_or(false);
+            if held && c.state != ShardState::Unassigned {
+                if let Some(a) = &c.allocation_id {
+                    fine.push(a.clone());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (shard, ids) in &m.in_sync_allocations {
+            for id in ids {
+                if !fine.contains(id) {
+                    out.push((*shard, id.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    fn stale_reports(&mut self, index: &str, took: &BTreeSet<NodeId>) -> Vec<Output> {
+        let mut out = Vec::new();
+        let Some(mgr) = self.state().cluster_manager.clone() else { return out };
+        for (shard, id) in self.stale_ids(index, took) {
+            let r = self.rid();
+            let body = json!({"index": index, "shard": shard, "allocation_id": id});
+            out.push(Output::Send {
+                to: mgr.clone(),
+                envelope: Envelope::request(
+                    super::coordinator::SHARD_STALE,
+                    self.me.clone(),
+                    r,
+                    serde_json::to_vec(&body).unwrap_or_default(),
+                ),
+            });
+        }
         out
     }
 
@@ -486,16 +546,41 @@ impl ClusterNode {
             }
             (COPY_WRITE, Kind::Response) => {
                 let mut out = Vec::new();
+                let mut acked_now: Option<(String, BTreeSet<NodeId>)> = None;
+                // the copies of the index, read before the pending entry is held
+                let holders: Vec<NodeId> = self
+                    .pending
+                    .get(&e.request_id)
+                    .map(|p| {
+                        self.state()
+                            .routing
+                            .shards_of(&p.index)
+                            .filter_map(|c| c.node.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let me = self.me.clone();
                 if let Some(p) = self.pending.get_mut(&e.request_id) {
                     p.waiting.remove(&from);
                     p.in_sync_waiting.remove(&from);
                     if !p.acked && p.in_sync_waiting.is_empty() {
                         p.acked = true;
-                        out.push(Self::ack(&p.client, p.client_rid, &self.me, p.seq, p.term));
+                        out.push(Self::ack(&p.client, p.client_rid, &me, p.seq, p.term));
+                        let mut took: BTreeSet<NodeId> = BTreeSet::new();
+                        took.insert(from.clone());
+                        for n in &holders {
+                            if !p.waiting.contains(n) {
+                                took.insert(n.clone());
+                            }
+                        }
+                        acked_now = Some((p.index.clone(), took));
                     }
                     if p.waiting.is_empty() {
                         self.pending.remove(&e.request_id);
                     }
+                }
+                if let Some((index, took)) = acked_now {
+                    out.extend(self.stale_reports(&index, &took));
                 }
                 out
             }
@@ -622,6 +707,11 @@ impl NodeLogic for ClusterNode {
     fn handle(&mut self, input: Input, clock: &dyn Clock, durable: &mut Durable) -> Vec<Output> {
         let mut out = match input {
             Input::Start => {
+                if let Some(bytes) = durable.entries.get("model_alloc") {
+                    if let Ok(a) = serde_json::from_slice::<BTreeMap<String, String>>(bytes) {
+                        *self.shared.alloc.lock() = a;
+                    }
+                }
                 if let Some(bytes) = durable.entries.get(D_DOCS) {
                     if let Ok(d) = serde_json::from_slice::<Docs>(bytes) {
                         *self.shared.docs.lock() = d;
@@ -643,6 +733,7 @@ impl NodeLogic for ClusterNode {
         };
         // copies the coordinator asked for since: started from the primary
         out.extend(self.start_recoveries());
+        self.persist(durable);
         out
     }
 }
@@ -1012,6 +1103,35 @@ pub mod tests {
 
     fn quiet(lab: &mut Lab, until: Millis) {
         lab.sim.run_until(until);
+    }
+
+    /// A node's copy keeps the allocation id the manager gave it across a
+    /// restart, and reports it as held.
+    #[test]
+    fn a_copy_remembers_its_allocation_id_across_a_restart() {
+        let mut map = BTreeMap::new();
+        map.insert("solo".to_string(), index_meta("solo", 0));
+        let source = Arc::new(MapSource::new(map));
+        let c = Coordinator::new(node("a"), "c", "u", vec!["a".into()], vec![]);
+        let mut cn = ClusterNode::new(c, source.clone(), Arc::default());
+        let src = cn.coord.metadata.clone().unwrap();
+        cn.shared.docs.lock().entry("solo".into()).or_default();
+        src.note_allocation("solo", "aid-1");
+        let mut durable = Durable::default();
+        cn.persist(&mut durable);
+        assert_eq!(
+            src.held(),
+            vec![("solo".to_string(), "solo-uuid".to_string(), "aid-1".to_string())]
+        );
+        // a fresh node from the same disk
+        let c2 = Coordinator::new(node("a"), "c", "u", vec!["a".into()], vec![]);
+        let mut cn2 = ClusterNode::new(c2, source, Arc::default());
+        let _ = cn2.handle(Input::Start, &NoClock, &mut durable);
+        let src2 = cn2.coord.metadata.clone().unwrap();
+        assert_eq!(
+            src2.held(),
+            vec![("solo".to_string(), "solo-uuid".to_string(), "aid-1".to_string())]
+        );
     }
 
     #[test]

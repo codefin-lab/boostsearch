@@ -49,6 +49,18 @@ async fn root() -> impl IntoResponse {
     }))
 }
 
+/// The chaos switch answers only when the process was started for it.
+async fn chaos_or_404(
+    state: axum::extract::State<Store>,
+    body: String,
+) -> axum::response::Response {
+    if std::env::var("BOOSTSEARCH_CHAOS").map(|v| v == "1").unwrap_or(false) {
+        api::chaos(state, body).await
+    } else {
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }
+}
+
 fn app(store: Store) -> Router {
     Router::new()
         .route("/", any(root))
@@ -263,6 +275,7 @@ fn app(store: Store) -> Router {
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info))
         .route("/_cluster/reroute", post(api::reroute))
+        .route("/_boost/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
         .route("/_script_language", get(api::script_languages))
         .route("/_tasks/_cancel", post(api::cancel_tasks))

@@ -174,6 +174,8 @@ pub struct Ack {
     pub successful: usize,
     pub failed: usize,
     pub failures: Vec<Value>,
+    /// a copy's failure or staleness could not be recorded with the manager
+    pub manager_unreachable: bool,
 }
 
 /// The primary's side: copy the writes out, wait for the answers, and
@@ -206,8 +208,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         let body = serde_json::to_vec(&json!({"index": index, "refresh": refresh, "ops": batch}))
             .unwrap_or_default();
         waits.push(tokio::spawn(async move {
-            let answer =
-                rt.call(&node, REPLICA_WRITE, body, std::time::Duration::from_secs(60)).await;
+            let answer = call_while_member(&rt, &node, REPLICA_WRITE, body).await;
             (node, index, in_sync, answer)
         }));
     }
@@ -218,16 +219,24 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         }
     }
     let manager = state.cluster_manager.clone();
+    // a copy that failed, or fell out of sync, is the manager's to record
+    // before this write may be acknowledged: a primary that cannot reach the
+    // manager acknowledges nothing (its own copy may be the stale one)
+    let mut manager_unreachable = false;
     // which nodes answered for each index; the counts follow the shards
     // written, since `_shards` speaks of a shard's copies
     let mut acked_nodes: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
     for (node, index, in_sync, answer) in answers {
         let ack = acks.entry(index.clone()).or_default();
         let failure: Option<String> = match &answer {
-            Some(e) if e.kind == Kind::Response => None,
-            Some(e) => Some(String::from_utf8_lossy(&e.body).into_owned()),
-            None => Some("no answer from the node".into()),
+            Ok(e) if e.kind == Kind::Response => None,
+            Ok(e) => Some(String::from_utf8_lossy(&e.body).into_owned()),
+            Err(Left) => Some("the node left the cluster".into()),
+            Err(NoAnswer) => Some("no answer from the node".into()),
         };
+        // a copy whose node the manager has already removed is not a failed
+        // copy: it is unassigned, and the write goes on without it
+        let left = matches!(answer, Err(Left));
         match failure {
             None => {
                 if in_sync {
@@ -238,7 +247,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                 tracker().lock().acked(&index, &node, max_seq);
             }
             Some(reason) => {
-                if in_sync {
+                if in_sync && !left {
                     ack.failed += 1;
                     ack.failures.push(json!({
                         "_index": index,
@@ -259,7 +268,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                     for (shard, aid) in copies {
                         let body = json!({"index": index, "shard": shard, "allocation_id": aid,
                             "message": format!("replication to [{}] failed: {reason}", node.as_str())});
-                        let _ = rt
+                        let answer = rt
                             .call(
                                 mgr,
                                 super::coordinator::SHARD_FAILED,
@@ -267,6 +276,51 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                                 std::time::Duration::from_secs(10),
                             )
                             .await;
+                        if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            manager_unreachable = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // a copy that was in sync and did not take this write is in sync no
+    // more: the manager is told, so a copy that missed writes can never
+    // be handed the primary on its own
+    if let Some(mgr) = &manager {
+        for index in acks.keys() {
+            let Some(m) = state.indices.get(index) else { continue };
+            let acked = acked_nodes.get(index).cloned().unwrap_or_default();
+            let mut fine: Vec<String> = Vec::new();
+            for c in state.routing.shards_of(index) {
+                let took = c.node.as_ref() == Some(&me)
+                    || c.node.as_ref().map(|n| acked.contains(n)).unwrap_or(false);
+                if took
+                    && matches!(
+                        c.state,
+                        ShardState::Started | ShardState::Relocating | ShardState::Initializing
+                    )
+                {
+                    if let Some(a) = &c.allocation_id {
+                        fine.push(a.clone());
+                    }
+                }
+            }
+            for (shard, ids) in &m.in_sync_allocations {
+                for id in ids {
+                    if !fine.contains(id) {
+                        let body = json!({"index": index, "shard": shard, "allocation_id": id});
+                        let answer = rt
+                            .call(
+                                mgr,
+                                super::coordinator::SHARD_STALE,
+                                serde_json::to_vec(&body).unwrap_or_default(),
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await;
+                        if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            manager_unreachable = true;
+                        }
                     }
                 }
             }
@@ -295,6 +349,9 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         }
         ack.successful = 1 + fewest.unwrap_or(0);
         ack.successful = ack.successful.min(ack.total.max(1));
+        if manager_unreachable {
+            ack.manager_unreachable = true;
+        }
     }
     acks
 }
@@ -346,6 +403,30 @@ pub async fn finish(
         return response;
     }
     let acks = replicate(ops, refresh).await;
+    // a copy that refused this node's term: this node is no primary any
+    // more, and the write did not happen as far as the cluster is concerned
+    let stale = acks.values().any(|a| {
+        a.failures.iter().any(|f| {
+            f.pointer("/reason/reason")
+                .and_then(|r| r.as_str())
+                .map(|r| r.contains("stale primary term"))
+                .unwrap_or(false)
+        })
+    });
+    if stale {
+        return crate::api::err(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable_shards_exception",
+            "the primary that took this write is no longer the primary (its term is stale); retry",
+        );
+    }
+    if acks.values().any(|a| a.manager_unreachable) {
+        return crate::api::err(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable_shards_exception",
+            "a copy did not take this write and the cluster manager could not be told; not acknowledged, retry",
+        );
+    }
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
     let mut v: Value = match serde_json::from_slice(&bytes) {
@@ -816,10 +897,25 @@ mod tests {
     #[test]
     fn shards_are_patched_for_a_document_and_for_a_bulk() {
         let mut acks = BTreeMap::new();
-        acks.insert("a".to_string(), Ack { total: 2, successful: 2, failed: 0, failures: vec![] });
+        acks.insert(
+            "a".to_string(),
+            Ack {
+                total: 2,
+                successful: 2,
+                failed: 0,
+                failures: vec![],
+                manager_unreachable: false,
+            },
+        );
         acks.insert(
             "b".to_string(),
-            Ack { total: 3, successful: 2, failed: 1, failures: vec![json!({"_node": "x"})] },
+            Ack {
+                total: 3,
+                successful: 2,
+                failed: 1,
+                failures: vec![json!({"_node": "x"})],
+                manager_unreachable: false,
+            },
         );
         let mut one = json!({"_index": "a", "_id": "1", "_shards": {"total": 2, "successful": 1, "failed": 0}});
         patch_shards(&mut one, &acks);
@@ -877,5 +973,40 @@ mod tests {
         assert_eq!(t.global_checkpoint("i", 10, &[a.clone(), b.clone()]), 7);
         assert_eq!(t.global_checkpoint("i", 10, &[b.clone()]), 9);
         assert_eq!(t.global_checkpoint("j", 3, &[a]), 0);
+    }
+}
+
+/// Why a copy write brought nothing back.
+enum NoReply {
+    /// the manager removed the node while the write was waiting
+    Left,
+    /// the node stayed a member and did not answer in time
+    NoAnswer,
+}
+use NoReply::{Left, NoAnswer};
+
+/// A call that waits as long as the node is a member of the cluster: a
+/// partition or a stopped process is the cluster manager's to notice, and
+/// once it has removed the node, the copy there is unassigned rather than
+/// failed. OpenSearch's replication waits the same way.
+async fn call_while_member(
+    rt: &Arc<super::runtime::Runtime>,
+    node: &NodeId,
+    action: &str,
+    body: Vec<u8>,
+) -> Result<Envelope, NoReply> {
+    let call = rt.call(node, action, body, std::time::Duration::from_secs(60));
+    tokio::pin!(call);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            answer = &mut call => return answer.ok_or(NoAnswer),
+            _ = tick.tick() => {
+                let member = super::with_state(|s| s.nodes.contains_key(node));
+                if !member {
+                    return Err(Left);
+                }
+            }
+        }
     }
 }

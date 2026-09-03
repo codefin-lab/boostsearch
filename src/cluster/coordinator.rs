@@ -51,6 +51,8 @@ pub const LEADER_CHECK: &str = "internal:coordination/fault_detection/leader_che
 pub const LEAVE: &str = "internal:cluster/coordination/leave";
 pub const SHARD_STARTED: &str = "internal:cluster/shard/started";
 pub const SHARD_FAILED: &str = "internal:cluster/shard/failure";
+/// a copy that was in sync missed an acknowledged write: it is in sync no more
+pub const SHARD_STALE: &str = "internal:cluster/shard/stale";
 pub const REROUTE: &str = "internal:cluster/reroute";
 /// a node holding an index's primary tells the manager the index's metadata
 pub const METADATA_REPORT: &str = "internal:cluster/metadata/report";
@@ -187,9 +189,9 @@ pub struct Coordinator {
     /// the customs this node last applied, as a fingerprint
     customs_applied: u64,
     /// the index copies each node holds on disk, as the nodes reported them
-    held: BTreeMap<NodeId, Vec<(String, String)>>,
+    held: BTreeMap<NodeId, Vec<(String, String, String)>>,
     /// what this node last reported holding
-    held_reported: Vec<(String, String)>,
+    held_reported: Vec<(String, String, String)>,
     /// `_cluster/voting_config_exclusions`, as (node id, node name)
     exclusions: Vec<(String, String)>,
     /// a publication asked for while one was in flight
@@ -203,6 +205,7 @@ pub struct Coordinator {
 enum ShardEvent {
     Started { index: String, shard: u32, allocation_id: String },
     Failed { index: String, shard: u32, allocation_id: String, message: String },
+    Stale { index: String, shard: u32, allocation_id: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -308,6 +311,11 @@ impl Coordinator {
     /// The committed state, as `_cluster/state` reads it.
     pub fn state(&self) -> &ClusterState {
         &self.committed
+    }
+
+    /// What the nodes told this manager they hold (tests).
+    pub fn held_report(&self) -> BTreeMap<NodeId, Vec<(String, String, String)>> {
+        self.held.clone()
     }
 
     fn eligible(&self) -> bool {
@@ -592,7 +600,7 @@ impl Coordinator {
         let vote = body.get("vote").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(h) = body
             .get("held")
-            .and_then(|h| serde_json::from_value::<Vec<(String, String)>>(h.clone()).ok())
+            .and_then(|h| serde_json::from_value::<Vec<(String, String, String)>>(h.clone()).ok())
         {
             if let Some(n) = body.get("node").and_then(|n| n.get("id")).and_then(|i| i.as_str()) {
                 self.held.insert(NodeId(n.to_string()), h);
@@ -734,23 +742,50 @@ impl Coordinator {
         let settings = src.cluster_settings();
         let cluster = super::allocation::ClusterSettings::from_value(&settings);
         let mut table = self.command_table.take().unwrap_or_else(|| s.routing.clone());
+        // copies no longer in sync: failed, or the source of a finished move;
+        // a primary made empty on request stands alone in its set
+        let mut retired: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+        let mut reset: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
         for ev in std::mem::take(&mut self.shard_events) {
             match ev {
                 ShardEvent::Started { index, shard, allocation_id } => {
-                    super::allocation::shard_started(&mut table, &index, shard, &allocation_id);
+                    if let Some(st) =
+                        super::allocation::shard_started(&mut table, &index, shard, &allocation_id)
+                    {
+                        if let Some(r) = st.retired {
+                            retired.entry(index.clone()).or_default().push((shard, r));
+                        }
+                        if st.forced_primary {
+                            reset
+                                .entry(index.clone())
+                                .or_default()
+                                .push((shard, allocation_id.clone()));
+                        }
+                    }
+                }
+                ShardEvent::Stale { index, shard, allocation_id } => {
+                    retired.entry(index.clone()).or_default().push((shard, allocation_id));
                 }
                 ShardEvent::Failed { index, shard, allocation_id, message } => {
-                    super::allocation::shard_failed(
+                    if super::allocation::shard_failed(
                         &mut table,
                         &index,
                         shard,
                         &allocation_id,
                         self.last_wall,
                         &message,
-                    );
+                    ) {
+                        retired
+                            .entry(index.clone())
+                            .or_default()
+                            .push((shard, allocation_id.clone()));
+                    }
                 }
             }
         }
+        // what was in sync before this publication, by index
+        let previous_in_sync: BTreeMap<String, BTreeMap<u32, Vec<String>>> =
+            s.indices.iter().map(|(n, m)| (n.clone(), m.in_sync_allocations.clone())).collect();
         // an index's metadata belongs to the node holding its primary: this
         // node's store for the primaries here (and for indices not yet
         // published), the latest report for primaries elsewhere, and what
@@ -776,6 +811,15 @@ impl Coordinator {
                     && t.pointer("/index/index_name").and_then(|n| n.as_str()) == Some(name)
             })
         };
+        // a store's metadata knows nothing of which copies are in sync or
+        // what term a primary is in: those come from what was published
+        let carried = |name: &str, mut m: super::state::IndexMetadata| {
+            if let Some(prev) = s.indices.get(name) {
+                m.in_sync_allocations = prev.in_sync_allocations.clone();
+                m.primary_terms = prev.primary_terms.clone();
+            }
+            m
+        };
         let mut home: BTreeMap<String, NodeId> = BTreeMap::new();
         for (name, m) in &own {
             if buried(name, &m.uuid) {
@@ -783,19 +827,24 @@ impl Coordinator {
             }
             match primary_of(name) {
                 Some(p) if p == me => {
-                    base.insert(name.clone(), m.clone());
+                    base.insert(name.clone(), carried(name, m.clone()));
                 }
                 Some(_) => {}
                 None => {
-                    // not placed yet: a new index, whose primary is where its data is
-                    base.insert(name.clone(), m.clone());
-                    home.insert(name.clone(), me.clone());
+                    // not placed yet: a new index, whose primary is where its
+                    // data is -- unless it was placed once and its primary is
+                    // lost, which is not this node's to decide
+                    let known = s.indices.contains_key(name);
+                    base.insert(name.clone(), carried(name, m.clone()));
+                    if !known {
+                        home.insert(name.clone(), me.clone());
+                    }
                 }
             }
         }
         for (name, (node, m)) in &self.reports {
             if primary_of(name).as_ref() == Some(node) && !buried(name, &m.uuid) {
-                base.insert(name.clone(), m.clone());
+                base.insert(name.clone(), carried(name, m.clone()));
             }
         }
         let mut held = self.held.clone();
@@ -814,6 +863,11 @@ impl Coordinator {
         for (index, shard, _node) in &changes.promoted {
             *self.terms.entry((index.clone(), *shard)).or_insert(1) += 1;
         }
+        if self.notes {
+            for n in &changes.notes {
+                out.push(self.note(format!("allocation: {n}")));
+            }
+        }
         if self.notes && !changes.is_empty() {
             out.push(self.note(format!(
                 "allocation: assigned={} unassigned={} promoted={} relocating={}",
@@ -829,9 +883,15 @@ impl Coordinator {
                 after: at.saturating_sub(self.last_wall).max(1),
             });
         }
+        let empty: BTreeMap<u32, Vec<String>> = BTreeMap::new();
         s.indices = base
             .into_iter()
-            .map(|(n, m)| (n, super::metadata::with_terms(m, &routing, &self.terms)))
+            .map(|(n, m)| {
+                let prev = previous_in_sync.get(&n).unwrap_or(&empty);
+                let ret = retired.get(&n).cloned().unwrap_or_default();
+                let rs = reset.get(&n).cloned().unwrap_or_default();
+                (n, super::metadata::with_terms(m, &routing, &self.terms, prev, &ret, &rs))
+            })
             .collect();
         self.terms.retain(|(i, _), _| s.indices.contains_key(i));
         s.routing = routing;
@@ -908,8 +968,9 @@ impl Coordinator {
     /// whose primary is elsewhere take their settings, mappings and
     /// aliases; the customs are taken whole; a local index the cluster
     /// buried or placed nowhere here is let go.
-    fn apply_metadata(&mut self) {
-        let Some(src) = self.metadata.clone() else { return };
+    fn apply_metadata(&mut self) -> Vec<Output> {
+        let mut out = Vec::new();
+        let Some(src) = self.metadata.clone() else { return out };
         let me = self.me.id.clone();
         let routing = &self.committed.routing;
         for (name, m) in &self.committed.indices {
@@ -933,25 +994,53 @@ impl Coordinator {
                 self.customs_applied = fp;
             }
         }
-        // what this node holds that the cluster does not place here
+        // what this node holds that the cluster does not place here: let go
+        // only when the index is buried, or when the cluster has it active
+        // elsewhere -- a copy of a primary that is lost may be the only data
+        // left, and the manager takes it back once this node says it holds it
         for (name, m) in src.snapshot() {
             let buried = self.committed.graveyard.iter().any(|t| {
                 t.pointer("/index/index_uuid").and_then(|u| u.as_str()) == Some(m.uuid.as_str())
             });
             let published = self.committed.indices.contains_key(&name);
             let copy_here = routing.on_node(&me).any(|c| c.index == name);
-            if buried || (published && !copy_here && self.committed.version > 0) {
+            let active_elsewhere = routing.shards_of(&name).any(|c| {
+                c.node.as_ref() != Some(&me)
+                    && c.primary
+                    && matches!(
+                        c.state,
+                        super::state::ShardState::Started | super::state::ShardState::Relocating
+                    )
+            });
+            if buried || (published && !copy_here && active_elsewhere && self.committed.version > 0)
+            {
+                if self.notes {
+                    out.push(self.note(format!(
+                        "dropped local copy of [{name}] ({})",
+                        if buried { "buried" } else { "active elsewhere, not placed here" }
+                    )));
+                }
                 src.drop_local(&name);
             }
         }
+        out
     }
 
     /// The copies the committed state puts on this node: started here and
     /// reported to the manager; the ones no longer here let go.
     fn apply_shards(&mut self) -> Vec<Output> {
-        self.apply_metadata();
-        let mut out = Vec::new();
+        let mut out = self.apply_metadata();
         let me = self.me.id.clone();
+        // every copy here learns the allocation id the manager gave it
+        if let Some(src) = self.metadata.clone() {
+            for c in self.committed.routing.on_node(&me) {
+                if let Some(a) = &c.allocation_id {
+                    if c.state != super::state::ShardState::Unassigned {
+                        src.note_allocation(&c.index, a);
+                    }
+                }
+            }
+        }
         let mine: Vec<super::state::ShardRouting> =
             self.committed.routing.on_node(&me).cloned().collect();
         // copies to start
@@ -1017,6 +1106,10 @@ impl Coordinator {
             ShardEvent::Failed { index, shard, allocation_id, message } => (
                 SHARD_FAILED,
                 json!({"index": index, "shard": shard, "allocation_id": allocation_id, "message": message}),
+            ),
+            ShardEvent::Stale { index, shard, allocation_id } => (
+                SHARD_STALE,
+                json!({"index": index, "shard": shard, "allocation_id": allocation_id}),
             ),
         };
         match self.mode.clone() {
@@ -1375,11 +1468,20 @@ impl NodeLogic for Coordinator {
                 let Some((index, shard)) = self.hosted.get(&allocation_id).cloned() else {
                     return vec![];
                 };
-                let ev = match result {
-                    Ok(()) => ShardEvent::Started { index, shard, allocation_id },
-                    Err(message) => ShardEvent::Failed { index, shard, allocation_id, message },
-                };
-                let mut out = self.report(ev);
+                let mut out = Vec::new();
+                let ev =
+                    match result {
+                        Ok(()) => ShardEvent::Started { index, shard, allocation_id },
+                        Err(message) => {
+                            if self.notes {
+                                out.push(self.note(format!(
+                                    "shard [{index}][{shard}] failed here: {message}"
+                                )));
+                            }
+                            ShardEvent::Failed { index, shard, allocation_id, message }
+                        }
+                    };
+                out.extend(self.report(ev));
                 out.extend(self.next_publication(durable));
                 out
             }
@@ -1726,7 +1828,9 @@ impl Coordinator {
                 }
                 out
             }
-            (SHARD_STARTED, Kind::Request) | (SHARD_FAILED, Kind::Request) => {
+            (SHARD_STARTED, Kind::Request)
+            | (SHARD_FAILED, Kind::Request)
+            | (SHARD_STALE, Kind::Request) => {
                 if self.mode != Mode::Leader {
                     let who = match &self.mode {
                         Mode::Follower(l) => Some(l.as_str().to_string()),
@@ -1742,6 +1846,8 @@ impl Coordinator {
                     v.get("allocation_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let ev = if e.action == SHARD_STARTED {
                     ShardEvent::Started { index, shard, allocation_id }
+                } else if e.action == SHARD_STALE {
+                    ShardEvent::Stale { index, shard, allocation_id }
                 } else {
                     let message =
                         v.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -1754,6 +1860,9 @@ impl Coordinator {
                         }
                         ShardEvent::Failed { index, shard, message, .. } => {
                             format!("shard failed [{index}][{shard}] on {from}: {message}")
+                        }
+                        ShardEvent::Stale { index, shard, .. } => {
+                            format!("shard stale [{index}][{shard}]")
                         }
                     };
                     out_note_holder(&mut Vec::new(), &what);
@@ -1780,10 +1889,9 @@ impl Coordinator {
                         }
                     }
                 }
-                if let Some(h) = v
-                    .get("held")
-                    .and_then(|h| serde_json::from_value::<Vec<(String, String)>>(h.clone()).ok())
-                {
+                if let Some(h) = v.get("held").and_then(|h| {
+                    serde_json::from_value::<Vec<(String, String, String)>>(h.clone()).ok()
+                }) {
                     self.held.insert(from.clone(), h);
                 }
                 self.republish_wanted = true;

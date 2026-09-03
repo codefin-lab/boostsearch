@@ -1273,3 +1273,57 @@ phase1 398/398; bench after 6.9 wins every dimension against plain
 OpenSearch (index 98,404 vs 64,846 docs/s, 384MiB vs 2.06GiB) and against
 os-secure (95,822 vs 59,726 docs/s); the TLS-vs-plain pass is within noise
 on one row and stays the documented transport mismatch.
+
+### 6.10 Linearizability against real nodes, with real partitions (done)
+
+`tools/linearize.py` works a few keys against three live nodes from six
+threads, recording every operation's call and return times, while it
+cuts partitions and stops processes: a partition through each node's
+`POST /_boost/chaos` switch (`{"cut": [names]}`, `{"heal": true}`; the
+route exists only with `BOOSTSEARCH_CHAOS=1`), which drops frames to and
+from the named peers inside the transport for real, and a stop through
+SIGSTOP/SIGCONT. At the end it waits for the index to be green on all
+three nodes, reads every key from every node with `preference=_local`,
+and judges the history two ways: LOST, an acknowledged write that is not
+the final value on some node with no later write to explain it, and
+STALE, a key whose history no linearization of a register explains
+(Wing and Gong over the operations, a failed write tried both ways). The
+two are kept apart because the shipped consistency mode is OpenSearch's
+(ADR 0003): a read from an active copy may be behind, and the report
+says how many of a stale key's reads fell inside a fault window.
+
+What the live runs found, in order, none of it visible to the
+simulation. A stale primary answered a write with 200 while the copy
+that had refused it was reported failed: the refusal is now the write's
+error. A copy that came back from a partition was handed the primary
+though it had missed writes: `in_sync_allocations` is now carried in
+the index metadata across publications, a copy that misses an
+acknowledged write is reported stale by the primary (`internal:cluster/
+shard/stale`) and retired from the set, a node says which allocation ids
+it holds (`held` in the join and the metadata report, kept in the
+store's `_meta.json`), and a lost primary goes only to a holder of an
+in-sync id, `no_valid_shard_copy` otherwise. A primary cut off from the
+manager acknowledged writes its stale-copy reports never reached: the
+reports are awaited, and a manager that cannot be reached makes the
+write a 503 `unavailable_shards_exception`. A node rejoining dropped the
+only copy of an index because the routing did not place it there: a copy
+is dropped only when a primary is active elsewhere. The health handler
+compared `wait_for_nodes` against one node: it now reads the live count
+in every spelling OpenSearch takes (`3`, `>=3`, `ge(3)`, `lt(2)`, ...).
+And the cut failed a copy write at once, so the replica was placed and
+failed again five times in the seconds before the manager removed the
+node, ending in `ALLOCATION_FAILED` for an operator's `retry_failed`: a
+cut now loses frames silently like a real partition, and a copy write
+waits while its node is a member of the cluster and gives up as "node
+left" when the manager removes it, which is not a copy failure -- what
+OpenSearch's replication does.
+
+Three seeds of 45 seconds each, five faults apiece, on three nodes:
+every run settles green at once, no acknowledged write is lost, no
+divergence between copies; the stale keys are stale inside fault
+windows, as the mode allows. The model gained `SHARD_STALE`, allocation
+ids across restarts and a lone primary coming back with its data. Gates:
+unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.10 wins
+every dimension in all three passes (index 98,421 vs 67,445 docs/s,
+380MiB vs 2.06GiB plain; 93,514 vs 60,731 against os-secure; and the TLS
+pass 94,154 vs 67,127 with every query row ahead).

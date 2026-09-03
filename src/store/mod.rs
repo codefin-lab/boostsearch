@@ -355,6 +355,9 @@ pub struct IdxState {
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
+    /// the allocation id the cluster manager gave this copy of the index,
+    /// which is how a returning node proves its copy is one that was in sync
+    pub allocation_id: Option<String>,
     /// how much has been recorded since the last commit spent the record
     translog_bytes_since_commit: u64,
     /// Writes recorded where a crash can still find them.
