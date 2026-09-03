@@ -71,6 +71,7 @@ pub fn classify(method: &Method, path: &str) -> Target {
         return match head {
             "_bulk" => Target::Write(None),
             // the tables that count what a node holds are asked of every node
+            "_stats" => Target::Broadcast(None),
             "_cat" => match first_segment(rest).0 {
                 "segments" | "fielddata" => {
                     let (_, after) = first_segment(rest);
@@ -134,6 +135,9 @@ pub fn classify(method: &Method, path: &str) -> Target {
         "_refresh" | "_flush" | "_forcemerge" | "_cache" | "_open" | "_close" => {
             Target::Broadcast(Some(index))
         }
+        // what an index cost in memory and on disk is what every node holding
+        // a copy of it spent, added up
+        "_stats" => Target::Broadcast(Some(index)),
         "_mget" | "_explain" | "_termvectors" | "_mtermvectors" | "_field_caps" | "_validate"
         | "_rank_eval" | "_analyze" | "_pit" => Target::Read(index),
         // the index's own metadata and maintenance: the node holding its primary
@@ -499,6 +503,7 @@ async fn broadcast(
     req: Request,
     next: Next,
 ) -> Response {
+    let path_is_stats = req.uri().path().contains("/_stats") || req.uri().path() == "/_stats";
     let me = rt.local();
     let mut here_copies = 0usize;
     let (here, others): (bool, Vec<(NodeId, usize)>) = super::with_state(|s| {
@@ -575,6 +580,9 @@ async fn broadcast(
     let mut first: Option<(StatusCode, Value)> = None;
     let mut per_index: std::collections::BTreeMap<String, Value> = Default::default();
     let mut lines: Vec<String> = Vec::new();
+    // counters -- what an index cost -- are added up over the nodes holding it
+    let summing = path_is_stats;
+    let mut summed: Option<Value> = None;
     let mut fold = |copies: usize, r: Response| {
         let status = r.status();
         let body = r.into_body();
@@ -609,6 +617,12 @@ async fn broadcast(
             failed += copies as u64;
         }
         total += copies as u64;
+        if summing {
+            match summed.as_mut() {
+                Some(acc) => add_into(acc, &v),
+                None => summed = Some(v.clone()),
+            }
+        }
         if let Some(idx) = v.get("indices").and_then(|i| i.as_object()) {
             for (k, val) in idx {
                 per_index.insert(k.clone(), val.clone());
@@ -660,14 +674,22 @@ async fn broadcast(
             "no node answered",
         );
     };
+    // the summed counters first, then the shard tallies the routing knows
+    if summing && status.is_success() {
+        if let Some(t) = summed.take() {
+            v = t;
+        }
+    }
     if status.is_success() && v.get("_shards").is_some() {
         v["_shards"] = json!({"total": total, "successful": successful, "failed": failed});
     }
     // an answer that speaks per index -- a close, an open -- speaks for the
     // indices every node answered for
-    if status.is_success() && !per_index.is_empty() {
+    // (a summed answer already carries every node's indices, added up)
+    if status.is_success() && !summing && !per_index.is_empty() {
         v["indices"] = Value::Object(per_index.into_iter().collect());
     }
+
     let mut r = Response::new(Body::from(serde_json::to_vec(&v).unwrap_or_default()));
     *r.status_mut() = status;
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -865,5 +887,39 @@ mod tests {
         assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
         assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);
         assert_eq!(classify(&get, "/_nodes/stats"), Target::Local);
+    }
+}
+
+/// Add one answer's counters into another: numbers add, objects merge, and
+/// anything else keeps what the first node said.
+fn add_into(acc: &mut Value, other: &Value) {
+    match (acc, other) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (k, v) in b {
+                match a.get_mut(k) {
+                    Some(slot) => add_into(slot, v),
+                    None => {
+                        a.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (Value::Number(a), Value::Number(b)) => {
+            let sum = a.as_f64().unwrap_or(0.0) + b.as_f64().unwrap_or(0.0);
+            if a.is_i64() && b.is_i64() {
+                *a = serde_json::Number::from(sum as i64);
+            } else if let Some(n) = serde_json::Number::from_f64(sum) {
+                *a = n;
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            for (i, v) in b.iter().enumerate() {
+                match a.get_mut(i) {
+                    Some(slot) => add_into(slot, v),
+                    None => a.push(v.clone()),
+                }
+            }
+        }
+        _ => {}
     }
 }

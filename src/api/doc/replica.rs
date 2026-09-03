@@ -17,12 +17,25 @@ fn held_version(st: &IdxState, id: &str) -> Option<u64> {
 
 /// Apply one of the primary's writes here. `false` when the copy already
 /// holds this version or a newer one.
+/// As `apply_replicated`, but the write wins whatever stands here: a page of
+/// a recovery is the primary's truth, and a copy being filled may hold a
+/// document of the same version from a life the cluster has forgotten.
+pub fn apply_recovered(st: &mut IdxState, op: &ReplicaOp) -> bool {
+    st.applied_term = st.applied_term.max(op.term);
+    apply_replicated_inner(st, op, true)
+}
+
 pub fn apply_replicated(st: &mut IdxState, op: &ReplicaOp) -> bool {
+    apply_replicated_inner(st, op, false)
+}
+
+fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> bool {
     // a write from a newer primary always wins: the primary that took over
     // counts a document's versions from the copy it held, which may be a
     // version behind what is here, and comparing versions across terms would
     // leave the two copies holding different values for one document for good
-    if op.term > st.applied_term {
+    if force {
+    } else if op.term > st.applied_term {
         st.applied_term = op.term;
     } else if let Some(have) = held_version(st, &op.id) {
         if have >= op.version {

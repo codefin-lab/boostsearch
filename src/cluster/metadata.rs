@@ -228,7 +228,7 @@ impl ShardHost for StoreSource {
                     }
                     idx.insert("uuid".into(), json!(meta.uuid));
                 }
-                let body = json!({"settings": settings, "mappings": meta.mappings});
+                let body = json!({"settings": settings, "mappings": meta.mappings, "aliases": meta.aliases});
                 self.store.create(&meta.name, &body).map_err(|e| {
                     format!("could not make an empty primary of [{}]: {e}", meta.name)
                 })?;
@@ -248,7 +248,8 @@ impl ShardHost for StoreSource {
             }
             idx.insert("uuid".into(), json!(meta.uuid));
         }
-        let body = json!({"settings": settings, "mappings": meta.mappings});
+        let body =
+            json!({"settings": settings, "mappings": meta.mappings, "aliases": meta.aliases});
         self.store.create(&meta.name, &body).map_err(|e| {
             format!("could not create a local copy of [{}][{}]: {e}", meta.name, copy.shard)
         })?;
