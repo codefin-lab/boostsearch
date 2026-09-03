@@ -139,11 +139,13 @@ pub async fn allocation_explain(
                 .map(|c| (n.clone(), c.node.clone().unwrap()))
         })
         .collect();
+    let held = std::collections::BTreeMap::new();
     let ctx = Context {
         nodes: &live.nodes,
         indices: &live.indices,
         cluster: &cluster,
         primary_home: &home,
+        held: &held,
         now: crate::cluster::clock().wall(),
     };
     let mut out = explain(&ctx, &live, &copy, flag(&p, "include_yes_decisions"));

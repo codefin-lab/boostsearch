@@ -386,6 +386,17 @@ pub fn install(store: Store) {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     waited += 1;
                 }
+                // a primary of an older term is no primary: its writes are refused
+                let known_term = super::primary_term(&index, 0);
+                if ops.iter().any(|op| op.term < known_term) {
+                    return e.error(
+                        from,
+                        &format!(
+                            "stale primary term for [{index}]: {} < {known_term}",
+                            ops.iter().map(|o| o.term).min().unwrap_or(0)
+                        ),
+                    );
+                }
                 let result = tokio::task::spawn_blocking(move || {
                     let Some(st) = store.get(&index) else {
                         return Err(format!("no copy of [{index}] on this node"));
@@ -700,8 +711,36 @@ async fn seed_replica_inner(store: &Store, index: &str, shard: u32) -> Result<()
     seed_by_scan(store, index, shard).await
 }
 
-/// Fill a copy from a scan of the primary's documents, in sequence order.
+/// Fill a copy from a scan of the primary's documents, in sequence order,
+/// starting from nothing: what was here before may hold writes the
+/// primary never took.
 pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), String> {
+    {
+        let meta = super::with_state(|s| s.indices.get(index).cloned());
+        let store2 = store.clone();
+        let name = index.to_string();
+        let primary_here = super::with_state(|s| {
+            let me = super::runtime().map(|r| r.local());
+            s.routing.primary(index, shard).and_then(|p| p.node.clone()) == me
+        });
+        if !primary_here {
+            if let Some(meta) = meta {
+                let _ = tokio::task::spawn_blocking(move || {
+                    store2.drop_local(&name);
+                    let mut settings = meta.settings.clone();
+                    if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
+                        for k in ["creation_date", "provided_name", "version"] {
+                            idx.remove(k);
+                        }
+                        idx.insert("uuid".into(), json!(meta.uuid));
+                    }
+                    let _ = store2
+                        .create(&name, &json!({"settings": settings, "mappings": meta.mappings}));
+                })
+                .await;
+            }
+        }
+    }
     let Some(rt) = super::runtime() else { return Ok(()) };
     let me = rt.local();
     let primary =

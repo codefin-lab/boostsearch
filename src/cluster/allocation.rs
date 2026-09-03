@@ -492,6 +492,8 @@ pub struct Context<'a> {
     pub cluster: &'a ClusterSettings,
     /// where an index's primary data lives, for indices the manager holds
     pub primary_home: &'a BTreeMap<String, NodeId>,
+    /// the index copies each node holds on disk, by name and uuid
+    pub held: &'a BTreeMap<NodeId, Vec<(String, String)>>,
     pub now: Millis,
 }
 
@@ -1379,9 +1381,38 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
             if copy.primary {
                 let reason = copy.unassigned.as_ref().map(|u| u.reason.clone()).unwrap_or_default();
                 if reason != "INDEX_CREATED" && reason != "FORCED_EMPTY_PRIMARY" {
+                    // a node that still holds this index's data (the same uuid)
+                    // gets the primary back: an existing-store recovery
+                    let uuid = ctx.indices.get(&name).map(|m| m.uuid.clone()).unwrap_or_default();
+                    let keeper = ctx
+                        .data_nodes()
+                        .into_iter()
+                        .find(|n| {
+                            ctx.held
+                                .get(&n.id)
+                                .map(|h| h.iter().any(|(hn, hu)| *hn == name && *hu == uuid))
+                                .unwrap_or(false)
+                                && overall(&can_allocate(ctx, &t, &copy, n)) == Decision::Yes
+                        })
+                        .map(|n| n.id.clone());
                     let copies = t.indices.get_mut(&name).unwrap().get_mut(&shard).unwrap();
-                    if let Some(u) = copies[i].unassigned.as_mut() {
-                        u.allocation_status = "no_valid_shard_copy".into();
+                    match keeper {
+                        Some(node) => {
+                            let c = &mut copies[i];
+                            c.state = ShardState::Initializing;
+                            c.node = Some(node.clone());
+                            c.relocating_node = None;
+                            c.allocation_id = Some(new_allocation_id());
+                            if let Some(u) = c.unassigned.as_mut() {
+                                u.delayed = false;
+                            }
+                            changes.assigned.push((name.clone(), shard, true, node));
+                        }
+                        None => {
+                            if let Some(u) = copies[i].unassigned.as_mut() {
+                                u.allocation_status = "no_valid_shard_copy".into();
+                            }
+                        }
                     }
                     continue;
                 }
@@ -2134,6 +2165,7 @@ mod tests {
         indices: BTreeMap<String, IndexMetadata>,
         cluster: ClusterSettings,
         home: BTreeMap<String, NodeId>,
+        held: BTreeMap<NodeId, Vec<(String, String)>>,
         table: RoutingTable,
         now: Millis,
     }
@@ -2146,6 +2178,7 @@ mod tests {
                 indices: indices.into_iter().map(|i| (i.name.clone(), i)).collect(),
                 cluster: ClusterSettings::default(),
                 home: home_map,
+                held: BTreeMap::new(),
                 table: RoutingTable::default(),
                 now: 10_000,
             }
@@ -2157,6 +2190,7 @@ mod tests {
                 indices: &self.indices,
                 cluster: &self.cluster,
                 primary_home: &self.home,
+                held: &self.held,
                 now: self.now,
             }
         }
@@ -2440,6 +2474,47 @@ mod tests {
             c.unassigned = Some(unassigned_info("NODE_LEFT", 0, "no_valid_shard_copy", 0));
         }
         assert!(apply_commands(&w.ctx(), &fresh, cmd.as_array().unwrap(), false).is_err());
+    }
+
+    /// The node that held a lost primary's data comes back: the primary goes
+    /// back to it, an existing-store recovery, not an empty one.
+    #[test]
+    fn a_lost_primary_goes_back_to_the_node_that_still_holds_its_data() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("solo", 1, 0, json!({}))],
+            "a",
+        );
+        w.settle();
+        let uuid = w.indices["solo"].uuid.clone();
+        w.nodes.remove(&NodeId("a".into()));
+        w.home.clear();
+        w.now += 1_000;
+        w.settle();
+        assert_eq!(w.table.primary("solo", 0).unwrap().state, ShardState::Unassigned);
+        // a returns, and says it still holds the index
+        w.nodes.insert(NodeId("a".into()), node("a", &[]));
+        w.held.insert(NodeId("a".into()), vec![("solo".into(), uuid)]);
+        let ch = w.reroute();
+        assert_eq!(ch.assigned.len(), 1, "{ch:?}");
+        let p = w.table.primary("solo", 0).unwrap().clone();
+        assert_eq!(p.node, Some(NodeId("a".into())));
+        assert_eq!(p.state, ShardState::Initializing);
+        assert_eq!(p.to_json()["recovery_source"]["type"], "EXISTING_STORE");
+        // a node holding a different creation of the index (another uuid) does not count
+        let mut w2 = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("solo", 1, 0, json!({}))],
+            "a",
+        );
+        w2.settle();
+        w2.nodes.remove(&NodeId("a".into()));
+        w2.home.clear();
+        w2.now += 1_000;
+        w2.settle();
+        w2.held.insert(NodeId("b".into()), vec![("solo".into(), "another-uuid".into())]);
+        w2.reroute();
+        assert_eq!(w2.table.primary("solo", 0).unwrap().state, ShardState::Unassigned);
     }
 
     #[test]

@@ -1227,3 +1227,49 @@ dimension in all three passes (index 91,411 vs 66,060 docs/s against
 plain OpenSearch, 94,466 vs 59,682 against os-secure; 401MiB vs 2.0GiB;
 every query p50 lower): the coordinator's plan is one read of the state
 per search and nothing more on one node.
+
+### 6.9 Invariants inside the simulation: nothing acknowledged is lost, no two primaries accept writes, no divergence after recovery (done)
+
+`src/cluster/model.rs` is the data path as the simulation runs it: one
+node is the coordinator and a replicated store with the store's rules and
+none of its I/O. A client node writes documents with unique ids to
+whichever node; a node that is not the primary carries the write to the
+node that is; the primary gives it a sequence number and the term it is
+in, applies it, copies it to every copy (in sync or still initializing),
+and answers once every in-sync copy has taken it; a copy that does not
+answer in time is reported to the manager as failed; a copy refuses a
+write from a primary of an older term; a copy the manager places is
+filled from the primary by a scan, from nothing; a copy the manager no
+longer places here is dropped; what a node wrote is on its disk across a
+crash. The three invariants are checks over the whole cluster at the end
+of a run: every acknowledged write is on every active copy with the value
+written; no two nodes accepted different writes as the primary of one
+index in one term with one sequence number; every active copy of an
+index holds the same documents.
+
+Two things the model found. A copy filled by a scan kept the documents
+it had before: an isolated primary had applied writes nobody
+acknowledged, was demoted and crashed, and when the manager placed the
+replica back on it the scan added only what was newer, so the stale
+forty stayed (seed 22). Now a recovery starts from nothing, in the model
+and in the production scan fallback (the file recovery already replaced
+the copy whole), and copies refuse a write from an older term, in the
+model and in the production replica handler. And a lost primary was gone
+for good when its node came back: the node holding the data now says so
+(`held` in the join and in the metadata report), and the allocator gives
+the primary back to a node holding that index uuid, an `EXISTING_STORE`
+recovery -- live, a lone primary's node killed leaves the index red with
+`no_valid_shard_copy`, and its return brings the index green with every
+document.
+
+Tests: writes reach every copy and are acknowledged; the primary crashes
+mid-stream and nothing acknowledged is lost, the promoted copy in a new
+term; a lone primary that crashes comes back with its data; the primary
+is cut off from the others and no acknowledged write is lost; a storm of
+crashes, restarts and partitions over twelve seeds keeps all three; and
+`MODEL_SEEDS=a..b` runs the storm over any range (120 seeds clean),
+`MODEL_SEED=n` replays one with its events and notes. Gates: unit 66/66,
+phase1 398/398; bench after 6.9 wins every dimension against plain
+OpenSearch (index 98,404 vs 64,846 docs/s, 384MiB vs 2.06GiB) and against
+os-secure (95,822 vs 59,726 docs/s); the TLS-vs-plain pass is within noise
+on one row and stays the documented transport mismatch.

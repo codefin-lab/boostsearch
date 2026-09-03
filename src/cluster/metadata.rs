@@ -45,6 +45,11 @@ pub trait MetadataSource: Send + Sync {
     fn apply_customs(&self, _customs: &Value) {}
     /// Let go of a local index the cluster no longer places here.
     fn drop_local(&self, _index: &str) {}
+    /// The index copies this node holds on disk, by name and uuid: what
+    /// the manager places a lost primary back on.
+    fn held(&self) -> Vec<(String, String)> {
+        self.snapshot().iter().map(|(n, m)| (n.clone(), m.uuid.clone())).collect()
+    }
 }
 
 /// What a data node does with the copies the manager puts on it: the store

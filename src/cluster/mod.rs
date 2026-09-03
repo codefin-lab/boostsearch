@@ -11,6 +11,7 @@ pub mod clock;
 pub mod coordinator;
 pub mod forward;
 pub mod metadata;
+pub mod model;
 pub mod node;
 pub mod replication;
 pub mod runtime;

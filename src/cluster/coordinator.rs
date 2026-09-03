@@ -186,6 +186,10 @@ pub struct Coordinator {
     reported_fp: BTreeMap<String, u64>,
     /// the customs this node last applied, as a fingerprint
     customs_applied: u64,
+    /// the index copies each node holds on disk, as the nodes reported them
+    held: BTreeMap<NodeId, Vec<(String, String)>>,
+    /// what this node last reported holding
+    held_reported: Vec<(String, String)>,
     /// `_cluster/voting_config_exclusions`, as (node id, node name)
     exclusions: Vec<(String, String)>,
     /// a publication asked for while one was in flight
@@ -293,6 +297,8 @@ impl Coordinator {
             reports: BTreeMap::new(),
             reported_fp: BTreeMap::new(),
             customs_applied: 0,
+            held: BTreeMap::new(),
+            held_reported: Vec::new(),
             exclusions: Vec::new(),
             republish_wanted: false,
             last_wall: 0,
@@ -484,12 +490,14 @@ impl Coordinator {
     /// node it goes to, in this term: one vote per node per term.
     fn join_body(&self, to: &NodeId) -> Value {
         let vote = self.last_join.as_ref() == Some(&(self.current_term, to.clone()));
+        let held = self.metadata.as_ref().map(|m| m.held()).unwrap_or_default();
         json!({
             "term": self.current_term,
             "last_accepted_term": self.accepted.term,
             "last_accepted_version": self.accepted.version,
             "node": self.me,
             "vote": vote,
+            "held": held,
         })
     }
 
@@ -582,6 +590,14 @@ impl Coordinator {
         let la_term = body.get("last_accepted_term").and_then(|t| t.as_u64()).unwrap_or(0);
         let la_version = body.get("last_accepted_version").and_then(|t| t.as_u64()).unwrap_or(0);
         let vote = body.get("vote").and_then(|v| v.as_bool()).unwrap_or(false);
+        if let Some(h) = body
+            .get("held")
+            .and_then(|h| serde_json::from_value::<Vec<(String, String)>>(h.clone()).ok())
+        {
+            if let Some(n) = body.get("node").and_then(|n| n.get("id")).and_then(|i| i.as_str()) {
+                self.held.insert(NodeId(n.to_string()), h);
+            }
+        }
         let Some(node) =
             body.get("node").and_then(|n| serde_json::from_value::<DiscoveryNode>(n.clone()).ok())
         else {
@@ -782,11 +798,15 @@ impl Coordinator {
                 base.insert(name.clone(), m.clone());
             }
         }
+        let mut held = self.held.clone();
+        held.insert(me.clone(), src.held());
+        held.retain(|n, _| s.nodes.contains_key(n));
         let ctx = super::allocation::Context {
             nodes: &s.nodes,
             indices: &base,
             cluster: &cluster,
             primary_home: &home,
+            held: &held,
             now: self.last_wall,
         };
         let (routing, changes) = super::allocation::reroute(&ctx, &table);
@@ -875,10 +895,13 @@ impl Coordinator {
                 changed.push(serde_json::to_value(m).unwrap_or(Value::Null));
             }
         }
-        if changed.is_empty() {
+        let held = src.held();
+        let held_changed = held != self.held_reported;
+        if changed.is_empty() && !held_changed {
             return vec![];
         }
-        vec![self.request(&leader, METADATA_REPORT, json!({"indices": changed}))]
+        self.held_reported = held.clone();
+        vec![self.request(&leader, METADATA_REPORT, json!({"indices": changed, "held": held}))]
     }
 
     /// Published metadata reaches the store: the copies here of indices
@@ -1757,6 +1780,12 @@ impl Coordinator {
                         }
                     }
                 }
+                if let Some(h) = v
+                    .get("held")
+                    .and_then(|h| serde_json::from_value::<Vec<(String, String)>>(h.clone()).ok())
+                {
+                    self.held.insert(from.clone(), h);
+                }
                 self.republish_wanted = true;
                 let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
                 out.extend(self.next_publication(durable));
@@ -1788,11 +1817,13 @@ impl Coordinator {
                 let home: BTreeMap<String, NodeId> =
                     snapshot.keys().map(|n| (n.clone(), self.me.id.clone())).collect();
                 let nodes = self.committed.nodes.clone();
+                let held = self.held.clone();
                 let ctx = super::allocation::Context {
                     nodes: &nodes,
                     indices: &snapshot,
                     cluster: &cluster,
                     primary_home: &home,
+                    held: &held,
                     now: self.last_wall,
                 };
                 let mut table = self.committed.routing.clone();
