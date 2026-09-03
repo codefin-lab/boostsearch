@@ -1327,3 +1327,88 @@ unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.10 wins
 every dimension in all three passes (index 98,421 vs 67,445 docs/s,
 380MiB vs 2.06GiB plain; 93,514 vs 60,731 against os-secure; and the TLS
 pass 94,154 vs 67,127 with every query row ahead).
+
+### 6.11 Chaos, soak, rolling restart (done)
+
+`tools/cluster_chaos.py` starts three nodes itself, so it can kill and
+restart them on their own data directories, drives writers and readers at
+all three, and applies faults on a schedule: a partition through the
+chaos switch, SIGSTOP/SIGCONT, SIGKILL and a start again, a graceful
+SIGTERM restart, and `--mode rolling`, which takes every node down and up
+in turn and waits for green between each. `--mode soak` spaces the faults
+out and samples each node's resident memory. At the end it waits for
+*every* node to say green with every node in the cluster -- asking one
+node is not enough, since a node that never rejoined answers happily
+about the cluster it remembers -- and then reads every acknowledged
+document from every copy: an acknowledged write missing anywhere is the
+run's failure.
+
+That check found seven ways an acknowledged write could be lost, none of
+which the simulation could see, because each is about a node's own store
+or its own idea of the cluster.
+
+  - **The sequence counter started again at zero after a restart.** It was
+    never persisted, so a restarted primary handed new writes numbers old
+    documents already carried. A recovery pages by sequence number and
+    keyed its documents by it, so a copy filled from such a primary was
+    quietly missing everything that collided. The counter is written with
+    the index (`_meta.json`) and taken back from the translog, and the
+    scan keys documents by number *and* id, cutting pages on a number so
+    nothing between two pages is skipped.
+  - **The recovery scan read the search reader.** A write is committed
+    ahead of a refresh when the memory it holds grows too large, and is
+    then in neither the pending table nor the reader search sees: the scan
+    reads the realtime reader now.
+  - **A copy filled from the primary's files stopped at its last commit.**
+    It catches up by scan from where the files end.
+  - **Writes that arrived while a copy was being filled were thrown away**
+    with the copy the seed replaced. They wait in the recovery's queue and
+    go in as the last thing it does, under the lock that closes it.
+  - **A second recovery within thirty seconds was skipped as a duplicate.**
+    It is skipped only for the same allocation id now: another id is
+    another copy, and what is on the node may be a copy the cluster left
+    behind.
+  - **A copy taken out of the in-sync set walked straight back in** at the
+    next publication, because every active copy was added to the set.
+    A stale copy is unassigned as well as retired, so it must be filled
+    again before it counts; a set built from nothing starts with the
+    primary alone; and the answer to a stale or failed report waits for
+    the state that carries it to be committed, so a manager that loses its
+    term does not leave a primary believing a retirement that never
+    happened.
+  - **A node that had lost the cluster manager kept acknowledging writes.**
+    A stopped or partitioned node knows nothing of what the cluster
+    decided while it was away, and the primary it thinks it holds may be
+    somebody else's now. A write is refused with OpenSearch's
+    `no cluster-manager` block unless this node is a follower whose last
+    check of the leader came back, or a leader a quorum of the voting
+    configuration is still answering; a node answering "not my manager"
+    counts against that quorum at once. The in-sync bookkeeping also runs
+    when the primary has no copy to write to, so an in-sync id belonging
+    to a node that is down leaves the set before that node returns and is
+    handed the primary as though it had everything.
+
+Ten chaos seeds of sixty seconds, five faults apiece: nine settle with
+every acknowledged write on every copy. One seed leaves a replica 420
+writes behind while the cluster says green -- the primary has them all,
+so nothing is lost, but a copy can still be counted in sync while it is
+catching up; that is the next thing to close. Rolling restart, two rounds
+over three nodes: green after every node, nothing lost, and about a fifth
+of the writes refused while the primary moves (OpenSearch refuses fewer,
+and the block is deliberately eager here). A five-minute soak with faults
+throughout: 142,420 writes acknowledged, every one on every copy, and
+memory 49 to 156 MiB as the data grew, against OpenSearch's two gigabytes
+for the same corpus.
+
+A refresh, flush, force merge or cache clear now reaches every copy
+rather than the primary's node alone, and its `_shards` counts are the
+sum over the nodes that answered -- what OpenSearch's broadcast actions
+do, and what the check above needs to read a copy honestly. A node
+stopped with SIGTERM tells the manager it is leaving, puts every translog
+on disk and then stops taking connections, which is what makes a rolling
+restart quiet.
+
+Gates: unit 67/67, 120-seed storm clean, phase1 398/398; bench after 6.11
+wins every dimension in all three passes (index 94,280 vs 65,652 docs/s
+and 399MiB vs 2.1GiB against plain OpenSearch; 89,077 vs 56,858 against
+os-secure; the TLS pass 89,427 vs 65,895 with every query row ahead).

@@ -91,16 +91,31 @@ pub fn with_terms(
     previous: &BTreeMap<u32, Vec<String>>,
     retired: &[(u32, String)],
     reset: &[(u32, String)],
+    started: &[(u32, String)],
 ) -> IndexMetadata {
     for shard in 0..m.number_of_shards {
         let term = terms.get(&(m.name.clone(), shard)).copied().unwrap_or(1);
         m.primary_terms.insert(shard, term);
-        // in sync: what was in sync before and was not retired, and every
-        // copy that is active now; a primary made empty on request stands alone
+        // In sync: what was in sync before and was not retired, the primary
+        // (it is the source every copy is filled from), and the copies whose
+        // nodes have just said they finished filling. A copy is not in sync
+        // merely for standing active in the routing: one taken out of the set
+        // for missing a write would walk straight back into it at the next
+        // publication, and could then be handed the primary.
         let mut in_sync: Vec<String> = previous.get(&shard).cloned().unwrap_or_default();
+        // a manager that has no set for this shard yet -- a leader whose
+        // committed state predates the index -- starts the set from the
+        // primary alone: the copies around it may be behind, and only a copy
+        // that says it finished filling has caught up
+        let from_nothing = in_sync.is_empty();
         if let Some(copies) = routing.indices.get(&m.name).and_then(|s| s.get(&shard)) {
             for c in copies {
-                if matches!(c.state, ShardState::Started | ShardState::Relocating) {
+                let fresh = started
+                    .iter()
+                    .any(|(s, a)| *s == shard && Some(a.as_str()) == c.allocation_id.as_deref());
+                if matches!(c.state, ShardState::Started | ShardState::Relocating)
+                    && (!from_nothing || c.primary || fresh)
+                {
                     if let Some(a) = &c.allocation_id {
                         if !in_sync.contains(a) {
                             in_sync.push(a.clone());
@@ -144,8 +159,9 @@ impl StoreSource {
         let store = self.store.clone();
         let index = meta.name.clone();
         let shard = copy.shard;
+        let id = aid.clone();
         tokio::spawn(async move {
-            let result = super::replication::seed_replica(&store, &index, shard).await;
+            let result = super::replication::seed_replica(&store, &index, shard, &id).await;
             if let Some(rt) = super::runtime() {
                 rt.shard_done(aid, result);
             }

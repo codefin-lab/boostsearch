@@ -47,6 +47,9 @@ pub enum Target {
     Write(Option<String>),
     /// a node holding an active copy of every named index
     Read(String),
+    /// every node holding an active copy of the named indices (all of them
+    /// when none is named): a refresh reaches every copy in OpenSearch
+    Broadcast(Option<String>),
 }
 
 fn first_segment(path: &str) -> (&str, &str) {
@@ -90,8 +93,8 @@ pub fn classify(method: &Method, path: &str) -> Target {
             "_search" | "_msearch" | "_count" | "_search_shards" => Target::Local,
             "_mget" | "_field_caps" | "_validate" | "_mtermvectors" | "_rank_eval" | "_render"
             | "_pit" | "_stats" | "_segments" | "_recovery" | "_shard_stores" | "_mapping"
-            | "_settings" | "_refresh" | "_flush" | "_forcemerge" | "_cache" | "_open"
-            | "_close" => Target::Manager,
+            | "_settings" | "_open" | "_close" => Target::Manager,
+            "_refresh" | "_flush" | "_forcemerge" | "_cache" => Target::Broadcast(None),
             _ => Target::Local,
         };
     }
@@ -113,6 +116,7 @@ pub fn classify(method: &Method, path: &str) -> Target {
         }
         "_update_by_query" | "_delete_by_query" => Target::Write(Some(index)),
         "_search" | "_count" | "_msearch" | "_search_shards" => Target::Local,
+        "_refresh" | "_flush" | "_forcemerge" | "_cache" => Target::Broadcast(Some(index)),
         "_mget" | "_explain" | "_termvectors" | "_mtermvectors" | "_field_caps" | "_validate"
         | "_rank_eval" | "_analyze" | "_pit" => Target::Read(index),
         // the index's own metadata and maintenance: the node holding its primary
@@ -124,10 +128,6 @@ pub fn classify(method: &Method, path: &str) -> Target {
         | "_open"
         | "_close"
         | "_block"
-        | "_refresh"
-        | "_flush"
-        | "_forcemerge"
-        | "_cache"
         | "_stats"
         | "_segments"
         | "_recovery"
@@ -317,13 +317,16 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     let path = req.uri().path().to_string();
     let query = parse_query(req.uri().query().unwrap_or(""));
     let target = classify(req.method(), &path);
+    if let Target::Broadcast(expr) = &target {
+        return broadcast(&rt, &store, expr.as_deref(), req, next).await;
+    }
     let (to, write_indices): (Option<NodeId>, Vec<String>) = super::with_state(|s| {
         // nothing committed yet: one node, everything local
         if s.version == 0 || s.nodes.len() <= 1 {
             return (None, Vec::new());
         }
         match &target {
-            Target::Local => (None, Vec::new()),
+            Target::Local | Target::Broadcast(_) => (None, Vec::new()),
             Target::Manager => (s.cluster_manager.clone().filter(|m| *m != me), Vec::new()),
             Target::Write(None) => (
                 s.cluster_manager.clone().filter(|m| *m != me),
@@ -360,6 +363,140 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         return run_with_replication(&store, req, next).await;
     };
     forward(&rt, &to, req).await
+}
+
+/// A request every copy answers: run here for the copies here, forwarded
+/// to every other node holding one, the shard tallies added up. A node
+/// that does not answer counts its copies as failed, the way a shard a
+/// refresh could not reach is failed in OpenSearch.
+async fn broadcast(
+    rt: &std::sync::Arc<super::runtime::Runtime>,
+    store: &Store,
+    expr: Option<&str>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let me = rt.local();
+    let (here, others): (bool, Vec<(NodeId, usize)>) = super::with_state(|s| {
+        if s.version == 0 || s.nodes.len() <= 1 {
+            return (true, Vec::new());
+        }
+        let names: Vec<String> = match expr {
+            Some(e) => resolve(s, store, e),
+            None => s.indices.keys().cloned().collect(),
+        };
+        let mut copies: std::collections::BTreeMap<NodeId, usize> = Default::default();
+        for n in &names {
+            for c in s.routing.shards_of(n) {
+                if let Some(node) = &c.node {
+                    if matches!(c.state, ShardState::Started | ShardState::Relocating) {
+                        *copies.entry(node.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let here = copies.contains_key(&me) || names.iter().any(|n| store.get(n).is_some());
+        (here, copies.into_iter().filter(|(n, _)| *n != me).collect())
+    });
+    if others.is_empty() {
+        return run_with_replication(store, req, next).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, crate::api::max_content_bytes() as usize).await {
+        Ok(b) => b,
+        Err(_) => {
+            return crate::api::err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "body could not be read",
+            );
+        }
+    };
+    let rebuild = |parts: &axum::http::request::Parts| -> Request {
+        let mut b =
+            axum::http::Request::builder().method(parts.method.clone()).uri(parts.uri.clone());
+        for (k, v) in parts.headers.iter() {
+            b = b.header(k, v);
+        }
+        let mut r = b.body(Body::from(bytes.clone())).unwrap_or_default();
+        *r.extensions_mut() = parts.extensions.clone();
+        r
+    };
+    // the other holders, all at once; the local run in this task
+    let mut waits = Vec::new();
+    for (node, n) in &others {
+        let r = rebuild(&parts);
+        let rt = rt.clone();
+        let node = node.clone();
+        let n = *n;
+        waits.push(tokio::spawn(async move {
+            let answer = forward(&rt, &node, r).await;
+            (n, answer)
+        }));
+    }
+    let local: Option<Response> =
+        if here { Some(run_with_replication(store, rebuild(&parts), next).await) } else { None };
+    let mut answers: Vec<(usize, Response)> = Vec::new();
+    for w in waits {
+        if let Ok(a) = w.await {
+            answers.push(a);
+        }
+    }
+    // the answer's body is the local one, or the first that came back, with
+    // the tallies of every copy added into `_shards`
+    let mut total = 0u64;
+    let mut successful = 0u64;
+    let mut failed = 0u64;
+    let mut first: Option<(StatusCode, Value)> = None;
+    let mut fold = |copies: usize, r: Response| {
+        let status = r.status();
+        let body = r.into_body();
+        (copies, status, body)
+    };
+    let mut parts_in: Vec<(usize, StatusCode, Body)> = Vec::new();
+    if let Some(l) = local {
+        parts_in.push(fold(0, l));
+    }
+    for (n, r) in answers {
+        parts_in.push(fold(n, r));
+    }
+    for (copies, status, body) in parts_in {
+        let bytes = axum::body::to_bytes(body, crate::api::max_content_bytes() as usize)
+            .await
+            .unwrap_or_default();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if status.is_success() {
+            let s = v.get("_shards").cloned().unwrap_or(Value::Null);
+            let t = s.get("total").and_then(|x| x.as_u64()).unwrap_or(copies as u64);
+            let ok = s.get("successful").and_then(|x| x.as_u64()).unwrap_or(t);
+            total += t;
+            successful += ok;
+            failed += s.get("failed").and_then(|x| x.as_u64()).unwrap_or(0);
+        } else {
+            total += copies as u64;
+            failed += copies as u64;
+        }
+        if first.is_none()
+            || (!first.as_ref().map(|(s, _)| s.is_success()).unwrap_or(false)
+                && status.is_success())
+        {
+            first = Some((status, v));
+        }
+    }
+    let Some((status, mut v)) = first else {
+        return crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "node_not_connected_exception",
+            "no node answered",
+        );
+    };
+    if status.is_success() && v.get("_shards").is_some() {
+        v["_shards"] = json!({"total": total, "successful": successful, "failed": failed});
+    }
+    let mut r = Response::new(Body::from(serde_json::to_vec(&v).unwrap_or_default()));
+    *r.status_mut() = status;
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    r
 }
 
 /// Run the handler here, then copy what it wrote to the replica copies and
@@ -545,6 +682,10 @@ mod tests {
         assert_eq!(classify(&post, "/logs/_search"), Target::Local);
         assert_eq!(classify(&post, "/_search"), Target::Local);
         assert_eq!(classify(&post, "/_count"), Target::Local);
+        // a refresh reaches every copy, not just the primary's node
+        assert_eq!(classify(&post, "/logs/_refresh"), Target::Broadcast(Some("logs".into())));
+        assert_eq!(classify(&post, "/_refresh"), Target::Broadcast(None));
+        assert_eq!(classify(&post, "/logs/_flush"), Target::Broadcast(Some("logs".into())));
         assert_eq!(classify(&get, "/logs/_explain/1"), Target::Read("logs".into()));
         assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
         assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);

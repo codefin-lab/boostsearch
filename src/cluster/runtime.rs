@@ -23,6 +23,8 @@ use super::transport::{Envelope, Handler, NodeId, Transport};
 pub struct Shared {
     pub state: RwLock<ClusterState>,
     pub mode: RwLock<String>,
+    /// whether the node is under a cluster manager whose word counts
+    pub manager: std::sync::atomic::AtomicBool,
 }
 
 /// Answers awaited by callers on this node, by request id.
@@ -131,6 +133,7 @@ impl Runtime {
         let shared = Arc::new(Shared {
             state: RwLock::new(logic.state().clone()),
             mode: RwLock::new(format!("{:?}", logic.mode)),
+            manager: std::sync::atomic::AtomicBool::new(logic.manager_here()),
         });
         let rt = Arc::new(Runtime {
             inputs: tx.clone(),
@@ -191,6 +194,7 @@ impl Runtime {
                 save_durable(data_dir.as_deref(), &durable, &mut written);
                 *shared.state.write() = logic.state().clone();
                 *shared.mode.write() = format!("{:?}", logic.mode);
+                shared.manager.store(logic.manager_here(), std::sync::atomic::Ordering::Relaxed);
                 for o in outputs {
                     match o {
                         Output::Send { to, envelope } if to == me => {
@@ -327,6 +331,14 @@ impl Runtime {
 
     pub fn state(&self) -> ClusterState {
         self.shared.state.read().clone()
+    }
+
+    /// Whether this node is following a cluster manager, or is one. A node
+    /// that has lost the manager -- a partition, a process stopped long
+    /// enough for the checks to miss -- knows nothing of what the cluster
+    /// has decided since.
+    pub fn has_manager(&self) -> bool {
+        self.shared.manager.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

@@ -1334,12 +1334,26 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 c.unassigned = Some(info);
                 changes.unassigned.push((name.clone(), *shard, was_primary, "NODE_LEFT".into()));
             }
-            // a primary lost: an active replica takes over
+            // a primary lost: an active replica that is in sync takes over.
+            // A copy that missed an acknowledged write was retired from the
+            // set when it missed it, and promoting it would throw that write
+            // away: the shard stays without a primary until a copy that has
+            // everything comes back, which is what OpenSearch does too.
+            let in_sync: Vec<String> = ctx
+                .indices
+                .get(name)
+                .and_then(|m| m.in_sync_allocations.get(shard).cloned())
+                .unwrap_or_default();
             if let Some(pi) =
                 copies.iter().position(|c| c.primary && c.state == ShardState::Unassigned)
             {
                 if let Some(ri) = copies.iter().position(|c| {
-                    !c.primary && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                    !c.primary
+                        && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                        && c.allocation_id
+                            .as_ref()
+                            .map(|a| in_sync.is_empty() || in_sync.iter().any(|i| i == a))
+                            .unwrap_or(false)
                 }) {
                     let node = copies[ri].node.clone().unwrap();
                     copies[ri].primary = true;
@@ -1356,6 +1370,14 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 {
                     if let Some(u) = copies[pi].unassigned.as_mut() {
                         u.allocation_status = "no_valid_shard_copy".into();
+                    }
+                    if copies.iter().any(|c| {
+                        !c.primary
+                            && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                    }) {
+                        changes.notes.push(format!(
+                            "no copy of [{name}][{shard}] may take the primary: the copies here are not in sync (in_sync={in_sync:?})"
+                        ));
                     }
                 }
             }
@@ -1639,6 +1661,37 @@ pub fn shard_failed(
     c.allocation_id = None;
     let mut u = unassigned_info("ALLOCATION_FAILED", now, "no_attempt", failed);
     u.details = Some(format!("failed shard on node: {message}"));
+    c.unassigned = Some(u);
+    true
+}
+
+/// A copy that did not take an acknowledged write is no copy of the index
+/// any more: it is unassigned, and the allocator fills it again from the
+/// primary. Not a failure -- nothing went wrong with the node -- so it does
+/// not count against `index.allocation.max_retries`, which is how OpenSearch
+/// treats a replica it takes out of the in-sync set.
+pub fn shard_stale(
+    table: &mut RoutingTable,
+    index: &str,
+    shard: u32,
+    allocation_id: &str,
+    now: Millis,
+) -> bool {
+    let Some(copies) = table.indices.get_mut(index).and_then(|s| s.get_mut(&shard)) else {
+        return false;
+    };
+    let Some(pos) =
+        copies.iter().position(|c| c.allocation_id.as_deref() == Some(allocation_id) && !c.primary)
+    else {
+        return false;
+    };
+    let c = &mut copies[pos];
+    c.state = ShardState::Unassigned;
+    c.node = None;
+    c.relocating_node = None;
+    c.allocation_id = None;
+    let mut u = unassigned_info("REALLOCATED_REPLICA", now, "no_attempt", 0);
+    u.details = Some("the copy did not take an acknowledged write".into());
     c.unassigned = Some(u);
     true
 }

@@ -310,9 +310,11 @@ pub fn recover(store: &Store) {
             let Some(id) = rec.get("id").and_then(|v| v.as_str()) else { continue };
             let version = rec.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut g = st.write();
-            // the write takes back the sequence number it was answered with
+            // the write takes back the sequence number it was answered with,
+            // and the counter never goes backwards: the numbers a restart
+            // hands out have to be past every number already on a document
             if let Some(seq) = rec.get("seq").and_then(|v| v.as_u64()) {
-                g.seq_no = seq;
+                g.seq_no = g.seq_no.max(seq);
             }
             // a record written before the source went in as a value holds it
             // as a string; both are read here

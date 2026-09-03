@@ -198,9 +198,10 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
             e.1 &= in_sync;
         }
     }
-    if batches.is_empty() {
-        return acks;
-    }
+    // even with no copy to write to there is bookkeeping to do: an in-sync
+    // copy whose node is down did not take this write either, and its
+    // allocation id has to leave the in-sync set before the node comes back
+    // and is handed the primary as though it had everything
     // every copy is written to at once; the answers are gathered in turn
     let mut waits = Vec::new();
     for ((node, index), (batch, in_sync)) in batches {
@@ -387,19 +388,52 @@ pub fn patch_shards(v: &mut Value, acks: &BTreeMap<String, Ack>) {
     }
 }
 
+/// This node's allocation id for an index, when it holds a copy.
+fn here_id(state: &ClusterState, me: &NodeId, index: &str) -> Option<String> {
+    state
+        .routing
+        .shards_of(index)
+        .find(|c| c.node.as_ref() == Some(me))
+        .and_then(|c| c.allocation_id.clone())
+}
+
 /// After a handler wrote: copy out, then say so in the answer.
 pub async fn finish(
     response: axum::response::Response,
     ops: Vec<ReplicaOp>,
     refresh: &str,
 ) -> axum::response::Response {
-    // nothing to copy to: the answer stands
-    let any_target = super::with_state(|s| {
+    // a node that has lost the cluster manager knows nothing of what the
+    // cluster decided while it was away: the primary it thinks it holds may
+    // be somebody else's now, and a write it acknowledged alone would be
+    // thrown away. OpenSearch blocks writes the same way, on the
+    // `no cluster-manager` block its checks raise.
+    if !super::has_manager() {
+        return crate::api::err(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_block_exception",
+            "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
+        );
+    }
+    // nothing to copy to and nothing in the in-sync set to retire: the
+    // answer stands as the handler wrote it
+    let nothing_to_do = super::with_state(|s| {
         let me = super::runtime().map(|r| r.local());
-        let Some(me) = me else { return false };
-        ops.iter().any(|op| !targets(s, &me, &op.index, op.shard).is_empty())
+        let Some(me) = me else { return true };
+        ops.iter().all(|op| {
+            targets(s, &me, &op.index, op.shard).is_empty()
+                && s.indices
+                    .get(&op.index)
+                    .map(|m| {
+                        m.in_sync_allocations
+                            .values()
+                            .flatten()
+                            .all(|id| Some(id) == here_id(s, &me, &op.index).as_ref())
+                    })
+                    .unwrap_or(true)
+        })
     });
-    if !any_target {
+    if nothing_to_do {
         return response;
     }
     let acks = replicate(ops, refresh).await;
@@ -477,6 +511,12 @@ pub fn install(store: Store) {
                             ops.iter().map(|o| o.term).min().unwrap_or(0)
                         ),
                     );
+                }
+                // a copy being filled takes the write when the seed is done
+                if park(&index, &ops) {
+                    let body =
+                        serde_json::to_vec(&json!({"applied": ops.len()})).unwrap_or_default();
+                    return e.response(from, body);
                 }
                 let result = tokio::task::spawn_blocking(move || {
                     let Some(st) = store.get(&index) else {
@@ -745,32 +785,120 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
 /// placed here together share the files, so the second waits for the
 /// first and finds them.
 static RECOVERING: std::sync::OnceLock<
-    parking_lot::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<u64>>>>,
+    parking_lot::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<Option<String>>>>>,
 > = std::sync::OnceLock::new();
 
-fn recovery_lock(index: &str) -> Arc<tokio::sync::Mutex<u64>> {
+fn recovery_lock(index: &str) -> Arc<tokio::sync::Mutex<Option<String>>> {
     let m = RECOVERING.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()));
     m.lock()
         .entry(index.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(0)))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
         .clone()
+}
+
+/// Writes that reached a copy while it was being filled.
+///
+/// The seed throws away what was on this node and fills the copy from the
+/// primary, so a write applied in the middle of that goes out with the old
+/// copy and is never asked for again -- the scan has already passed its
+/// sequence number. It waits here instead, and the seed applies what waited
+/// as the last thing it does, under the lock that closes the recovery.
+static ARRIVED: std::sync::OnceLock<parking_lot::Mutex<BTreeMap<String, Vec<ReplicaOp>>>> =
+    std::sync::OnceLock::new();
+
+fn arrived() -> &'static parking_lot::Mutex<BTreeMap<String, Vec<ReplicaOp>>> {
+    ARRIVED.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()))
+}
+
+/// A write for a copy that is being filled: it waits for the seed. False
+/// when no recovery is running, and the caller applies it itself.
+fn park(index: &str, ops: &[ReplicaOp]) -> bool {
+    let mut m = arrived().lock();
+    match m.get_mut(index) {
+        Some(waiting) => {
+            waiting.extend(ops.iter().cloned());
+            true
+        }
+        None => false,
+    }
 }
 
 /// Fill a copy the manager placed here: from the primary's files when it
 /// has them on disk, else from a scan of its documents.
-pub async fn seed_replica(store: &Store, index: &str, shard: u32) -> Result<(), String> {
+pub async fn seed_replica(
+    store: &Store,
+    index: &str,
+    shard: u32,
+    allocation_id: &str,
+) -> Result<(), String> {
     let lock = recovery_lock(index);
     let mut done = lock.lock().await;
-    let now = super::clock().wall();
-    // a copy filled in the last few seconds is this one too
-    if *done > 0 && now.saturating_sub(*done) < 30_000 && store.get(index).is_some() {
+    // the same copy asked for twice while a publication is repeated is one
+    // recovery; a copy with another allocation id is another copy, and is
+    // filled however lately the last one was -- what is on this node may be
+    // a copy the cluster left behind, missing everything written since
+    if done.as_deref() == Some(allocation_id) && store.get(index).is_some() {
         return Ok(());
     }
+    arrived().lock().insert(index.to_string(), Vec::new());
+    let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+    let before = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
     let r = seed_replica_inner(store, index, shard).await;
+    let r = match r {
+        Ok(()) => apply_what_waited(store, index).await,
+        Err(why) => {
+            arrived().lock().remove(index);
+            Err(why)
+        }
+    };
     if r.is_ok() {
-        *done = now.max(1);
+        *done = Some(allocation_id.to_string());
+    }
+    if notes {
+        let after = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
+        eprintln!(
+            "boostsearch: filled [{index}] as {allocation_id}: {before} documents here before, {after} after ({})",
+            match &r {
+                Ok(()) => "done".to_string(),
+                Err(why) => why.clone(),
+            }
+        );
     }
     r
+}
+
+/// The end of a recovery: what waited goes in, and the copy is a copy that
+/// takes its writes as they come. Draining and closing happen under one
+/// lock, so a write cannot slip between the last drain and the close.
+async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
+    let store = store.clone();
+    let name = index.to_string();
+    tokio::task::spawn_blocking(move || {
+        loop {
+            let batch = {
+                let mut m = arrived().lock();
+                match m.get_mut(&name) {
+                    Some(waiting) if !waiting.is_empty() => std::mem::take(waiting),
+                    // nothing waiting: close the recovery while the lock is held
+                    _ => {
+                        m.remove(&name);
+                        return Ok(());
+                    }
+                }
+            };
+            let Some(st) = store.get(&name) else {
+                arrived().lock().remove(&name);
+                return Err(format!("no copy of [{name}] here to finish"));
+            };
+            let mut g = st.write();
+            for op in &batch {
+                crate::api::doc::apply_replicated(&mut g, op);
+            }
+            g.sync_translog();
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("finishing the recovery of [{index}] panicked: {e}")))
 }
 
 async fn seed_replica_inner(store: &Store, index: &str, shard: u32) -> Result<(), String> {
@@ -780,7 +908,12 @@ async fn seed_replica_inner(store: &Store, index: &str, shard: u32) -> Result<()
     if let (Some(p), Some(me)) = (&primary, &me) {
         if p != me {
             match seed_from_files(store, index, p).await {
-                Ok(true) => return Ok(()),
+                // the files are the primary's last commit; what it took after
+                // that comes over as documents
+                Ok(true) => {
+                    let from = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
+                    return catch_up_by_scan(store, index, shard, from).await;
+                }
                 Ok(false) => {}
                 Err(why) => {
                     // the files did not come: the documents will
@@ -822,6 +955,19 @@ pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), 
             }
         }
     }
+    catch_up_by_scan(store, index, shard, 0).await
+}
+
+/// Ask the primary for everything from a sequence number on, and apply it
+/// here. A copy filled from the primary's files holds what the primary had
+/// committed, not the writes it had taken and not yet committed, so a file
+/// recovery catches up this way from where its files end.
+pub async fn catch_up_by_scan(
+    store: &Store,
+    index: &str,
+    shard: u32,
+    from: u64,
+) -> Result<(), String> {
     let Some(rt) = super::runtime() else { return Ok(()) };
     let me = rt.local();
     let primary =
@@ -832,7 +978,7 @@ pub async fn seed_by_scan(store: &Store, index: &str, shard: u32) -> Result<(), 
     if primary == me {
         return Ok(());
     }
-    let mut from_seq = 0u64;
+    let mut from_seq = from;
     let mut tries = 0;
     loop {
         let body = serde_json::to_vec(

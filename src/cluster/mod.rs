@@ -78,6 +78,12 @@ pub fn runtime() -> Option<Arc<runtime::Runtime>> {
     RUNTIME.get().cloned()
 }
 
+/// Is there a cluster manager this node is answering to? A node on its own
+/// (no coordinator running at all) is its own authority and says yes.
+pub fn has_manager() -> bool {
+    runtime().map(|rt| rt.has_manager()).unwrap_or(true)
+}
+
 /// The last committed cluster state, or a state of this node alone while
 /// the coordinator has not started (tools, tests).
 thread_local! {

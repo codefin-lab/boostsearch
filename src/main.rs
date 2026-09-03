@@ -505,14 +505,55 @@ async fn main() -> anyhow::Result<()> {
     let tls_settings = tls::TlsSettings::read(&node_settings);
     if tls_settings.enabled {
         eprintln!("boostsearch listening on https://{addr}");
-        tls::serve_tls(listener, app(store), &tls_settings).await?;
+        tls::serve_tls(listener, app(store.clone()), &tls_settings, shutdown_signal(store)).await?;
     } else {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
             listener,
-            app(store).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app(store.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal(store))
         .await?;
     }
     Ok(())
+}
+
+/// SIGTERM or SIGINT: the node tells the cluster manager it is leaving, so
+/// the manager removes it now rather than after three missed checks, puts
+/// every translog on disk, and then stops taking connections. A rolling
+/// restart is this, one node at a time.
+async fn shutdown_signal(store: Store) {
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = term => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+    eprintln!("boostsearch: stopping");
+    if let Some(rt) = cluster::runtime() {
+        let me = rt.local();
+        if let Some(m) = rt.state().cluster_manager.clone() {
+            if m != me {
+                let _ = rt
+                    .call(
+                        &m,
+                        cluster::coordinator::LEAVE,
+                        vec![],
+                        std::time::Duration::from_secs(2),
+                    )
+                    .await;
+            }
+        }
+    }
+    for name in store.names() {
+        if let Some(st) = store.get(&name) {
+            st.write().sync_translog();
+        }
+    }
 }

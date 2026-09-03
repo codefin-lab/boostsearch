@@ -70,8 +70,12 @@ pub fn scan_replicated(
 ) -> (Vec<ReplicaOp>, Option<u64>) {
     use std::collections::BTreeMap;
     let term = crate::cluster::primary_term(&st.name, shard);
-    // seq -> op; the pending table wins over the index for the same id
-    let mut found: BTreeMap<u64, ReplicaOp> = BTreeMap::new();
+    // (seq, id) -> op; the pending table wins over the index for the same id.
+    // Two documents may carry one sequence number -- a copy filled from a
+    // primary that had been restarted, an index from an older version -- and
+    // a table keyed by the number alone would hand over one of them and drop
+    // the rest, which is a copy quietly missing documents
+    let mut found: BTreeMap<(u64, String), ReplicaOp> = BTreeMap::new();
     let mut pending_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let all = shard == u32::MAX;
     for (id, source) in &st.pending {
@@ -84,7 +88,7 @@ pub fn scan_replicated(
             continue;
         }
         found.insert(
-            seq,
+            (seq, id.clone()),
             ReplicaOp {
                 index: st.name.clone(),
                 id: id.clone(),
@@ -97,7 +101,11 @@ pub fn scan_replicated(
             },
         );
     }
-    let searcher = st.reader.searcher();
+    // the realtime reader, not the one search reads: a write is committed
+    // ahead of a refresh when the memory it holds grows too large, and it is
+    // then in neither the pending table nor the reader a search sees. A copy
+    // filled from that reader would be quietly missing those documents.
+    let searcher = st.realtime.searcher();
     // the `size` smallest sequence numbers at or past `from_seq`, by address
     let mut picked: Vec<(u64, usize, u32)> = Vec::new();
     for (ord, seg) in searcher.segment_readers().iter().enumerate() {
@@ -113,8 +121,11 @@ pub fn scan_replicated(
     picked.sort_unstable();
     let mut more = false;
     let mut taken = 0usize;
+    // a page ends on a sequence number, never inside one: the caller asks for
+    // what comes after the last number it was given
+    let mut last_seq: Option<u64> = None;
     for (seq, ord, doc_id) in picked {
-        if found.len() >= size {
+        if found.len() >= size && Some(seq) != last_seq {
             more = true;
             break;
         }
@@ -127,8 +138,9 @@ pub fn scan_replicated(
             continue;
         }
         let Some(raw) = doc.get_first(st.fields.source).and_then(|v| v.as_str()) else { continue };
+        last_seq = Some(seq);
         found.insert(
-            seq,
+            (seq, id.to_string()),
             ReplicaOp {
                 index: st.name.clone(),
                 id: id.to_string(),
@@ -143,7 +155,14 @@ pub fn scan_replicated(
         taken += 1;
     }
     let _ = taken;
-    let ops: Vec<ReplicaOp> = found.into_values().take(size).collect();
-    let next = if more || ops.len() >= size { ops.last().map(|o| o.seq + 1) } else { None };
+    let mut ops: Vec<ReplicaOp> = found.into_values().collect();
+    // cut on a sequence number, so nothing between pages is skipped
+    if ops.len() > size {
+        let cut = ops[size - 1].seq;
+        let end = ops.iter().position(|o| o.seq > cut).unwrap_or(ops.len());
+        ops.truncate(end);
+        more = true;
+    }
+    let next = if more { ops.last().map(|o| o.seq + 1) } else { None };
     (ops, next)
 }

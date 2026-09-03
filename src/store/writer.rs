@@ -13,6 +13,10 @@ impl IdxState {
             "dynamic_types": self.dynamic_types,
             "observed_kinds": self.observed_kinds,
             "allocation_id": self.allocation_id,
+            // where the sequence numbers had got to: a restart that started
+            // again from zero would hand new writes numbers old documents
+            // already carry, and a recovery pages by sequence number
+            "seq_no": self.seq_no,
         });
         let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
     }

@@ -161,6 +161,9 @@ pub struct Coordinator {
     /// unanswered follower checks, by request id
     pending_checks: BTreeMap<u64, NodeId>,
     leader_misses: u32,
+    /// shard events whose reporter is waiting for the state that carries
+    /// them to be committed: (the version when it arrived, who, what)
+    event_replies: Vec<(u64, NodeId, Envelope)>,
     leader_check_outstanding: Option<u64>,
     /// nodes that asked to join, and to leave, while a publication was in flight
     waiting_joins: BTreeMap<NodeId, DiscoveryNode>,
@@ -284,6 +287,7 @@ impl Coordinator {
             next_request: 1,
             pending_checks: BTreeMap::new(),
             leader_misses: 0,
+            event_replies: Vec::new(),
             leader_check_outstanding: None,
             waiting_joins: BTreeMap::new(),
             pending_removals: BTreeSet::new(),
@@ -311,6 +315,42 @@ impl Coordinator {
     /// The committed state, as `_cluster/state` reads it.
     pub fn state(&self) -> &ClusterState {
         &self.committed
+    }
+
+    /// Whether this node is under a cluster manager whose word still counts.
+    ///
+    /// A follower is; a candidate is not. A leader is only while it still
+    /// hears from a quorum of the voting configuration: one cut off from the
+    /// others is a leader of nothing, and the cluster is electing another. A
+    /// write it took alone would be thrown away, so it takes none -- what
+    /// OpenSearch's `no cluster-manager` block does.
+    pub fn manager_here(&self) -> bool {
+        match &self.mode {
+            // a follower whose checks of the leader are going unanswered is
+            // out of touch: what it knows of the cluster is as old as the
+            // last check that came back, and the primary it thinks it holds
+            // may have been given to somebody else since
+            Mode::Follower(_) => self.leader_misses == 0,
+            Mode::Candidate => false,
+            Mode::Leader => {
+                let config = &self.committed.last_committed_config;
+                if config.is_empty() {
+                    return true;
+                }
+                let answering = config
+                    .iter()
+                    .filter(|n| {
+                        // answering now, not merely within the retries: a
+                        // node that has missed even one check may be
+                        // following another manager already, and a write this
+                        // node takes alone would be thrown away with its term
+                        **n == self.me.id
+                            || self.followers.get(*n).map(|h| h.misses == 0).unwrap_or(false)
+                    })
+                    .count();
+                answering * 2 > config.len()
+            }
+        }
     }
 
     /// What the nodes told this manager they hold (tests).
@@ -409,6 +449,15 @@ impl Coordinator {
     // ---- being a candidate -------------------------------------------------------
 
     fn become_candidate(&mut self) -> Vec<Output> {
+        // whoever is waiting to hear that a shard event was committed will
+        // not hear it from this node: it says so, rather than leaving the
+        // caller to its timeout
+        let mut out = Vec::new();
+        for (_, from, e) in std::mem::take(&mut self.event_replies) {
+            let msg =
+                json!({"term": self.current_term, "reason": "no longer the manager"}).to_string();
+            out.push(self.send(&from, e.error(self.me.id.clone(), &msg)));
+        }
         self.mode = Mode::Candidate;
         self.publishing = None;
         self.followers.clear();
@@ -418,7 +467,8 @@ impl Coordinator {
         self.election_attempt = 0;
         self.election_scheduled = false;
         self.leader_hint = None;
-        self.discover()
+        out.extend(self.discover());
+        out
     }
 
     /// The first voting configuration, once every node named for it is known.
@@ -746,12 +796,19 @@ impl Coordinator {
         // a primary made empty on request stands alone in its set
         let mut retired: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
         let mut reset: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+        // copies whose nodes finished filling them in this round
+        let mut started: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
         for ev in std::mem::take(&mut self.shard_events) {
             match ev {
                 ShardEvent::Started { index, shard, allocation_id } => {
                     if let Some(st) =
                         super::allocation::shard_started(&mut table, &index, shard, &allocation_id)
                     {
+                        // filled and caught up: this copy is in sync now
+                        started
+                            .entry(index.clone())
+                            .or_default()
+                            .push((shard, allocation_id.clone()));
                         if let Some(r) = st.retired {
                             retired.entry(index.clone()).or_default().push((shard, r));
                         }
@@ -764,6 +821,17 @@ impl Coordinator {
                     }
                 }
                 ShardEvent::Stale { index, shard, allocation_id } => {
+                    // out of the in-sync set, and out of the routing: a copy
+                    // that stayed active would be put back in the set by the
+                    // next publication, and could then be handed the primary
+                    // though it is missing writes
+                    super::allocation::shard_stale(
+                        &mut table,
+                        &index,
+                        shard,
+                        &allocation_id,
+                        self.last_wall,
+                    );
                     retired.entry(index.clone()).or_default().push((shard, allocation_id));
                 }
                 ShardEvent::Failed { index, shard, allocation_id, message } => {
@@ -890,10 +958,37 @@ impl Coordinator {
                 let prev = previous_in_sync.get(&n).unwrap_or(&empty);
                 let ret = retired.get(&n).cloned().unwrap_or_default();
                 let rs = reset.get(&n).cloned().unwrap_or_default();
-                (n, super::metadata::with_terms(m, &routing, &self.terms, prev, &ret, &rs))
+                let up = started.get(&n).cloned().unwrap_or_default();
+                (n, super::metadata::with_terms(m, &routing, &self.terms, prev, &ret, &rs, &up))
             })
             .collect();
         self.terms.retain(|(i, _), _| s.indices.contains_key(i));
+        if self.notes {
+            for (n, m) in &s.indices {
+                let now = m.in_sync_allocations.get(&0).cloned().unwrap_or_default();
+                let was =
+                    previous_in_sync.get(n).and_then(|p| p.get(&0)).cloned().unwrap_or_default();
+                if now != was {
+                    let where_: Vec<String> = routing
+                        .shards_of(n)
+                        .map(|c| {
+                            format!(
+                                "{}{}:{:?}@{}",
+                                if c.primary { "p" } else { "r" },
+                                c.allocation_id.clone().unwrap_or_default(),
+                                c.state,
+                                c.node.clone().map(|x| x.as_str().to_string()).unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    out.push(
+                        self.note(format!(
+                            "in sync [{n}][0]: {was:?} -> {now:?}; routing {where_:?}"
+                        )),
+                    );
+                }
+            }
+        }
         s.routing = routing;
         s.cluster_settings = settings;
         s.customs = src.customs();
@@ -1207,6 +1302,16 @@ impl Coordinator {
         self.lagging = state.nodes.keys().filter(|n| !p.acked.contains(*n)).cloned().collect();
         self.apply_committed(state.clone(), durable);
         out.extend(self.apply_shards());
+        // the shard events this state carried are the cluster's word now
+        let version = self.committed.version;
+        let waiting = std::mem::take(&mut self.event_replies);
+        for (at, from, e) in waiting {
+            if at < version {
+                out.push(self.send(&from, e.response(self.me.id.clone(), vec![])));
+            } else {
+                self.event_replies.push((at, from, e));
+            }
+        }
         if self.notes {
             out.push(self.note(format!(
                 "committed t{} v{} nodes={} config={}",
@@ -1795,10 +1900,19 @@ impl Coordinator {
                 }
                 vec![]
             }
-            (FOLLOWER_CHECK, Kind::Error) => match term_in(&e.body) {
-                Some(t) => self.saw_term(t, durable),
-                None => vec![],
-            },
+            (FOLLOWER_CHECK, Kind::Error) => {
+                // a node that answers "not my manager" is not this node's to
+                // count: it follows somebody else, and this leader speaks for
+                // one node fewer from now until it hears otherwise
+                self.pending_checks.retain(|_, n| *n != from);
+                if let Some(h) = self.followers.get_mut(&from) {
+                    h.misses = self.timings.follower_check_retries + 1;
+                }
+                match term_in(&e.body) {
+                    Some(t) => self.saw_term(t, durable),
+                    None => vec![],
+                }
+            }
             (LEADER_CHECK, Kind::Request) => {
                 if self.mode == Mode::Leader && self.committed.nodes.contains_key(&from) {
                     vec![self.send(&from, e.response(self.me.id.clone(), vec![]))]
@@ -1869,9 +1983,14 @@ impl Coordinator {
                 }
                 self.shard_events.push(ev);
                 self.republish_wanted = true;
-                let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
-                out.extend(self.next_publication(durable));
-                out
+                // the answer waits for the state that carries this event to
+                // be committed. A primary holds its acknowledgement until it
+                // hears that a copy is out of the in-sync set, and an answer
+                // given before the publication would be a promise this node
+                // cannot keep: a manager that loses the term here loses the
+                // event with it, and the copy would walk back into the set.
+                self.event_replies.push((self.committed.version, from.clone(), e));
+                self.next_publication(durable)
             }
             (METADATA_REPORT, Kind::Request) => {
                 if self.mode != Mode::Leader {
