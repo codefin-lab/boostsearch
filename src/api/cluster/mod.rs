@@ -119,7 +119,36 @@ pub async fn cluster_health(
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let expr = index.map(|Path(i)| i);
+    // a wait on a cluster is a wait: the shards this asks about are being
+    // placed by the manager, and a moment later the answer is different.
+    // (On a single node nothing is going to change while the request is held,
+    // so the first look is also the last.)
+    let waits = ["wait_for_status", "wait_for_nodes", "wait_for_active_shards", "wait_for_events"]
+        .iter()
+        .any(|k| p.get(*k).is_some());
+    let clustered = crate::cluster::runtime().map(|rt| rt.state().nodes.len() > 1).unwrap_or(false);
+    if waits && clustered {
+        let ms = p
+            .get("timeout")
+            .and_then(|t| crate::cluster::allocation::time_ms(t))
+            .unwrap_or(30_000)
+            .min(120_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            let r = health_now(&store, index.as_ref().map(|Path(i)| i.clone()), &p);
+            if !r.1 || std::time::Instant::now() >= deadline {
+                return r.0;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    health_now(&store, index.map(|Path(i)| i), &p).0
+}
+
+/// The health as it stands, and whether the wait the request asked for is
+/// still unmet.
+fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, bool) {
+    let store = store.clone();
     // `expand_wildcards` decides whether a pattern reaches closed indices,
     // which are the ones that make the cluster less than green
     // health looks at every index by default, closed ones included: a closed
@@ -326,9 +355,9 @@ pub async fn cluster_health(
         out["indices"] = Value::Object(indices);
     }
     if !satisfied {
-        return (StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response();
+        return ((StatusCode::REQUEST_TIMEOUT, axum::Json(out)).into_response(), true);
     }
-    respond(&p, out)
+    (respond(p, out), false)
 }
 
 /// What the indices define for analysis, and what they use of what is built

@@ -1438,3 +1438,69 @@ bench after the two fixes above reads lower on both sides on a machine
 that had been running chaos for hours (72,067 against 63,555 docs/s, and
 the commit before them measures the same there, so nothing in them costs
 throughput); every dimension is still ahead.
+
+### 6.12 The corpus and the diff on three nodes; the rolling-upgrade tests (done)
+
+OpenSearch's own suites, run against three nodes rather than one, and the
+same three diffs run against the cluster.
+
+| gate | one node | three nodes |
+|---|---:|---:|
+| core corpus (`/tmp/every_manifest.json`, 1,427 sections) | 1,427 | **1,412** |
+| module corpus (`tools/modules_manifest.json`, 895) | 820 | **813** |
+| `tools/search_diff.py` | 92 / 92 | **92 / 92** |
+| `tools/shape_diff.py` | 27 / 29 | **28 / 29** |
+| `tools/analysis_diff.py` | 519 / 522 | **520 / 522** |
+
+The first run of the core corpus on three nodes passed 554 of 1,427. What
+the difference was, in the order it was found:
+
+  - **A create answered before the node the client was talking to knew the
+    index.** The manager makes it and publishes; the request after it went
+    to a node a publication behind and was told there is no such index.
+    An answer to a request that makes or unmakes an index now waits for
+    this node's own view to hold what the cluster decided, which is what
+    OpenSearch's `acknowledged` means. That alone took a sample chunk from
+    52 of 77 to 76 of 77.
+  - **`_cluster/health` did not wait.** On one node nothing changes while
+    the request is held, so the engine answered at once and said it had
+    timed out; on a cluster the shards being placed are exactly what the
+    wait is for. A health request naming any `wait_for_*` now waits on a
+    cluster, up to its `timeout`.
+  - **Listing and wildcards stopped at the local store.** `_cat/indices`
+    showed one node's share of the cluster as though it were all of it,
+    and `DELETE /*` left the indices held elsewhere standing -- so the
+    tests that assume an empty cluster found leftovers. Both resolve over
+    the cluster's indices now, and a `_cat/indices` row for an index held
+    elsewhere is drawn from what the manager published.
+  - **A refresh, flush or force merge counted its shards once per node.**
+    The broadcast adds up the copies each node answered for, not the
+    tallies each node reported over the whole index.
+  - **A task lived where the work ran.** The index work that leaves a task
+    behind runs on the manager, so `_tasks` is asked of the manager.
+
+Fifteen sections of the core corpus and seven of the module corpus still
+part from the single-node run: `cat.nodeattrs` and `cat.allocation` shapes
+with three nodes in them, three `cluster/allocation_explain` sections, two
+`search_shards` alias sections, a `cluster.put_settings` default, a
+`cluster.reroute` stash, and two `indices.split` sections that time out on
+a cluster. They are named here rather than counted as passing.
+
+`tools/rolling_upgrade.py` takes two builds -- the one the cluster starts
+on and the one it ends on -- and replaces every node in turn while writers
+and readers work, waiting for green between each and searching on each
+node while the versions are mixed. Against 3.9.0 -> 3.9.1 (the same code
+with a different version), every node came back green, search answered on
+a mixed cluster, and every acknowledged write survived; with one build
+given twice it is a rolling restart, and `cluster_chaos.py --mode rolling`
+runs that shape too.
+
+Gates: unit 67/67, 120-seed storm clean, phase1 398/398, chaos seeds and
+the rolling restart with no acknowledged write lost and no copy behind;
+bench after 6.12 wins every dimension in passes 1 and 3 (index 67,979 vs
+63,103 docs/s and 394MiB vs 2.2GiB against plain OpenSearch; 64,989 vs
+53,722 against os-secure), and in pass 2 -- BoostSearch on TLS against
+OpenSearch on plain HTTP, the documented transport mismatch -- every row
+but `cardinality` (1.07 ms against 0.98 ms). The absolute numbers on both
+sides are lower than 6.10's on this machine, which had been running chaos
+for hours; the commit before these changes measures the same there.

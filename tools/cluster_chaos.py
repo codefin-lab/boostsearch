@@ -23,8 +23,11 @@ against last-minute, so a leak shows as a slope.
 """
 import argparse, json, os, random, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
-HTTP = [9213, 9214, 9215]
-TRANSPORT = [9303, 9304, 9305]
+# the ports the three nodes take; another run at the same time asks for its
+# own with BOOSTSEARCH_TEST_PORTS=<first http>,<first transport>
+_base = os.environ.get("BOOSTSEARCH_TEST_PORTS", "9213,9303").split(",")
+HTTP = [int(_base[0]) + i for i in range(3)]
+TRANSPORT = [int(_base[1]) + i for i in range(3)]
 NAMES = ["n1", "n2", "n3"]
 
 

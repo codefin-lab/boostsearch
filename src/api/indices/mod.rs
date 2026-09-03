@@ -197,9 +197,21 @@ pub async fn delete_index(
     let mut missing: Option<String> = None;
     for part in index.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
         if part.contains('*') {
-            for n in store.names() {
-                if crate::store::glob_match(part, &n) && !targets.contains(&n) {
+            // the cluster's indices, not this node's share of them: a pattern
+            // that stopped at the local store would leave the rest standing
+            for n in crate::api::cluster_names(&store) {
+                if !crate::store::glob_match(part, &n) || targets.contains(&n) {
+                    continue;
+                }
+                if store.get(&n).is_some() {
                     targets.push(n);
+                } else if let Some(uuid) =
+                    crate::cluster::with_state(|s| s.indices.get(&n).map(|m| m.uuid.clone()))
+                {
+                    // held elsewhere: the tombstone the manager publishes is
+                    // what deletes it
+                    store.tombstone(&n, &uuid);
+                    crate::security::audit_index_event(&n, "indices:admin/delete", "{}", false);
                 }
             }
         } else if store.is_alias(part) {

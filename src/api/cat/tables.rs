@@ -67,12 +67,16 @@ pub async fn cat_indices(
         );
     }
     let expr = index.map(|Path(i)| i).unwrap_or_default();
-    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
+    let names = if expr.is_empty() {
+        crate::api::cluster_names(&store)
+    } else {
+        crate::api::cluster_resolve(&store, &expr)
+    };
     // a name given outright must resolve to something -- it may be an alias,
     // whose own name never appears among the indices it stands for
     if !expr.is_empty() && !ignore_unavailable(&p) {
         for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
-            if store.resolve(part).is_empty() {
+            if crate::api::cluster_resolve(&store, part).is_empty() {
                 return no_such_index(part);
             }
         }
@@ -89,8 +93,33 @@ pub async fn cat_indices(
     let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
     let show_hidden = named_outright || asked_for_hidden || dot_pattern;
     let mut rows = Vec::new();
+    let published = crate::cluster::current_state();
     for n in names {
-        let Some(st) = store.get(&n) else { continue };
+        let Some(st) = store.get(&n) else {
+            // an index of the cluster whose copies are on other nodes: what
+            // the manager published is what there is to say about it here
+            let Some(m) = published.indices.get(&n) else { continue };
+            let only = vec![n.clone()];
+            let health = published.health_status(Some(&only));
+            if p.get("health").map(|h| h != health).unwrap_or(false) {
+                continue;
+            }
+            rows.push(vec![
+                ("health", health.to_string()),
+                ("status", "open".to_string()),
+                ("index", n.clone()),
+                ("uuid", m.uuid.clone()),
+                ("pri", m.number_of_shards.to_string()),
+                ("rep", m.number_of_replicas.to_string()),
+                ("docs.count", "0".to_string()),
+                ("docs.deleted", "0".to_string()),
+                ("store.size", "0b".to_string()),
+                ("pri.store.size", "0b".to_string()),
+                ("creation.date", "0".to_string()),
+                ("creation.date.string", String::new()),
+            ]);
+            continue;
+        };
         let g = st.read();
         if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
             continue;

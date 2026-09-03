@@ -240,9 +240,10 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
         let left = matches!(answer, Err(Left));
         match failure {
             None => {
-                if in_sync {
-                    acked_nodes.entry(index.clone()).or_default().push(node.clone());
-                }
+                // every node that took the write, in sync or still filling:
+                // a copy that took it is not a copy that missed it
+                acked_nodes.entry(index.clone()).or_default().push(node.clone());
+                let _ = in_sync;
                 let max_seq =
                     ops.iter().filter(|o| o.index == index).map(|o| o.seq).max().unwrap_or(0);
                 tracker().lock().acked(&index, &node, max_seq);

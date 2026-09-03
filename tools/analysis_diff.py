@@ -8,8 +8,9 @@ empty.
 """
 import json, sys, urllib.request
 
-A = "http://127.0.0.1:9299"   # OpenSearch
-B = "http://127.0.0.1:9200"   # BoostSearch
+import os
+A = os.environ.get("DIFF_A", "http://127.0.0.1:9299")   # OpenSearch
+B = os.environ.get("DIFF_B", "http://127.0.0.1:9200")   # BoostSearch
 
 TEXTS = [
     "The quick brown foxes jumped over the lazy dogs",

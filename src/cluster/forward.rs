@@ -91,6 +91,9 @@ pub fn classify(method: &Method, path: &str) -> Target {
             | "_update_by_query" => Target::Manager,
             // a search is coordinated from the node it reached
             "_search" | "_msearch" | "_count" | "_search_shards" => Target::Local,
+            // a task lives where the work ran: the manager, for the index
+            // work that leaves a task behind
+            "_tasks" => Target::Manager,
             "_mget" | "_field_caps" | "_validate" | "_mtermvectors" | "_rank_eval" | "_render"
             | "_pit" | "_stats" | "_segments" | "_recovery" | "_shard_stores" | "_mapping"
             | "_settings" | "_open" | "_close" => Target::Manager,
@@ -320,6 +323,11 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     if let Target::Broadcast(expr) = &target {
         return broadcast(&rt, &store, expr.as_deref(), req, next).await;
     }
+    // what this request will have changed about the cluster's indices, so the
+    // answer can wait until this node knows it: a create that answered before
+    // the state reached the node the client is talking to would have the very
+    // next request say the index is not there
+    let settles = settles_metadata(req.method(), &path);
     let (to, write_indices): (Option<NodeId>, Vec<String>) = super::with_state(|s| {
         // nothing committed yet: one node, everything local
         if s.version == 0 || s.nodes.len() <= 1 {
@@ -360,9 +368,60 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         }
     }
     let Some(to) = to else {
-        return run_with_replication(&store, req, next).await;
+        let r = run_with_replication(&store, req, next).await;
+        return wait_for_metadata(&store, settles, r).await;
     };
-    forward(&rt, &to, req).await
+    let r = forward(&rt, &to, req).await;
+    wait_for_metadata(&store, settles, r).await
+}
+
+/// The index a request makes or unmakes, and which of the two it is.
+fn settles_metadata(method: &Method, path: &str) -> Option<(String, bool)> {
+    let (index, rest) = first_segment(path);
+    if index.is_empty() || index.starts_with('_') {
+        return None;
+    }
+    let (op, _) = first_segment(rest);
+    match (method, op) {
+        (&Method::PUT, "") | (&Method::POST, "") => Some((index.to_string(), true)),
+        (&Method::DELETE, "") => Some((index.to_string(), false)),
+        // a write makes the index it names when there is none
+        (&Method::PUT | &Method::POST, "_doc" | "_create" | "_update") => {
+            Some((index.to_string(), true))
+        }
+        _ => None,
+    }
+}
+
+/// Hold the answer until this node knows what the cluster now holds.
+///
+/// The cluster manager makes an index and publishes it; the node the client
+/// is talking to hears a moment later. OpenSearch answers `acknowledged` when
+/// every node has the state, and the request after a create finds the index
+/// wherever it is sent, so this one waits too -- briefly, and only for the
+/// node that answers.
+async fn wait_for_metadata(
+    store: &Store,
+    settles: Option<(String, bool)>,
+    response: Response,
+) -> Response {
+    let Some((index, present)) = settles else { return response };
+    if !response.status().is_success() {
+        return response;
+    }
+    // the name may be an alias, or a data stream's backing index
+    let known = |store: &Store| {
+        !store.resolve(&index).is_empty()
+            || super::with_state(|s| {
+                s.indices.contains_key(&index)
+                    || s.indices.values().any(|m| m.aliases.get(&index).is_some())
+            })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while known(store) != present && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    response
 }
 
 /// A request every copy answers: run here for the copies here, forwarded
@@ -377,6 +436,7 @@ async fn broadcast(
     next: Next,
 ) -> Response {
     let me = rt.local();
+    let mut here_copies = 0usize;
     let (here, others): (bool, Vec<(NodeId, usize)>) = super::with_state(|s| {
         if s.version == 0 || s.nodes.len() <= 1 {
             return (true, Vec::new());
@@ -396,6 +456,7 @@ async fn broadcast(
             }
         }
         let here = copies.contains_key(&me) || names.iter().any(|n| store.get(n).is_some());
+        here_copies = copies.get(&me).copied().unwrap_or(0);
         (here, copies.into_iter().filter(|(n, _)| *n != me).collect())
     });
     if others.is_empty() {
@@ -455,7 +516,7 @@ async fn broadcast(
     };
     let mut parts_in: Vec<(usize, StatusCode, Body)> = Vec::new();
     if let Some(l) = local {
-        parts_in.push(fold(0, l));
+        parts_in.push(fold(here_copies, l));
     }
     for (n, r) in answers {
         parts_in.push(fold(n, r));
@@ -465,17 +526,15 @@ async fn broadcast(
             .await
             .unwrap_or_default();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        // the copies each node answered for, not the tallies it reported: a
+        // node counts the shards it knows of, and adding those up would count
+        // one shard once per node
         if status.is_success() {
-            let s = v.get("_shards").cloned().unwrap_or(Value::Null);
-            let t = s.get("total").and_then(|x| x.as_u64()).unwrap_or(copies as u64);
-            let ok = s.get("successful").and_then(|x| x.as_u64()).unwrap_or(t);
-            total += t;
-            successful += ok;
-            failed += s.get("failed").and_then(|x| x.as_u64()).unwrap_or(0);
+            successful += copies as u64;
         } else {
-            total += copies as u64;
             failed += copies as u64;
         }
+        total += copies as u64;
         if first.is_none()
             || (!first.as_ref().map(|(s, _)| s.is_success()).unwrap_or(false)
                 && status.is_success())
