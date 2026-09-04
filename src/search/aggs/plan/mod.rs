@@ -242,7 +242,7 @@ pub(crate) fn plan_aggs(
             .filter(|(_, def)| {
                 // anything under it that has to be run here drags the whole
                 // aggregation out of BoostCore's hands with it
-                peelable(def)
+                peelable(def, store, targets)
                     || def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
@@ -257,6 +257,15 @@ pub(crate) fn plan_aggs(
                         .and_then(|t| t.get("field"))
                         .and_then(|f| f.as_str())
                         == Some("_index")
+                    // an analysed field buckets what the analyser made of the
+                    // text, which lives in the term dictionary rather than in
+                    // a column of values
+                    || def
+                        .get("terms")
+                        .and_then(|t| t.get("field"))
+                        .and_then(|f| f.as_str())
+                        .map(|f| analysed_text_field(store, targets, f))
+                        .unwrap_or(false)
                     // BoostCore's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
@@ -338,11 +347,16 @@ pub(crate) fn combine(main: &Option<Value>, extra: Option<Value>) -> Value {
 
 /// Split sub-aggregations into the ones this engine computes itself and the
 /// ones BoostCore can parse, so each set can take the path that suits it.
-pub(crate) fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option<Value>) {
+pub(crate) fn split_peelable(
+    sub_aggs: &Option<Value>,
+    store: &Store,
+    targets: &[String],
+) -> (Option<Value>, Option<Value>) {
     let Some(o) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
         return (None, sub_aggs.clone());
     };
-    let (mine, theirs): (Vec<_>, Vec<_>) = o.iter().partition(|(_, d)| peelable(d));
+    let (mine, theirs): (Vec<_>, Vec<_>) =
+        o.iter().partition(|(_, d)| peelable(d, store, targets));
     let pack = |v: Vec<(&String, &Value)>| {
         if v.is_empty() {
             None
@@ -355,23 +369,27 @@ pub(crate) fn split_peelable(sub_aggs: &Option<Value>) -> (Option<Value>, Option
 
 /// Is this aggregation, or anything under it, one that has to be computed a
 /// bucket at a time here?
-pub(crate) fn peelable(def: &Value) -> bool {
-    peelable_here(def)
+pub(crate) fn peelable(def: &Value, store: &Store, targets: &[String]) -> bool {
+    peelable_here(def, store, targets)
         || def
             .get("aggs")
             .or_else(|| def.get("aggregations"))
             .and_then(|s| s.as_object())
-            .map(|o| o.values().any(peelable))
+            .map(|o| o.values().any(|d| peelable(d, store, targets)))
             .unwrap_or(false)
 }
 
 /// Is this an aggregation BoostCore has no parser for, which has to be computed
 /// a bucket at a time here instead?
-pub(crate) fn peelable_here(def: &Value) -> bool {
+pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> bool {
     const OWN: &[&str] = &[
         "missing",
         "median_absolute_deviation",
         "filter",
+        "filters",
+        // approximate where OpenSearch is exact over the handful of values
+        // these aggregations see
+        "percentiles",
         "global",
         "weighted_avg",
         "variable_width_histogram",
@@ -400,6 +418,14 @@ pub(crate) fn peelable_here(def: &Value) -> bool {
         "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
+        // an analysed field buckets what the analyser made of the text, which
+        // lives in the term dictionary rather than in a column of values
+        || def
+            .get("terms")
+            .and_then(|t| t.get("field"))
+            .and_then(|f| f.as_str())
+            .map(|f| analysed_text_field(store, targets, f))
+            .unwrap_or(false)
         || def.get("date_histogram").map(walked_here).unwrap_or(false)
         // a script makes the keys, which no engine reads from a field
         || def.pointer("/terms/script").is_some()
@@ -494,7 +520,8 @@ pub(crate) fn count_with_sub_aggs(
     let Some(subs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
         return filtered_count(store, targets, query_json, sub_aggs);
     };
-    let (mine, theirs): (Vec<_>, Vec<_>) = subs.iter().partition(|(_, d)| peelable(d));
+    let (mine, theirs): (Vec<_>, Vec<_>) =
+        subs.iter().partition(|(_, d)| peelable(d, store, targets));
     if mine.is_empty() {
         return filtered_count(store, targets, query_json, sub_aggs);
     }
@@ -548,6 +575,13 @@ pub(crate) fn filtered_count(
             let mut rewritten = sa.clone();
             let mut ignored = Vec::new();
             normalize_aggs(&mut rewritten, &mut ignored, false);
+            // the same preparation a top-level aggregation gets: a date is
+            // written many ways and a fixed step is one of them, and a
+            // sub-aggregation is no different for being one
+            normalize_agg_dates(&mut rewritten);
+            lower_nested_filters(&mut rewritten, &ctx);
+            strip_untranslatable_term_filters(&mut rewritten, &ctx);
+            fixed_date_histograms(&mut rewritten, &ctx);
             rewrite_agg_fields(&mut rewritten, &ctx);
             let parsed: Aggregations = serde_json::from_value(rewritten)
                 .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
@@ -566,13 +600,9 @@ pub(crate) fn filtered_count(
             req = Some(parsed);
         }
     }
-    let sub = match (acc, req) {
-        (Some(a), Some(r)) => a
-            .into_final_result(r, Default::default())
-            .ok()
-            .and_then(|v| serde_json::to_value(v).ok()),
-        _ => None,
-    };
+    // a sub-aggregation's answer is written the way a top-level one is: the
+    // key shapes, the formats and the names a date metric carries
+    let sub = finalise_aggs(store, targets, acc, req, sub_aggs, &[], &[], &[], false)?;
     Ok((total, sub))
 }
 

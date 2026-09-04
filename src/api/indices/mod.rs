@@ -23,6 +23,9 @@ pub async fn create_index(
     if let Some(r) = reserved_index_name(&index) {
         return r;
     }
+    if let Some(r) = bad_index_name(&index) {
+        return r;
+    }
     let body: Value = if body.trim().is_empty() {
         json!({})
     } else {
@@ -276,6 +279,26 @@ pub async fn index_exists(State(store): State<Store>, Path(index): Path<String>)
     } else {
         StatusCode::OK.into_response()
     }
+}
+
+/// The characters an index name may not carry, and the order OpenSearch
+/// lists them in when it complains.
+const FORBIDDEN_IN_NAME: &[char] = &[' ', '"', '*', '\\', '<', '|', ',', '>', '/', '?'];
+
+/// A name a new index may not be given: OpenSearch names the whole set in
+/// the complaint, whichever of them the name carried.
+pub(crate) fn bad_index_name(name: &str) -> Option<Response> {
+    if !name.contains(|c| FORBIDDEN_IN_NAME.contains(&c)) {
+        return None;
+    }
+    Some(err(
+        StatusCode::BAD_REQUEST,
+        "invalid_index_name_exception",
+        format!(
+            "Invalid index name [{name}], must not contain the following characters \
+             [ , \", *, \\, <, |, ,, >, /, ?]"
+        ),
+    ))
 }
 
 /// Names beginning with an underscore are reserved for the API's own

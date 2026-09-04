@@ -110,6 +110,14 @@ pub(crate) fn run_peeled_agg(
         run_mad_agg(store, targets, query_json, def)
     } else if def.get("percentiles").is_some() {
         run_hdr_percentiles(store, targets, query_json, def)
+    } else if def
+        .get("terms")
+        .and_then(|t| t.get("field"))
+        .and_then(|f| f.as_str())
+        .map(|f| analysed_text_field(store, targets, f))
+        .unwrap_or(false)
+    {
+        run_text_terms_agg(store, targets, query_json, def, weighted)
     } else if def.get("filter").is_some() {
         run_filter_agg(store, targets, query_json, def)
     } else if def.get("global").is_some() {

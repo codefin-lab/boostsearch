@@ -18,15 +18,35 @@ impl IdxState {
             "version": {"created": "136407827"},
             "replication": {"type": "DOCUMENT"},
         });
-        // settings arrive either nested under `index` or flat, and OpenSearch
-        // always echoes the values back as strings
+        // Settings arrive either nested under `index` or flat. OpenSearch
+        // holds every setting as a dotted key with a string value, so what
+        // comes back keeps the shape it was written in but with each leaf
+        // -- and each element of a list -- written out as text.
+        fn as_text(v: &Value) -> Value {
+            match v {
+                Value::Object(o) => {
+                    Value::Object(o.iter().map(|(k, x)| (k.clone(), as_text(x))).collect())
+                }
+                Value::Array(a) => Value::Array(a.iter().map(as_text).collect()),
+                Value::String(_) => v.clone(),
+                other => Value::String(other.to_string()),
+            }
+        }
         fn put(idx: &mut Value, k: &str, v: &Value) {
             let k = k.trim_start_matches("index.");
-            idx[k] = match v {
-                Value::String(_) => v.clone(),
-                Value::Null => return,
-                other => Value::String(other.to_string()),
-            };
+            if v.is_null() {
+                return;
+            }
+            // a key may be written dotted where the shape is nested
+            let mut cur = idx;
+            let segs: Vec<&str> = k.split('.').collect();
+            for seg in &segs[..segs.len() - 1] {
+                if !cur.get(*seg).map(|x| x.is_object()).unwrap_or(false) {
+                    cur[*seg] = serde_json::json!({});
+                }
+                cur = &mut cur[*seg];
+            }
+            cur[segs[segs.len() - 1]] = as_text(v);
         }
         if let Some(user) = self.settings.as_object() {
             for (k, v) in user {

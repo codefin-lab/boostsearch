@@ -45,7 +45,7 @@ pub(crate) fn run_multi_terms_agg(
 
     // an aggregation BoostCore cannot parse cannot ride down with the terms
     // request; it is run per bucket once the buckets are known
-    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs, store, targets);
     let mut request = plain_subs.clone().unwrap_or_else(|| json!({}));
     for (i, field) in fields.iter().enumerate().rev() {
         let mut node = json!({"terms": {"field": field, "size": 65_536}});

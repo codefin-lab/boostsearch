@@ -948,12 +948,21 @@ pub fn run(
     // cut the page while collecting either
     let rescored_later = body.pointer("/query/function_score").is_some()
         || body.pointer("/query/script_score").is_some();
-    let page_want =
-        if slice.is_some() || body.get("collapse").is_some() || nested_filtered || rescored_later {
-            65_536
-        } else {
-            from + size
-        };
+    // a narrowing that happens after the candidates are in hand -- a
+    // `post_filter`, a score floor -- decides both the page and the total, so
+    // the collection cannot stop at a page's worth
+    let narrowed_after =
+        body.get("post_filter").is_some() || body.get("min_score").is_some();
+    let page_want = if slice.is_some()
+        || body.get("collapse").is_some()
+        || nested_filtered
+        || rescored_later
+        || narrowed_after
+    {
+        65_536
+    } else {
+        from + size
+    };
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
         Vec::new();

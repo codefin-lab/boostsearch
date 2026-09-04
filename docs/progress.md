@@ -1752,3 +1752,52 @@ Objects page itself calls -- relationships, `_find`, `_allowed_types`,
 `scroll/counts`), Discover draws its histogram and table, the saved
 dashboard draws its chart, and Index Management lists the indices with
 their real sizes and counts.
+
+## 7.2 -- the clients, running their own suites
+
+### The Python client
+
+`opensearch-py` 3.2.0 was cloned and its own server suite run against a
+node (the gRPC and plugin tests aside: the first is a transport we do not
+answer, the second is Phase 10's ISM and the notifications plugin). It
+started at 99 of 127 and found seven things:
+
+  - **A nested setting came back as a string.** `index.analysis` was
+    written out as `"{\"analyzer\":{...}}"` rather than as the object it
+    is. OpenSearch holds every setting as a dotted key with a string
+    value, so what comes back keeps the shape it was written in with each
+    leaf -- and each element of a list -- as text. A key written dotted
+    where the shape is nested is placed nested, too.
+  - **An index could be made with a slash in its name.** The characters
+    OpenSearch refuses are refused, with the complaint it writes.
+  - **A `filters` aggregation under another aggregation was not peeled.**
+    Only the top level was looked at, so a `filters` inside a `terms` was
+    handed to BoostCore, which has no parser for it. `filters` and
+    `percentiles` are peeled wherever they sit now.
+  - **A `terms` aggregation over an analysed text field returned the
+    text.** A text field holds tokens, not values -- OpenSearch buckets
+    what the analyser made of it. The tokens are read from the term
+    dictionary and counted against the query, with the sub-aggregations
+    run inside each bucket.
+  - **A keyword sub-field under any name but `keyword` was not the raw
+    view of its parent.** `title.raw` is the same view as `title.keyword`
+    when it is a plain keyword; the aggregations only knew the one
+    spelling, so a `terms` over `author.name.raw` found nothing.
+  - **`post_filter` counted only the page.** A narrowing that happens
+    once the candidates are in hand -- a `post_filter`, a `min_score` --
+    decides both the page and the total, so collection no longer stops at
+    a page's worth: 8 of 35 became 35 of 35.
+  - **A sub-aggregation was prepared differently from a top-level one.**
+    A `date_histogram` inside a peeled `filter` came back empty, because
+    the date normalising and the fixed-step lowering were only done for
+    the aggregations at the top; and what it did return was unformatted
+    (a float key, no `key_as_string`). Sub-aggregations get the same
+    preparation and the same finish now.
+
+That leaves 107 of 127 passing. What is still out: `inner_hits` wrapped
+in a response, a highlight carried in a hit's meta, and the nested facets
+-- all of them `nested` and `inner_hits` work -- plus one test that wants
+a `pytest-mock` fixture the checkout does not install.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.

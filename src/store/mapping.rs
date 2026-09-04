@@ -537,6 +537,24 @@ impl Mapping {
         sub.get("normalizer").is_none() && sub.get("ignore_above").is_none()
     }
 
+    /// The parent whose untouched view already holds this sub-field's values.
+    ///
+    /// `title.keyword` is how a text field's untouched view is addressed
+    /// whether or not the mapping declares the sub-field; a sub-field under
+    /// any other name -- `title.raw` is the common one -- is the same view
+    /// when it is a plain keyword with nothing done to it on the way in.
+    pub fn raw_view_parent<'a>(&self, field: &'a str) -> Option<&'a str> {
+        if let Some(parent) = field.strip_suffix(".keyword")
+            && !matches!(self.type_of(parent), Some("object" | "nested"))
+        {
+            return Some(parent);
+        }
+        if self.plain_keyword_sub(field) {
+            return field.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        None
+    }
+
     /// The format a date path declares, if it declares one.
     pub fn date_format(&self, field: &str) -> Option<&str> {
         self.formats.get(field).map(|s| s.as_str())
