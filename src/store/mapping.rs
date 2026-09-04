@@ -682,6 +682,14 @@ pub(crate) fn flatten_props(
 ) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        // a join field carries which side of a relation a document is on and
+        // which document it belongs to; both are names, never text to search
+        if def.get("type").and_then(|t| t.as_str()) == Some("join") {
+            out.insert(path.clone(), "join".to_string());
+            out.insert(format!("{path}.name"), "keyword".to_string());
+            out.insert(format!("{path}.parent"), "keyword".to_string());
+            continue;
+        }
         if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
             // the container is a field in its own right: an object, or a
             // nested one if it says so

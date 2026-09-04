@@ -516,7 +516,7 @@ pub(crate) fn expand_joins(store: &Store, targets: &[String], node: &mut Value) 
             let child = spec.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let inner = spec.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
             let of_that_kind = json!({
-                "bool": {"must": [inner, {"term": {format!("{field}.name"): child}}]}
+                "bool": {"must": [inner, on_that_side(&field, child)]}
             });
             let parents = ids_of_field(store, targets, &of_that_kind, &format!("{field}.parent"));
             json!({"ids": {"values": parents}})
@@ -526,7 +526,7 @@ pub(crate) fn expand_joins(store: &Store, targets: &[String], node: &mut Value) 
             let parent = spec.get("parent_type").and_then(|v| v.as_str()).unwrap_or("");
             let inner = spec.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
             let of_that_kind = json!({
-                "bool": {"must": [inner, {"term": {format!("{field}.name"): parent}}]}
+                "bool": {"must": [inner, on_that_side(&field, parent)]}
             });
             let parents = matching_ids_here(store, targets, &of_that_kind);
             // a parent is named by its id, which a document may have written
@@ -553,13 +553,25 @@ pub(crate) fn expand_joins(store: &Store, targets: &[String], node: &mut Value) 
             json!({
                 "bool": {"must": [
                     {"term": {format!("{field}.parent"): parent}},
-                    {"term": {format!("{field}.name"): child}},
+                    on_that_side(&field, child),
                 ]}
             })
         }
     };
     o.remove(&kind);
     *node = rewritten;
+}
+
+/// Which side of the relation a document is on.
+///
+/// A document with no parent may write the join field as the name alone
+/// rather than as an object, which is how OpenSearch lets a root document be
+/// written; both spellings name the same side.
+fn on_that_side(field: &str, name: &str) -> Value {
+    json!({"bool": {"should": [
+        {"term": {format!("{field}.name"): name}},
+        {"term": {field: name}},
+    ], "minimum_should_match": 1}})
 }
 
 /// The join field an index declares, if it declares one.

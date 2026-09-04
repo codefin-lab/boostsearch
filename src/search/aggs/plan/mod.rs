@@ -602,7 +602,15 @@ pub(crate) fn filtered_count(
     }
     // a sub-aggregation's answer is written the way a top-level one is: the
     // key shapes, the formats and the names a date metric carries
-    let sub = finalise_aggs(store, targets, acc, req, sub_aggs, &[], &[], &[], false)?;
+    let mut sub = finalise_aggs(store, targets, acc, req, sub_aggs, &[], &[], &[], false)?;
+    // and the same finishing touches the answer gets at the top: keys in
+    // milliseconds, the range keys the request asked for, the names a date
+    // metric carries
+    if let (Some(a), Some(reqj)) = (sub.as_mut(), sub_aggs.as_ref()) {
+        millis_in_keys(a);
+        keep_asked_ranges(reqj, a);
+        name_date_metrics(store, targets, reqj, a);
+    }
     Ok((total, sub))
 }
 

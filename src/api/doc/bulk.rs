@@ -290,11 +290,9 @@ pub async fn bulk(
                                 b["status"] = json!(status.as_u16());
                                 json!({ op.clone(): b })
                             }
-                            Err(_) => {
+                            Err(e) => {
                                 errors = true;
-                                json!({ op.clone(): {"_index": d.index, "_id": new_id, "status": 409,
-                                    "error": {"type": "version_conflict_engine_exception",
-                                              "reason": format!("[{new_id}]: version conflict, document already exists")}}})
+                                failed_item(&op, &d.index, &new_id, e)
                             }
                         };
                         items.push(item);
@@ -415,15 +413,9 @@ pub async fn bulk(
                         b["status"] = json!(status.as_u16());
                         json!({ op.clone(): b })
                     }
-                    Err(_) => {
+                    Err(e) => {
                         errors = true;
-                        json!({ op.clone(): {
-                            "_index": idx, "_id": id, "status": 409,
-                            "error": {
-                                "type": "version_conflict_engine_exception",
-                                "reason": format!("[{id}]: version conflict, document already exists")
-                            }
-                        }})
+                        failed_item(&op, &idx, &id, e)
                     }
                 }
             }
@@ -628,4 +620,24 @@ pub async fn bulk(
         out["ingest_took"] = json!(0);
     }
     axum::Json(out).into_response()
+}
+
+/// What one operation's failure says, as an item in the answer.
+///
+/// A write may fail for a reason of its own -- a document the mapping cannot
+/// parse, an index held still -- and that reason is the item's, not a made-up
+/// conflict; the error travels beside the response it was written into.
+fn failed_item(op: &str, index: &str, id: &str, e: Response) -> Value {
+    match e.extensions().get::<crate::api::shared::ErrorKind>() {
+        Some(k) => json!({ op: {
+            "_index": index, "_id": id, "status": e.status().as_u16(),
+            "error": {"type": k.kind, "reason": k.reason,
+                      "root_cause": [{"type": k.kind, "reason": k.reason}]}
+        }}),
+        None => json!({ op: {
+            "_index": index, "_id": id, "status": 409,
+            "error": {"type": "version_conflict_engine_exception",
+                      "reason": format!("[{id}]: version conflict, document already exists")}
+        }}),
+    }
 }

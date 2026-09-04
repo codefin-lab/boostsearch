@@ -2450,8 +2450,13 @@ fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) 
         }
         return Some(chain);
     }
-    let named = spec.get("tokenizer").and_then(|t| t.as_str()).unwrap_or("standard");
-    let source = tokenizer_source(named, tokenizers);
+    // a tokenizer is named, or described where it is used -- `_analyze` sends
+    // the description itself rather than a name the settings gave it
+    let source = match spec.get("tokenizer") {
+        Some(Value::Object(_)) => source_of_spec(spec.get("tokenizer").unwrap()),
+        Some(Value::String(named)) => tokenizer_source(named, tokenizers),
+        _ => tokenizer_source("standard", tokenizers),
+    };
     let mut steps = Vec::new();
     for step in
         spec.get("filter").into_iter().flat_map(|f| f.as_array().cloned().unwrap_or_default())

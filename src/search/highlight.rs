@@ -515,6 +515,10 @@ pub(crate) fn mark_terms(
     let mut out = String::with_capacity(text.len() + 16);
     let mut marked = false;
     let mut rest = text;
+    // a word in the text is read the same way the query was: an analyzer that
+    // stems -- or folds, or maps -- makes a token the plain word never equals,
+    // and the word it came from is what a highlight marks
+    let mut forms_of: std::collections::HashMap<String, Vec<String>> = Default::default();
     while !rest.is_empty() {
         let start = match rest.find(|c: char| c.is_alphanumeric()) {
             Some(i) => i,
@@ -525,7 +529,24 @@ pub(crate) fn mark_terms(
         let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
         let (word, tail) = word.split_at(end);
         let lower = word.to_lowercase();
-        if whole.contains(&lower) || starts.iter().any(|p| lower.starts_with(p)) {
+        let hit = whole.contains(&lower)
+            || starts.iter().any(|p| lower.starts_with(p))
+            || {
+                let forms = forms_of.entry(lower.clone()).or_insert_with(|| {
+                    let mut f: Vec<String> = Vec::new();
+                    for analyzer in analyzers {
+                        f.extend(match analyzer.as_deref().and_then(|named| analysis.get(named)) {
+                            Some(chain) => chain.terms(&lower),
+                            None => crate::query::analyze_text(index, &lower, analyzer.as_deref()),
+                        });
+                    }
+                    f
+                });
+                forms
+                    .iter()
+                    .any(|t| whole.contains(t) || starts.iter().any(|p| t.starts_with(p)))
+            };
+        if hit {
             out.push_str(pre);
             out.push_str(word);
             out.push_str(post);

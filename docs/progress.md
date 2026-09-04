@@ -1794,10 +1794,39 @@ started at 99 of 127 and found seven things:
     (a float key, no `key_as_string`). Sub-aggregations get the same
     preparation and the same finish now.
 
-That leaves 107 of 127 passing. What is still out: `inner_hits` wrapped
-in a response, a highlight carried in a hit's meta, and the nested facets
--- all of them `nested` and `inner_hits` work -- plus one test that wants
-a `pytest-mock` fixture the checkout does not install.
+Then six more, found by running it again:
+
+  - **A highlight over a field with an analyzer of its own marked
+    nothing.** The words of the text were compared as written against the
+    query read through the analyzer, so a stemmer -- or a folder, or a
+    mapper -- made a token the plain word never equals. Each word of the
+    text is now read the same way the query was, and the word it came
+    from is what is marked.
+  - **`has_parent` and `parent_id` found nothing.** A join field's `name`
+    and `parent` had been mapped dynamically as text, so the id of a
+    parent was cut into pieces and a `term` on it matched nothing; they
+    are names, and are mapped as such. And a root document may write the
+    join field as the name alone rather than as an object, which is the
+    other spelling of the same side.
+  - **A range asked for by key was answered by its bounds.** `ok` came
+    back as `*-1.0`.
+  - **A bulk item that could not be written reported a version
+    conflict.** Whatever the write actually complained about -- a
+    document the mapping cannot parse, an index held still -- is the
+    item's error now, with the status that goes with it.
+  - **`_analyze` ignored a tokenizer described rather than named.**
+    A `{"type": "simple_pattern_split", "pattern": ":"}` sent inline fell
+    back to `standard`.
+  - **A sub-aggregation's range keys and date names were not applied.**
+    The finishing touches a top-level answer gets are given to a
+    sub-aggregation's too.
+
+That leaves **113 of 127** passing. What is still out is one piece of
+work: `nested` and `inner_hits` in an answer -- a `top_hits` inside a
+`nested` aggregation returns the whole document rather than the nested
+one, `inner_hits` on a join query are not returned at all, and the two
+nested facets rest on both. Plus one test that wants a `pytest-mock`
+fixture the checkout does not install.
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
