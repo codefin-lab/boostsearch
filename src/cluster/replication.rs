@@ -279,6 +279,15 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             )
                             .await;
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                                eprintln!(
+                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    match &answer {
+                                        Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
+                                        None => "no answer".to_string(),
+                                    }
+                                );
+                            }
                             manager_unreachable = true;
                         }
                     }
@@ -330,6 +339,15 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             )
                             .await;
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                                eprintln!(
+                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    match &answer {
+                                        Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
+                                        None => "no answer".to_string(),
+                                    }
+                                );
+                            }
                             manager_unreachable = true;
                         }
                     }
@@ -932,7 +950,7 @@ async fn seed_replica_inner(
             // that comes over as documents
             Ok(true) => {
                 let from = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
-                return catch_up_by_scan(store, index, shard, from, primary).await;
+                return catch_up_by_scan(store, index, shard, from, primary, false).await;
             }
             Ok(false) => {}
             Err(why) => {
@@ -953,6 +971,8 @@ pub async fn seed_by_scan(
     shard: u32,
     primary: &NodeId,
 ) -> Result<(), String> {
+    // whether what was here could not be emptied, so the pages must overwrite
+    let mut stubborn = false;
     {
         let meta = super::with_state(|s| s.indices.get(index).cloned());
         let store2 = store.clone();
@@ -960,8 +980,16 @@ pub async fn seed_by_scan(
         let primary_here = super::runtime().map(|r| r.local()).as_ref() == Some(primary);
         if !primary_here {
             if let Some(meta) = meta {
-                let _ = tokio::task::spawn_blocking(move || {
+                let made = tokio::task::spawn_blocking(move || {
                     store2.drop_local(&name);
+                    // files a half-finished recovery left behind: nothing holds
+                    // them open once the store has let the index go, and the
+                    // new copy cannot be opened on top of them
+                    if store2.get(&name).is_none() {
+                        if let Some(dir) = store2.index_dir(&name) {
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                    }
                     let mut settings = meta.settings.clone();
                     if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
                         for k in ["creation_date", "provided_name", "version"] {
@@ -969,14 +997,42 @@ pub async fn seed_by_scan(
                         }
                         idx.insert("uuid".into(), json!(meta.uuid));
                     }
-                    let _ = store2
-                        .create(&name, &json!({"settings": settings, "mappings": meta.mappings}));
+                    let body = json!({"settings": settings, "mappings": meta.mappings, "aliases": meta.aliases});
+                    // the empty index the documents will be applied to: if it
+                    // cannot be made, the recovery says so rather than failing
+                    // page by page with nothing here to apply them to
+                    match store2.create(&name, &body) {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            // the old copy had not finished being dropped: it
+                            // is dropped again, and what the scan sends will
+                            // overwrite whatever is left standing
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            store2.drop_local(&name);
+                            match store2.create(&name, &body) {
+                                Ok(()) => Ok(()),
+                                Err(_) if store2.get(&name).is_some() => Err(String::new()),
+                                Err(_) => {
+                                    Err(format!("could not make a copy of [{name}] here: {e}"))
+                                }
+                            }
+                        }
+                    }
                 })
-                .await;
+                .await
+                .unwrap_or_else(|e| Err(format!("making a copy of [{index}] panicked: {e}")));
+                match made {
+                    Ok(()) => {}
+                    // an empty message means "it is still standing": the pages
+                    // that follow overwrite it rather than being skipped as
+                    // versions already held
+                    Err(e) if e.is_empty() => stubborn = true,
+                    Err(e) => return Err(e),
+                }
             }
         }
     }
-    catch_up_by_scan(store, index, shard, 0, primary).await
+    catch_up_by_scan(store, index, shard, 0, primary, stubborn).await
 }
 
 /// Ask the primary for everything from a sequence number on, and apply it
@@ -989,6 +1045,7 @@ pub async fn catch_up_by_scan(
     shard: u32,
     from: u64,
     primary: &NodeId,
+    overwrite: bool,
 ) -> Result<(), String> {
     let Some(rt) = super::runtime() else { return Ok(()) };
     let me = rt.local();
@@ -1029,7 +1086,11 @@ pub async fn catch_up_by_scan(
             };
             let mut g = st.write();
             for op in &ops {
-                crate::api::doc::apply_replicated(&mut g, op);
+                if overwrite {
+                    crate::api::doc::apply_recovered(&mut g, op);
+                } else {
+                    crate::api::doc::apply_replicated(&mut g, op);
+                }
             }
             g.sync_translog();
             Ok(())

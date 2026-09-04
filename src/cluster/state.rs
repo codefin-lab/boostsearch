@@ -225,7 +225,14 @@ impl RoutingTable {
     }
 
     pub fn primary(&self, index: &str, shard: u32) -> Option<&ShardRouting> {
-        self.indices.get(index)?.get(&shard)?.iter().find(|r| r.primary)
+        // while a primary is moving there are two copies marked primary: the
+        // one being moved away from is the one that answers, until its target
+        // says it is ready
+        let copies = self.indices.get(index)?.get(&shard)?;
+        copies
+            .iter()
+            .find(|r| r.primary && matches!(r.state, ShardState::Started | ShardState::Relocating))
+            .or_else(|| copies.iter().find(|r| r.primary))
     }
 
     /// Where a shard's copies are, by node: the `routing_nodes` view.
@@ -369,6 +376,18 @@ impl ClusterState {
                 }
             }
             if r.state != ShardState::Started && r.state != ShardState::Relocating {
+                // the target of a move is being filled while the copy it comes
+                // from still answers: the shard is not without a primary
+                let moving_here = r.relocating_node.is_some()
+                    && r.state == ShardState::Initializing
+                    && self.routing.shards_of(&r.index).any(|c| {
+                        c.shard == r.shard
+                            && c.primary == r.primary
+                            && c.state == ShardState::Relocating
+                    });
+                if moving_here {
+                    continue;
+                }
                 if r.primary {
                     return "red";
                 }

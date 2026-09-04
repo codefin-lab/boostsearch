@@ -93,12 +93,65 @@ pub async fn cat_indices(
     let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
     let show_hidden = named_outright || asked_for_hidden || dot_pattern;
     let mut rows = Vec::new();
+    // `bytes` asks for the sizes as plain numbers in the unit it names
+    let unit = p.get("bytes").map(|s| s.to_string());
+    let sized = |bytes: u64| crate::api::shared::sized(unit.as_deref(), bytes);
     let published = crate::cluster::current_state();
+    // On a cluster the node holding an index's primary is the one that can
+    // say how many documents it has and what it takes on disk, so that node
+    // writes the row. The node the request reached writes the rows for the
+    // indices no node holds; every row is gathered into one table.
+    let clustered = published.nodes.len() > 1;
+    let me = crate::cluster::identity().id.clone();
+    let primary_here = |n: &str| {
+        published
+            .routing
+            .shards_of(n)
+            .any(|c| {
+                c.primary
+                    && c.node.as_ref() == Some(&me)
+                    && matches!(
+                        c.state,
+                        crate::cluster::state::ShardState::Started
+                            | crate::cluster::state::ShardState::Relocating
+                    )
+            })
+    };
+    let held_somewhere = |n: &str| {
+        published.routing.shards_of(n).any(|c| {
+            c.primary
+                && matches!(
+                    c.state,
+                    crate::cluster::state::ShardState::Started
+                        | crate::cluster::state::ShardState::Relocating
+                )
+        })
+    };
+    // rows for indices no node holds are written once, by the node the
+    // request reached rather than by every node answering it
+    let forwarded = crate::cluster::forward::answering_forward();
     for n in names {
+        if clustered {
+            if held_somewhere(&n) {
+                if !primary_here(&n) {
+                    continue;
+                }
+            } else if forwarded {
+                continue;
+            }
+        }
         let Some(st) = store.get(&n) else {
             // an index of the cluster whose copies are on other nodes: what
             // the manager published is what there is to say about it here
             let Some(m) = published.indices.get(&n) else { continue };
+            let hidden = m
+                .settings
+                .pointer("/index/hidden")
+                .map(|v| v == "true" || v == true)
+                .unwrap_or(false);
+            if !show_hidden && hidden {
+                continue;
+            }
             let only = vec![n.clone()];
             let health = published.health_status(Some(&only));
             if p.get("health").map(|h| h != health).unwrap_or(false) {
@@ -113,8 +166,8 @@ pub async fn cat_indices(
                 ("rep", m.number_of_replicas.to_string()),
                 ("docs.count", "0".to_string()),
                 ("docs.deleted", "0".to_string()),
-                ("store.size", "0b".to_string()),
-                ("pri.store.size", "0b".to_string()),
+                ("store.size", sized(0)),
+                ("pri.store.size", sized(0)),
                 ("creation.date", "0".to_string()),
                 ("creation.date.string", String::new()),
             ]);
@@ -124,21 +177,26 @@ pub async fn cat_indices(
         if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
             continue;
         }
-        // an index asking for replicas has some it will never get on one node
-        let health = if g.numeric_setting("number_of_replicas").unwrap_or(0) > 0 {
-            "yellow"
-        } else {
-            "green"
+        // health is the cluster's answer about the index, not this node's
+        // share of it: a copy held here says nothing about the copy elsewhere
+        let only = vec![g.name.clone()];
+        let health = match published.indices.get(&g.name) {
+            Some(_) => published.health_status(Some(&only)).to_string(),
+            // no published state (a node running alone before the coordinator
+            // has started): an index asking for replicas will not get them
+            None if g.numeric_setting("number_of_replicas").unwrap_or(0) > 0 => "yellow".into(),
+            None => "green".to_string(),
         };
-        if p.get("health").map(|h| h != health).unwrap_or(false) {
+        if p.get("health").map(|h| h != &health).unwrap_or(false) {
             continue;
         }
         // a closed index has no shard open to count, so those columns are
         // blank rather than zero
         let docs = g.reader.searcher().num_docs();
+        let bytes_on_disk = store.index_size(&g.name);
         let count = |v: String| if g.closed { String::new() } else { v };
         rows.push(vec![
-            ("health", health.to_string()),
+            ("health", health),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
             ("index", g.name.clone()),
             ("uuid", g.uuid.clone()),
@@ -147,8 +205,8 @@ pub async fn cat_indices(
             ("rep", g.numeric_setting("number_of_replicas").unwrap_or(0).to_string()),
             ("docs.count", count(docs.to_string())),
             ("docs.deleted", count("0".to_string())),
-            ("store.size", count("0b".to_string())),
-            ("pri.store.size", count("0b".to_string())),
+            ("store.size", count(sized(bytes_on_disk))),
+            ("pri.store.size", count(sized(bytes_on_disk))),
             // when the index was made, as the epoch and as text
             ("creation.date", g.created_millis().to_string()),
             ("creation.date.string", g.created_string()),
@@ -245,21 +303,57 @@ pub async fn cat_allocation(
 
 /// `_cat/nodeattrs` -- the attributes a node was started with.
 pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
-    let rows: Vec<Vec<(&str, String)>> = node_attrs()
-        .into_iter()
-        .map(|(attr, value)| {
-            vec![
-                ("node", "boostsearch".to_string()),
-                ("id", "node-0".to_string()),
+    // every node of the cluster and what it says about itself: the attributes
+    // it was configured with (`node.attr.*`), and the ones the engine adds
+    let live = crate::cluster::current_state();
+    let me = crate::cluster::identity();
+    let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
+    let nodes: Vec<(String, String, String, std::collections::BTreeMap<String, String>)> =
+        if live.nodes.is_empty() {
+            vec![(
+                me.name.clone(),
+                me.id.as_str().to_string(),
+                me.transport_address.clone(),
+                me.attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect(),
+            )]
+        } else {
+            live.nodes
+                .iter()
+                .map(|(id, n)| {
+                    (
+                        n.name.clone(),
+                        id.as_str().to_string(),
+                        n.transport_address.clone(),
+                        n.attributes.clone(),
+                    )
+                })
+                .collect()
+        };
+    for (name, id, address, attrs) in nodes {
+        let ip = address.split(':').next().unwrap_or("127.0.0.1").to_string();
+        let port = address.split(':').nth(1).unwrap_or("9300").to_string();
+        let mut all: Vec<(String, String)> = attrs.into_iter().collect();
+        for (k, v) in node_attrs() {
+            if !all.iter().any(|(x, _)| *x == k) {
+                all.push((k, v));
+            }
+        }
+        for (attr, value) in all {
+            rows.push(vec![
+                ("node", name.clone()),
+                ("id", id.clone()),
                 ("pid", std::process::id().to_string()),
-                ("host", "127.0.0.1".to_string()),
-                ("ip", "127.0.0.1".to_string()),
-                ("port", "9300".to_string()),
+                ("host", ip.clone()),
+                ("ip", ip.clone()),
+                ("port", port.clone()),
                 ("attr", attr),
                 ("value", value),
-            ]
-        })
-        .collect();
+            ]);
+        }
+    }
     let rows = cat_only_default(rows, &["node", "host", "ip", "attr", "value"], &p);
     cat_render_cols(CAT_NODEATTRS_COLS, rows, &p)
 }
@@ -391,10 +485,20 @@ pub async fn cat_aliases(
         Some(v) => v.split(',').any(|w| matches!(w.trim(), "hidden" | "all")),
     };
     let mut rows = Vec::new();
-    for n in store.names() {
-        let Some(st) = store.get(&n) else { continue };
-        let g = st.read();
-        for (a, def) in &g.aliases {
+    // every index of the cluster, and the aliases it carries: an alias belongs
+    // to the index, wherever its copies are
+    let published = crate::cluster::current_state();
+    for n in crate::api::cluster_names(&store) {
+        let held: std::collections::BTreeMap<String, Value> = match store.get(&n) {
+            Some(st) => st.read().aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            None => published
+                .indices
+                .get(&n)
+                .and_then(|m| m.aliases.as_object().cloned())
+                .map(|o| o.into_iter().collect())
+                .unwrap_or_default(),
+        };
+        for (a, def) in &held {
             let wanted = match filter.as_deref() {
                 None | Some("") | Some("*") | Some("_all") => true,
                 Some(expr) => expr.split(',').any(|pat| {
@@ -405,8 +509,17 @@ pub async fn cat_aliases(
             if !wanted {
                 continue;
             }
-            let hidden = def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false)
-                || g.setting("hidden").map(|v| v == "true").unwrap_or(false);
+            let index_hidden = match store.get(&n) {
+                Some(st) => st.read().setting("hidden").map(|v| v == "true").unwrap_or(false),
+                None => published
+                    .indices
+                    .get(&n)
+                    .and_then(|m| m.settings.pointer("/index/hidden"))
+                    .map(|v| v == "true" || v == true)
+                    .unwrap_or(false),
+            };
+            let hidden =
+                def.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false) || index_hidden;
             if hidden && !show_hidden {
                 continue;
             }

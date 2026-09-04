@@ -19,7 +19,9 @@ pub async fn field_caps(
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
     let body: Value = parse_body(&body).unwrap_or(json!({}));
-    let targets = store.resolve(&expr);
+    // every index the cluster holds: a field's capabilities belong to the
+    // index, wherever its copies are
+    let targets = crate::api::cluster_resolve(&store, &expr);
     if targets.is_empty() && !expr.contains('*') && expr != "_all" {
         return no_such_index(&expr);
     }
@@ -80,8 +82,32 @@ pub async fn field_caps(
             );
         }
     }
+    let published = crate::cluster::current_state();
     for n in &kept {
-        let Some(st) = store.get(n) else { continue };
+        let Some(st) = store.get(n) else {
+            // held elsewhere: the published mapping says what its fields are
+            if let Some(m) = published.indices.get(n) {
+                let mut types: std::collections::HashMap<String, String> = Default::default();
+                crate::search::aggs::published_field_types(&m.mappings, "", &mut types);
+                for (name, kind) in types {
+                    let asked = patterns.iter().any(|pat| {
+                        pat == "*"
+                            || *pat == name
+                            || crate::store::wildcard_to_regex(pat).is_match(&name)
+                    });
+                    if !asked {
+                        continue;
+                    }
+                    let entry = fields.entry(name.clone()).or_insert_with(|| json!({}));
+                    let e = entry.as_object_mut().unwrap();
+                    let per = e.entry(kind.clone()).or_insert_with(
+                        || json!({"type": kind, "searchable": true, "aggregatable": true}),
+                    );
+                    let _ = per;
+                }
+            }
+            continue;
+        };
         let g = st.read();
         let view = crate::security::view::view_for(&store, &g.name);
         for (name, kind) in g.all_field_types() {

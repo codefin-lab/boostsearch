@@ -35,6 +35,13 @@ pub trait MetadataSource: Send + Sync {
     fn has_tombstones(&self) -> bool {
         false
     }
+    /// Does this node's copy of the index hold any document?
+    ///
+    /// An index just made holds none, and the cluster is free to place it
+    /// wherever there is room; one with documents belongs where they are.
+    fn holds_documents(&self, _index: &str) -> bool {
+        true
+    }
     /// Templates, component templates, pipelines and scripts.
     fn customs(&self) -> Value {
         json!({})
@@ -210,6 +217,12 @@ impl ShardHost for StoreSource {
         copy: &ShardRouting,
         primary: Option<&NodeId>,
     ) -> Result<bool, String> {
+        // the store holds an index, not a shard of one: the first shard's copy
+        // is what is made or filled here, and the rest of the shards are that
+        // same index under another number
+        if copy.shard > 0 && self.store.get(&meta.name).is_some() {
+            return Ok(true);
+        }
         if copy.primary && copy.relocating_node.is_none() {
             // a primary placed where its data is (a new index, a promoted
             // copy), or an empty one someone asked for after a loss: made
@@ -222,7 +235,7 @@ impl ShardHost for StoreSource {
                     }
                     idx.insert("uuid".into(), json!(meta.uuid));
                 }
-                let body = json!({"settings": settings, "mappings": meta.mappings});
+                let body = json!({"settings": settings, "mappings": meta.mappings, "aliases": meta.aliases});
                 self.store.create(&meta.name, &body).map_err(|e| {
                     format!("could not make an empty primary of [{}]: {e}", meta.name)
                 })?;
@@ -242,7 +255,8 @@ impl ShardHost for StoreSource {
             }
             idx.insert("uuid".into(), json!(meta.uuid));
         }
-        let body = json!({"settings": settings, "mappings": meta.mappings});
+        let body =
+            json!({"settings": settings, "mappings": meta.mappings, "aliases": meta.aliases});
         self.store.create(&meta.name, &body).map_err(|e| {
             format!("could not create a local copy of [{}][{}]: {e}", meta.name, copy.shard)
         })?;
@@ -266,6 +280,16 @@ impl ShardHost for StoreSource {
 }
 
 impl MetadataSource for StoreSource {
+    fn holds_documents(&self, index: &str) -> bool {
+        self.store
+            .get(index)
+            .map(|st| {
+                let g = st.read();
+                g.reader.searcher().num_docs() > 0 || !g.pending.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
     fn cluster_settings(&self) -> Value {
         self.store.cluster_settings()
     }

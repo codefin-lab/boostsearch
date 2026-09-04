@@ -80,7 +80,7 @@ pub(crate) fn finalise_aggs(
                     apply_bucket_formats(&mut v, req);
                     // a search may span indices, so a field's type is whatever
                     // the first index that names it says
-                    let types: std::collections::HashMap<String, String> = targets
+                    let mut types: std::collections::HashMap<String, String> = targets
                         .iter()
                         .filter_map(|n| store.get(n))
                         .flat_map(|st| {
@@ -92,6 +92,15 @@ pub(crate) fn finalise_aggs(
                                 .collect::<Vec<_>>()
                         })
                         .collect();
+                    // an index of the cluster this node holds no copy of: the
+                    // mapping the manager published says what its fields are,
+                    // and without it a key would come back unformatted
+                    let published = crate::cluster::current_state();
+                    for name in targets.iter().filter(|n| store.get(n).is_none()) {
+                        if let Some(m) = published.indices.get(name) {
+                            published_types(&m.mappings, "", &mut types);
+                        }
+                    }
                     date_histogram_keys(&mut v, req, &types);
                     format_terms_keys(&mut v, req, &types);
                     // one index may hold a field as whole numbers and another
@@ -565,4 +574,29 @@ pub(crate) fn filtered_count(
         _ => None,
     };
     Ok((total, sub))
+}
+
+/// The field types a published mapping names, as the aggregations read them.
+pub(crate) fn published_types(
+    mappings: &Value,
+    prefix: &str,
+    out: &mut std::collections::HashMap<String, String>,
+) {
+    let Some(props) = mappings.get("properties").and_then(|p| p.as_object()) else { return };
+    for (name, def) in props {
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        if let Some(t) = def.get("type").and_then(|t| t.as_str()) {
+            out.entry(path.clone()).or_insert_with(|| t.to_string());
+        }
+        if def.get("properties").is_some() {
+            published_types(def, &path, out);
+        }
+        if let Some(fields) = def.get("fields").and_then(|f| f.as_object()) {
+            for (sub, sdef) in fields {
+                if let Some(t) = sdef.get("type").and_then(|t| t.as_str()) {
+                    out.entry(format!("{path}.{sub}")).or_insert_with(|| t.to_string());
+                }
+            }
+        }
+    }
 }

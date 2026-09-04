@@ -130,6 +130,10 @@ impl ShardHost for ModelSource {
         copy: &ShardRouting,
         _primary: Option<&NodeId>,
     ) -> Result<bool, String> {
+        // an index is held whole here too
+        if copy.shard > 0 && self.0.docs.lock().contains_key(&meta.name) {
+            return Ok(true);
+        }
         if copy.primary && copy.relocating_node.is_none() {
             // where the data is, or an empty primary someone accepted
             self.0.docs.lock().entry(meta.name.clone()).or_default();

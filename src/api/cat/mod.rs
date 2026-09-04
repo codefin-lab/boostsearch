@@ -278,6 +278,8 @@ pub(crate) async fn cat_by_name(
                     ("unassigned.details", String::new()),
                 ]
             };
+            let clustered = live.nodes.len() > 1;
+            let forwarded = crate::cluster::forward::answering_forward();
             let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
             for n in names {
                 let local_docs =
@@ -286,6 +288,9 @@ pub(crate) async fn cat_by_name(
                     live.routing.shards_of(&n).collect();
                 copies.sort_by_key(|c| (c.shard, !c.primary));
                 if copies.is_empty() {
+                    if clustered && forwarded {
+                        continue;
+                    }
                     // not published: this node holds it, alone
                     let Some(st) = store.get(&n) else { continue };
                     let g = st.read();
@@ -330,9 +335,31 @@ pub(crate) async fn cat_by_name(
                     }
                     let active = matches!(c.state, ShardState::Started | ShardState::Relocating);
                     if active {
-                        row[4].1 =
-                            if here && c.shard == 0 { local_docs.to_string() } else { "0".into() };
-                        row[5].1 = "0b".into();
+                        // a copy is a copy of the whole index here, so a node
+                        // holding one can answer for it; a copy elsewhere is
+                        // that node's row to write
+                        if here {
+                            row[4].1 = local_docs.to_string();
+                            row[5].1 = crate::api::shared::sized(
+                                p.get("bytes").map(|s| s.as_str()),
+                                store.index_size(&n),
+                            );
+                        } else if clustered {
+                            continue;
+                        } else {
+                            row[4].1 = "0".into();
+                            row[5].1 = "0b".into();
+                        }
+                    } else if clustered
+                        && (match &c.node {
+                            // a copy being made somewhere else is that node's row
+                            Some(nd) => nd != &me.id,
+                            // a copy with no node is written once, by the node
+                            // the request reached
+                            None => forwarded,
+                        })
+                    {
+                        continue;
                     }
                     if let (Some(u), ShardState::Unassigned) = (&c.unassigned, c.state) {
                         row[9].1 = u.reason.clone();

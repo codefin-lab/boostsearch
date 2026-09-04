@@ -106,9 +106,11 @@ pub async fn nodes_stats(
         );
     }
     let mut docs = 0u64;
+    let mut on_disk = 0u64;
     for n in store.names() {
         if let Some(st) = store.get(&n) {
             docs += st.read().reader.searcher().num_docs();
+            on_disk += store.index_size(&n);
         }
     }
     // a second path part narrows within `indices` to the metrics it names
@@ -127,7 +129,7 @@ pub async fn nodes_stats(
             "roles": crate::cluster::identity().roles, "attributes": crate::cluster::identity().attributes,
             "indices": {
                 "docs": {"count": docs, "deleted": 0},
-                "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+                "store": {"size_in_bytes": on_disk, "reserved_in_bytes": 0},
                 "indexing": {
                     "index_total": docs, "index_time_in_millis": 0, "index_current": 0,
                     "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,

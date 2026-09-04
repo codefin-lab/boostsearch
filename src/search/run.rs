@@ -681,9 +681,16 @@ pub fn run(
         .get("expand_wildcards")
         .map(|v| v.split(',').any(|w| matches!(w.trim(), "closed" | "all")))
         .unwrap_or(false);
+    // a closed index is closed cluster-wide: this node may hold no copy of it
+    let closed_in_cluster = |name: &str| -> bool {
+        store.is_closed(name)
+            || crate::cluster::with_state(|s| {
+                s.indices.get(name).map(|m| m.state == "close").unwrap_or(false)
+            })
+    };
     if wants_closed && !lenient {
-        for name in store.resolve(expr) {
-            if store.is_closed(&name) {
+        for name in crate::api::cluster_resolve(store, expr) {
+            if closed_in_cluster(&name) {
                 return Err(err(
                     StatusCode::BAD_REQUEST,
                     "index_closed_exception",
@@ -695,7 +702,7 @@ pub fn run(
     for name in
         expr.split(',').map(|n| n.trim()).filter(|n| !n.is_empty() && !n.contains('*') && !lenient)
     {
-        if store.is_closed(name) {
+        if closed_in_cluster(name) {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "index_closed_exception",

@@ -9,7 +9,13 @@ impl IdxState {
         let Some(path) = &self.path else { return };
         let meta = serde_json::json!({
             "name": self.name,
-            "body": {"mappings": self.mapping.raw, "settings": self.settings},
+            "body": {
+                "mappings": self.mapping.raw,
+                "settings": self.settings,
+                // the names this index also answers to: a restart that forgot
+                // them would leave every alias pointing at nothing
+                "aliases": self.aliases,
+            },
             "dynamic_types": self.dynamic_types,
             "observed_kinds": self.observed_kinds,
             "allocation_id": self.allocation_id,

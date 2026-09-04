@@ -11,9 +11,11 @@ pub use state::*;
 pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let names = store.names();
     let mut docs = 0u64;
+    let mut on_disk = 0u64;
     for n in &names {
         if let Some(st) = store.get(n) {
             docs += st.read().reader.searcher().num_docs();
+            on_disk += store.index_size(n);
         }
     }
     let replicated = names
@@ -40,7 +42,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
                     },
                 },
                 "docs": {"count": docs, "deleted": 0},
-                "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+                "store": {"size_in_bytes": on_disk, "reserved_in_bytes": 0},
                 "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
                 "query_cache": {
                     "memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,

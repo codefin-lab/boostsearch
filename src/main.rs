@@ -36,14 +36,29 @@ use serde_json::json;
 use store::Store;
 
 async fn root() -> impl IntoResponse {
+    // the node answers with its own name and the cluster it belongs to, the
+    // way a client that pins a node by name expects
+    let me = cluster::identity();
+    let state = cluster::current_state();
+    let uuid = if state.cluster_uuid.is_empty() {
+        "_na_".to_string()
+    } else {
+        state.cluster_uuid.clone()
+    };
     axum::Json(json!({
-        "name": "boostsearch",
-        "cluster_name": "boostsearch",
-        "cluster_uuid": "_na_",
+        "name": me.name,
+        "cluster_name": me.cluster_name,
+        "cluster_uuid": uuid,
         "version": {
             "distribution": "boostsearch",
             "number": "3.9.0",
+            "build_type": "tar",
+            "build_hash": "unknown",
+            "build_date": "2026-01-01T00:00:00.000000Z",
+            "build_snapshot": false,
             "lucene_version": "BoostCore-0.26",
+            "minimum_wire_compatibility_version": "2.19.0",
+            "minimum_index_compatibility_version": "2.0.0",
         },
         "tagline": "You Know, for Search"
     }))
@@ -549,6 +564,21 @@ async fn shutdown_signal(store: Store) {
                     )
                     .await;
             }
+        }
+        // the primaries here are what a write needs, so the node waits for the
+        // manager to put them somewhere else before it stops answering: a
+        // rolling restart then costs a moment of a copy's absence rather than
+        // every write to those indices while the node is down
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let mine = rt.state().routing.on_node(&me).filter(|c| c.primary).count();
+            if mine == 0 || std::time::Instant::now() >= deadline {
+                if mine > 0 {
+                    eprintln!("boostsearch: stopping with {mine} primaries still here");
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
     for name in store.names() {

@@ -102,7 +102,12 @@ pub(crate) fn stats_field_wanted(patterns: &[String], name: &str) -> bool {
     })
 }
 
-pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Params) -> Value {
+pub(crate) fn index_stats(
+    st: &IdxState,
+    on_disk: u64,
+    want_groups: Option<&[String]>,
+    p: &Params,
+) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
     // only a field whose ordinals were actually read counts as fielddata
@@ -182,7 +187,7 @@ pub(crate) fn index_stats(st: &IdxState, want_groups: Option<&[String]>, p: &Par
     let human = p.get("human").map(|v| v != "false").unwrap_or(false);
     let mut out = json!({
         "docs": {"count": docs, "deleted": 0},
-        "store": {"size_in_bytes": 0, "reserved_in_bytes": 0},
+        "store": {"size_in_bytes": on_disk, "reserved_in_bytes": 0},
         "indexing": {"index_total": docs, "index_time_in_millis": 0, "index_current": 0,
                      "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,
                      "delete_current": 0,
@@ -431,7 +436,7 @@ pub(crate) fn stats_value(
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read(), want_groups.as_deref(), p);
+        let s = index_stats(&st.read(), store.index_size(n), want_groups.as_deref(), p);
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",

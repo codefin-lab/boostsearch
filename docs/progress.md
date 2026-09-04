@@ -1536,3 +1536,219 @@ OpenSearch on plain HTTP, the documented transport mismatch -- every row
 but `cardinality` (1.07 ms against 0.98 ms). The absolute numbers on both
 sides are lower than 6.10's on this machine, which had been running chaos
 for hours; the commit before these changes measures the same there.
+
+### 6.13 Closing the cluster's own gaps before Phase 7 (in progress)
+
+Three things were left open at the end of 6.12: the sections the corpus
+lost on three nodes, the shortfall against the phase's 2,296, and the
+writes a rolling upgrade refused. This is where they stand.
+
+**A rolling upgrade refuses three writes in a thousand, not a fifth.** A
+node stopped with SIGTERM now hands its primaries to the rest of the
+cluster before it stops answering: it says it is leaving, then waits (up
+to fifteen seconds) for the manager to place its primaries elsewhere. On
+three nodes carrying twenty thousand writes, 64 were refused where 3,272
+had been.
+
+**The corpus on three nodes went from 1,184 to 1,382 of 1,427**, and the
+single-node run is back to 1,427 of 1,427. What was wrong, in the order
+it was found:
+
+  - **An index's shards were spread across nodes** while the store holds
+    an index whole (ADR 0003): a write routed to shard three landed on the
+    node answering for shard zero. Every shard of an index now sits where
+    its first shard sits, the balancer weighs copies of indices rather
+    than shards, and a shard past the first needs no work of its own on a
+    node that already holds the index.
+  - **A copy made from published metadata was made without the index's
+    aliases**, so an index that moved lost them, and every lookup through
+    an alias came back empty.
+  - **The listings answered for one node's share of the cluster.**
+    `_cat/indices`, `_cat/aliases`, `_cat/segments`, `_cat/fielddata`,
+    mappings, field capabilities, wildcards and `DELETE /*` all read the
+    published metadata now, and `_stats` is asked of every node holding a
+    copy with its counters added up.
+  - **A close or an open reached only the node that answered**, and its
+    per-index reply named only what that node held. Both are broadcast,
+    the replies are merged, and the answer waits for the state that says
+    the index is closed to be published; a closed index is refused for
+    searches wherever its copies are.
+  - **A moving primary stopped answering.** While a primary is being moved
+    two copies are marked primary, and reading the wrong one had the
+    relocation target try to fill itself from itself: the copy that
+    answers is the one being moved away from, until its target is ready.
+  - **Files a failed recovery left behind stopped the next one**, and a
+    copy that failed could not be made again on the same node under the
+    same id.
+  - **A terms lookup could not read its document from another node.** It
+    reads it across the cluster now, and when one node holds both indices
+    the search runs there.
+  - `_cluster/state` answers the question it was asked (its metadata was
+    listing this node's indices when the request named none), an
+    allocation explanation says an index is started here when this node
+    holds it, a reroute names the cluster manager both ways, a task is
+    named after the node that ran it, and `node.attr.*` reaches
+    `_cat/nodeattrs` and the cluster settings' defaults for every node.
+
+**The gate is not met yet.** On three nodes the two corpora read 1,382 of
+1,427 and 752 of 895 -- 2,134 of 2,322 against the phase's 2,296. On a
+single node they read 1,427 and 820, so about fifty of the shortfall is
+the cluster's and the rest is the module corpus's own (reindex from a
+remote, geoip, the URL repository, the attachment processor, kuromoji --
+Phase 3 and 4 work). What the cluster still loses, by name: the terms
+aggregation merged across nodes (12), `_stats` and `_cat/shards` tallies
+(6), `indices_boost` and `search_after` over several nodes (7), and a
+dozen single sections in `msearch`, `search_shards`, `shard_stores`,
+`cluster.health` and `indices.refresh`.
+
+Gates as they stand: unit 67/67, the storm over a thousand seeds clean,
+phase1 398/398, chaos seeds and the rolling restart with no acknowledged
+write lost, the rolling upgrade with every acknowledged write surviving;
+bench wins every dimension in passes 1 and 3 (97,282 against 65,664
+docs/s and 368MiB against 2.18GiB on plain HTTP; 92,662 against 55,975
+against os-secure) and every row but three aggregations in the TLS
+against plain pass, the documented transport mismatch.
+
+### 6.14 The cluster's remaining gaps, and what the gate still needs (in progress)
+
+Another pass over the three open items. The corpus on a single node is
+back to **1,427 of 1,427**; on three nodes it reads between 1,317 and
+1,382 of 1,427 depending on the run, and the spread is itself a finding:
+the cluster's answers vary with what the balancer is moving at the
+moment the assertion runs.
+
+What was fixed in this pass:
+
+  - **An aggregation the merge could not produce came back missing.** The
+    engine works some aggregations out from the documents rather than
+    from an intermediate -- a `missing` value, a calendar interval, a
+    pipeline -- and the coordinator has no documents. When the merged
+    answer lacks an aggregation the request named, every holder is asked
+    for its own answer and the buckets are added together by key. The
+    histograms, the typed keys, the pipelines, the multi-terms and the
+    terms with a missing value all come back (10_histogram 3/11 to 11/11,
+    80_typed_keys 9/13 to 13/13, 370_multi_terms 13/17 to 17/17).
+  - **A refusal from another node became "the shards would not answer".**
+    It keeps its status and body now, so a bad request is a bad request
+    wherever the index is held.
+  - **An alias was read from the local store.** Aliases are read from the
+    cluster's metadata, and one just made is waited for before the answer
+    -- as are a template, a pipeline and a script (get_alias 19/23 to
+    23/23, put_alias 11/12 to 12/12, cat.templates 2/9 to 8/9).
+  - **`_all` was an endpoint rather than an index expression**, so
+    `/_all/_stats` answered for one node's share.
+  - **A stats answer counted copies rather than shards**, a copy being
+    moved into place made the cluster red, a terms lookup could not read
+    across nodes, and an `indices_boost` could not name an index held
+    elsewhere.
+
+**What the phase's 2,296 still needs.** On a single node the two corpora
+read 1,427 and 820 of 895 -- 2,247 of 2,322. The 75 the module corpus
+loses on a single node are not cluster work at all: they are the analysis
+plugins (kuromoji, phonetic, ICU, stempel), geoip, the attachment
+processor, reindex from a remote cluster and the URL repository -- each a
+feature to build, and Phase 7's ecosystem work rather than Phase 6's. On
+three nodes the corpus loses another hundred or so, in a long tail of
+single sections (`_stats` fielddata, `cat.shards` while a copy moves,
+scroll and point-in-time across nodes, a sort value's last digit through
+the coordinator), and those are Phase 6's own debt.
+
+Gates as they stand: unit 67/67, the storm over a thousand seeds clean,
+phase1 398/398, core corpus 1,427/1,427 on one node, chaos seeds and the
+rolling restart with no acknowledged write lost, the rolling upgrade with
+three writes in a thousand refused; bench wins **every** dimension in all
+three passes (93,933 against 66,368 docs/s and 401MiB against 2.25GiB on
+plain HTTP; 88,690 against 57,340 against os-secure; and every row of the
+TLS-against-plain pass as well).
+
+## 7.1 -- Dashboards, end to end
+
+OpenSearch Dashboards 3.1.0 was pointed at a single BoostSearch node and
+driven the way a person drives it. It migrated its saved objects on the
+first start (a fresh `.kibana_1` with the `.kibana` alias over it, and a
+second start that had it move to `.kibana_2` and swap the alias across),
+started all fifty-four of its plugins, and reported its own status green
+with nothing non-green in it.
+
+What was driven, and what it found:
+
+  - **Discover** renders against a 500-line index: the field sidebar,
+    the date histogram over `@timestamp`, and the document table
+    (500/500 in the last year).
+  - **The Visualize editor** opens on an index pattern, draws a count of
+    all documents, and adds a terms bucket over `speaker`.
+  - **A saved dashboard** loads its panel by reference and draws the
+    bar chart from our aggregation.
+  - **Saved objects** create, read, update, delete, find by title,
+    bulk-get, export with references, and import -- including the import
+    that OpenSearch Dashboards deliberately does not write while a
+    resolvable conflict stands, and the same import with `overwrite`.
+  - **Index Management** lists the indices with their health, status,
+    doc counts and sizes.
+
+Two things it broke on, both now fixed:
+
+  - **An alias did not survive a restart.** The index's `_meta.json` kept
+    its mappings and settings but not the names it also answers to, so a
+    restarted node had no `.kibana` -- and Dashboards, finding none,
+    made a fresh empty one and every saved object was gone. Aliases are
+    written beside the index now, and every path that adds or removes one
+    persists it: the create body, `_aliases`, `PUT /{index}/_alias`, and
+    the rollover that moves an alias to the new index.
+  - **Every index reported a store size of zero.** `_cat/indices`,
+    `_stats`, node stats and cluster stats now add up what the index's
+    directory actually holds, and `_cat` honours the unit `bytes` names
+    rather than ignoring it.
+
+What Dashboards asks for and we still answer 501: `_plugins/_ism/explain`
+(Phase 10), `_plugins/_query/_datasources` (Phase 12), and the alerting
+and anomaly-detection searches, which are not in the plan. The security
+plugin's `_plugins/_security/api/account` is asked for even with the
+plugin disabled.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- the same 75 as before, none of them Dashboards work.
+
+### 7.1 -- what Dashboards on three nodes found
+
+Pointing Dashboards at a three-node cluster rather than one node turned up
+three things, all of them the cluster's rather than Dashboards':
+
+  - **A bulk ran wherever it landed.** A `_bulk` was sent to the cluster
+    manager, and the manager wrote it -- even for an index whose copies
+    are on other nodes. The write then reached one copy and not the
+    primary, and the answer said it had succeeded: acknowledged writes
+    that a later read could not find. A bulk is coordinated now: the
+    body is split by the index each operation names, each part goes to
+    the node holding that index's primary, an index the cluster does not
+    know yet goes to the manager to be made, and the items come back in
+    the order they were asked. The answer waits until this node knows
+    the indices the bulk created, the way a create does.
+  - **The listings spoke only for the node that answered.** `_cat/indices`
+    and `_cat/shards` are asked of every node now: the node holding a
+    copy writes its row, with the documents it holds and what the copy
+    takes on disk, and the node the request reached writes the rows for
+    the copies no node holds. The rows are gathered under one header --
+    the one from a node that had rows to describe -- and `format=json`
+    is joined and ordered the same way.
+  - **`/` gave the same answer on every node.** It reports the node's own
+    name, the cluster it joined and the cluster's uuid, with the build
+    and compatibility fields a client reads.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100 on one node,
+module corpus 820/895; **core corpus 1,076/1,100 on three nodes**, up
+from about a thousand -- the cluster's own tail is 24 sections now
+(`indices.delete_alias` across nodes 8, the terms and multi-terms
+aggregations 6, and single sections in `cat.indices`, `cat.shards`,
+`cluster.state`, `indices.open`, `indices.shard_stores`,
+`indices.stats` translog, a pre-filter search and a terms lookup).
+Chaos, the rolling restart and the register check all end with no
+acknowledged write lost and the register linearizable.
+
+**7.1 closed.** With those three fixed, Dashboards runs against the
+three-node cluster exactly as it does against one: the saved-object
+round trip passes ten of ten (including the management routes the Saved
+Objects page itself calls -- relationships, `_find`, `_allowed_types`,
+`scroll/counts`), Discover draws its histogram and table, the saved
+dashboard draws its chart, and Index Management lists the indices with
+their real sizes and counts.
