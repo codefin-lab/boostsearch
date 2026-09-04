@@ -1875,3 +1875,39 @@ its downloader does not start on Node 24.
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
+
+### The Go client
+
+`opensearch-go` v5's integration suite is the strictest of the four: for
+every call it compares the raw JSON we send against the client's own
+typed struct and reports each field that does not line up, in either
+direction. It found nine things.
+
+  - **Four endpoints answered only one of their two methods.** The REST
+    spec lists `POST` beside `PUT` for nineteen paths; we were missing it
+    on `/{index}/_mapping`, `/_component_template/{name}` and
+    `/{index}/_aliases/{name}`, and `/_aliases/{name}` was not routed at
+    all.
+  - **`value_count` and `cardinality` came back as fractions.** Both
+    count things and both are whole numbers in OpenSearch; a client
+    reading `3.0` into an integer cannot.
+  - **`GET /_upgrade` answered as though it had upgraded something.**
+    Asking is not doing: a GET reports how much of each index would have
+    to be rewritten, a POST reports what the rewriting did.
+  - **The warmer statistic used the wrong name**, `time_in_millis` where
+    every other total is `total_time_in_millis`.
+  - **`_nodes/usage` returned the whole of `_nodes`.** It reports when a
+    node started counting and what it counted since, and nothing else.
+  - **`_nodes/reload_secure_settings` was not answered.** There is no
+    keystore to reread here, so every node answers that it did.
+  - **`_data_stream/_stats` was read as an index called `_stats`.** It
+    reports the indices behind each stream, what they take on disk and
+    the newest instant their documents carry.
+  - **`_cat/pit_segments` was an unknown endpoint.** A point-in-time
+    holds the segments its indices held when it was opened, which are the
+    segments the index still has.
+
+**189 of 189 pass**, with the plugin tag as well as the core one.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.

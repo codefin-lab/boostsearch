@@ -1613,6 +1613,7 @@ pub(crate) fn finish_search(
         (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
     {
         keep_asked_ranges(req, a);
+        whole_metric_values(a, req);
     }
 
     if let (Some(a), Some(req)) =

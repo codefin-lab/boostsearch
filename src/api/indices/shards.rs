@@ -274,6 +274,7 @@ pub async fn indices_recovery(
 /// upgrade has nothing to do but say which it is.
 pub async fn indices_upgrade(
     State(store): State<Store>,
+    method: axum::http::Method,
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
@@ -285,6 +286,33 @@ pub async fn indices_upgrade(
                 return no_such_index(part);
             }
         }
+    }
+    // asking is not the same as doing: a GET reports how much of each index
+    // would have to be rewritten, a POST reports what the rewriting did
+    if method == axum::http::Method::GET {
+        let mut indices = serde_json::Map::new();
+        let mut total = 0u64;
+        for n in &names {
+            let bytes = store.index_size(n);
+            total += bytes;
+            indices.insert(
+                n.clone(),
+                json!({
+                    "size_in_bytes": bytes,
+                    "size_to_upgrade_in_bytes": 0,
+                    "size_to_upgrade_ancient_in_bytes": 0,
+                }),
+            );
+        }
+        return respond(
+            &p,
+            json!({
+                "size_in_bytes": total,
+                "size_to_upgrade_in_bytes": 0,
+                "size_to_upgrade_ancient_in_bytes": 0,
+                "indices": Value::Object(indices),
+            }),
+        );
     }
     let tally = shards_over(&store, &names);
     let mut upgraded = serde_json::Map::new();

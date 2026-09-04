@@ -377,7 +377,9 @@ pub(crate) async fn cat_by_name(
             );
             cat_render(rows, &p)
         }
-        "segments" => {
+        // a point-in-time holds the segments its indices held when it was
+        // opened, and those are the segments the index still has
+        "segments" | "pit_segments" => {
             let rows = store
                 .names()
                 .into_iter()

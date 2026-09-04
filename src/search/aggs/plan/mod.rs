@@ -609,6 +609,7 @@ pub(crate) fn filtered_count(
     if let (Some(a), Some(reqj)) = (sub.as_mut(), sub_aggs.as_ref()) {
         millis_in_keys(a);
         keep_asked_ranges(reqj, a);
+        whole_metric_values(a, reqj);
         name_date_metrics(store, targets, reqj, a);
     }
     Ok((total, sub))

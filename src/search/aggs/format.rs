@@ -67,6 +67,41 @@ pub(crate) fn millis_in_keys(node: &mut Value) {
 
 // a range aggregation answers for the ranges it was given; a gap between
 // two of them was not asked about and is not a bucket
+
+/// The metrics OpenSearch answers with a whole number rather than a fraction.
+///
+/// `value_count` counts values and `cardinality` counts distinct ones; both
+/// are longs there, and a client that reads them into an integer cannot read
+/// `3.0`.
+pub(crate) fn whole_metric_values(result: &mut Value, req: &Value) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+        if defo.contains_key("value_count") || defo.contains_key("cardinality") {
+            if let Some(v) = node.get("value").and_then(|v| v.as_f64())
+                && v.fract() == 0.0
+            {
+                node["value"] = json!(v as i64);
+            }
+        }
+        let Some(subs) = defo.get("aggs").or_else(|| defo.get("aggregations")) else { continue };
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => {
+                for b in list.iter_mut() {
+                    whole_metric_values(b, subs);
+                }
+            }
+            Some(Value::Object(named)) => {
+                for (_, b) in named.iter_mut() {
+                    whole_metric_values(b, subs);
+                }
+            }
+            _ => whole_metric_values(node, subs),
+        }
+    }
+}
+
 pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
     let Some(reqs) = request.as_object() else { return };
     for (name, def) in reqs {

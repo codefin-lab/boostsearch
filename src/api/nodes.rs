@@ -159,7 +159,9 @@ pub async fn nodes_stats(
                 "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
                             "external_total_time_in_millis": 0, "listeners": 0},
                 "flush": {"total": 0, "periodic": 0, "total_time_in_millis": 0},
-                "warmer": zero_time.clone(),
+                // a warmer's time is a total, the way a refresh's and a
+                // flush's are
+                "warmer": {"total": 0, "total_time_in_millis": 0, "current": 0},
                 "query_cache": {"memory_size_in_bytes": 0, "total_count": 0,
                                 "hit_count": 0, "miss_count": 0, "cache_size": 0,
                                 "cache_count": 0, "evictions": 0},
@@ -442,6 +444,30 @@ pub fn node_attrs() -> Vec<(String, String)> {
     out
 }
 
+/// `/_nodes/{*rest}` -- the node information, or one of the two reports that
+/// live under the same prefix and are told apart by their last part.
+pub async fn nodes_info_scoped(
+    Path(rest): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    if rest.split('/').next_back() == Some("usage") {
+        return nodes_usage(Query(p)).await;
+    }
+    nodes_info(Query(p)).await
+}
+
+/// A write under `/_nodes`: rereading the keystore is the only one.
+pub async fn nodes_post(Path(rest): Path<String>, Query(p): Query<Params>) -> Response {
+    if rest.split('/').next_back() == Some("reload_secure_settings") {
+        return nodes_reload_secure_settings(Query(p)).await;
+    }
+    crate::api::err(
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "not_implemented_exception",
+        "not ported yet",
+    )
+}
+
 pub async fn nodes_info(Query(p): Query<Params>) -> Response {
     let live = crate::cluster::current_state();
     let mut others = serde_json::Map::new();
@@ -494,4 +520,70 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
         }
     }
     respond(&p, body)
+}
+
+/// `_nodes/usage` -- how much of the API each node has been asked for.
+///
+/// A node reports when it started counting and what it counted since; the
+/// counts themselves are not kept here, so the lists are empty rather than
+/// invented.
+pub async fn nodes_usage(Query(p): Query<Params>) -> Response {
+    let live = crate::cluster::current_state();
+    let me = crate::cluster::identity();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mut nodes = serde_json::Map::new();
+    let listed: Vec<(String, String)> = if live.nodes.is_empty() {
+        vec![(me.id.as_str().to_string(), me.name.clone())]
+    } else {
+        live.nodes.values().map(|n| (n.id.as_str().to_string(), n.name.clone())).collect()
+    };
+    for (id, _name) in listed {
+        nodes.insert(
+            id,
+            json!({
+                "timestamp": now,
+                "since": now,
+                "rest_actions": {},
+                "aggregations": {},
+            }),
+        );
+    }
+    let total = nodes.len();
+    crate::api::respond(
+        &p,
+        json!({
+            "_nodes": {"total": total, "successful": total, "failed": 0},
+            "cluster_name": me.cluster_name,
+            "nodes": Value::Object(nodes),
+        }),
+    )
+}
+
+/// `_nodes/reload_secure_settings` -- read the keystore again.
+///
+/// There is no keystore to reread here, so every node answers that it did.
+pub async fn nodes_reload_secure_settings(Query(p): Query<Params>) -> Response {
+    let live = crate::cluster::current_state();
+    let me = crate::cluster::identity();
+    let mut nodes = serde_json::Map::new();
+    let listed: Vec<(String, String)> = if live.nodes.is_empty() {
+        vec![(me.id.as_str().to_string(), me.name.clone())]
+    } else {
+        live.nodes.values().map(|n| (n.id.as_str().to_string(), n.name.clone())).collect()
+    };
+    for (id, name) in listed {
+        nodes.insert(id, json!({"name": name}));
+    }
+    let total = nodes.len();
+    crate::api::respond(
+        &p,
+        json!({
+            "_nodes": {"total": total, "successful": total, "failed": 0},
+            "cluster_name": me.cluster_name,
+            "nodes": Value::Object(nodes),
+        }),
+    )
 }

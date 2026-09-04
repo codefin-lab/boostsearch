@@ -175,6 +175,14 @@ fn app(store: Store) -> Router {
                 .post(api::put_alias_named),
         )
         .route("/_aliases", post(api::update_aliases))
+        // an alias may be named through `_aliases` as well as through `_alias`
+        .route(
+            "/_aliases/{*rest}",
+            get(api::get_alias_scoped)
+                .head(api::exists_alias)
+                .put(api::put_alias_named)
+                .post(api::put_alias_named),
+        )
         // --- snapshots ---
         .route("/_snapshot", get(api::get_repository))
         .route(
@@ -226,6 +234,8 @@ fn app(store: Store) -> Router {
         )
         // --- data streams ---
         .route("/_data_stream", get(api::get_data_stream))
+        .route("/_data_stream/_stats", get(api::data_stream_stats))
+        .route("/_data_stream/{name}/_stats", get(api::data_stream_stats))
         .route(
             "/_data_stream/{name}",
             put(api::create_data_stream)
@@ -241,7 +251,10 @@ fn app(store: Store) -> Router {
             "/{index}/_alias/{name}",
             put(api::put_alias).post(api::put_alias).delete(api::delete_alias),
         )
-        .route("/{index}/_aliases/{name}", put(api::put_alias).delete(api::delete_alias))
+        .route(
+            "/{index}/_aliases/{name}",
+            put(api::put_alias).post(api::put_alias).delete(api::delete_alias),
+        )
         .route("/{index}/_alias", put(api::put_alias_on_index))
         .route("/{index}/_aliases", put(api::put_alias_on_index))
         .route("/_alias", put(api::put_alias_body))
@@ -268,6 +281,7 @@ fn app(store: Store) -> Router {
         .route(
             "/_component_template/{name}",
             put(api::put_component_template)
+                .post(api::put_component_template)
                 .get(api::get_component_template)
                 .delete(api::delete_component_template),
         )
@@ -285,10 +299,13 @@ fn app(store: Store) -> Router {
             post(api::simulate_index_template).put(api::simulate_index_template),
         )
         // --- nodes and cluster housekeeping ---
+        .route("/_nodes/usage", get(api::nodes_usage))
+        .route("/_nodes/usage/{*rest}", get(api::nodes_usage))
+        .route("/_nodes/reload_secure_settings", post(api::nodes_reload_secure_settings))
         .route("/_nodes/stats", get(api::nodes_stats))
         .route("/_nodes/stats/{*rest}", get(api::nodes_stats))
         .route("/_nodes", get(api::nodes_info))
-        .route("/_nodes/{*rest}", get(api::nodes_info))
+        .route("/_nodes/{*rest}", get(api::nodes_info_scoped).post(api::nodes_post))
         .route("/_cluster/reroute", post(api::reroute))
         .route("/_boost/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
@@ -348,7 +365,10 @@ fn app(store: Store) -> Router {
         .route("/{index}/_refresh", post(api::refresh_index).get(api::refresh_index))
         // --- mappings / settings ---
         .route("/_mapping", get(api::get_mapping))
-        .route("/{index}/_mapping", get(api::get_mapping).put(api::put_mapping))
+        .route(
+            "/{index}/_mapping",
+            get(api::get_mapping).put(api::put_mapping).post(api::put_mapping),
+        )
         .route("/_settings", get(api::get_settings))
         .route("/_settings/{name}", get(api::get_settings_all_named))
         .route("/{index}/_settings", get(api::get_settings).put(api::put_settings))
