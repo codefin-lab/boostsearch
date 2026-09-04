@@ -1608,3 +1608,55 @@ bench wins every dimension in passes 1 and 3 (97,282 against 65,664
 docs/s and 368MiB against 2.18GiB on plain HTTP; 92,662 against 55,975
 against os-secure) and every row but three aggregations in the TLS
 against plain pass, the documented transport mismatch.
+
+### 6.14 The cluster's remaining gaps, and what the gate still needs (in progress)
+
+Another pass over the three open items. The corpus on a single node is
+back to **1,427 of 1,427**; on three nodes it reads between 1,317 and
+1,382 of 1,427 depending on the run, and the spread is itself a finding:
+the cluster's answers vary with what the balancer is moving at the
+moment the assertion runs.
+
+What was fixed in this pass:
+
+  - **An aggregation the merge could not produce came back missing.** The
+    engine works some aggregations out from the documents rather than
+    from an intermediate -- a `missing` value, a calendar interval, a
+    pipeline -- and the coordinator has no documents. When the merged
+    answer lacks an aggregation the request named, every holder is asked
+    for its own answer and the buckets are added together by key. The
+    histograms, the typed keys, the pipelines, the multi-terms and the
+    terms with a missing value all come back (10_histogram 3/11 to 11/11,
+    80_typed_keys 9/13 to 13/13, 370_multi_terms 13/17 to 17/17).
+  - **A refusal from another node became "the shards would not answer".**
+    It keeps its status and body now, so a bad request is a bad request
+    wherever the index is held.
+  - **An alias was read from the local store.** Aliases are read from the
+    cluster's metadata, and one just made is waited for before the answer
+    -- as are a template, a pipeline and a script (get_alias 19/23 to
+    23/23, put_alias 11/12 to 12/12, cat.templates 2/9 to 8/9).
+  - **`_all` was an endpoint rather than an index expression**, so
+    `/_all/_stats` answered for one node's share.
+  - **A stats answer counted copies rather than shards**, a copy being
+    moved into place made the cluster red, a terms lookup could not read
+    across nodes, and an `indices_boost` could not name an index held
+    elsewhere.
+
+**What the phase's 2,296 still needs.** On a single node the two corpora
+read 1,427 and 820 of 895 -- 2,247 of 2,322. The 75 the module corpus
+loses on a single node are not cluster work at all: they are the analysis
+plugins (kuromoji, phonetic, ICU, stempel), geoip, the attachment
+processor, reindex from a remote cluster and the URL repository -- each a
+feature to build, and Phase 7's ecosystem work rather than Phase 6's. On
+three nodes the corpus loses another hundred or so, in a long tail of
+single sections (`_stats` fielddata, `cat.shards` while a copy moves,
+scroll and point-in-time across nodes, a sort value's last digit through
+the coordinator), and those are Phase 6's own debt.
+
+Gates as they stand: unit 67/67, the storm over a thousand seeds clean,
+phase1 398/398, core corpus 1,427/1,427 on one node, chaos seeds and the
+rolling restart with no acknowledged write lost, the rolling upgrade with
+three writes in a thousand refused; bench wins **every** dimension in all
+three passes (93,933 against 66,368 docs/s and 401MiB against 2.25GiB on
+plain HTTP; 88,690 against 57,340 against os-secure; and every row of the
+TLS-against-plain pass as well).
