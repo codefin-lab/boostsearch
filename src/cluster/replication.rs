@@ -982,6 +982,14 @@ pub async fn seed_by_scan(
             if let Some(meta) = meta {
                 let made = tokio::task::spawn_blocking(move || {
                     store2.drop_local(&name);
+                    // files a half-finished recovery left behind: nothing holds
+                    // them open once the store has let the index go, and the
+                    // new copy cannot be opened on top of them
+                    if store2.get(&name).is_none() {
+                        if let Some(dir) = store2.index_dir(&name) {
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                    }
                     let mut settings = meta.settings.clone();
                     if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
                         for k in ["creation_date", "provided_name", "version"] {

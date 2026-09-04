@@ -923,3 +923,42 @@ fn add_into(acc: &mut Value, other: &Value) {
         _ => {}
     }
 }
+
+/// Read one document of an index this node holds no copy of.
+///
+/// A terms lookup names a document in another index, and on a cluster that
+/// index may be anywhere: the node holding it is asked for the document the
+/// way any other request would be forwarded.
+pub fn fetch_document(index: &str, id: &str) -> Option<Value> {
+    let rt = super::runtime()?;
+    let me = rt.local();
+    let holder = super::with_state(|s| {
+        s.nodes.keys().find(|n| **n != me && held_here(s, n, index)).cloned()
+    })?;
+    let ask = json!({
+        "method": "GET",
+        "uri": format!("/{index}/_doc/{id}"),
+        "headers": [],
+        "body": "",
+        "caller": crate::security::layer::current_caller().unwrap_or_default(),
+    });
+    // the call runs on the runtime and this thread waits for it: the search
+    // that asks for the document may already be inside a blocking section,
+    // and a nested block would deadlock rather than answer
+    let (tx, rx) = std::sync::mpsc::channel();
+    let body = serde_json::to_vec(&ask).unwrap_or_default();
+    let rt2 = rt.clone();
+    let to = holder.clone();
+    super::handle()?.spawn(async move {
+        let answer = rt2.call(&to, FORWARD, body, std::time::Duration::from_secs(10)).await;
+        let _ = tx.send(answer);
+    });
+    let answer = rx.recv_timeout(std::time::Duration::from_secs(12)).ok().flatten()?;
+    if answer.kind == Kind::Error {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&answer.body).ok()?;
+    let body = v.get("body").and_then(|b| b.as_str())?;
+    let doc: Value = serde_json::from_str(body).ok()?;
+    doc.get("_source").cloned()
+}

@@ -68,10 +68,20 @@ pub fn state_uuid() -> String {
 static STATE_UUID: OnceLock<String> = OnceLock::new();
 
 static RUNTIME: OnceLock<Arc<runtime::Runtime>> = OnceLock::new();
+static HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
 /// The node's coordinator runtime, once it is up.
 pub fn set_runtime(rt: Arc<runtime::Runtime>) {
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        let _ = HANDLE.set(h);
+    }
     let _ = RUNTIME.set(rt);
+}
+
+/// The runtime the node is running on, for the few places that must ask
+/// another node from a thread that is not itself async.
+pub fn handle() -> Option<tokio::runtime::Handle> {
+    HANDLE.get().cloned().or_else(|| tokio::runtime::Handle::try_current().ok())
 }
 
 pub fn runtime() -> Option<Arc<runtime::Runtime>> {

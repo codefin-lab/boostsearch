@@ -421,11 +421,16 @@ pub fn run_spanning(
         }
     }
     let own = own_aggregations(body);
-    if !own.is_empty() {
-        // one node holding everything runs it whole
-        let holder = super::with_state(|s| {
-            s.nodes.keys().find(|n| plan.all.iter().all(|i| active_here(s, n, i))).cloned()
-        });
+    // a terms lookup reads a document of another index; when one node holds
+    // both, the search runs there and the lookup is a local read
+    let lookups = lookup_indices(body);
+    let holder = super::with_state(|s| {
+        s.nodes
+            .keys()
+            .find(|n| plan.all.iter().chain(lookups.iter()).all(|i| active_here(s, n, i)))
+            .cloned()
+    });
+    if !own.is_empty() || (!lookups.is_empty() && holder.is_some()) {
         return match holder {
             Some(n) => {
                 let me = rt.local();
@@ -808,4 +813,35 @@ mod tests {
             vec!["collapse/rescore/slice"]
         );
     }
+}
+
+/// The indices a terms lookup in this body reads its terms from.
+fn lookup_indices(body: &Value) -> Vec<String> {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(o) => {
+                if let Some(Value::Object(terms)) = o.get("terms") {
+                    for def in terms.values() {
+                        if let Some(i) = def.get("index").and_then(|i| i.as_str()) {
+                            if !out.iter().any(|x| x == i) {
+                                out.push(i.to_string());
+                            }
+                        }
+                    }
+                }
+                for inner in o.values() {
+                    walk(inner, out);
+                }
+            }
+            Value::Array(a) => {
+                for inner in a {
+                    walk(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, &mut out);
+    out
 }

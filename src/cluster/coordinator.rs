@@ -1687,6 +1687,10 @@ impl NodeLogic for Coordinator {
                                     "shard [{index}][{shard}] failed here: {message}"
                                 )));
                             }
+                            // it may be placed here again under the same id:
+                            // the node has to be free to make it a second time
+                            self.reported.remove(&allocation_id);
+                            self.started_here.remove(&allocation_id);
                             ShardEvent::Failed { index, shard, allocation_id, message }
                         }
                     };

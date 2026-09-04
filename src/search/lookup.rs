@@ -359,6 +359,32 @@ pub(crate) fn resolve_terms_lookups(
                     ) else {
                         continue;
                     };
+                    let elsewhere = store.get(index).is_none();
+                    if elsewhere {
+                        // the index is the cluster's, not this node's: the
+                        // document comes from the node holding it
+                        let id = d.get("id").and_then(|v| v.as_str());
+                        let from_cluster =
+                            id.and_then(|id| crate::cluster::forward::fetch_document(index, id));
+                        match from_cluster {
+                            Some(src) => {
+                                let pointer = format!("/{}", path.replace('.', "/"));
+                                let list = match src.pointer(&pointer).cloned() {
+                                    Some(Value::Array(a)) => a,
+                                    Some(one) => vec![one],
+                                    None => Vec::new(),
+                                };
+                                let vt = o.get("terms").and_then(|t| t.get("value_type")).cloned();
+                                let mut terms = json!({ field.clone(): list });
+                                if let Some(vt) = vt {
+                                    terms["value_type"] = vt;
+                                }
+                                o.insert("terms".into(), terms);
+                                continue;
+                            }
+                            None => return Err(no_such_index(index)),
+                        }
+                    }
                     let Some(st) = store.get(index) else {
                         return Err(no_such_index(index));
                     };
