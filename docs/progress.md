@@ -1708,3 +1708,39 @@ plugin disabled.
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- the same 75 as before, none of them Dashboards work.
+
+### 7.1 -- what Dashboards on three nodes found
+
+Pointing Dashboards at a three-node cluster rather than one node turned up
+three things, all of them the cluster's rather than Dashboards':
+
+  - **A bulk ran wherever it landed.** A `_bulk` was sent to the cluster
+    manager, and the manager wrote it -- even for an index whose copies
+    are on other nodes. The write then reached one copy and not the
+    primary, and the answer said it had succeeded: acknowledged writes
+    that a later read could not find. A bulk is coordinated now: the
+    body is split by the index each operation names, each part goes to
+    the node holding that index's primary, an index the cluster does not
+    know yet goes to the manager to be made, and the items come back in
+    the order they were asked. The answer waits until this node knows
+    the indices the bulk created, the way a create does.
+  - **The listings spoke only for the node that answered.** `_cat/indices`
+    and `_cat/shards` are asked of every node now: the node holding a
+    copy writes its row, with the documents it holds and what the copy
+    takes on disk, and the node the request reached writes the rows for
+    the copies no node holds. The rows are gathered under one header --
+    the one from a node that had rows to describe -- and `format=json`
+    is joined and ordered the same way.
+  - **`/` gave the same answer on every node.** It reports the node's own
+    name, the cluster it joined and the cluster's uuid, with the build
+    and compatibility fields a client reads.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100 on one node,
+module corpus 820/895; **core corpus 1,076/1,100 on three nodes**, up
+from about a thousand -- the cluster's own tail is 24 sections now
+(`indices.delete_alias` across nodes 8, the terms and multi-terms
+aggregations 6, and single sections in `cat.indices`, `cat.shards`,
+`cluster.state`, `indices.open`, `indices.shard_stores`,
+`indices.stats` translog, a pre-filter search and a terms lookup).
+Chaos, the rolling restart and the register check all end with no
+acknowledged write lost and the register linearizable.

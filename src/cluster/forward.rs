@@ -35,6 +35,17 @@ static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 #[derive(Clone, Debug)]
 pub struct ForwardedCaller(pub Caller);
 
+tokio::task_local! {
+    /// Set while this node answers a request another node sent it.
+    static ANSWERING_FORWARD: bool;
+}
+
+/// Is this node answering for another node's request? A listing every node
+/// contributes rows to asks, so that the rows no node holds are written once.
+pub fn answering_forward() -> bool {
+    ANSWERING_FORWARD.try_with(|v| *v).unwrap_or(false)
+}
+
 /// Where a request belongs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -77,7 +88,9 @@ pub fn classify(method: &Method, path: &str) -> Target {
             // the tables that count what a node holds are asked of every node
             "_stats" => Target::Broadcast(None),
             "_cat" => match first_segment(rest).0 {
-                "segments" | "fielddata" => {
+                // the tables whose numbers a node can only give for what it
+                // holds: each node answers for its own copies
+                "segments" | "fielddata" | "indices" | "shards" => {
                     let (_, after) = first_segment(rest);
                     let name = first_segment(after).0;
                     Target::Broadcast((!name.is_empty()).then(|| name.to_string()))
@@ -344,7 +357,7 @@ fn time_text(ms: u64) -> String {
 pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Response {
     // a request another node sent here is answered here
     if req.extensions().get::<ForwardedCaller>().is_some() {
-        return run_with_replication(&store, req, next).await;
+        return ANSWERING_FORWARD.scope(true, run_with_replication(&store, req, next)).await;
     }
     let Some(rt) = super::runtime() else {
         return run_with_replication(&store, req, next).await;
@@ -389,6 +402,13 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     // answer can wait until this node knows it: a create that answered before
     // the state reached the node the client is talking to would have the very
     // next request say the index is not there
+    // A bulk is coordinated, not run wherever it lands: each operation
+    // belongs to an index, and an index's writes belong to the node holding
+    // its primary. Running the whole body on the node the request reached
+    // would have a copy take writes the primary never saw.
+    if matches!(target, Target::Write(None)) && super::with_state(|s| s.nodes.len() > 1) {
+        return coordinate_bulk(&rt, &store, req, next).await;
+    }
     let settles = settles_metadata(req.method(), &path);
     let settles_c = settles_custom(req.method(), &path);
     let settles_a = settles_alias(req.method(), &path);
@@ -710,8 +730,14 @@ async fn broadcast(
             (n, answer)
         }));
     }
-    let local: Option<Response> =
-        if here { Some(run_with_replication(store, rebuild(&parts), next).await) } else { None };
+    // a `cat` table always runs here as well: the node that took the request
+    // is the one that speaks for the copies no node holds
+    let path_is_cat = parts.uri.path().starts_with("/_cat/");
+    let local: Option<Response> = if here || path_is_cat {
+        Some(run_with_replication(store, rebuild(&parts), next).await)
+    } else {
+        None
+    };
     let mut answers: Vec<(usize, Response)> = Vec::new();
     for w in waits {
         if let Ok(a) = w.await {
@@ -726,6 +752,9 @@ async fn broadcast(
     let mut first: Option<(StatusCode, Value)> = None;
     let mut per_index: std::collections::BTreeMap<String, Value> = Default::default();
     let mut lines: Vec<String> = Vec::new();
+    let mut cat_json: Vec<Value> = Vec::new();
+    let path_is_cat_body = parts.uri.path().starts_with("/_cat/");
+    let path_is_cat = path_is_cat_body;
     // counters -- what an index cost -- are added up over the nodes holding it
     let summing = path_is_stats;
     let mut summed: Option<Value> = None;
@@ -769,6 +798,13 @@ async fn broadcast(
                 None => summed = Some(v.clone()),
             }
         }
+        // a `cat` table asked for as json: every node's rows, in one array
+        if path_is_cat && v.is_array() && status.is_success() {
+            if let Some(a) = v.as_array() {
+                cat_json.extend(a.iter().cloned());
+            }
+            continue;
+        }
         if let Some(idx) = v.get("indices").and_then(|i| i.as_object()) {
             for (k, val) in idx {
                 per_index.insert(k.clone(), val.clone());
@@ -781,21 +817,34 @@ async fn broadcast(
             first = Some((status, v));
         }
     }
+    if path_is_cat && !cat_json.is_empty() {
+        let query = parse_query(parts.uri.query().unwrap_or(""));
+        sort_cat_json(&mut cat_json, query.get("s").map(|x| x.as_str()));
+        let mut r = Response::new(Body::from(Value::Array(cat_json).to_string()));
+        r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        return r;
+    }
     if !lines.is_empty() {
-        // the first table's header, then every table's rows
+        // One header, then every node's rows. Every node ran the same handler
+        // with the same parameters, so either all the tables carry a header
+        // line or none of them do; the header kept is the one from a node
+        // that had rows to describe, since a node with nothing to say cannot
+        // know which columns the rows will need.
+        let query = parse_query(parts.uri.query().unwrap_or(""));
+        let headed =
+            query.contains_key("v") && query.get("v").map(|v| v != "false").unwrap_or(true);
         let mut header: Option<String> = None;
         let mut rows: Vec<String> = Vec::new();
         for table in &lines {
             let mut ls = table.lines();
-            if let Some(head) = ls.next() {
-                // a header line names columns; a row starts with a value
-                if header.is_none() && head.split_whitespace().count() > 1 && !head.starts_with(' ')
-                {
+            if headed {
+                let Some(head) = ls.next() else { continue };
+                let body: Vec<String> = ls.map(|l| l.to_string()).collect();
+                if header.is_none() || (!body.is_empty() && rows.is_empty()) {
                     header = Some(head.to_string());
-                    rows.extend(ls.map(|l| l.to_string()));
-                    continue;
                 }
-                rows.push(head.to_string());
+                rows.extend(body);
+            } else {
                 rows.extend(ls.map(|l| l.to_string()));
             }
         }
@@ -875,6 +924,282 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
             replication::finish(response, ops, &refresh).await
         })
         .await
+}
+
+
+
+/// Put a `cat` table's rows in the order the request asked for, the way one
+/// node would have ordered them before its rows were joined with the others'.
+fn sort_cat_json(rows: &mut [Value], spec: Option<&str>) {
+    let keys: Vec<(String, bool)> = match spec.filter(|s| !s.is_empty()) {
+        Some(s) => s
+            .split(',')
+            .map(|k| match k.trim().split_once(':') {
+                Some((name, dir)) => (name.to_string(), dir.eq_ignore_ascii_case("desc")),
+                None => (k.trim().to_string(), false),
+            })
+            .collect(),
+        // no order asked for: by index name, which is how each node had
+        // already sorted its own rows
+        None => rows
+            .first()
+            .and_then(|r| r.as_object())
+            .and_then(|o| {
+                o.keys().find(|k| *k == "index").or_else(|| o.keys().next()).cloned()
+            })
+            .map(|k| vec![(k, false)])
+            .unwrap_or_default(),
+    };
+    if keys.is_empty() {
+        return;
+    }
+    rows.sort_by(|a, b| {
+        for (name, desc) in &keys {
+            let pick = |v: &Value| -> String {
+                v.as_object()
+                    .and_then(|o| {
+                        o.iter()
+                            .find(|(k, _)| crate::api::cat::cat_column_matches(k, name))
+                            .map(|(_, v)| v)
+                    })
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    })
+                    .unwrap_or_default()
+            };
+            let ord = pick(a).cmp(&pick(b));
+            let ord = if *desc { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+/// Split a bulk body by the node that holds each index's primary, send each
+/// part to that node, and put the answers back in the order they were asked.
+///
+/// An index the cluster does not know yet is the manager's to make, so its
+/// operations go there; the operations for indices held here run here.
+async fn coordinate_bulk(
+    rt: &std::sync::Arc<super::runtime::Runtime>,
+    store: &Store,
+    req: Request,
+    next: Next,
+) -> Response {
+    let me = rt.local();
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, crate::api::max_content_bytes() as usize).await {
+        Ok(b) => b,
+        Err(_) => {
+            return crate::api::err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "body could not be read",
+            );
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    // the path may name the index every operation defaults to
+    let default_index = {
+        let p = parts.uri.path();
+        let p = p.strip_prefix('/').unwrap_or(p);
+        match p.strip_suffix("_bulk").and_then(|x| x.strip_suffix('/')) {
+            Some(i) if !i.is_empty() => Some(i.to_string()),
+            _ => None,
+        }
+    };
+    // each operation, as the lines it is written on and the index it names
+    let mut groups: std::collections::BTreeMap<Option<NodeId>, (Vec<usize>, String)> =
+        Default::default();
+    let mut count = 0usize;
+    // the operations, each as the lines it was written on and the index it
+    // names; the body is read through before anything is sent
+    enum Split {
+        Ops(Vec<(String, Option<String>, String)>),
+        Unreadable,
+    }
+    let split = {
+        let mut out: Vec<(String, Option<String>, String)> = Vec::new();
+        let mut bad = false;
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        while let Some(action_line) = lines.next() {
+            let Ok(action) = serde_json::from_str::<Value>(action_line) else {
+                bad = true;
+                break;
+            };
+            let Some((op, meta)) = action.as_object().and_then(|o| o.iter().next()) else {
+                bad = true;
+                break;
+            };
+            let index = meta
+                .get("_index")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| default_index.clone());
+            let doc_line = if op == "delete" { None } else { lines.next().map(|l| l.to_string()) };
+            let Some(index) = index else {
+                bad = true;
+                break;
+            };
+            out.push((action_line.to_string(), doc_line, index));
+        }
+        if bad { Split::Unreadable } else { Split::Ops(out) }
+    };
+    // a body this node cannot read is the handler's complaint to make
+    let Split::Ops(ops) = split else {
+        return run_local_bulk(store, parts, bytes, next).await;
+    };
+    // an index a write is about to make is not in the cluster's metadata yet;
+    // the answer waits until this node knows it, the way it does for a create
+    let mut made: Vec<String> = Vec::new();
+    for (action_line, doc_line, index) in ops {
+        // an alias or a data stream names an index; an unknown name is the
+        // manager's to create
+        if super::with_state(|s| resolve(s, store, &index).is_empty()) && !made.contains(&index) {
+            made.push(index.clone());
+        }
+        let node = super::with_state(|s| {
+            let names = resolve(s, store, &index);
+            match names.first() {
+                Some(n) => primary_node(s, n).or_else(|| s.cluster_manager.clone()),
+                None => s.cluster_manager.clone(),
+            }
+        });
+        let entry = groups.entry(node).or_insert_with(|| (Vec::new(), String::new()));
+        entry.0.push(count);
+        entry.1.push_str(&action_line);
+        entry.1.push('\n');
+        if let Some(d) = doc_line {
+            entry.1.push_str(&d);
+            entry.1.push('\n');
+        }
+        count += 1;
+    }
+    // everything belongs to one node: the request goes there whole
+    if groups.len() <= 1 {
+        let only = groups.keys().next().cloned().flatten();
+        let r = match only {
+            Some(to) if to != me => forward(rt, &to, rebuild_request(&parts, bytes.clone())).await,
+            _ => run_local_bulk(store, parts, bytes, next).await,
+        };
+        return wait_for_made(store, &made, r).await;
+    }
+    // otherwise each node answers for its own part, all at once
+    let mut here: Option<(Vec<usize>, String)> = None;
+    let mut waits = Vec::new();
+    for (node, (order, part)) in groups {
+        match node {
+            Some(to) if to != me => {
+                let r = rebuild_request(&parts, axum::body::Bytes::from(part));
+                let rt = rt.clone();
+                waits.push(tokio::spawn(async move {
+                    let answer = forward(&rt, &to, r).await;
+                    (order, answer)
+                }));
+            }
+            _ => match here.as_mut() {
+                Some((o, b)) => {
+                    o.extend(order);
+                    b.push_str(&part);
+                }
+                None => here = Some((order, part)),
+            },
+        }
+    }
+    let mut answers: Vec<(Vec<usize>, Response)> = Vec::new();
+    if let Some((order, part)) = here {
+        let r = run_local_bulk(store, parts.clone(), axum::body::Bytes::from(part), next).await;
+        answers.push((order, r));
+    }
+    for w in waits {
+        if let Ok(a) = w.await {
+            answers.push(a);
+        }
+    }
+    let mut items: Vec<Option<Value>> = vec![None; count];
+    let mut errors = false;
+    let mut took = 0u64;
+    let mut ingest_took: Option<u64> = None;
+    for (order, r) in answers {
+        let status = r.status();
+        let body = axum::body::to_bytes(r.into_body(), crate::api::max_content_bytes() as usize)
+            .await
+            .unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        // a part that failed outright is the whole bulk's answer: the caller
+        // is told what went wrong rather than given a half-written body
+        if !status.is_success() {
+            let mut out = Response::new(Body::from(body));
+            *out.status_mut() = status;
+            out.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            return out;
+        }
+        errors |= v.get("errors").and_then(|e| e.as_bool()).unwrap_or(false);
+        took = took.max(v.get("took").and_then(|t| t.as_u64()).unwrap_or(0));
+        if let Some(t) = v.get("ingest_took").and_then(|t| t.as_u64()) {
+            ingest_took = Some(ingest_took.unwrap_or(0).max(t));
+        }
+        if let Some(list) = v.get("items").and_then(|i| i.as_array()) {
+            for (slot, item) in order.iter().zip(list.iter()) {
+                if let Some(cell) = items.get_mut(*slot) {
+                    *cell = Some(item.clone());
+                }
+            }
+        }
+    }
+    let mut out = json!({
+        "took": took,
+        "errors": errors,
+        "items": items.into_iter().map(|i| i.unwrap_or(Value::Null)).collect::<Vec<_>>(),
+    });
+    if let Some(t) = ingest_took {
+        out["ingest_took"] = json!(t);
+    }
+    let mut r = Response::new(Body::from(out.to_string()));
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    wait_for_made(store, &made, r).await
+}
+
+/// Hold the answer until this node knows the indices the bulk made, so the
+/// request after it does not find them missing.
+async fn wait_for_made(store: &Store, made: &[String], response: Response) -> Response {
+    if made.is_empty() || !response.status().is_success() {
+        return response;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let known = super::with_state(|s| {
+            made.iter().all(|n| s.indices.contains_key(n) || !resolve(s, store, n).is_empty())
+        });
+        if known || std::time::Instant::now() >= deadline {
+            return response;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// The request again, with a body of its own.
+fn rebuild_request(parts: &axum::http::request::Parts, body: axum::body::Bytes) -> Request {
+    let mut b = axum::http::Request::builder().method(parts.method.clone()).uri(parts.uri.clone());
+    for (k, v) in parts.headers.iter() {
+        b = b.header(k, v);
+    }
+    let mut r = b.body(Body::from(body)).unwrap_or_default();
+    *r.extensions_mut() = parts.extensions.clone();
+    r
+}
+
+async fn run_local_bulk(
+    store: &Store,
+    parts: axum::http::request::Parts,
+    bytes: axum::body::Bytes,
+    next: Next,
+) -> Response {
+    run_with_replication(store, rebuild_request(&parts, bytes), next).await
 }
 
 /// Send the request to the node, whole, and hand back its answer, whole.
@@ -1026,7 +1351,10 @@ mod tests {
         let del = Method::DELETE;
         assert_eq!(classify(&get, "/"), Target::Local);
         assert_eq!(classify(&get, "/_cluster/health"), Target::Local);
-        assert_eq!(classify(&get, "/_cat/shards"), Target::Local);
+        // a listing whose numbers only a holder can give goes to every node
+        assert_eq!(classify(&get, "/_cat/shards"), Target::Broadcast(None));
+        assert_eq!(classify(&get, "/_cat/indices"), Target::Broadcast(None));
+        assert_eq!(classify(&get, "/_cat/health"), Target::Local);
         assert_eq!(classify(&put, "/_cluster/settings"), Target::Manager);
         assert_eq!(classify(&put, "/logs"), Target::Manager);
         assert_eq!(classify(&del, "/logs"), Target::Manager);

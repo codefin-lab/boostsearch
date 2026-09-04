@@ -19,7 +19,7 @@ mod alias;
 // The handlers are re-exported flat, so the routing table reads as one list
 // and the module a handler lives in is a detail of where to find it.
 pub use alias::*;
-mod cat;
+pub(crate) mod cat;
 pub use cat::*;
 mod cluster;
 pub use cluster::*;

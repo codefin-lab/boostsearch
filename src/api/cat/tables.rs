@@ -97,7 +97,49 @@ pub async fn cat_indices(
     let unit = p.get("bytes").map(|s| s.to_string());
     let sized = |bytes: u64| crate::api::shared::sized(unit.as_deref(), bytes);
     let published = crate::cluster::current_state();
+    // On a cluster the node holding an index's primary is the one that can
+    // say how many documents it has and what it takes on disk, so that node
+    // writes the row. The node the request reached writes the rows for the
+    // indices no node holds; every row is gathered into one table.
+    let clustered = published.nodes.len() > 1;
+    let me = crate::cluster::identity().id.clone();
+    let primary_here = |n: &str| {
+        published
+            .routing
+            .shards_of(n)
+            .any(|c| {
+                c.primary
+                    && c.node.as_ref() == Some(&me)
+                    && matches!(
+                        c.state,
+                        crate::cluster::state::ShardState::Started
+                            | crate::cluster::state::ShardState::Relocating
+                    )
+            })
+    };
+    let held_somewhere = |n: &str| {
+        published.routing.shards_of(n).any(|c| {
+            c.primary
+                && matches!(
+                    c.state,
+                    crate::cluster::state::ShardState::Started
+                        | crate::cluster::state::ShardState::Relocating
+                )
+        })
+    };
+    // rows for indices no node holds are written once, by the node the
+    // request reached rather than by every node answering it
+    let forwarded = crate::cluster::forward::answering_forward();
     for n in names {
+        if clustered {
+            if held_somewhere(&n) {
+                if !primary_here(&n) {
+                    continue;
+                }
+            } else if forwarded {
+                continue;
+            }
+        }
         let Some(st) = store.get(&n) else {
             // an index of the cluster whose copies are on other nodes: what
             // the manager published is what there is to say about it here
@@ -135,13 +177,17 @@ pub async fn cat_indices(
         if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
             continue;
         }
-        // an index asking for replicas has some it will never get on one node
-        let health = if g.numeric_setting("number_of_replicas").unwrap_or(0) > 0 {
-            "yellow"
-        } else {
-            "green"
+        // health is the cluster's answer about the index, not this node's
+        // share of it: a copy held here says nothing about the copy elsewhere
+        let only = vec![g.name.clone()];
+        let health = match published.indices.get(&g.name) {
+            Some(_) => published.health_status(Some(&only)).to_string(),
+            // no published state (a node running alone before the coordinator
+            // has started): an index asking for replicas will not get them
+            None if g.numeric_setting("number_of_replicas").unwrap_or(0) > 0 => "yellow".into(),
+            None => "green".to_string(),
         };
-        if p.get("health").map(|h| h != health).unwrap_or(false) {
+        if p.get("health").map(|h| h != &health).unwrap_or(false) {
             continue;
         }
         // a closed index has no shard open to count, so those columns are
@@ -150,7 +196,7 @@ pub async fn cat_indices(
         let bytes_on_disk = store.index_size(&g.name);
         let count = |v: String| if g.closed { String::new() } else { v };
         rows.push(vec![
-            ("health", health.to_string()),
+            ("health", health),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
             ("index", g.name.clone()),
             ("uuid", g.uuid.clone()),
