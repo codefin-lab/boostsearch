@@ -67,16 +67,55 @@ pub(crate) fn millis_in_keys(node: &mut Value) {
 
 // a range aggregation answers for the ranges it was given; a gap between
 // two of them was not asked about and is not a bucket
+
+/// The metrics OpenSearch answers with a whole number rather than a fraction.
+///
+/// `value_count` counts values and `cardinality` counts distinct ones; both
+/// are longs there, and a client that reads them into an integer cannot read
+/// `3.0`.
+pub(crate) fn whole_metric_values(result: &mut Value, req: &Value) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(defo) = def.as_object() else { continue };
+        let Some(node) = result.get_mut(name) else { continue };
+        if defo.contains_key("value_count") || defo.contains_key("cardinality") {
+            if let Some(v) = node.get("value").and_then(|v| v.as_f64())
+                && v.fract() == 0.0
+            {
+                node["value"] = json!(v as i64);
+            }
+        }
+        let Some(subs) = defo.get("aggs").or_else(|| defo.get("aggregations")) else { continue };
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => {
+                for b in list.iter_mut() {
+                    whole_metric_values(b, subs);
+                }
+            }
+            Some(Value::Object(named)) => {
+                for (_, b) in named.iter_mut() {
+                    whole_metric_values(b, subs);
+                }
+            }
+            _ => whole_metric_values(node, subs),
+        }
+    }
+}
+
 pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
     let Some(reqs) = request.as_object() else { return };
     for (name, def) in reqs {
-        let asked: Option<Vec<(Option<f64>, Option<f64>)>> =
+        #[allow(clippy::type_complexity)]
+        let asked: Option<Vec<((Option<f64>, Option<f64>), Option<String>)>> =
             def.pointer("/range/ranges").and_then(|r| r.as_array()).map(|a| {
                 a.iter()
                     .map(|r| {
                         (
-                            r.get("from").and_then(|v| v.as_f64()),
-                            r.get("to").and_then(|v| v.as_f64()),
+                            (
+                                r.get("from").and_then(|v| v.as_f64()),
+                                r.get("to").and_then(|v| v.as_f64()),
+                            ),
+                            r.get("key").and_then(|v| v.as_str()).map(|s| s.to_string()),
                         )
                     })
                     .collect()
@@ -85,11 +124,19 @@ pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
         if let Some(asked) = asked
             && let Some(buckets) = node.get_mut("buckets").and_then(|b| b.as_array_mut())
         {
-            buckets.retain(|b| {
-                let pair =
-                    (b.get("from").and_then(|v| v.as_f64()), b.get("to").and_then(|v| v.as_f64()));
-                asked.contains(&pair)
-            });
+            let pair_of = |b: &Value| {
+                (b.get("from").and_then(|v| v.as_f64()), b.get("to").and_then(|v| v.as_f64()))
+            };
+            buckets.retain(|b| asked.iter().any(|(p, _)| *p == pair_of(b)));
+            // a range written with a key of its own is answered by that key
+            // rather than by the bounds it stands for
+            for b in buckets.iter_mut() {
+                let pair = pair_of(b);
+                if let Some((_, Some(key))) = asked.iter().find(|(p, k)| *p == pair && k.is_some())
+                {
+                    b["key"] = json!(key);
+                }
+            }
         }
         let subs = def.get("aggs").or_else(|| def.get("aggregations"));
         if let Some(subs) = subs {

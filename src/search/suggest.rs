@@ -23,7 +23,13 @@ pub(crate) fn build_suggest(
             continue;
         }
         let Some(b) = body.as_object() else { continue };
-        let text = b.get("text").and_then(|t| t.as_str()).unwrap_or(global_text);
+        // a completion suggester is usually given a `prefix`; the others take
+        // `text`, and either may fall back to the one written once at the top
+        let text = b
+            .get("prefix")
+            .or_else(|| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or(global_text);
 
         if let Some(c) = b.get("completion") {
             let entries = completion_suggest(store, targets, text, c)?;

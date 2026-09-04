@@ -43,20 +43,25 @@ pub async fn update_doc(
             }
         }
     }
-    // an update carrying an upsert creates the index, the way OpenSearch does
-    let has_upsert = patch.get("upsert").is_some()
-        || patch.get("doc_as_upsert").and_then(|v| v.as_bool()).unwrap_or(false);
-    let st = if has_upsert {
-        match store.ensure(&index) {
-            Ok(s) => s,
-            Err(e) => {
-                return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
+    // an update makes the index it is aimed at, the way any other write does:
+    // OpenSearch creates it and then says the document is not in it
+    let st = match store.get(&index) {
+        Some(s) => s,
+        None => {
+            if let Some(complaint) = crate::api::auto_create_complaint(&store, &index) {
+                let _ = complaint;
+                return no_such_index(&index);
             }
-        }
-    } else {
-        match store.get(&index) {
-            Some(s) => s,
-            None => return no_such_index(&index),
+            match store.ensure(&index) {
+                Ok(s) => s,
+                Err(e) => {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        e.to_string(),
+                    );
+                }
+            }
         }
     };
     let mut g = st.write();

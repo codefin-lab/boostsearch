@@ -200,21 +200,66 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
 
     // one node can hold one copy of a shard, so an index asking for replicas
     // has some it will never get, and the cluster is yellow while it is in view
+    // an index that says nothing about replicas gets one, which is what
+    // OpenSearch gives it
     let unassignable = names
         .iter()
         .filter_map(|n| store.get(n))
-        .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
+        .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(1) > 0);
     // what the cluster manager placed decides, once it has placed anything
     // named here; the store's own settings speak for an index it has not seen
     let live = crate::cluster::current_state();
     let placed = names.iter().any(|n| live.routing.indices.contains_key(n));
-    let status = if placed {
-        live.health_status(Some(&names))
-    } else if unassignable {
-        "yellow"
-    } else {
-        "green"
+    // the metadata says how many copies an index should have; a copy the
+    // routing has not got yet is a copy nobody holds, which is what makes an
+    // index yellow whether the manager has caught up or not
+    let short = names.iter().any(|n| {
+        // how many copies there should be: what the manager published, or
+        // what the index itself was asked for before the manager caught up
+        let published = live
+            .indices
+            .get(n)
+            .map(|m| (m.number_of_shards.max(1) * (1 + m.number_of_replicas)) as usize);
+        let asked = store.get(n).map(|st| {
+            let g = st.read();
+            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
+            let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
+            (shards * (1 + replicas)) as usize
+        });
+        let want = match (published, asked) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        // nothing placed yet is not a shortfall: the manager has not begun
+        let have = live.routing.shards_of(n).count();
+        have > 0 && want.map(|want| have < want).unwrap_or(false)
+    });
+    // a copy the routing has not got is a copy nobody holds, whether the
+    // manager has caught up with the index or never will
+    let status = match (placed, short) {
+        (true, false) => live.health_status(Some(&names)),
+        (true, true) => match live.health_status(Some(&names)) {
+            "red" => "red",
+            _ => "yellow",
+        },
+        (false, true) => "yellow",
+        (false, false) if unassignable => "yellow",
+        (false, false) => "green",
     };
+    // an index named in full that the cluster does not know is one the health
+    // request would wait for and never see
+    let missing = expr
+        .as_deref()
+        .map(|e| {
+            e.split(',').map(|x| x.trim()).any(|part| {
+                !part.is_empty()
+                    && !part.contains('*')
+                    && part != "_all"
+                    && !live.indices.contains_key(part)
+                    && store.get(part).is_none()
+            })
+        })
+        .unwrap_or(false);
 
     // a wait this engine cannot satisfy is answered as a timeout rather than
     // by waiting: nothing here is going to change while the request is held
@@ -256,6 +301,12 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
             }
         }
     }
+    // a health request naming an index that is not there waits for it and
+    // gives up: it is answered as the timeout it would have become
+    let (status, satisfied) = match missing {
+        true => ("red", false),
+        false => (status, satisfied),
+    };
     let mut out = json!({
         "cluster_name": crate::cluster::identity().cluster_name, "status": status, "timed_out": !satisfied,
         "number_of_nodes": crate::cluster::current_state().nodes.len(),
@@ -277,7 +328,7 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
             let (shards, replicas) = match (store.get(name), live.indices.get(name)) {
                 (Some(st), _) => (
                     st.read().shard_count() as usize,
-                    st.read().numeric_setting("number_of_replicas").unwrap_or(0) as usize,
+                    st.read().numeric_setting("number_of_replicas").unwrap_or(1) as usize,
                 ),
                 (None, Some(m)) => (m.number_of_shards as usize, m.number_of_replicas as usize),
                 _ => continue,

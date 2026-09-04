@@ -120,12 +120,26 @@ pub(crate) fn build_highlight(
                 .unwrap_or(Value::Null);
             let plain = opts.get("type").and_then(|t| t.as_str()) == Some("plain")
                 || spec.get("type").and_then(|t| t.as_str()) == Some("plain");
-            let text = match opts.get("max_analyzer_offset").and_then(|v| v.as_u64()) {
-                Some(cap) if plain => {
-                    let cap = (cap as usize).min(text.len());
-                    &text[..cap]
+            // `max_analyzer_offset` says how far into the field the analyser
+            // is allowed to read: past it there are no tokens, so there is
+            // nothing to mark. It is not the plain highlighter's alone.
+            let (text, beyond) = match opts
+                .get("max_analyzer_offset")
+                .or_else(|| spec.get("max_analyzer_offset"))
+                .and_then(|v| v.as_u64())
+            {
+                Some(cap) => {
+                    let mut cap = (cap as usize).min(text.len());
+                    while cap > 0 && !text.is_char_boundary(cap) {
+                        cap -= 1;
+                    }
+                    // the analyser stops there. The plain highlighter builds
+                    // its fragments out of what it analysed, so its answer
+                    // stops there too; the unified one marks inside the whole
+                    // field, and what lies beyond comes back as it stands.
+                    (&text[..cap], if plain { "" } else { &text[cap..] })
                 }
-                _ => text,
+                None => (text, ""),
             };
             // a field may be highlighted against a query of its own rather than
             // against the one that found the document
@@ -185,7 +199,8 @@ pub(crate) fn build_highlight(
                     mark_terms(index, text, &terms, &readers, analysis, &pre, &post)
                 }
             };
-            if let Some(marked) = marked {
+            if let Some(mut marked) = marked {
+                marked.push_str(beyond);
                 fragments.push(marked);
             }
         }
@@ -515,6 +530,10 @@ pub(crate) fn mark_terms(
     let mut out = String::with_capacity(text.len() + 16);
     let mut marked = false;
     let mut rest = text;
+    // a word in the text is read the same way the query was: an analyzer that
+    // stems -- or folds, or maps -- makes a token the plain word never equals,
+    // and the word it came from is what a highlight marks
+    let mut forms_of: std::collections::HashMap<String, Vec<String>> = Default::default();
     while !rest.is_empty() {
         let start = match rest.find(|c: char| c.is_alphanumeric()) {
             Some(i) => i,
@@ -525,7 +544,24 @@ pub(crate) fn mark_terms(
         let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
         let (word, tail) = word.split_at(end);
         let lower = word.to_lowercase();
-        if whole.contains(&lower) || starts.iter().any(|p| lower.starts_with(p)) {
+        let hit = whole.contains(&lower)
+            || starts.iter().any(|p| lower.starts_with(p))
+            || {
+                let forms = forms_of.entry(lower.clone()).or_insert_with(|| {
+                    let mut f: Vec<String> = Vec::new();
+                    for analyzer in analyzers {
+                        f.extend(match analyzer.as_deref().and_then(|named| analysis.get(named)) {
+                            Some(chain) => chain.terms(&lower),
+                            None => crate::query::analyze_text(index, &lower, analyzer.as_deref()),
+                        });
+                    }
+                    f
+                });
+                forms
+                    .iter()
+                    .any(|t| whole.contains(t) || starts.iter().any(|p| t.starts_with(p)))
+            };
+        if hit {
             out.push_str(pre);
             out.push_str(word);
             out.push_str(post);

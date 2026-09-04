@@ -290,11 +290,9 @@ pub async fn bulk(
                                 b["status"] = json!(status.as_u16());
                                 json!({ op.clone(): b })
                             }
-                            Err(_) => {
+                            Err(e) => {
                                 errors = true;
-                                json!({ op.clone(): {"_index": d.index, "_id": new_id, "status": 409,
-                                    "error": {"type": "version_conflict_engine_exception",
-                                              "reason": format!("[{new_id}]: version conflict, document already exists")}}})
+                                failed_item(&op, &d.index, &new_id, e)
                             }
                         };
                         items.push(item);
@@ -355,12 +353,14 @@ pub async fn bulk(
                     continue;
                 }
                 // an index action may be conditional too, on the sequence
-                // number the caller believes the document is at
-                let cond =
-                    meta.get("if_seq_no").and_then(|v| v.as_u64()).filter(|_| exists_doc(&g, &id));
+                // number the caller believes the document is at. A document
+                // that is not there is at no sequence number at all, which is
+                // a conflict with any the caller could name.
+                let cond = meta.get("if_seq_no").and_then(|v| v.as_u64());
                 if let Some(want) = cond {
-                    let have = read_seq(&g, &id).unwrap_or(0);
-                    if have != want {
+                    let here = exists_doc(&g, &id);
+                    let have = if here { read_seq(&g, &id).unwrap_or(0) as i64 } else { -2 };
+                    if have != want as i64 {
                         errors = true;
                         items.push(json!({ op.clone(): {
                             "_index": idx, "_id": id, "status": 409,
@@ -415,15 +415,9 @@ pub async fn bulk(
                         b["status"] = json!(status.as_u16());
                         json!({ op.clone(): b })
                     }
-                    Err(_) => {
+                    Err(e) => {
                         errors = true;
-                        json!({ op.clone(): {
-                            "_index": idx, "_id": id, "status": 409,
-                            "error": {
-                                "type": "version_conflict_engine_exception",
-                                "reason": format!("[{id}]: version conflict, document already exists")
-                            }
-                        }})
+                        failed_item(&op, &idx, &id, e)
                     }
                 }
             }
@@ -590,6 +584,79 @@ pub async fn bulk(
                             }})
                         }
                     }
+                    // a script over the document that is there: the same
+                    // work the single-document update does, reported as an
+                    // item rather than as the whole request
+                    (Some(base), None) if patch.get("script").is_some() => {
+                        let spec = patch.get("script").cloned().unwrap_or(Value::Null);
+                        let compiled = match crate::painless::contexts::Compiled::of(&spec, &|n| {
+                            store.stored_script(n)
+                        }) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                errors = true;
+                                items.push(json!({"update": {
+                                    "_index": idx, "_id": id, "status": 400, "error": e.to_json()
+                                }}));
+                                continue;
+                            }
+                        };
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        let ctx = crate::painless::contexts::update_ctx(
+                            &idx,
+                            &id,
+                            g.version_of(&id),
+                            &base,
+                            now,
+                            "index",
+                        );
+                        let mut runner =
+                            crate::painless::contexts::Runner::new(&compiled.params)
+                                .with_ctx(ctx.clone());
+                        if let Err(e) = runner.run(&compiled.script) {
+                            errors = true;
+                            items.push(json!({"update": {
+                                "_index": idx, "_id": id, "status": 400, "error": e.to_json()
+                            }}));
+                            continue;
+                        }
+                        let Ok((op, source, _, _)) = crate::painless::contexts::read_ctx(&ctx)
+                        else {
+                            errors = true;
+                            items.push(json!({"update": {
+                                "_index": idx, "_id": id, "status": 400
+                            }}));
+                            continue;
+                        };
+                        match op.as_str() {
+                            "noop" | "none" => json!({"update": {
+                                "_index": idx, "_id": id, "_version": g.version_of(&id),
+                                "result": "noop", "status": 200
+                            }}),
+                            "delete" => {
+                                let (body, _) = delete_doc(&mut g, &id);
+                                let mut b = body;
+                                b["result"] = json!("deleted");
+                                b["status"] = json!(200);
+                                json!({"update": b})
+                            }
+                            _ => match write_doc(&mut g, &id, source, "index") {
+                                Ok((body, _)) => {
+                                    let mut b = body;
+                                    b["result"] = json!("updated");
+                                    b["status"] = json!(200);
+                                    json!({"update": b})
+                                }
+                                Err(_) => {
+                                    errors = true;
+                                    json!({"update": {"_index": idx, "_id": id, "status": 500}})
+                                }
+                            },
+                        }
+                    }
                     _ => {
                         errors = true;
                         json!({"update": {"_index": idx, "_id": id, "status": 400}})
@@ -620,7 +687,10 @@ pub async fn bulk(
         }
     }
     let mut out = json!({
-        "took": started.elapsed().as_millis() as u64,
+        // a write that took less than a millisecond still took some time:
+        // OpenSearch's own clock never reports a bulk as instantaneous, and a
+        // client that measures throughput divides by this
+        "took": (started.elapsed().as_millis() as u64).max(1),
         "errors": errors,
         "items": items,
     });
@@ -628,4 +698,24 @@ pub async fn bulk(
         out["ingest_took"] = json!(0);
     }
     axum::Json(out).into_response()
+}
+
+/// What one operation's failure says, as an item in the answer.
+///
+/// A write may fail for a reason of its own -- a document the mapping cannot
+/// parse, an index held still -- and that reason is the item's, not a made-up
+/// conflict; the error travels beside the response it was written into.
+fn failed_item(op: &str, index: &str, id: &str, e: Response) -> Value {
+    match e.extensions().get::<crate::api::shared::ErrorKind>() {
+        Some(k) => json!({ op: {
+            "_index": index, "_id": id, "status": e.status().as_u16(),
+            "error": {"type": k.kind, "reason": k.reason,
+                      "root_cause": [{"type": k.kind, "reason": k.reason}]}
+        }}),
+        None => json!({ op: {
+            "_index": index, "_id": id, "status": 409,
+            "error": {"type": "version_conflict_engine_exception",
+                      "reason": format!("[{id}]: version conflict, document already exists")}
+        }}),
+    }
 }

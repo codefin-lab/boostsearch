@@ -615,6 +615,19 @@ fn walk_malformed(
 ) -> std::result::Result<(), (String, String)> {
     match node {
         Value::Object(obj) => {
+            // a field the mapping declares as a plain value cannot hold an
+            // object: OpenSearch refuses the document rather than writing
+            // something the field could never be searched by
+            if let Some(ty) = mapping.type_of(path)
+                && !type_takes_an_object(ty)
+            {
+                let lenient = mapping.lenient_of(path).unwrap_or(index_default);
+                if lenient {
+                    ignored.push(path.clone());
+                    return Ok(());
+                }
+                return Err((path.clone(), ty.to_string()));
+            }
             let base = path.len();
             for (k, v) in obj {
                 if base > 0 {
@@ -651,6 +664,33 @@ fn walk_malformed(
         }
     }
     Ok(())
+}
+
+/// Can a field of this type hold an object rather than a plain value?
+///
+/// The containers can, and so can the handful of types written as objects:
+/// a range with its ends, a point with its coordinates, a suggestion with its
+/// weight, a stored query.
+fn type_takes_an_object(ty: &str) -> bool {
+    ty.ends_with("_range")
+        || matches!(
+            ty,
+            "object"
+                | "nested"
+                | "flat_object"
+                | "join"
+                | "geo_point"
+                | "geo_shape"
+                | "xy_point"
+                | "xy_shape"
+                | "point"
+                | "shape"
+                | "percolator"
+                | "completion"
+                | "knn_vector"
+                | "rank_features"
+                | "aggregate_metric_double"
+        )
 }
 
 /// The window a date column can hold. Nanoseconds in an i64 reach about 292

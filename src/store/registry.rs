@@ -291,6 +291,14 @@ impl Store {
         if let Some(s) = self.inner.read().get(name) {
             return Some(s.clone());
         }
+        // a name in angle brackets is a date expression standing for the
+        // index of some day, month or year
+        if name.starts_with('<') {
+            let resolved = resolve_date_math_name(name);
+            if resolved != name {
+                return self.get(&resolved);
+            }
+        }
         // alias lookup
         let guard = self.inner.read();
         for st in guard.values() {
@@ -397,6 +405,9 @@ impl Store {
     }
 
     pub fn create(&self, name: &str, body: &Value) -> Result<()> {
+        // an index may be asked for by the date it belongs to
+        let resolved = resolve_date_math_name(name);
+        let name = resolved.as_str();
         let body = &self.apply_templates(name, body);
         if self.exists(name) {
             return Err(anyhow!("resource_already_exists_exception"));

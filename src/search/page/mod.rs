@@ -56,19 +56,31 @@ pub(crate) fn write_page(
                 .collect()
         })
         .unwrap_or_default();
+    // a sort answers with no score unless the request asked for one to be
+    // kept: `track_scores` says the documents were scored as well as ordered
+    let keep_score = sort_keys.is_empty()
+        || body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
     all_hits
         .into_iter()
         .map(|h| {
             // `stored_fields: _none_` strips the metadata too
             let none = stored.as_ref().map(|s| s.is_empty()).unwrap_or(false)
-                && body.get("stored_fields").map(|v| v == "_none_").unwrap_or(false);
+                && body
+                    .get("stored_fields")
+                    .map(|v| match v {
+                        // the field list may be written as one name or as a
+                        // list of them, and `_none_` may be either
+                        Value::Array(a) => a.iter().any(|x| x == "_none_"),
+                        other => other == "_none_",
+                    })
+                    .unwrap_or(false);
             let mut hit = if none {
-                json!({"_score": if sort_keys.is_empty() { json!(h.score) } else { Value::Null }})
+                json!({"_score": if keep_score { json!(h.score) } else { Value::Null }})
             } else {
                 json!({
                     "_index": h.index,
                     "_id": h.id,
-                    "_score": if sort_keys.is_empty() { json!(h.score) } else { Value::Null },
+                    "_score": if keep_score { json!(h.score) } else { Value::Null },
                 })
             };
             // a selector on the URL is the narrower instruction and wins over
@@ -553,10 +565,12 @@ pub(crate) fn output_specs(
         (a, b) => a.or(b),
     };
     let stored: Option<Vec<String>> = match body.get("stored_fields") {
+        // `_none_` asks for no fields at all, written either way
+        Some(Value::String(s)) if s == "_none_" => Some(vec![]),
+        Some(Value::Array(a)) if a.iter().any(|x| x == "_none_") => Some(vec![]),
         Some(Value::Array(a)) => {
             Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         }
-        Some(Value::String(s)) if s == "_none_" => Some(vec![]),
         Some(Value::String(s)) => Some(vec![s.clone()]),
         _ => None,
     };

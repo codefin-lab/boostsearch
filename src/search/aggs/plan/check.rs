@@ -198,14 +198,7 @@ pub(crate) fn check_agg_node(
                     continue;
                 }
                 let field = def.get("field").and_then(|f| f.as_str()).unwrap_or("");
-                let base = match field.strip_suffix(".keyword") {
-                    Some(parent)
-                        if !matches!(ctx.mapping.type_of(parent), Some("object" | "nested")) =>
-                    {
-                        parent
-                    }
-                    _ => field,
-                };
+                let base = ctx.mapping.raw_view_parent(field).unwrap_or(field);
                 if !matches!(
                     ctx.mapping.type_of(base),
                     None | Some("keyword" | "text" | "wildcard")

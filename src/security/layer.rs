@@ -97,10 +97,18 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     if req.uri().path().ends_with("/_plugins/_security/api/authtoken") {
         return run_as(Caller::default(), req, next).await;
     }
+    // the plain listener reports the peer as this crate's own type, the TLS
+    // one hands the address in as itself
     let remote = req
         .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
+        .get::<axum::extract::ConnectInfo<crate::http_compat::Peer>>()
+        .map(|c| c.0.0)
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0)
+        })
+        .map(|a| a.ip().to_string())
         .unwrap_or_default();
     let peer_dn = req.extensions().get::<PeerDn>().map(|d| d.0.clone());
     let query = req.uri().query().unwrap_or("").to_string();

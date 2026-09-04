@@ -143,15 +143,70 @@ pub(crate) fn phrase_suggest(
     scored.dedup_by(|a, b| a.1 == b.1);
     scored.truncate(size);
 
+    // `collate` runs a query per suggestion to see whether anything in the
+    // index actually reads that way. With `prune` the answer is reported
+    // beside each suggestion; without it, the ones that match nothing go.
+    let collate = spec.get("collate");
+    let prune = collate
+        .and_then(|c| c.get("prune"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut options: Vec<Value> = Vec::new();
+    for (score, line) in scored {
+        let mut option = json!({"text": line.clone(), "score": score.max(0.0) + 0.01});
+        if let Some(c) = collate {
+            let matched = collate_matches(store, targets, c, &line);
+            if !prune && !matched {
+                continue;
+            }
+            if prune {
+                option["collate_match"] = json!(matched);
+            }
+        }
+        options.push(option);
+    }
+
     Ok(json!([{
         "text": text,
         "offset": 0,
         "length": text.chars().count(),
-        "options": scored
-            .into_iter()
-            .map(|(score, line)| json!({"text": line, "score": score.max(0.0) + 0.01}))
-            .collect::<Vec<_>>(),
+        "options": options,
     }]))
+}
+
+/// Does the index hold anything the suggestion's own query finds?
+///
+/// The query is a template: `{{suggestion}}` stands for the line being
+/// weighed, and whatever else the request wrote under `params` stands for
+/// itself.
+fn collate_matches(store: &Store, targets: &[String], collate: &Value, suggestion: &str) -> bool {
+    let Some(source) = collate.pointer("/query/source").or_else(|| collate.get("query")) else {
+        return true;
+    };
+    let mut params = collate.get("params").cloned().unwrap_or_else(|| json!({}));
+    if let Some(o) = params.as_object_mut() {
+        o.insert("suggestion".into(), json!(suggestion));
+    }
+    // the template is written as text or as the query it stands for
+    let query = match source {
+        Value::String(text) => {
+            let rendered = crate::api::mustache::render(text, &params);
+            match serde_json::from_str::<Value>(&rendered) {
+                Ok(v) => v,
+                Err(_) => return true,
+            }
+        }
+        other => match crate::api::mustache::render_query_template(other, &params) {
+            Some(v) => v,
+            None => return true,
+        },
+    };
+    let probe = json!({"query": query, "size": 0, "terminate_after": 1});
+    match crate::search::run(store, &targets.join(","), &probe, &Params::new()) {
+        Ok(found) => found.total > 0,
+        // a query the suggestion made unreadable does not condemn it
+        Err(_) => true,
+    }
 }
 
 /// The words one generator offers for a word that was written.

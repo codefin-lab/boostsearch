@@ -885,7 +885,7 @@ fn too_few_copies(store: &Store, name: &str, p: &Params) -> Option<Value> {
 /// `action.auto_create_index` is either a flat yes or no, or a list of
 /// patterns a new name has to match -- and a pattern written with a leading
 /// `-` forbids the names it matches.
-fn auto_create_complaint(store: &Store, name: &str) -> Option<Response> {
+pub(crate) fn auto_create_complaint(store: &Store, name: &str) -> Option<Response> {
     let setting = store.cluster_setting("action.auto_create_index")?;
     let written = match &setting {
         Value::Bool(b) => b.to_string(),

@@ -23,6 +23,11 @@ pub async fn create_index(
     if let Some(r) = reserved_index_name(&index) {
         return r;
     }
+    // a name in angle brackets is the date expression it stands for
+    let index = crate::store::resolve_date_math_name(&index);
+    if let Some(r) = bad_index_name(&index) {
+        return r;
+    }
     let body: Value = if body.trim().is_empty() {
         json!({})
     } else {
@@ -278,6 +283,26 @@ pub async fn index_exists(State(store): State<Store>, Path(index): Path<String>)
     }
 }
 
+/// The characters an index name may not carry, and the order OpenSearch
+/// lists them in when it complains.
+const FORBIDDEN_IN_NAME: &[char] = &[' ', '"', '*', '\\', '<', '|', ',', '>', '/', '?'];
+
+/// A name a new index may not be given: OpenSearch names the whole set in
+/// the complaint, whichever of them the name carried.
+pub(crate) fn bad_index_name(name: &str) -> Option<Response> {
+    if !name.contains(|c| FORBIDDEN_IN_NAME.contains(&c)) {
+        return None;
+    }
+    Some(err(
+        StatusCode::BAD_REQUEST,
+        "invalid_index_name_exception",
+        format!(
+            "Invalid index name [{name}], must not contain the following characters \
+             [ , \", *, \\, <, |, ,, >, /, ?]"
+        ),
+    ))
+}
+
 /// Names beginning with an underscore are reserved for the API's own
 /// endpoints, so one cannot also be an index.
 pub(crate) fn reserved_index_name(expr: &str) -> Option<Response> {
@@ -310,6 +335,18 @@ pub async fn get_index(
     let targets = store.resolve(&index);
     if targets.is_empty() && !index.contains('*') && index != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&index);
+    }
+    // every name written out in full has to be there: one missing among
+    // several is still a missing index, not a shorter answer
+    if !ignore_unavailable(&p) {
+        for part in index.split(',').map(|n| n.trim()) {
+            if part.is_empty() || part.contains('*') || part == "_all" {
+                continue;
+            }
+            if store.resolve(part).is_empty() {
+                return no_such_index(part);
+            }
+        }
     }
     // a pattern reaching nothing is an error only when the caller said so
     let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);

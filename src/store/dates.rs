@@ -557,3 +557,32 @@ pub fn parse_with_pattern(s: &str, pattern: &str) -> Option<boostcore::time::Off
     let local = OffsetDateTime::new_utc(date, time);
     Some(local - boostcore::time::Duration::seconds(offset_secs))
 }
+
+/// Does this text look like a date to the dynamic mapping?
+///
+/// OpenSearch does not hand a new field to the date type because some parser
+/// somewhere can read it: it tries the formats in `dynamic_date_formats`,
+/// which are `strict_date_optional_time` and `yyyy/MM/dd HH:mm:ss Z`. Text
+/// that needs any other reading is text.
+pub fn looks_like_dynamic_date(s: &str) -> bool {
+    use std::sync::OnceLock;
+    static STRICT: OnceLock<regex::Regex> = OnceLock::new();
+    static SLASHED: OnceLock<regex::Regex> = OnceLock::new();
+    let strict = STRICT.get_or_init(|| {
+        regex::Regex::new(
+            r"(?x)^\d{4}-\d{2}-\d{2}
+              (T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?
+               (Z|[+-]\d{2}:?\d{2})?)?$",
+        )
+        .expect("the strict date pattern is written correctly")
+    });
+    let slashed = SLASHED.get_or_init(|| {
+        regex::Regex::new(
+            r"(?x)^\d{4}/\d{2}/\d{2}
+              (\ \d{2}:\d{2}:\d{2})?
+              (\ ?(Z|[+-]\d{2}:?\d{2}))?$",
+        )
+        .expect("the slashed date pattern is written correctly")
+    });
+    strict.is_match(s) || slashed.is_match(s)
+}

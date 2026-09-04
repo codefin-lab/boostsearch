@@ -31,8 +31,9 @@ pub async fn cat_segments(
                 ("shard", "0".to_string()),
                 ("prirep", "p".to_string()),
                 ("ip", "127.0.0.1".to_string()),
-                // `id` answers to `h=` and appears in the help, but the
-                // default row does not carry it
+                // the node the segment is on: not in the default table, but
+                // a caller naming its own columns may ask for it
+                ("id", crate::cluster::identity().id.as_str().to_string()),
                 ("segment", format!("_{i}")),
                 ("generation", i.to_string()),
                 ("docs.count", reader.num_docs().to_string()),
@@ -46,7 +47,30 @@ pub async fn cat_segments(
             ]);
         }
     }
-    rows.sort_by(|a, b| a[0].1.cmp(&b[0].1).then(a[5].1.cmp(&b[5].1)));
+    let at = |r: &Vec<(&str, String)>, k: &str| {
+        r.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()).unwrap_or_default()
+    };
+    rows.sort_by(|a, b| at(a, "index").cmp(&at(b, "index")).then(at(a, "segment").cmp(&at(b, "segment"))));
+    let rows = cat_only_default(
+        rows,
+        &[
+            "index",
+            "shard",
+            "prirep",
+            "ip",
+            "segment",
+            "generation",
+            "docs.count",
+            "docs.deleted",
+            "size",
+            "size.memory",
+            "committed",
+            "searchable",
+            "version",
+            "compound",
+        ],
+        &p,
+    );
     cat_render_cols(CAT_SEGMENT_COLS, rows, &p)
 }
 

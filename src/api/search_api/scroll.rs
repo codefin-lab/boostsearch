@@ -27,8 +27,11 @@ pub async fn create_pit(
 }
 
 pub async fn get_all_pits(State(store): State<Store>, Query(p): Query<Params>) -> Response {
-    let pits: Vec<Value> = store
-        .all_pits()
+    // the newest first: the ids are handed out in order, so the one a caller
+    // has just opened is the one it reads about first
+    let mut open = store.all_pits();
+    open.sort_by(|a, b| b.0.cmp(&a.0));
+    let pits: Vec<Value> = open
         .into_iter()
         .map(|(id, st)| {
             json!({
@@ -236,12 +239,13 @@ pub async fn clear_scroll(
         );
     }
     let freed = ids.iter().filter(|i| store.close_scroll(i)).count();
+    // a scroll that was not there is not an error to report: the answer is
+    // the ordinary one, with nothing freed, under the status that says so
+    let body = json!({"succeeded": freed > 0, "num_freed": freed});
     if freed == 0 {
-        return err(
-            StatusCode::NOT_FOUND,
-            "search_context_missing_exception",
-            "No search context found",
-        );
+        let mut r = respond(&p, body);
+        *r.status_mut() = StatusCode::NOT_FOUND;
+        return r;
     }
-    respond(&p, json!({"succeeded": true, "num_freed": freed}))
+    respond(&p, body)
 }

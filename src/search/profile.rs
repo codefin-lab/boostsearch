@@ -259,7 +259,9 @@ pub(crate) fn typed_key_prefix(store: &Store, targets: &[String], def: &Value) -
     Some(match kind.as_str() {
         "terms" => format!("{}terms", field_kind()),
         "significant_terms" => format!("sig{}terms", field_kind()),
-        "multi_terms" => "multiterms".into(),
+        // the multi-terms aggregation is written out under its own name,
+        // unlike the plain terms aggregation and its abbreviations
+        "multi_terms" => "multi_terms".into(),
         "percentiles" => {
             if spec.get("hdr").is_some() {
                 "hdr_percentiles".into()

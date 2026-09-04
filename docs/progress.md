@@ -1752,3 +1752,326 @@ Objects page itself calls -- relationships, `_find`, `_allowed_types`,
 `scroll/counts`), Discover draws its histogram and table, the saved
 dashboard draws its chart, and Index Management lists the indices with
 their real sizes and counts.
+
+## 7.2 -- the clients, running their own suites
+
+### The Python client
+
+`opensearch-py` 3.2.0 was cloned and its own server suite run against a
+node (the gRPC and plugin tests aside: the first is a transport we do not
+answer, the second is Phase 10's ISM and the notifications plugin). It
+started at 99 of 127 and found seven things:
+
+  - **A nested setting came back as a string.** `index.analysis` was
+    written out as `"{\"analyzer\":{...}}"` rather than as the object it
+    is. OpenSearch holds every setting as a dotted key with a string
+    value, so what comes back keeps the shape it was written in with each
+    leaf -- and each element of a list -- as text. A key written dotted
+    where the shape is nested is placed nested, too.
+  - **An index could be made with a slash in its name.** The characters
+    OpenSearch refuses are refused, with the complaint it writes.
+  - **A `filters` aggregation under another aggregation was not peeled.**
+    Only the top level was looked at, so a `filters` inside a `terms` was
+    handed to BoostCore, which has no parser for it. `filters` and
+    `percentiles` are peeled wherever they sit now.
+  - **A `terms` aggregation over an analysed text field returned the
+    text.** A text field holds tokens, not values -- OpenSearch buckets
+    what the analyser made of it. The tokens are read from the term
+    dictionary and counted against the query, with the sub-aggregations
+    run inside each bucket.
+  - **A keyword sub-field under any name but `keyword` was not the raw
+    view of its parent.** `title.raw` is the same view as `title.keyword`
+    when it is a plain keyword; the aggregations only knew the one
+    spelling, so a `terms` over `author.name.raw` found nothing.
+  - **`post_filter` counted only the page.** A narrowing that happens
+    once the candidates are in hand -- a `post_filter`, a `min_score` --
+    decides both the page and the total, so collection no longer stops at
+    a page's worth: 8 of 35 became 35 of 35.
+  - **A sub-aggregation was prepared differently from a top-level one.**
+    A `date_histogram` inside a peeled `filter` came back empty, because
+    the date normalising and the fixed-step lowering were only done for
+    the aggregations at the top; and what it did return was unformatted
+    (a float key, no `key_as_string`). Sub-aggregations get the same
+    preparation and the same finish now.
+
+Then six more, found by running it again:
+
+  - **A highlight over a field with an analyzer of its own marked
+    nothing.** The words of the text were compared as written against the
+    query read through the analyzer, so a stemmer -- or a folder, or a
+    mapper -- made a token the plain word never equals. Each word of the
+    text is now read the same way the query was, and the word it came
+    from is what is marked.
+  - **`has_parent` and `parent_id` found nothing.** A join field's `name`
+    and `parent` had been mapped dynamically as text, so the id of a
+    parent was cut into pieces and a `term` on it matched nothing; they
+    are names, and are mapped as such. And a root document may write the
+    join field as the name alone rather than as an object, which is the
+    other spelling of the same side.
+  - **A range asked for by key was answered by its bounds.** `ok` came
+    back as `*-1.0`.
+  - **A bulk item that could not be written reported a version
+    conflict.** Whatever the write actually complained about -- a
+    document the mapping cannot parse, an index held still -- is the
+    item's error now, with the status that goes with it.
+  - **`_analyze` ignored a tokenizer described rather than named.**
+    A `{"type": "simple_pattern_split", "pattern": ":"}` sent inline fell
+    back to `standard`.
+  - **A sub-aggregation's range keys and date names were not applied.**
+    The finishing touches a top-level answer gets are given to a
+    sub-aggregation's too.
+
+Then the last of them, all `nested` and `inner_hits` work:
+
+  - **A `top_hits` named `hits` returned the whole document.** Inside a
+    nested aggregation the hits are the objects at the path, and the
+    expansion looked for them at `hits.hits` -- which is also where an
+    aggregation a caller happened to name `hits` puts its own answer. It
+    is a page of documents only when it is a list.
+  - **A nested aggregation counted documents rather than objects.** What
+    it counts is the objects at its path, and a page of hits under it is
+    a page of those objects: as long as it asked for, counting them all.
+  - **A histogram under a nested aggregation answered nothing.** The
+    aggregations run over the objects knew `terms`, `filter`, `nested`,
+    `reverse_nested`, `composite` and the plain metrics, but not
+    `histogram` or `date_histogram`; both are there now, by calendar step
+    and by fixed one, with the key written out as a date.
+  - **`inner_hits` on a join query came back empty**, for the same reason
+    `has_parent` did: a root document may write the join field as the
+    name alone.
+
+**118 of 118 pass.** (The plugin tests are left out: they are Phase 10's
+ISM and the notifications plugin.)
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.
+
+### The JavaScript client
+
+`opensearch-js` was cloned, installed, and its integration helpers run
+against a node -- `bulk`, `msearch`, `scroll` and `search`, each loading
+a five-thousand-document fixture first. They found two things:
+
+  - **A new field became a date because some parser could read it.**
+    The fixture writes `2011-01-27 20:19:13.563 UTC`, which OpenSearch
+    maps as text: a field is given the date type only when the value
+    reads as one of the formats `dynamic_date_formats` names, which are
+    `strict_date_optional_time` and `yyyy/MM/dd HH:mm:ss Z`. Ours took
+    anything a lenient parser could make sense of, so the first document
+    made the field a date and the next thousand were refused -- and
+    `2011/01/27 20:19:13 +0000`, which OpenSearch does map as a date, was
+    text.
+  - **An object could be written into a field mapped as a value.**
+    `{"title": {"foo": "bar"}}` against a text field was accepted and
+    stored as something no query could reach; it is a
+    `mapper_parsing_exception` now, as it is in OpenSearch, while the
+    types that are written as objects -- the ranges, the points and
+    shapes, `flat_object`, `join`, `completion`, `percolator`, a vector
+    -- still take one.
+
+All four helper suites pass. The client's own YAML runner is not run: it
+loads OpenSearch's rest-api-spec, which is the corpus we already run, and
+its downloader does not start on Node 24.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.
+
+### The Go client
+
+`opensearch-go` v5's integration suite is the strictest of the four: for
+every call it compares the raw JSON we send against the client's own
+typed struct and reports each field that does not line up, in either
+direction. It found nine things.
+
+  - **Four endpoints answered only one of their two methods.** The REST
+    spec lists `POST` beside `PUT` for nineteen paths; we were missing it
+    on `/{index}/_mapping`, `/_component_template/{name}` and
+    `/{index}/_aliases/{name}`, and `/_aliases/{name}` was not routed at
+    all.
+  - **`value_count` and `cardinality` came back as fractions.** Both
+    count things and both are whole numbers in OpenSearch; a client
+    reading `3.0` into an integer cannot.
+  - **`GET /_upgrade` answered as though it had upgraded something.**
+    Asking is not doing: a GET reports how much of each index would have
+    to be rewritten, a POST reports what the rewriting did.
+  - **The warmer statistic used the wrong name**, `time_in_millis` where
+    every other total is `total_time_in_millis`.
+  - **`_nodes/usage` returned the whole of `_nodes`.** It reports when a
+    node started counting and what it counted since, and nothing else.
+  - **`_nodes/reload_secure_settings` was not answered.** There is no
+    keystore to reread here, so every node answers that it did.
+  - **`_data_stream/_stats` was read as an index called `_stats`.** It
+    reports the indices behind each stream, what they take on disk and
+    the newest instant their documents carry.
+  - **`_cat/pit_segments` was an unknown endpoint.** A point-in-time
+    holds the segments its indices held when it was opened, which are the
+    segments the index still has.
+
+**189 of 189 pass**, with the plugin tag as well as the core one.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.
+
+### The Java client
+
+`opensearch-java` 4.0's integration suite runs 231 tests, and it starts by
+asking the cluster about itself through the low-level `RestClient` --
+which was enough to stop every one of them.
+
+  - **A request target without a leading slash was refused.** OpenSearch
+    is served by Netty, which takes the target as it finds it: a caller
+    who writes `_cat/indices` rather than `/_cat/indices` gets an answer,
+    and the client's own test harness writes it the first way. Hyper
+    answered a bare `400` before the router saw the request. The bytes of
+    a connection now pass through a small HTTP/1 reader that puts the
+    slash back. It looks at the request line and the headers of each
+    message and hands the body straight to the caller's buffer, so a bulk
+    load is neither copied nor scanned; anything it does not follow -- a
+    chunked body, an over-long header block -- turns it off for the rest
+    of that connection.
+
+With that fixed, 231 became 79, and then:
+
+  - **A date written into an index name was taken literally.**
+    `<logstash-{now/M}>` was resolved when reading but not when creating
+    or writing, so a client that made an index by its date made one
+    called `<logstash-{now/M}>`.
+  - **A wildcard that reached nothing was an error.** `DELETE /_template/*`,
+    `/_index_template/*` and `/_data_stream/*` said the thing was missing;
+    a pattern that takes nothing away has still done what was asked.
+  - **An unknown cluster setting was accepted.** A setting belongs to a
+    part of the server, and one whose family is not a family at all --
+    `no_idea_what_you_are_talking_about` -- is refused now, the way
+    OpenSearch refuses it.
+  - **The node statistics were missing pieces a typed client insists on**:
+    the transport's bound and published addresses, the merge totals, the
+    per-part segment memory, the script cache.
+  - **A `multi_terms` aggregation was keyed `multiterms#name`** under
+    `typed_keys`, where OpenSearch writes the aggregation's own name.
+  - **A data stream reported `@timestamp` whatever its template said.**
+  - **A bulk `index` with `if_seq_no` on a document that is not there
+    succeeded.** A document that is not there is at no sequence number,
+    which conflicts with any the caller could name.
+  - **A bulk that took less than a millisecond reported `took: 0`**,
+    which a client dividing by it cannot use.
+
+231 failing to 36, and then the last of them, one behaviour at a time:
+
+  - **A bulk `update` carrying a script was refused** with a bare 400
+    where the single-document update runs one. It runs the script over
+    the document that is there and honours what the script asks for: a
+    noop, a delete, or the document it wrote.
+  - **`_cat/nodes` had no `pid` or `version`**, and `_cat/segments` no
+    `id` -- columns that are not in either default table but that a
+    caller naming its own columns may ask for.
+  - **`GET /a,b` answered for `a` alone when `b` was not there.** Every
+    name written out in full has to be there; one missing among several
+    is a missing index, not a shorter answer.
+  - **`_cat/pit_segments` listed the index's segments.** From OpenSearch
+    2.10 the table is there and has nothing in it.
+  - **`stored_fields` written as a list ignored `_none_`**, so a hit came
+    back with its metadata after being asked for none of it.
+  - **`max_analyzer_offset` was the plain highlighter's alone.** It says
+    how far into a field the analyser may read, whichever highlighter is
+    marking: past it there are no tokens and nothing to mark. The plain
+    highlighter's fragments stop there too, the unified one's do not.
+  - **`track_scores` was ignored.** A sort collects without scoring, and
+    a request that asks for the score as well as the order now gets it,
+    worked out for the page alone rather than for every match.
+  - **The completion suggester ignored `prefix`.** It is the word a
+    completion suggester is given; `text` is the other suggesters'.
+  - **The phrase suggester had no `collate`.** A suggestion can be put to
+    the index as a query of its own -- `{{suggestion}}` standing for the
+    line -- and either pruned when nothing reads that way or marked with
+    whether anything does.
+  - **An index asking for nothing got no replica.** OpenSearch gives it
+    one, which is what makes a single-node cluster yellow rather than
+    green; the health, its per-index block and the counts all say so now,
+    and a copy the routing has not got yet is counted whether the manager
+    has caught up or not.
+  - **A health request naming an index that is not there answered green.**
+    It is the request that waits and gives up: red, timed out.
+  - **`DELETE /_search/scroll` on an unknown id answered with an error.**
+    OpenSearch answers with the ordinary body -- nothing freed -- under
+    the status that says it was not found.
+  - **An index held closed to readers still answered a search.** It is
+    forbidden, the way a write to one held closed to writers is.
+  - **An update on an index that is not there said so.** OpenSearch makes
+    the index and then says the document is missing, which is what
+    `action.auto_create_index` means for an update as much as for a write.
+  - **Every fuzzy match scored the same.** A word one edit away is a
+    better answer than one two edits away: each distance is asked for on
+    its own and weighed by how far it is, so the nearer word scores
+    higher without the terms having to be enumerated.
+  - **The open point-in-times came back in no order.** The newest first,
+    so the one a caller has just opened is the one it reads about first.
+
+**231 of 231 pass.**
+
+Gates: unit 70/70, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.
+
+**More of what the Java suite found**, and the answer's own shape:
+
+  - **A bulk `update` carrying a script was refused.** The single-document
+    update runs one; the bulk fell through to a bare 400. It runs the
+    script over the document that is there now, and honours what the
+    script asks for: a noop, a delete, or the document it wrote.
+
+That leaves **199 of 231**. The rest are single behaviours, written up as
+the Phase 7 tail: a highlight's offsets, `min_score` inside a
+multi-search, the completion and phrase suggesters, a search context
+outliving its scroll, `_cat/segments` and `_cat/nodes` columns, and a
+handful of assertions about state a previous test in the same class left
+behind.
+
+### Where the four clients stand
+
+| | |
+|---|---|
+| `opensearch-py` | **118 of 118** |
+| `opensearch-js` | **4 of 4** integration helper suites |
+| `opensearch-go` | **189 of 189**, core and plugins |
+| `opensearch-java` | **231 of 231** |
+
+
+**7.2 closed.** Four official clients, four of their own test suites, all
+passing: 542 tests between them, none skipped for our sake. What they
+found was thirty-eight distinct behaviours, and the shape of the list is
+worth keeping: the Python suite found the search semantics (aggregations
+over analysed text, `post_filter`, the join queries, highlighting), the
+Go suite found the response shapes field by field (its client reads every
+answer into a typed struct and reports what does not line up, in either
+direction), the Java suite found the REST surface and the HTTP layer
+itself, and the JavaScript suite found what a five-thousand-document bulk
+load does to a mapping that guessed wrong.
+
+Nothing here was reachable from the YAML corpora. They test what
+OpenSearch's own server tests; a client tests what a client needs.
+
+### The bench, after the network layer changed
+
+Reading request lines leniently and buffering a response before it is
+encrypted are both on the path every request takes, so the matrix was run
+again -- three passes, the same machine, nothing else on it.
+
+  - **Plain against plain** (BoostSearch with security on, OpenSearch
+    with no security plugin): BoostSearch wins **all eleven**. 92,711
+    against 62,785 docs/s; every latency between 1.2 and 4 times better.
+  - **TLS against TLS** (both with their security plugin): BoostSearch
+    wins **all eleven**, at 88,201 against 59,707 docs/s and 389MiB
+    against 2.025GiB -- a fifth of the memory.
+  - **Our TLS against their plain HTTP**: BoostSearch wins the indexing
+    and most of the queries, and loses the three or four smallest
+    aggregations by two to four tenths of a millisecond -- which is what
+    TLS costs us on this machine. Which of those rows falls either way
+    changes from run to run: our own numbers sit inside a tenth of a
+    millisecond across runs, the plain-HTTP reference's move by half of
+    one. It is not a like-for-like comparison, and the two that are we
+    win outright.
+
+Two things were done for it while it was measured, both worth having on
+their own: an answer is written without waiting to fill a packet
+(`TCP_NODELAY`, which Netty sets and hyper does not), and a response is
+gathered before it is encrypted rather than becoming a TLS record per
+piece.

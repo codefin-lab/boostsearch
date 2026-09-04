@@ -212,16 +212,10 @@ pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // `_raw` carries both the untokenised strings and the numerics,
                 // so it is the right column for every agg except one over an
                 // explicitly analysed text field.
-                // `title.keyword` is the raw view of `title`; but a field
+                // `title.keyword` is the raw view of `title`, and so is any
+                // plain keyword sub-field under another name; but a field
                 // called `keyword` under an object is a field of its own
-                let base = match f.strip_suffix(".keyword") {
-                    Some(parent)
-                        if !matches!(ctx.mapping.type_of(parent), Some("object" | "nested")) =>
-                    {
-                        parent
-                    }
-                    _ => f,
-                };
+                let base = ctx.mapping.raw_view_parent(f).unwrap_or(f);
                 // Both views carry the numerics, but resolving a purely numeric
                 // path is measurably cheaper on `_dyn` -- `_raw` also holds a
                 // string column for every path, which the lookup has to consider.
@@ -430,14 +424,7 @@ pub(crate) fn strip_untranslatable_term_filters(node: &mut Value, ctx: &Ctx) {
         Value::Object(o) => {
             if let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
                 let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
-                let base = match field.strip_suffix(".keyword") {
-                    Some(parent)
-                        if !matches!(ctx.mapping.type_of(parent), Some("object" | "nested")) =>
-                    {
-                        parent
-                    }
-                    _ => field.as_str(),
-                };
+                let base = ctx.mapping.raw_view_parent(&field).unwrap_or(field.as_str());
                 if term_filter_needs_translating(ctx.mapping.type_of(base)) {
                     terms.remove("include");
                     terms.remove("exclude");

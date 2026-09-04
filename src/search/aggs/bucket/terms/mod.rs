@@ -4,6 +4,8 @@ use super::*;
 
 mod multi;
 pub(crate) use multi::*;
+mod text;
+pub(crate) use text::*;
 mod significant;
 pub(crate) use significant::*;
 
@@ -21,7 +23,7 @@ pub(crate) fn run_field_terms_agg(
     let spec = def.get("terms").cloned().unwrap_or(json!({}));
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
-    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs);
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs, store, targets);
     // an order naming a sub-aggregation that is run here cannot be asked of
     // BoostCore, which will not have that aggregation; the buckets are put in
     // order once it has answered

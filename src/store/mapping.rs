@@ -537,6 +537,24 @@ impl Mapping {
         sub.get("normalizer").is_none() && sub.get("ignore_above").is_none()
     }
 
+    /// The parent whose untouched view already holds this sub-field's values.
+    ///
+    /// `title.keyword` is how a text field's untouched view is addressed
+    /// whether or not the mapping declares the sub-field; a sub-field under
+    /// any other name -- `title.raw` is the common one -- is the same view
+    /// when it is a plain keyword with nothing done to it on the way in.
+    pub fn raw_view_parent<'a>(&self, field: &'a str) -> Option<&'a str> {
+        if let Some(parent) = field.strip_suffix(".keyword")
+            && !matches!(self.type_of(parent), Some("object" | "nested"))
+        {
+            return Some(parent);
+        }
+        if self.plain_keyword_sub(field) {
+            return field.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        None
+    }
+
     /// The format a date path declares, if it declares one.
     pub fn date_format(&self, field: &str) -> Option<&str> {
         self.formats.get(field).map(|s| s.as_str())
@@ -664,6 +682,14 @@ pub(crate) fn flatten_props(
 ) {
     for (name, def) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        // a join field carries which side of a relation a document is on and
+        // which document it belongs to; both are names, never text to search
+        if def.get("type").and_then(|t| t.as_str()) == Some("join") {
+            out.insert(path.clone(), "join".to_string());
+            out.insert(format!("{path}.name"), "keyword".to_string());
+            out.insert(format!("{path}.parent"), "keyword".to_string());
+            continue;
+        }
         if let Some(sub) = def.get("properties").and_then(|p| p.as_object()) {
             // the container is a field in its own right: an object, or a
             // nested one if it says so
