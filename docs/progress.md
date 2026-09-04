@@ -1744,3 +1744,11 @@ aggregations 6, and single sections in `cat.indices`, `cat.shards`,
 `indices.stats` translog, a pre-filter search and a terms lookup).
 Chaos, the rolling restart and the register check all end with no
 acknowledged write lost and the register linearizable.
+
+**7.1 closed.** With those three fixed, Dashboards runs against the
+three-node cluster exactly as it does against one: the saved-object
+round trip passes ten of ten (including the management routes the Saved
+Objects page itself calls -- relationships, `_find`, `_allowed_types`,
+`scroll/counts`), Discover draws its histogram and table, the saved
+dashboard draws its chart, and Index Management lists the indices with
+their real sizes and counts.
