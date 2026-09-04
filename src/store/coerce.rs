@@ -320,11 +320,10 @@ pub(crate) fn json_mapping_type(v: &Value) -> &'static str {
             }
         }
         Value::String(s) => {
-            if s.len() >= 10
-                && s.as_bytes()[4] == b'-'
-                && s.as_bytes()[7] == b'-'
-                && parse_date_lenient(s).is_some()
-            {
+            // a new field is a date only when it reads as one of the formats
+            // the dynamic mapping tries, not because some parser can make
+            // sense of it
+            if crate::store::looks_like_dynamic_date(s) {
                 "date"
             } else {
                 "string"

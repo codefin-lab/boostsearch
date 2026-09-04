@@ -109,7 +109,7 @@ impl IdxState {
                 leaf if !prefix.is_empty() => {
                     let kind = match leaf {
                         Value::String(s) => {
-                            if crate::query::parse_datetime(s).is_some() {
+                            if crate::store::looks_like_dynamic_date(s) {
                                 "date"
                             } else {
                                 "text"

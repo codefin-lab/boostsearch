@@ -1845,3 +1845,33 @@ ISM and the notifications plugin.)
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
+
+### The JavaScript client
+
+`opensearch-js` was cloned, installed, and its integration helpers run
+against a node -- `bulk`, `msearch`, `scroll` and `search`, each loading
+a five-thousand-document fixture first. They found two things:
+
+  - **A new field became a date because some parser could read it.**
+    The fixture writes `2011-01-27 20:19:13.563 UTC`, which OpenSearch
+    maps as text: a field is given the date type only when the value
+    reads as one of the formats `dynamic_date_formats` names, which are
+    `strict_date_optional_time` and `yyyy/MM/dd HH:mm:ss Z`. Ours took
+    anything a lenient parser could make sense of, so the first document
+    made the field a date and the next thousand were refused -- and
+    `2011/01/27 20:19:13 +0000`, which OpenSearch does map as a date, was
+    text.
+  - **An object could be written into a field mapped as a value.**
+    `{"title": {"foo": "bar"}}` against a text field was accepted and
+    stored as something no query could reach; it is a
+    `mapper_parsing_exception` now, as it is in OpenSearch, while the
+    types that are written as objects -- the ranges, the points and
+    shapes, `flat_object`, `join`, `completion`, `percolator`, a vector
+    -- still take one.
+
+All four helper suites pass. The client's own YAML runner is not run: it
+loads OpenSearch's rest-api-spec, which is the corpus we already run, and
+its downloader does not start on Node 24.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.
