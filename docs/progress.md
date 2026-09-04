@@ -1536,3 +1536,75 @@ OpenSearch on plain HTTP, the documented transport mismatch -- every row
 but `cardinality` (1.07 ms against 0.98 ms). The absolute numbers on both
 sides are lower than 6.10's on this machine, which had been running chaos
 for hours; the commit before these changes measures the same there.
+
+### 6.13 Closing the cluster's own gaps before Phase 7 (in progress)
+
+Three things were left open at the end of 6.12: the sections the corpus
+lost on three nodes, the shortfall against the phase's 2,296, and the
+writes a rolling upgrade refused. This is where they stand.
+
+**A rolling upgrade refuses three writes in a thousand, not a fifth.** A
+node stopped with SIGTERM now hands its primaries to the rest of the
+cluster before it stops answering: it says it is leaving, then waits (up
+to fifteen seconds) for the manager to place its primaries elsewhere. On
+three nodes carrying twenty thousand writes, 64 were refused where 3,272
+had been.
+
+**The corpus on three nodes went from 1,184 to 1,382 of 1,427**, and the
+single-node run is back to 1,427 of 1,427. What was wrong, in the order
+it was found:
+
+  - **An index's shards were spread across nodes** while the store holds
+    an index whole (ADR 0003): a write routed to shard three landed on the
+    node answering for shard zero. Every shard of an index now sits where
+    its first shard sits, the balancer weighs copies of indices rather
+    than shards, and a shard past the first needs no work of its own on a
+    node that already holds the index.
+  - **A copy made from published metadata was made without the index's
+    aliases**, so an index that moved lost them, and every lookup through
+    an alias came back empty.
+  - **The listings answered for one node's share of the cluster.**
+    `_cat/indices`, `_cat/aliases`, `_cat/segments`, `_cat/fielddata`,
+    mappings, field capabilities, wildcards and `DELETE /*` all read the
+    published metadata now, and `_stats` is asked of every node holding a
+    copy with its counters added up.
+  - **A close or an open reached only the node that answered**, and its
+    per-index reply named only what that node held. Both are broadcast,
+    the replies are merged, and the answer waits for the state that says
+    the index is closed to be published; a closed index is refused for
+    searches wherever its copies are.
+  - **A moving primary stopped answering.** While a primary is being moved
+    two copies are marked primary, and reading the wrong one had the
+    relocation target try to fill itself from itself: the copy that
+    answers is the one being moved away from, until its target is ready.
+  - **Files a failed recovery left behind stopped the next one**, and a
+    copy that failed could not be made again on the same node under the
+    same id.
+  - **A terms lookup could not read its document from another node.** It
+    reads it across the cluster now, and when one node holds both indices
+    the search runs there.
+  - `_cluster/state` answers the question it was asked (its metadata was
+    listing this node's indices when the request named none), an
+    allocation explanation says an index is started here when this node
+    holds it, a reroute names the cluster manager both ways, a task is
+    named after the node that ran it, and `node.attr.*` reaches
+    `_cat/nodeattrs` and the cluster settings' defaults for every node.
+
+**The gate is not met yet.** On three nodes the two corpora read 1,382 of
+1,427 and 752 of 895 -- 2,134 of 2,322 against the phase's 2,296. On a
+single node they read 1,427 and 820, so about fifty of the shortfall is
+the cluster's and the rest is the module corpus's own (reindex from a
+remote, geoip, the URL repository, the attachment processor, kuromoji --
+Phase 3 and 4 work). What the cluster still loses, by name: the terms
+aggregation merged across nodes (12), `_stats` and `_cat/shards` tallies
+(6), `indices_boost` and `search_after` over several nodes (7), and a
+dozen single sections in `msearch`, `search_shards`, `shard_stores`,
+`cluster.health` and `indices.refresh`.
+
+Gates as they stand: unit 67/67, the storm over a thousand seeds clean,
+phase1 398/398, chaos seeds and the rolling restart with no acknowledged
+write lost, the rolling upgrade with every acknowledged write surviving;
+bench wins every dimension in passes 1 and 3 (97,282 against 65,664
+docs/s and 368MiB against 2.18GiB on plain HTTP; 92,662 against 55,975
+against os-secure) and every row but three aggregations in the TLS
+against plain pass, the documented transport mismatch.
