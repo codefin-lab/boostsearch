@@ -1962,3 +1962,44 @@ scroll, `_cat/segments` columns -- and is written up as the Phase 7 tail.
 
 Gates: unit 70/70, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
+
+**More of what the Java suite found**, and the answer's own shape:
+
+  - **A bulk `update` carrying a script was refused.** The single-document
+    update runs one; the bulk fell through to a bare 400. It runs the
+    script over the document that is there now, and honours what the
+    script asks for: a noop, a delete, or the document it wrote.
+
+That leaves **199 of 231**. The rest are single behaviours, written up as
+the Phase 7 tail: a highlight's offsets, `min_score` inside a
+multi-search, the completion and phrase suggesters, a search context
+outliving its scroll, `_cat/segments` and `_cat/nodes` columns, and a
+handful of assertions about state a previous test in the same class left
+behind.
+
+### The bench, after the network layer changed
+
+Reading request lines leniently and buffering a response before it is
+encrypted are both on the path every request takes, so the matrix was run
+again -- three passes, the same machine, nothing else on it.
+
+  - **Plain against plain** (BoostSearch with security on, OpenSearch
+    with no security plugin): BoostSearch wins **all eleven**. 92,711
+    against 62,785 docs/s; every latency between 1.2 and 4 times better.
+  - **TLS against TLS** (both with their security plugin): BoostSearch
+    wins **all eleven**, at 88,201 against 59,707 docs/s and 389MiB
+    against 2.025GiB -- a fifth of the memory.
+  - **Our TLS against their plain HTTP**: BoostSearch wins the indexing
+    and most of the queries, and loses the three or four smallest
+    aggregations by two to four tenths of a millisecond -- which is what
+    TLS costs us on this machine. Which of those rows falls either way
+    changes from run to run: our own numbers sit inside a tenth of a
+    millisecond across runs, the plain-HTTP reference's move by half of
+    one. It is not a like-for-like comparison, and the two that are we
+    win outright.
+
+Two things were done for it while it was measured, both worth having on
+their own: an answer is written without waiting to fill a packet
+(`TCP_NODELAY`, which Netty sets and hyper does not), and a response is
+gathered before it is encrypted rather than becoming a TLS record per
+piece.

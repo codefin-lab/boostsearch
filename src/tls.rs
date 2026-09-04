@@ -205,6 +205,9 @@ pub async fn serve_tls(
             Ok(s) => s,
             Err(_) => continue,
         };
+        // an answer goes out as soon as it is written: waiting to fill a
+        // packet costs a request more than the packet saves
+        let _ = stream.set_nodelay(true);
         let acceptor = acceptor.clone();
         let app = app.clone();
         tokio::spawn(async move {
@@ -218,7 +221,12 @@ pub async fn serve_tls(
                 .and_then(|chain| chain.first())
                 .and_then(|c| x509_parser::parse_x509_certificate(c.as_ref()).ok())
                 .map(|(_, cert)| crate::security::normalize_dn(&cert.subject().to_string()));
-            let io = hyper_util::rt::TokioIo::new(tls);
+            // the same lenient request line the plain listener reads
+            // the answer is gathered before it is encrypted: hyper writes a
+            // response in pieces, and each piece on its own would be a TLS
+            // record and a packet of its own
+            let buffered = tokio::io::BufWriter::with_capacity(32 * 1024, tls);
+            let io = hyper_util::rt::TokioIo::new(crate::http_compat::Lenient::new(buffered));
             let mut app = app;
             app = app.layer(axum::Extension(axum::extract::ConnectInfo(peer)));
             if let Some(dn) = peer_dn {

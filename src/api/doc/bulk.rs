@@ -584,6 +584,79 @@ pub async fn bulk(
                             }})
                         }
                     }
+                    // a script over the document that is there: the same
+                    // work the single-document update does, reported as an
+                    // item rather than as the whole request
+                    (Some(base), None) if patch.get("script").is_some() => {
+                        let spec = patch.get("script").cloned().unwrap_or(Value::Null);
+                        let compiled = match crate::painless::contexts::Compiled::of(&spec, &|n| {
+                            store.stored_script(n)
+                        }) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                errors = true;
+                                items.push(json!({"update": {
+                                    "_index": idx, "_id": id, "status": 400, "error": e.to_json()
+                                }}));
+                                continue;
+                            }
+                        };
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        let ctx = crate::painless::contexts::update_ctx(
+                            &idx,
+                            &id,
+                            g.version_of(&id),
+                            &base,
+                            now,
+                            "index",
+                        );
+                        let mut runner =
+                            crate::painless::contexts::Runner::new(&compiled.params)
+                                .with_ctx(ctx.clone());
+                        if let Err(e) = runner.run(&compiled.script) {
+                            errors = true;
+                            items.push(json!({"update": {
+                                "_index": idx, "_id": id, "status": 400, "error": e.to_json()
+                            }}));
+                            continue;
+                        }
+                        let Ok((op, source, _, _)) = crate::painless::contexts::read_ctx(&ctx)
+                        else {
+                            errors = true;
+                            items.push(json!({"update": {
+                                "_index": idx, "_id": id, "status": 400
+                            }}));
+                            continue;
+                        };
+                        match op.as_str() {
+                            "noop" | "none" => json!({"update": {
+                                "_index": idx, "_id": id, "_version": g.version_of(&id),
+                                "result": "noop", "status": 200
+                            }}),
+                            "delete" => {
+                                let (body, _) = delete_doc(&mut g, &id);
+                                let mut b = body;
+                                b["result"] = json!("deleted");
+                                b["status"] = json!(200);
+                                json!({"update": b})
+                            }
+                            _ => match write_doc(&mut g, &id, source, "index") {
+                                Ok((body, _)) => {
+                                    let mut b = body;
+                                    b["result"] = json!("updated");
+                                    b["status"] = json!(200);
+                                    json!({"update": b})
+                                }
+                                Err(_) => {
+                                    errors = true;
+                                    json!({"update": {"_index": idx, "_id": id, "status": 500}})
+                                }
+                            },
+                        }
+                    }
                     _ => {
                         errors = true;
                         json!({"update": {"_index": idx, "_id": id, "status": 400}})

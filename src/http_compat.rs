@@ -117,6 +117,23 @@ impl<S> Lenient<S> {
                     self.phase = Phase::Body(n - take as u64);
                 }
                 Phase::Line => {
+                    // HTTP/2 opens with a preface and then speaks in frames,
+                    // which have no request line to read: the connection is
+                    // handed through from the first byte of it
+                    const H2: &[u8] = b"PRI * HTTP/2.0\r\n";
+                    let short = self.hold.len() < H2.len();
+                    let looks_like_h2 = if short {
+                        H2.starts_with(&self.hold[..])
+                    } else {
+                        self.hold.starts_with(H2)
+                    };
+                    if looks_like_h2 {
+                        if short {
+                            return;
+                        }
+                        self.phase = Phase::Through;
+                        continue;
+                    }
                     let Some(at) = find(&self.hold, b"\r\n") else {
                         if self.hold.len() > LINE_LIMIT {
                             self.phase = Phase::Through;
@@ -263,7 +280,12 @@ impl axum::serve::Listener for LenientListener {
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             match self.0.accept().await {
-                Ok((stream, addr)) => return (Lenient::new(stream), addr),
+                Ok((stream, addr)) => {
+                    // an answer goes out as soon as it is written: waiting to
+                    // fill a packet costs a request more than the packet saves
+                    let _ = stream.set_nodelay(true);
+                    return (Lenient::new(stream), addr);
+                }
                 Err(e) => {
                     if !matches!(
                         e.kind(),
@@ -321,6 +343,18 @@ mod tests {
         assert_eq!(body_length(block), (42, false));
         let chunked = b"Transfer-Encoding: chunked\r\n\r\n";
         assert_eq!(body_length(chunked), (0, true));
+    }
+
+    #[tokio::test]
+    async fn a_frame_stream_is_handed_through() {
+        use tokio::io::AsyncReadExt;
+        let mut raw: Vec<u8> = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        // a settings frame, which has no request line in it at all
+        raw.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        let mut s = Lenient::new(std::io::Cursor::new(raw.clone()));
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.expect("the cursor reads to its end");
+        assert_eq!(out, raw);
     }
 
     #[tokio::test]
