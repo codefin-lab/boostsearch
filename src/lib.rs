@@ -9,6 +9,7 @@ pub mod api;
 pub mod blockstats;
 pub mod cluster;
 pub mod hdr;
+pub mod http_compat;
 pub mod ingest;
 pub mod painless;
 pub mod query;

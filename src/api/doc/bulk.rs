@@ -353,12 +353,14 @@ pub async fn bulk(
                     continue;
                 }
                 // an index action may be conditional too, on the sequence
-                // number the caller believes the document is at
-                let cond =
-                    meta.get("if_seq_no").and_then(|v| v.as_u64()).filter(|_| exists_doc(&g, &id));
+                // number the caller believes the document is at. A document
+                // that is not there is at no sequence number at all, which is
+                // a conflict with any the caller could name.
+                let cond = meta.get("if_seq_no").and_then(|v| v.as_u64());
                 if let Some(want) = cond {
-                    let have = read_seq(&g, &id).unwrap_or(0);
-                    if have != want {
+                    let here = exists_doc(&g, &id);
+                    let have = if here { read_seq(&g, &id).unwrap_or(0) as i64 } else { -2 };
+                    if have != want as i64 {
                         errors = true;
                         items.push(json!({ op.clone(): {
                             "_index": idx, "_id": id, "status": 409,
@@ -612,7 +614,10 @@ pub async fn bulk(
         }
     }
     let mut out = json!({
-        "took": started.elapsed().as_millis() as u64,
+        // a write that took less than a millisecond still took some time:
+        // OpenSearch's own clock never reports a bulk as instantaneous, and a
+        // client that measures throughput divides by this
+        "took": (started.elapsed().as_millis() as u64).max(1),
         "errors": errors,
         "items": items,
     });

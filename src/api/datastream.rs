@@ -65,10 +65,25 @@ pub async fn create_data_stream(
     respond(&p, json!({"acknowledged": true}))
 }
 
-pub(crate) fn data_stream_entry(_store: &Store, name: &str, template: &str) -> Value {
+pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Value {
+    // the template a stream was made from says which field carries its time
+    let field = store
+        .get_templates()
+        .get(template)
+        .and_then(|t| {
+            // the composable form the template was written in is kept beside
+            // the flattened one the index creation reads
+            t.pointer("/__composable/data_stream/timestamp_field/name")
+                .or_else(|| t.pointer("/__composable/data_stream/timestamp_field"))
+                .or_else(|| t.pointer("/data_stream/timestamp_field/name"))
+                .or_else(|| t.pointer("/data_stream/timestamp_field"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "@timestamp".to_string());
     json!({
         "name": name,
-        "timestamp_field": {"name": "@timestamp"},
+        "timestamp_field": {"name": field},
         "indices": [{
             "index_name": backing_index(name, 1),
             "index_uuid": crate::store::index_uuid(&backing_index(name, 1)),
@@ -115,7 +130,8 @@ pub async fn delete_data_stream(
     Query(p): Query<Params>,
 ) -> Response {
     let gone = store.remove_data_stream(&name);
-    if gone.is_empty() {
+    // a pattern that reaches no stream has taken none away
+    if gone.is_empty() && !name.contains('*') && name != "_all" {
         return err(
             StatusCode::NOT_FOUND,
             "index_not_found_exception",

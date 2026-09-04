@@ -11,6 +11,7 @@ mod api;
 mod blockstats;
 mod cluster;
 mod hdr;
+mod http_compat;
 mod ingest;
 mod painless;
 mod query;
@@ -544,8 +545,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
-            listener,
-            app(store.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            http_compat::LenientListener(listener),
+            app(store.clone())
+                .into_make_service_with_connect_info::<http_compat::Peer>(),
         )
         .with_graceful_shutdown(shutdown_signal(store))
         .await?;

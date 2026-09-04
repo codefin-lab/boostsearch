@@ -23,6 +23,8 @@ pub async fn create_index(
     if let Some(r) = reserved_index_name(&index) {
         return r;
     }
+    // a name in angle brackets is the date expression it stands for
+    let index = crate::store::resolve_date_math_name(&index);
     if let Some(r) = bad_index_name(&index) {
         return r;
     }

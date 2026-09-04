@@ -1911,3 +1911,54 @@ direction. It found nine things.
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
+
+### The Java client
+
+`opensearch-java` 4.0's integration suite runs 231 tests, and it starts by
+asking the cluster about itself through the low-level `RestClient` --
+which was enough to stop every one of them.
+
+  - **A request target without a leading slash was refused.** OpenSearch
+    is served by Netty, which takes the target as it finds it: a caller
+    who writes `_cat/indices` rather than `/_cat/indices` gets an answer,
+    and the client's own test harness writes it the first way. Hyper
+    answered a bare `400` before the router saw the request. The bytes of
+    a connection now pass through a small HTTP/1 reader that puts the
+    slash back. It looks at the request line and the headers of each
+    message and hands the body straight to the caller's buffer, so a bulk
+    load is neither copied nor scanned; anything it does not follow -- a
+    chunked body, an over-long header block -- turns it off for the rest
+    of that connection.
+
+With that fixed, 231 became 79, and then:
+
+  - **A date written into an index name was taken literally.**
+    `<logstash-{now/M}>` was resolved when reading but not when creating
+    or writing, so a client that made an index by its date made one
+    called `<logstash-{now/M}>`.
+  - **A wildcard that reached nothing was an error.** `DELETE /_template/*`,
+    `/_index_template/*` and `/_data_stream/*` said the thing was missing;
+    a pattern that takes nothing away has still done what was asked.
+  - **An unknown cluster setting was accepted.** A setting belongs to a
+    part of the server, and one whose family is not a family at all --
+    `no_idea_what_you_are_talking_about` -- is refused now, the way
+    OpenSearch refuses it.
+  - **The node statistics were missing pieces a typed client insists on**:
+    the transport's bound and published addresses, the merge totals, the
+    per-part segment memory, the script cache.
+  - **A `multi_terms` aggregation was keyed `multiterms#name`** under
+    `typed_keys`, where OpenSearch writes the aggregation's own name.
+  - **A data stream reported `@timestamp` whatever its template said.**
+  - **A bulk `index` with `if_seq_no` on a document that is not there
+    succeeded.** A document that is not there is at no sequence number,
+    which conflicts with any the caller could name.
+  - **A bulk that took less than a millisecond reported `took: 0`**,
+    which a client dividing by it cannot use.
+
+231 failing to **36**; 195 of 231 pass. What is left is a list of single
+behaviours -- a highlight's offsets, `min_score` in a multi-search, the
+completion and phrase suggesters, a search context that outlives its
+scroll, `_cat/segments` columns -- and is written up as the Phase 7 tail.
+
+Gates: unit 70/70, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- unchanged.

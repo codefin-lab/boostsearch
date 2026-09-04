@@ -119,6 +119,18 @@ pub async fn nodes_stats(
         .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
     let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
+    /// What the segments of an index cost, every part of it, which a client
+    /// reads into a struct that asks for all of them.
+    fn segment_stats() -> Value {
+        json!({
+            "count": 0, "memory_in_bytes": 0, "terms_memory_in_bytes": 0,
+            "stored_fields_memory_in_bytes": 0, "term_vectors_memory_in_bytes": 0,
+            "norms_memory_in_bytes": 0, "points_memory_in_bytes": 0,
+            "doc_values_memory_in_bytes": 0, "index_writer_memory_in_bytes": 0,
+            "version_map_memory_in_bytes": 0, "fixed_bit_set_memory_in_bytes": 0,
+            "max_unsafe_auto_id_timestamp": -1, "file_sizes": {}
+        })
+    }
     let mut out = json!({
         "_nodes": {"total": 1, "successful": 1, "failed": 0},
         "cluster_name": crate::cluster::identity().cluster_name,
@@ -155,7 +167,10 @@ pub async fn nodes_stats(
                            "suggest_time_in_millis": 0, "suggest_current": 0},
                 "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
                            "total": 0, "total_time_in_millis": 0, "total_docs": 0,
-                           "total_size_in_bytes": 0},
+                           "total_size_in_bytes": 0,
+                           "total_stopped_time_in_millis": 0,
+                           "total_throttled_time_in_millis": 0,
+                           "total_auto_throttle_in_bytes": 20_971_520_i64},
                 "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
                             "external_total_time_in_millis": 0, "listeners": 0},
                 "flush": {"total": 0, "periodic": 0, "total_time_in_millis": 0},
@@ -167,7 +182,7 @@ pub async fn nodes_stats(
                                 "cache_count": 0, "evictions": 0},
                 "fielddata": {"memory_size_in_bytes": 0, "evictions": 0},
                 "completion": {"size_in_bytes": 0},
-                "segments": {"count": 0, "memory_in_bytes": 0},
+                "segments": segment_stats(),
                 "translog": {"operations": 0, "size_in_bytes": 0,
                              "uncommitted_operations": 0, "uncommitted_size_in_bytes": 0,
                              "earliest_last_modified_age": 0},
@@ -192,9 +207,18 @@ pub async fn nodes_stats(
             "transport": {"server_open": 0, "rx_count": 0, "rx_size_in_bytes": 0,
                           "tx_count": 0, "tx_size_in_bytes": 0},
             "http": {"current_open": 0, "total_opened": 0},
-            "breakers": {}, "script": {"compilations": 0, "cache_evictions": 0},
+            "breakers": {},
+            "script": {
+                "compilations": 0, "cache_evictions": 0, "compilation_limit_triggered": 0
+            },
             "discovery": {}, "ingest": crate::api::ingest_stats_json(&store),
-            "adaptive_selection": {}, "script_cache": {"sum": {}},
+            "adaptive_selection": {},
+            "script_cache": {
+                "sum": {
+                    "compilations": 0, "cache_evictions": 0, "compilation_limit_triggered": 0
+                },
+                "contexts": []
+            },
             "indexing_pressure": {"memory": {}},
         }},
     });
@@ -504,7 +528,13 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                 "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
                 "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
             },
-            "thread_pool": {}, "transport": {},
+            "thread_pool": {},
+            // where the other nodes of the cluster reach this one
+            "transport": {
+                "bound_address": [crate::cluster::identity().transport_address.clone()],
+                "publish_address": crate::cluster::identity().transport_address.clone(),
+                "profiles": {},
+            },
             // where a client -- or another cluster reindexing from this
             // one -- reaches this node
             "http": {

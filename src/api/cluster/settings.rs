@@ -158,6 +158,48 @@ pub(crate) fn flatten_cluster_settings(
 }
 
 /// A setting whose value the cluster refuses rather than stores.
+/// The families of settings a cluster takes. A setting is named for the part
+/// of the server it belongs to, and one whose family nothing here answers for
+/// is a name OpenSearch does not know either.
+const SETTING_FAMILIES: &[&str] = &[
+    "action",
+    "admission_control",
+    "bootstrap",
+    "cluster",
+    "cluster_manager",
+    "compatibility",
+    "discovery",
+    "gateway",
+    "http",
+    "indices",
+    "ingest",
+    "knn",
+    "logger",
+    "monitor",
+    "network",
+    "no_master_block",
+    "node",
+    "opendistro",
+    "opensearch",
+    "path",
+    "persistent_tasks",
+    "plugins",
+    "processors",
+    "remote_store",
+    "repositories",
+    "script",
+    "search",
+    "search_backpressure",
+    "segrep",
+    "shard_indexing_pressure",
+    "snapshot",
+    "task_resource_consumers",
+    "telemetry",
+    "thread_pool",
+    "transport",
+    "wlm",
+];
+
 pub(crate) fn check_cluster_setting(key: &str, value: &Value) -> Option<Response> {
     // a null is a removal, not a value, and nothing about it can be wrong
     if value.is_null() {
@@ -240,6 +282,16 @@ pub async fn cluster_settings_put(
         for (k, v) in &flat {
             if let Some(r) = check_cluster_setting(k, v) {
                 return r;
+            }
+            // a setting belongs to a part of the server; one whose family is
+            // not a family at all is a name the cluster does not know
+            let family = k.split('.').next().unwrap_or("");
+            if !SETTING_FAMILIES.contains(&family) {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("{scope} setting [{k}], not recognized"),
+                );
             }
         }
         body[scope] = Value::Object(flat);

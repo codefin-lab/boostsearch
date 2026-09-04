@@ -125,7 +125,9 @@ pub async fn delete_template(
     Path(name): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    if !store.delete_template(&name) {
+    // a pattern that reaches nothing has taken nothing away, which is not an
+    // error; a name that was written out in full and is not there is
+    if !store.delete_template(&name) && !name.contains('*') && name != "_all" {
         return err(
             StatusCode::NOT_FOUND,
             "index_template_missing_exception",
@@ -512,7 +514,7 @@ pub async fn delete_index_template(
             ),
         );
     }
-    if !store.delete_template(&name) {
+    if !store.delete_template(&name) && !name.contains('*') && name != "_all" {
         return err(
             StatusCode::NOT_FOUND,
             "resource_not_found_exception",
