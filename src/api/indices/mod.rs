@@ -336,6 +336,18 @@ pub async fn get_index(
     if targets.is_empty() && !index.contains('*') && index != "_all" && !ignore_unavailable(&p) {
         return no_such_index(&index);
     }
+    // every name written out in full has to be there: one missing among
+    // several is still a missing index, not a shorter answer
+    if !ignore_unavailable(&p) {
+        for part in index.split(',').map(|n| n.trim()) {
+            if part.is_empty() || part.contains('*') || part == "_all" {
+                continue;
+            }
+            if store.resolve(part).is_empty() {
+                return no_such_index(part);
+            }
+        }
+    }
     // a pattern reaching nothing is an error only when the caller said so
     let allow_none = p.get("allow_no_indices").map(|v| v != "false").unwrap_or(true);
     if targets.is_empty() && !allow_none {

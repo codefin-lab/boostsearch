@@ -710,6 +710,25 @@ pub fn run(
             ));
         }
     }
+    // an index held closed to readers refuses a search, the way one held
+    // closed to writers refuses a write
+    for name in &targets {
+        let blocked = store
+            .get(name)
+            .map(|st| {
+                let g = st.read();
+                g.setting("blocks.read").as_deref() == Some("true")
+                    || g.setting("blocks.read_only").as_deref() == Some("true")
+            })
+            .unwrap_or(false);
+        if blocked {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "cluster_block_exception",
+                format!("index [{name}] blocked by: [FORBIDDEN/7/index read (api)];"),
+            ));
+        }
+    }
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !expr.is_empty() && !lenient {
         // a date-math name is reported as the index it stands for, since that
         // is the one that was not there
@@ -1222,6 +1241,8 @@ pub fn run(
     }
 
     // now, and only now, read stored fields -- for at most `size` documents
+    let track_scores = !sort_keys.is_empty()
+        && body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut all_hits: Vec<Hit> = Vec::new();
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
@@ -1230,12 +1251,23 @@ pub fn run(
         // `_ignored` travels inside the stored source but belongs on the hit
         let ignored = src.as_object_mut().and_then(|o| o.remove("_ignored"));
         let version = g.version_of(&id);
+        // a sort collects without scoring; `track_scores` asks for the score
+        // as well as the order, and it is worked out for the page alone
+        let score = match track_scores {
+            true => body
+                .get("query")
+                .and_then(|q| crate::search::explain::explain_document(&g, q, &id))
+                .and_then(|e| e.get("value").and_then(|v| v.as_f64()))
+                .map(|v| v as f32)
+                .unwrap_or(c.score),
+            false => c.score,
+        };
         all_hits.push(Hit {
             seq: c.seq,
             shard_idx: c.shard,
             index: name.clone(),
             id,
-            score: c.score,
+            score,
             source: src,
             sort: c.sort,
             version,

@@ -1955,10 +1955,58 @@ With that fixed, 231 became 79, and then:
   - **A bulk that took less than a millisecond reported `took: 0`**,
     which a client dividing by it cannot use.
 
-231 failing to **36**; 195 of 231 pass. What is left is a list of single
-behaviours -- a highlight's offsets, `min_score` in a multi-search, the
-completion and phrase suggesters, a search context that outlives its
-scroll, `_cat/segments` columns -- and is written up as the Phase 7 tail.
+231 failing to 36, and then the last of them, one behaviour at a time:
+
+  - **A bulk `update` carrying a script was refused** with a bare 400
+    where the single-document update runs one. It runs the script over
+    the document that is there and honours what the script asks for: a
+    noop, a delete, or the document it wrote.
+  - **`_cat/nodes` had no `pid` or `version`**, and `_cat/segments` no
+    `id` -- columns that are not in either default table but that a
+    caller naming its own columns may ask for.
+  - **`GET /a,b` answered for `a` alone when `b` was not there.** Every
+    name written out in full has to be there; one missing among several
+    is a missing index, not a shorter answer.
+  - **`_cat/pit_segments` listed the index's segments.** From OpenSearch
+    2.10 the table is there and has nothing in it.
+  - **`stored_fields` written as a list ignored `_none_`**, so a hit came
+    back with its metadata after being asked for none of it.
+  - **`max_analyzer_offset` was the plain highlighter's alone.** It says
+    how far into a field the analyser may read, whichever highlighter is
+    marking: past it there are no tokens and nothing to mark. The plain
+    highlighter's fragments stop there too, the unified one's do not.
+  - **`track_scores` was ignored.** A sort collects without scoring, and
+    a request that asks for the score as well as the order now gets it,
+    worked out for the page alone rather than for every match.
+  - **The completion suggester ignored `prefix`.** It is the word a
+    completion suggester is given; `text` is the other suggesters'.
+  - **The phrase suggester had no `collate`.** A suggestion can be put to
+    the index as a query of its own -- `{{suggestion}}` standing for the
+    line -- and either pruned when nothing reads that way or marked with
+    whether anything does.
+  - **An index asking for nothing got no replica.** OpenSearch gives it
+    one, which is what makes a single-node cluster yellow rather than
+    green; the health, its per-index block and the counts all say so now,
+    and a copy the routing has not got yet is counted whether the manager
+    has caught up or not.
+  - **A health request naming an index that is not there answered green.**
+    It is the request that waits and gives up: red, timed out.
+  - **`DELETE /_search/scroll` on an unknown id answered with an error.**
+    OpenSearch answers with the ordinary body -- nothing freed -- under
+    the status that says it was not found.
+  - **An index held closed to readers still answered a search.** It is
+    forbidden, the way a write to one held closed to writers is.
+  - **An update on an index that is not there said so.** OpenSearch makes
+    the index and then says the document is missing, which is what
+    `action.auto_create_index` means for an update as much as for a write.
+  - **Every fuzzy match scored the same.** A word one edit away is a
+    better answer than one two edits away: each distance is asked for on
+    its own and weighed by how far it is, so the nearer word scores
+    higher without the terms having to be enumerated.
+  - **The open point-in-times came back in no order.** The newest first,
+    so the one a caller has just opened is the one it reads about first.
+
+**231 of 231 pass.**
 
 Gates: unit 70/70, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.
@@ -1976,6 +2024,15 @@ multi-search, the completion and phrase suggesters, a search context
 outliving its scroll, `_cat/segments` and `_cat/nodes` columns, and a
 handful of assertions about state a previous test in the same class left
 behind.
+
+### Where the four clients stand
+
+| | |
+|---|---|
+| `opensearch-py` | **118 of 118** |
+| `opensearch-js` | **4 of 4** integration helper suites |
+| `opensearch-go` | **189 of 189**, core and plugins |
+| `opensearch-java` | **231 of 231** |
 
 ### The bench, after the network layer changed
 

@@ -329,9 +329,34 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, true);
             let d = opts.get("fuzziness").and_then(|v| v.as_u64()).unwrap_or(2).min(2) as u8;
+            let want = val.as_str().unwrap_or_default().to_lowercase();
             let mut t = Term::from_field_json_path(f, &path, true);
-            t.append_type_and_str(&val.as_str().unwrap_or_default().to_lowercase());
-            Box::new(FuzzyTermQuery::new(t, d, true))
+            t.append_type_and_str(&want);
+            if d == 0 {
+                Box::new(FuzzyTermQuery::new(t, 0, true))
+            } else {
+                // A word one edit away is a better answer than a word two
+                // away, and the score has to say so. Each distance is asked
+                // for on its own and weighed by how far it is: a word at one
+                // edit matches every clause from its distance outwards, so
+                // the nearer word scores higher without the terms having to
+                // be enumerated.
+                let len = want.chars().count().max(1) as f32;
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for k in 0..=d {
+                    let mut term = Term::from_field_json_path(f, &path, true);
+                    term.append_type_and_str(&want);
+                    let boost = (1.0 - k as f32 / len).max(0.01);
+                    clauses.push((
+                        Occur::Should,
+                        Box::new(BoostQuery::new(
+                            Box::new(FuzzyTermQuery::new(term, k, true)),
+                            boost,
+                        )),
+                    ));
+                }
+                Box::new(BooleanQuery::new(clauses))
+            }
         }
         "range" => build_range(ctx, &body)?,
         "match_bool_prefix" => build_match_bool_prefix(ctx, &body)?,

@@ -85,6 +85,15 @@ pub(crate) async fn cat_by_name(
                         },
                     ),
                     ("ip", ip.clone()),
+                    // what the node is and what runs it, which a caller
+                    // naming its own columns asks for
+                    ("pid", std::process::id().to_string()),
+                    ("version", "3.9.0".into()),
+                    ("type", "tar".into()),
+                    ("build", "boostsearch".into()),
+                    ("jdk", "21".into()),
+                    ("uptime", "0s".into()),
+                    ("master", if is_manager { "*".into() } else { "-".into() }),
                     ("file_desc.current", "0".into()),
                     ("file_desc.percent", "0".into()),
                     ("file_desc.max", "0".into()),
@@ -377,9 +386,10 @@ pub(crate) async fn cat_by_name(
             );
             cat_render(rows, &p)
         }
-        // a point-in-time holds the segments its indices held when it was
-        // opened, and those are the segments the index still has
-        "segments" | "pit_segments" => {
+        // a point-in-time's segments are not listed from OpenSearch 2.10 on:
+        // the table is there and has nothing in it
+        "pit_segments" => cat_render_cols(CAT_SEGMENT_COLS, Vec::new(), &p),
+        "segments" => {
             let rows = store
                 .names()
                 .into_iter()
@@ -395,6 +405,8 @@ pub(crate) async fn cat_by_name(
                                 ("index", n.clone()),
                                 ("shard", "0".into()),
                                 ("prirep", "p".into()),
+                                // which node the segment is on
+                                ("id", crate::cluster::identity().id.as_str().to_string()),
                                 ("segment", format!("_{i}")),
                                 ("docs.count", sr.num_docs().to_string()),
                                 ("docs.deleted", sr.num_deleted_docs().to_string()),

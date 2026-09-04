@@ -120,12 +120,26 @@ pub(crate) fn build_highlight(
                 .unwrap_or(Value::Null);
             let plain = opts.get("type").and_then(|t| t.as_str()) == Some("plain")
                 || spec.get("type").and_then(|t| t.as_str()) == Some("plain");
-            let text = match opts.get("max_analyzer_offset").and_then(|v| v.as_u64()) {
-                Some(cap) if plain => {
-                    let cap = (cap as usize).min(text.len());
-                    &text[..cap]
+            // `max_analyzer_offset` says how far into the field the analyser
+            // is allowed to read: past it there are no tokens, so there is
+            // nothing to mark. It is not the plain highlighter's alone.
+            let (text, beyond) = match opts
+                .get("max_analyzer_offset")
+                .or_else(|| spec.get("max_analyzer_offset"))
+                .and_then(|v| v.as_u64())
+            {
+                Some(cap) => {
+                    let mut cap = (cap as usize).min(text.len());
+                    while cap > 0 && !text.is_char_boundary(cap) {
+                        cap -= 1;
+                    }
+                    // the analyser stops there. The plain highlighter builds
+                    // its fragments out of what it analysed, so its answer
+                    // stops there too; the unified one marks inside the whole
+                    // field, and what lies beyond comes back as it stands.
+                    (&text[..cap], if plain { "" } else { &text[cap..] })
                 }
-                _ => text,
+                None => (text, ""),
             };
             // a field may be highlighted against a query of its own rather than
             // against the one that found the document
@@ -185,7 +199,8 @@ pub(crate) fn build_highlight(
                     mark_terms(index, text, &terms, &readers, analysis, &pre, &post)
                 }
             };
-            if let Some(marked) = marked {
+            if let Some(mut marked) = marked {
+                marked.push_str(beyond);
                 fragments.push(marked);
             }
         }
