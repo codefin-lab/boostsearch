@@ -2034,6 +2034,21 @@ behind.
 | `opensearch-go` | **189 of 189**, core and plugins |
 | `opensearch-java` | **231 of 231** |
 
+
+**7.2 closed.** Four official clients, four of their own test suites, all
+passing: 542 tests between them, none skipped for our sake. What they
+found was thirty-eight distinct behaviours, and the shape of the list is
+worth keeping: the Python suite found the search semantics (aggregations
+over analysed text, `post_filter`, the join queries, highlighting), the
+Go suite found the response shapes field by field (its client reads every
+answer into a typed struct and reports what does not line up, in either
+direction), the Java suite found the REST surface and the HTTP layer
+itself, and the JavaScript suite found what a five-thousand-document bulk
+load does to a mapping that guessed wrong.
+
+Nothing here was reachable from the YAML corpora. They test what
+OpenSearch's own server tests; a client tests what a client needs.
+
 ### The bench, after the network layer changed
 
 Reading request lines leniently and buffering a response before it is
