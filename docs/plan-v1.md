@@ -10,10 +10,10 @@ dimension of the bench matrix. Elasticsearch 8/9 is a separate target and is
 version two (ADR 0006, 0001–0005 for the rest).
 
 Phase 13 is the exception to that sentence. The other twelve are about
-answering the same questions as OpenSearch; the thirteenth is about the
-program a person looks at, which OpenSearch ships separately and in another
-language. It is added here because the alternative is a Rust server behind two
-and a half gigabytes of Node.
+answering the same questions as OpenSearch; the thirteenth answers the ones
+its console asks, so that the console runs on a Rust server rather than behind
+two and a half gigabytes of Node. The console's own front end is left as it
+is.
 
 ## Where it stands today
 
@@ -179,49 +179,54 @@ HNSW, filtered search, nested vectors, the on-disk format, the k-NN API.
 Two query languages: lexer, parser, planner, execution against the search
 layer, and the response shapes their drivers expect.
 
-### 13. The console — 78 days
+### 13. The console's server — 30 days
 
-OpenSearch Dashboards is two programs. One is a Node server that keeps the
-saved objects, proxies the search API and hands out the front end; it is where
-the two and a half gigabytes of image and the several hundred megabytes of
-resident memory go. The other is a React application in the browser, and it is
-where the work is.
+OpenSearch Dashboards is two programs. One is a Node server: it keeps the
+saved objects, migrates them, proxies the search API, serves the front end and
+hands it the metadata it boots from. The other is the React application in the
+browser. The first is where the two and a half gigabytes of image and the
+several hundred megabytes of resident memory go; the second is fine as it is.
 
-We fork it for what it knows rather than for what it is: the saved-object
-schemas and their migrations, the shapes of the requests each page makes, the
-state a URL carries, and the behaviour a person already expects. The Node
-server is replaced outright by a Rust one. The browser application is rebuilt
-in Rust compiled to WebAssembly, a page at a time, with the existing one served
-until the page that replaces it is better.
+So the second is left alone. We do not fork the front end, do not rewrite it,
+and do not touch a line of its JavaScript -- we serve the bundle the OpenSearch
+project publishes, and replace the program behind it with a Rust one.
 
-That ordering is the point: the server comes first because it is bounded and
-pays for itself immediately, and no page is thrown away before its replacement
-stands.
+This is the smaller half of the work and nearly all of the win: the browser
+does what it always did, and the server it talks to starts in milliseconds
+instead of most of a minute and holds tens of megabytes instead of hundreds.
 
 | | | days |
 |---|---|---:|
-| 13.1 | The server: static assets, the search proxy, config, status -- the existing front end, served from Rust | 6 |
-| 13.2 | Saved objects: the store, the migrations, find, bulk, export, import, the management routes | 8 |
-| 13.3 | What the pages ask for: index patterns, `_fields_for_wildcard`, the internal search endpoints | 5 |
-| 13.4 | The shell in WebAssembly: routing, the state a URL carries, the component set | 12 |
-| 13.5 | Discover | 10 |
-| 13.6 | Visualize, and the chart layer under it | 14 |
-| 13.7 | Dashboard: panels, layout, filters, the time range | 10 |
-| 13.8 | Index and cluster management, the Dev Tools console | 8 |
-| 13.9 | The gate: every flow driven in a browser against both, to the same answer, inside a memory and a download budget | 5 |
+| 13.1 | The shell: the built assets, the metadata the front end boots from, the base path, the CSP, the translations | 6 |
+| 13.2 | Settings and status: `uiSettings` and the config object behind it, `/api/status` | 3 |
+| 13.3 | Saved objects: the store, the migrations that make `.kibana_N` and move the alias, the API and the management routes | 8 |
+| 13.4 | What the pages ask for: index patterns, `_fields_for_wildcard`, the internal search endpoints, the Dev Tools proxy, short URLs | 5 |
+| 13.5 | The plugin routes the pages we answer for need; a plain refusal for the rest | 4 |
+| 13.6 | The gate: every Phase 7.1 flow, through our server, against the same browser | 4 |
 
 Gate: the flows Phase 7.1 drives -- migration, Discover, the Visualize
 editor, a saved dashboard, the saved-object round trip, Index Management --
-all pass against our console, unchanged; resident memory under 64MiB against
-the Node server's several hundred; the first paint under a second on a cold
-cache.
+pass against our server with the front end unchanged; resident memory under
+64MiB against the Node server's several hundred; ready to serve in under a
+second against its thirty.
 
 What is not claimed: the plugin system. Dashboards loads fifty-four plugins,
-most of which belong to features this plan does not have. The console answers
-for the pages listed above and says so plainly for the rest.
+most of them for features this plan does not have. Our server answers the
+routes the pages above need and says plainly that it does not answer the rest,
+which is what it already does for `_plugins/_ism` and the alerting searches.
+
+The risk is that the metadata the front end boots from is a contract between
+two halves of one program, and nobody wrote it down. It changes when
+Dashboards changes, so the version we serve is pinned and moving it is a
+task, not an accident.
 
 The licence allows this. OpenSearch Dashboards is Apache 2.0, the same licence
-this repository already carries, and the fork keeps its NOTICE.
+this repository already carries, and what we redistribute keeps its NOTICE.
+
+The browser application in Rust and WebAssembly is a separate question and not
+in this plan. If the server is answered first, that question can be asked one
+page at a time afterwards, with the page it replaces still there to compare
+against.
 
 ## The arithmetic
 
@@ -233,14 +238,14 @@ this repository already carries, and the fork keeps its NOTICE.
 | Phase 6, cluster | 80 | 16 |
 | Phase 7, proof and release | 29 | 6 |
 | Phases 8–12, the rest of the surface | 108 | 22 |
-| Phase 13, the console | 78 | 16 |
-| **Total, one stream** | **424** | **85** |
+| Phase 13, the console's server | 30 | 6 |
+| **Total, one stream** | **376** | **75** |
 
 | streams | critical path | calendar |
 |---|---|---|
-| one | everything in order | 85 weeks |
-| two | search and ecosystem beside security and cluster | ~44 weeks |
-| three | search · security then cluster · ecosystem, console beside them | ~36 weeks |
+| one | everything in order | 75 weeks |
+| two | search and ecosystem beside security and cluster | ~39 weeks |
+| three | search · security then cluster · ecosystem, the console beside them | ~32 weeks |
 
 The console is the one phase that needs nothing from the others: it talks to
 the server over the same REST API any client uses, so it can be built beside
