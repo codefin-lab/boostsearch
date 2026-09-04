@@ -678,7 +678,7 @@ pub(crate) fn attach_join_inner_hits(
                     }
                     json!({"bool": {"must": [
                         inner.clone(),
-                        {"term": {format!("{field}.name"): named}},
+                        on_that_side(&field, named),
                         {"terms": {format!("{field}.parent"): written}},
                     ]}})
                 }
@@ -693,7 +693,7 @@ pub(crate) fn attach_join_inner_hits(
                         .unwrap_or_default();
                     json!({"bool": {"must": [
                         inner.clone(),
-                        {"term": {format!("{field}.name"): named}},
+                        on_that_side(&field, named),
                         {"ids": {"values": [parent]}},
                     ]}})
                 }

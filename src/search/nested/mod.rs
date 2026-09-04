@@ -205,6 +205,58 @@ pub(crate) fn objects_agg(
                 answer["after_key"] = last["key"].clone();
             }
             out[name.clone()] = answer;
+        } else if def.get("date_histogram").is_some() || def.get("histogram").is_some() {
+            let dated = def.get("date_histogram").is_some();
+            let spec = def
+                .get("date_histogram")
+                .or_else(|| def.get("histogram"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let min = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            // the objects that carry the field, each with the number it is
+            // bucketed by: a date reads as milliseconds
+            let mut placed: Vec<(i64, (String, Value))> = Vec::new();
+            for ((id, object), (_, value)) in objects.iter().zip(values(&spec)) {
+                let Some(n) = number_of(&value) else { continue };
+                let n = if dated && value.is_string() { n / 1_000_000.0 } else { n };
+                if let Some(key) = bucket_key(&spec, n, dated) {
+                    placed.push((key, (id.clone(), object.clone())));
+                }
+            }
+            let mut groups: Vec<(i64, Vec<(String, Value)>)> = Vec::new();
+            for (key, entry) in placed {
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, list)) => list.push(entry),
+                    None => groups.push((key, vec![entry])),
+                }
+            }
+            groups.sort_by_key(|(k, _)| *k);
+            let buckets: Vec<Value> = groups
+                .into_iter()
+                .filter(|(_, list)| list.len() as u64 >= min.max(1))
+                .map(|(key, list)| {
+                    let mut b = json!({"key": key, "doc_count": list.len()});
+                    if dated {
+                        if let Ok(at) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+                            key as i128 * 1_000_000,
+                        ) {
+                            b["key_as_string"] =
+                                json!(crate::search::aggs::iso_millis(at));
+                        }
+                    }
+                    if let Some(Value::Object(inner)) =
+                        subs.as_ref().map(|_| objects_agg(store, targets, &list, path, &subs))
+                    {
+                        for (k, v) in inner {
+                            if k != "doc_count" {
+                                b[k] = v;
+                            }
+                        }
+                    }
+                    b
+                })
+                .collect();
+            out[name.clone()] = json!({"buckets": buckets});
         } else {
             // a metric reads the objects' own values
             let kind = def
@@ -311,6 +363,40 @@ pub(crate) fn scope_sorts_to(node: &mut Value, path: &str) {
 }
 
 /// A value as the number it stands for: a date is its instant.
+
+/// Which bucket a number falls in, for a histogram written over objects.
+///
+/// A calendar step is a step of the calendar rather than a length, so it is
+/// taken by the calendar; a fixed step and a plain histogram's interval are
+/// lengths, and the bucket is the multiple below the value.
+fn bucket_key(spec: &Value, n: f64, dated: bool) -> Option<i64> {
+    if dated {
+        if let Some(unit) = spec
+            .get("calendar_interval")
+            .and_then(|v| v.as_str())
+            .and_then(crate::search::calendar::CalendarUnit::parse)
+        {
+            let at = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+                (n * 1_000_000.0) as i128,
+            )
+            .ok()?;
+            return Some((unit.floor(at).unix_timestamp_nanos() / 1_000_000) as i64);
+        }
+        let step = spec
+            .get("fixed_interval")
+            .or_else(|| spec.get("interval"))
+            .and_then(|v| v.as_str())
+            .and_then(crate::search::aggs::parse_offset)
+            .map(|d| d.whole_milliseconds() as i64)
+            .filter(|ms| *ms > 0)
+            .unwrap_or(86_400_000) as f64;
+        return Some(((n / step).floor() * step) as i64);
+    }
+    let step = spec.get("interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let offset = spec.get("offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    Some((((n - offset) / step).floor() * step + offset) as i64)
+}
+
 pub(crate) fn number_of(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),

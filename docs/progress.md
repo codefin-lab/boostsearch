@@ -1821,12 +1821,27 @@ Then six more, found by running it again:
     The finishing touches a top-level answer gets are given to a
     sub-aggregation's too.
 
-That leaves **113 of 127** passing. What is still out is one piece of
-work: `nested` and `inner_hits` in an answer -- a `top_hits` inside a
-`nested` aggregation returns the whole document rather than the nested
-one, `inner_hits` on a join query are not returned at all, and the two
-nested facets rest on both. Plus one test that wants a `pytest-mock`
-fixture the checkout does not install.
+Then the last of them, all `nested` and `inner_hits` work:
+
+  - **A `top_hits` named `hits` returned the whole document.** Inside a
+    nested aggregation the hits are the objects at the path, and the
+    expansion looked for them at `hits.hits` -- which is also where an
+    aggregation a caller happened to name `hits` puts its own answer. It
+    is a page of documents only when it is a list.
+  - **A nested aggregation counted documents rather than objects.** What
+    it counts is the objects at its path, and a page of hits under it is
+    a page of those objects: as long as it asked for, counting them all.
+  - **A histogram under a nested aggregation answered nothing.** The
+    aggregations run over the objects knew `terms`, `filter`, `nested`,
+    `reverse_nested`, `composite` and the plain metrics, but not
+    `histogram` or `date_histogram`; both are there now, by calendar step
+    and by fixed one, with the key written out as a date.
+  - **`inner_hits` on a join query came back empty**, for the same reason
+    `has_parent` did: a root document may write the join field as the
+    name alone.
+
+**118 of 118 pass.** (The plugin tests are left out: they are Phase 10's
+ISM and the notifications plugin.)
 
 Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
 corpus 820/895 -- unchanged.

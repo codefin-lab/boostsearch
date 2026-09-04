@@ -174,7 +174,15 @@ pub(crate) fn find_nested_inner_hits_full(node: &Value) -> Option<(String, Value
 pub(crate) fn expand_nested_hits(node: &mut Value, path: &str) {
     match node {
         Value::Object(o) => {
-            if let Some(hits) = o.get_mut("hits").and_then(|h| h.get_mut("hits")) {
+            // `hits.hits` is a page of documents only when it is a list: an
+            // aggregation may itself be named `hits`, and then the `hits`
+            // under it is that aggregation's own answer
+            let page = o
+                .get("hits")
+                .and_then(|h| h.get("hits"))
+                .map(|x| x.is_array())
+                .unwrap_or(false);
+            if page && let Some(hits) = o.get_mut("hits").and_then(|h| h.get_mut("hits")) {
                 if let Some(list) = hits.as_array().cloned() {
                     let mut out = Vec::new();
                     for hit in list {

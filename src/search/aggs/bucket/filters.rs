@@ -91,6 +91,45 @@ pub(crate) fn run_filters_agg(
     }
 }
 
+
+/// How many objects sit at a nested path across the documents a query finds.
+fn nested_object_count(
+    store: &Store,
+    targets: &[String],
+    query_json: &Option<Value>,
+    path: &str,
+) -> u64 {
+    let probe = json!({
+        "query": query_json.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        "size": 10_000,
+    });
+    let Ok(answer) = crate::search::run(store, &targets.join(","), &probe, &Params::new()) else {
+        return 0;
+    };
+    let mut objects: Vec<(String, Value)> = Vec::new();
+    for hit in &answer.hits {
+        let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let Some(source) = hit.get("_source") else { continue };
+        crate::search::nested::gather_objects(source, path, &id, &mut objects);
+    }
+    objects.len() as u64
+}
+
+/// A page of hits inside a nested aggregation is a page of objects: it counts
+/// the objects, and is as long as the aggregation asked for rather than as
+/// long as the documents they came from made it.
+fn cap_nested_pages(answer: &mut Value, sub_aggs: &Option<Value>, objects: u64) {
+    let Some(subs) = sub_aggs.as_ref().and_then(|s| s.as_object()) else { return };
+    for (name, def) in subs {
+        let Some(size) = def.pointer("/top_hits/size").and_then(|v| v.as_u64()) else { continue };
+        let Some(node) = answer.get_mut(name).and_then(|n| n.get_mut("hits")) else { continue };
+        node["total"] = json!({"value": objects, "relation": "eq"});
+        if let Some(list) = node.get_mut("hits").and_then(|h| h.as_array_mut()) {
+            list.truncate(size as usize);
+        }
+    }
+}
+
 /// Run one aggregation that BoostCore cannot parse itself.
 ///
 /// These are computed by asking a question per bucket rather than by walking
@@ -211,9 +250,14 @@ pub(crate) fn run_peeled_agg(
                 d
             })?;
             // inside a nested aggregation the documents are the objects at
-            // that path, so any hits reported under it are those objects
+            // that path, so any hits reported under it are those objects --
+            // and what the aggregation counts is those objects, not the
+            // documents they were written in
             if let Some(path) = path {
                 expand_nested_hits(&mut answer, &path);
+                let objects = nested_object_count(store, targets, query_json, &path);
+                answer["doc_count"] = json!(objects);
+                cap_nested_pages(&mut answer, &sub_aggs, objects);
             }
             Ok(answer)
         }
