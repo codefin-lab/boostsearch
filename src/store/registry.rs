@@ -248,6 +248,30 @@ impl Store {
         self.data_dir.as_ref().map(|d| d.join(dir))
     }
 
+    /// How many bytes an index's files take on disk.
+    ///
+    /// OpenSearch reports what the shard's directory holds, so we add up the
+    /// files under the index's own directory -- the segments, the translog and
+    /// the small state files beside them.
+    pub fn index_size(&self, name: &str) -> u64 {
+        fn walk(dir: &std::path::Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+            let mut total = 0;
+            for e in entries.flatten() {
+                match e.metadata() {
+                    Ok(m) if m.is_dir() => total += walk(&e.path()),
+                    Ok(m) => total += m.len(),
+                    Err(_) => {}
+                }
+            }
+            total
+        }
+        match self.index_path(name) {
+            Some(p) => walk(&p),
+            None => 0,
+        }
+    }
+
     pub fn exists(&self, name: &str) -> bool {
         self.inner.read().contains_key(name)
     }

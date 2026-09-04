@@ -364,9 +364,15 @@ pub async fn rollover(
         // the alias moves; the old index keeps whatever else pointed at it
         let def = { src.read().aliases.get(&alias).cloned().unwrap_or_else(|| json!({})) };
         if let Some(st) = store.get(&new_index) {
-            st.write().aliases.insert(alias.clone(), def);
+            let mut g = st.write();
+            g.aliases.insert(alias.clone(), def);
+            g.save_meta();
         }
-        src.write().aliases.remove(&alias);
+        {
+            let mut g = src.write();
+            g.aliases.remove(&alias);
+            g.save_meta();
+        }
     }
     respond(
         &p,

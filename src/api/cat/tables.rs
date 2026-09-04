@@ -93,6 +93,9 @@ pub async fn cat_indices(
     let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
     let show_hidden = named_outright || asked_for_hidden || dot_pattern;
     let mut rows = Vec::new();
+    // `bytes` asks for the sizes as plain numbers in the unit it names
+    let unit = p.get("bytes").map(|s| s.to_string());
+    let sized = |bytes: u64| crate::api::shared::sized(unit.as_deref(), bytes);
     let published = crate::cluster::current_state();
     for n in names {
         let Some(st) = store.get(&n) else {
@@ -121,8 +124,8 @@ pub async fn cat_indices(
                 ("rep", m.number_of_replicas.to_string()),
                 ("docs.count", "0".to_string()),
                 ("docs.deleted", "0".to_string()),
-                ("store.size", "0b".to_string()),
-                ("pri.store.size", "0b".to_string()),
+                ("store.size", sized(0)),
+                ("pri.store.size", sized(0)),
                 ("creation.date", "0".to_string()),
                 ("creation.date.string", String::new()),
             ]);
@@ -144,6 +147,7 @@ pub async fn cat_indices(
         // a closed index has no shard open to count, so those columns are
         // blank rather than zero
         let docs = g.reader.searcher().num_docs();
+        let bytes_on_disk = store.index_size(&g.name);
         let count = |v: String| if g.closed { String::new() } else { v };
         rows.push(vec![
             ("health", health.to_string()),
@@ -155,8 +159,8 @@ pub async fn cat_indices(
             ("rep", g.numeric_setting("number_of_replicas").unwrap_or(0).to_string()),
             ("docs.count", count(docs.to_string())),
             ("docs.deleted", count("0".to_string())),
-            ("store.size", count("0b".to_string())),
-            ("pri.store.size", count("0b".to_string())),
+            ("store.size", count(sized(bytes_on_disk))),
+            ("pri.store.size", count(sized(bytes_on_disk))),
             // when the index was made, as the epoch and as text
             ("creation.date", g.created_millis().to_string()),
             ("creation.date.string", g.created_string()),

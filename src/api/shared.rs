@@ -315,6 +315,21 @@ pub(crate) fn readable_bytes(bytes: u64) -> String {
     "0b".to_string()
 }
 
+/// A size the way a `cat` column writes one: readable text, or a plain number
+/// when the request named a unit with `bytes`.
+pub(crate) fn sized(unit: Option<&str>, bytes: u64) -> String {
+    let Some(u) = unit else { return readable_bytes(bytes) };
+    let scale: u64 = match u.trim().to_lowercase().as_str() {
+        "kb" => 1024,
+        "mb" => 1024 * 1024,
+        "gb" => 1024 * 1024 * 1024,
+        "tb" => 1024u64.pow(4),
+        "pb" => 1024u64.pow(5),
+        _ => 1,
+    };
+    (bytes / scale).to_string()
+}
+
 /// Are these two names a single character apart -- one changed, added, or
 /// dropped? Close enough to be worth suggesting when a metric is not known.
 pub(crate) fn one_edit_apart(a: &str, b: &str) -> bool {

@@ -324,7 +324,9 @@ pub(crate) async fn put_alias_inner(
     }
     for n in targets {
         if let Some(st) = store.get(&n) {
-            st.write().aliases.insert(name.clone(), crate::store::normalize_alias(&def));
+            let mut g = st.write();
+            g.aliases.insert(name.clone(), crate::store::normalize_alias(&def));
+            g.save_meta();
         }
     }
     respond(&p, json!({"acknowledged": true}))
@@ -394,6 +396,7 @@ pub async fn delete_alias(
                     g.aliases.remove(&h);
                     removed = true;
                 }
+                g.save_meta();
             }
         }
     }
@@ -478,6 +481,7 @@ pub async fn update_aliases(
                             o.remove("aliases");
                         }
                         g.aliases.insert(a.clone(), crate::store::normalize_alias(&def));
+                        g.save_meta();
                     }
                     "remove" => {
                         let re = crate::store::wildcard_to_regex(a);
@@ -487,6 +491,7 @@ pub async fn update_aliases(
                         for h in hits {
                             g.aliases.remove(&h);
                         }
+                        g.save_meta();
                     }
                     "remove_index" => {}
                     _ => {}

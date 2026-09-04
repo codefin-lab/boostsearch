@@ -1660,3 +1660,51 @@ three writes in a thousand refused; bench wins **every** dimension in all
 three passes (93,933 against 66,368 docs/s and 401MiB against 2.25GiB on
 plain HTTP; 88,690 against 57,340 against os-secure; and every row of the
 TLS-against-plain pass as well).
+
+## 7.1 -- Dashboards, end to end
+
+OpenSearch Dashboards 3.1.0 was pointed at a single BoostSearch node and
+driven the way a person drives it. It migrated its saved objects on the
+first start (a fresh `.kibana_1` with the `.kibana` alias over it, and a
+second start that had it move to `.kibana_2` and swap the alias across),
+started all fifty-four of its plugins, and reported its own status green
+with nothing non-green in it.
+
+What was driven, and what it found:
+
+  - **Discover** renders against a 500-line index: the field sidebar,
+    the date histogram over `@timestamp`, and the document table
+    (500/500 in the last year).
+  - **The Visualize editor** opens on an index pattern, draws a count of
+    all documents, and adds a terms bucket over `speaker`.
+  - **A saved dashboard** loads its panel by reference and draws the
+    bar chart from our aggregation.
+  - **Saved objects** create, read, update, delete, find by title,
+    bulk-get, export with references, and import -- including the import
+    that OpenSearch Dashboards deliberately does not write while a
+    resolvable conflict stands, and the same import with `overwrite`.
+  - **Index Management** lists the indices with their health, status,
+    doc counts and sizes.
+
+Two things it broke on, both now fixed:
+
+  - **An alias did not survive a restart.** The index's `_meta.json` kept
+    its mappings and settings but not the names it also answers to, so a
+    restarted node had no `.kibana` -- and Dashboards, finding none,
+    made a fresh empty one and every saved object was gone. Aliases are
+    written beside the index now, and every path that adds or removes one
+    persists it: the create body, `_aliases`, `PUT /{index}/_alias`, and
+    the rollover that moves an alias to the new index.
+  - **Every index reported a store size of zero.** `_cat/indices`,
+    `_stats`, node stats and cluster stats now add up what the index's
+    directory actually holds, and `_cat` honours the unit `bytes` names
+    rather than ignoring it.
+
+What Dashboards asks for and we still answer 501: `_plugins/_ism/explain`
+(Phase 10), `_plugins/_query/_datasources` (Phase 12), and the alerting
+and anomaly-detection searches, which are not in the plan. The security
+plugin's `_plugins/_security/api/account` is asked for even with the
+plugin disabled.
+
+Gates: unit 67/67, phase1 398/398, core corpus 1,100/1,100, module
+corpus 820/895 -- the same 75 as before, none of them Dashboards work.
