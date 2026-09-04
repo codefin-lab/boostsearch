@@ -8,9 +8,11 @@ pub(crate) fn alias_view(
     name_expr: Option<&str>,
     states: Option<&str>,
 ) -> Value {
+    // every index the cluster holds: an alias belongs to the index, and its
+    // copies may be on any node
     let targets = match index_expr {
-        Some(e) => store.resolve(e),
-        None => store.names(),
+        Some(e) => crate::api::cluster_resolve(store, e),
+        None => crate::api::cluster_names(store),
     };
     // `expand_wildcards` says which states to include; without it, both
     let (want_open, want_closed) = match states {
@@ -20,21 +22,30 @@ pub(crate) fn alias_view(
             v.split(',').any(|w| matches!(w.trim(), "closed" | "all")),
         ),
     };
+    let published = crate::cluster::current_state();
+    let closed_of = |n: &String| -> Option<bool> {
+        match store.get(n) {
+            Some(st) => Some(st.read().closed),
+            None => published.indices.get(n).map(|m| m.state == "close"),
+        }
+    };
     let targets: Vec<String> = targets
         .into_iter()
-        .filter(|n| {
-            store
-                .get(n)
-                .map(|st| if st.read().closed { want_closed } else { want_open })
-                .unwrap_or(false)
-        })
+        .filter(|n| closed_of(n).map(|c| if c { want_closed } else { want_open }).unwrap_or(false))
         .collect();
     let mut out = serde_json::Map::new();
     for n in targets {
-        let Some(st) = store.get(&n) else { continue };
-        let g = st.read();
+        let held: std::collections::BTreeMap<String, Value> = match store.get(&n) {
+            Some(st) => st.read().aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            None => published
+                .indices
+                .get(&n)
+                .and_then(|m| m.aliases.as_object().cloned())
+                .map(|o| o.into_iter().collect())
+                .unwrap_or_default(),
+        };
         let mut aliases = serde_json::Map::new();
-        for (a, def) in &g.aliases {
+        for (a, def) in &held {
             if alias_name_wanted(name_expr, a) {
                 aliases.insert(a.clone(), def.clone());
             }

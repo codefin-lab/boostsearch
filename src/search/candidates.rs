@@ -117,7 +117,12 @@ pub(crate) fn apply_indices_boost(
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);
     if !lenient {
         for (pat, _) in &pairs {
-            let known = pat.contains('*') || store.exists(pat) || store.get(pat).is_some();
+            // the cluster's indices and aliases, not this node's share: a
+            // boost may name an index whose copies are on another node
+            let known = pat.contains('*')
+                || store.exists(pat)
+                || store.get(pat).is_some()
+                || !crate::api::cluster_resolve(store, pat).is_empty();
             if !known {
                 return Err(err(
                     StatusCode::NOT_FOUND,

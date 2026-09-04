@@ -67,6 +67,10 @@ pub fn classify(method: &Method, path: &str) -> Target {
         return Target::Local;
     }
     let is_write = matches!(*method, Method::POST | Method::PUT | Method::DELETE | Method::PATCH);
+    // `_all` names every index rather than an endpoint of its own
+    if head == "_all" {
+        return classify_index(method, "_all", rest, is_write);
+    }
     if head.starts_with('_') {
         return match head {
             "_bulk" => Target::Write(None),
@@ -112,6 +116,12 @@ pub fn classify(method: &Method, path: &str) -> Target {
         };
     }
     // `/{index}` and `/{index}/...`
+    classify_index(method, head, rest, is_write)
+}
+
+/// Which node a request about one index (or an expression naming several)
+/// belongs on.
+fn classify_index(method: &Method, head: &str, rest: &str, is_write: bool) -> Target {
     let index = head.to_string();
     let (op, _) = first_segment(rest);
     if op.is_empty() {
@@ -380,6 +390,9 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     // the state reached the node the client is talking to would have the very
     // next request say the index is not there
     let settles = settles_metadata(req.method(), &path);
+    let settles_c = settles_custom(req.method(), &path);
+    let settles_a = settles_alias(req.method(), &path);
+    let version_before = super::with_state(|s| s.version);
     let (to, write_indices): (Option<NodeId>, Vec<String>) = super::with_state(|s| {
         // nothing committed yet: one node, everything local
         if s.version == 0 || s.nodes.len() <= 1 {
@@ -421,10 +434,143 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     }
     let Some(to) = to else {
         let r = run_with_replication(&store, req, next).await;
-        return wait_for_metadata(&store, settles, r).await;
+        let r = wait_for_metadata(&store, settles, r).await;
+        let r = wait_for_custom(settles_c, r).await;
+        return wait_for_alias(&store, settles_a, version_before, r).await;
     };
     let r = forward(&rt, &to, req).await;
-    wait_for_metadata(&store, settles, r).await
+    let r = wait_for_metadata(&store, settles, r).await;
+    let r = wait_for_custom(settles_c, r).await;
+    wait_for_alias(&store, settles_a, version_before, r).await
+}
+
+/// Hold the answer until the alias the request made is one the cluster knows:
+/// an alias belongs to an index, and the index may be held elsewhere.
+async fn wait_for_alias(
+    store: &Store,
+    settles: Option<(String, String, bool)>,
+    version_before: u64,
+    response: Response,
+) -> Response {
+    let Some((index, alias, present)) = settles else { return response };
+    if !response.status().is_success() {
+        return response;
+    }
+    // a request whose body named the indices can only wait for the cluster to
+    // publish something, so it waits briefly rather than the full ten seconds
+    let wait = if alias.is_empty() { 2 } else { 5 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let settled = super::with_state(|s| {
+            if alias.is_empty() {
+                // the body named the indices: something was published, which
+                // is as much as this can wait for
+                return s.version > version_before;
+            }
+            let names = resolve(s, store, &index);
+            !names.is_empty()
+                && names.iter().all(|n| {
+                    s.indices
+                        .get(n)
+                        .map(|m| m.aliases.get(&alias).is_some() == present)
+                        .unwrap_or(!present)
+                })
+        });
+        if settled || std::time::Instant::now() >= deadline {
+            return response;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Hold the answer until this node has the template (or pipeline, or script)
+/// the cluster now holds: the request after a template is made looks it up,
+/// and on a cluster it is the manager that keeps it and publishes it.
+async fn wait_for_custom(
+    settles: Option<(&'static str, String, bool)>,
+    response: Response,
+) -> Response {
+    let Some((section, name, present)) = settles else { return response };
+    if !response.status().is_success() {
+        return response;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let there = super::with_state(|s| {
+            let c = &s.customs;
+            match section {
+                "pipelines" => c
+                    .get("pipelines")
+                    .map(|p| {
+                        p.get("ingest").and_then(|i| i.get(&name)).is_some()
+                            || p.get("search").and_then(|i| i.get(&name)).is_some()
+                    })
+                    .unwrap_or(false),
+                other => c.get(other).and_then(|o| o.get(&name)).is_some(),
+            }
+        });
+        if there == present || std::time::Instant::now() >= deadline {
+            return response;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// The alias a request makes or unmakes, as (index expression, alias, there
+/// afterwards). `POST /_aliases` names its indices in the body, so it asks
+/// only that the cluster publish something after it.
+fn settles_alias(method: &Method, path: &str) -> Option<(String, String, bool)> {
+    let (head, rest) = first_segment(path);
+    let present = match *method {
+        Method::PUT | Method::POST => true,
+        Method::DELETE => false,
+        _ => return None,
+    };
+    if head == "_aliases" {
+        return Some((String::new(), String::new(), present));
+    }
+    if head.is_empty() || head.starts_with('_') {
+        return None;
+    }
+    let (op, after) = first_segment(rest);
+    if op != "_alias" && op != "_aliases" {
+        return None;
+    }
+    let name = first_segment(after).0;
+    if name.is_empty() || name.contains('*') {
+        return None;
+    }
+    Some((head.to_string(), name.to_string(), present))
+}
+
+/// The template, pipeline or script a request makes or unmakes: which part
+/// of the cluster's customs it lands in, its name, and whether it should be
+/// there afterwards.
+fn settles_custom(method: &Method, path: &str) -> Option<(&'static str, String, bool)> {
+    let (head, rest) = first_segment(path);
+    let present = match *method {
+        Method::PUT | Method::POST => true,
+        Method::DELETE => false,
+        _ => return None,
+    };
+    let (section, name) = match head {
+        "_template" => ("templates", first_segment(rest).0),
+        "_component_template" => ("components", first_segment(rest).0),
+        "_index_template" => ("templates", first_segment(rest).0),
+        "_scripts" => ("scripts", first_segment(rest).0),
+        "_ingest" => {
+            let (kind, after) = first_segment(rest);
+            if kind != "pipeline" {
+                return None;
+            }
+            ("pipelines", first_segment(after).0)
+        }
+        _ => return None,
+    };
+    if name.is_empty() || name.contains('*') {
+        return None;
+    }
+    Some((section, name.to_string(), present))
 }
 
 /// The index a request makes or unmakes, and which of the two it is.
@@ -681,7 +827,24 @@ async fn broadcast(
         }
     }
     if status.is_success() && v.get("_shards").is_some() {
-        v["_shards"] = json!({"total": total, "successful": successful, "failed": failed});
+        if summing {
+            // what an index asked for, the way OpenSearch counts a stats
+            // answer: every shard and every replica of it, held or not
+            let asked: u64 = super::with_state(|s| {
+                let names: Vec<String> = match expr {
+                    Some(e) => resolve(s, store, e),
+                    None => s.indices.keys().cloned().collect(),
+                };
+                names
+                    .iter()
+                    .filter_map(|n| s.indices.get(n))
+                    .map(|m| m.number_of_shards as u64 * (1 + m.number_of_replicas as u64))
+                    .sum()
+            });
+            v["_shards"] = json!({"total": asked, "successful": asked, "failed": 0});
+        } else {
+            v["_shards"] = json!({"total": total, "successful": successful, "failed": failed});
+        }
     }
     // an answer that speaks per index -- a close, an open -- speaks for the
     // indices every node answered for

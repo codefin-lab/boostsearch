@@ -183,6 +183,21 @@ enum Reply {
     Failed(String),
 }
 
+/// The answer a node refused with, when it carried one.
+fn refusal(why: &str) -> Option<axum::response::Response> {
+    let v: Value = serde_json::from_str(why).ok()?;
+    let status = v.get("status").and_then(|s| s.as_u64())? as u16;
+    let body = v.get("body").and_then(|b| b.as_str())?.to_string();
+    let mut r = axum::response::Response::new(axum::body::Body::from(body));
+    *r.status_mut() =
+        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+    r.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    Some(r)
+}
+
 fn sort_keys_of(body: &Value) -> Vec<(bool, Option<bool>)> {
     // (desc, missing_last) per key, as `parse_sort` would read them
     let Some(sort) = body.get("sort") else { return Vec::new() };
@@ -343,6 +358,12 @@ fn own_aggregations(body: &Value) -> Vec<String> {
                 if d.values().any(|x| x.get("script").is_some()) && !out.contains(name) {
                     out.push(name.clone());
                 }
+                // a `missing` value stands in for documents the field is not
+                // in, and the engine works it out a bucket at a time from the
+                // documents themselves rather than from an intermediate
+                if d.values().any(|x| x.get("missing").is_some()) && !out.contains(name) {
+                    out.push(name.clone());
+                }
             }
         }
     }
@@ -454,14 +475,22 @@ pub fn run_spanning(
                     });
                     match reply {
                         Reply::Ok(o) => Ok(o),
-                        Reply::Failed(why) => Err(crate::api::err(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "search_phase_execution_exception",
-                            why,
-                        )),
+                        Reply::Failed(why) => Err(refusal(&why).unwrap_or_else(|| {
+                            crate::api::err(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "search_phase_execution_exception",
+                                why,
+                            )
+                        })),
                     }
                 }
             }
+            // no node holds them all: each node answers for the indices it
+            // holds and the buckets are added together, which is what a
+            // reduce over final results is. Only for a request that asks for
+            // no documents -- with hits to merge as well, the order of the
+            // page would have to come from the intermediates.
+            None if want_no_hits(body, p) => reduce_over_holders(store, body, p, &plan, rt),
             None => Err(crate::api::err(
                 StatusCode::BAD_REQUEST,
                 "search_phase_execution_exception",
@@ -593,6 +622,11 @@ pub fn run_spanning(
                 }
             }
             Reply::Failed(why) => {
+                // the node refused rather than failed: it is answering for
+                // the whole request, so its answer is the request's
+                if let Some(r) = refusal(&why) {
+                    return Err(r);
+                }
                 // every shard of every index that node answered for
                 let per_index: Vec<(String, u32)> = super::with_state(|s| {
                     indices
@@ -697,6 +731,21 @@ pub fn run_spanning(
     let mut out = out;
     out.took_ms = out.took_ms.max(took);
     out.skipped = skipped;
+    // an aggregation the request named and the merge could not produce -- one
+    // the engine works out from the documents rather than from an
+    // intermediate: every holder is asked for its own answer instead, and the
+    // buckets are added together
+    let asked_for: Vec<String> = body
+        .get("aggs")
+        .or_else(|| body.get("aggregations"))
+        .and_then(|a| a.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    let missing =
+        asked_for.iter().any(|name| out.aggs.as_ref().and_then(|a| a.get(name)).is_none());
+    if missing {
+        return reduce_over_holders(store, body, p, &plan, rt);
+    }
     Ok(out)
 }
 
@@ -731,8 +780,16 @@ pub fn install(store: Store) {
                 match result {
                     Ok(Ok(out)) => e.response(from, serde_json::to_vec(&out).unwrap_or_default()),
                     Ok(Err(resp)) => {
-                        let why = format!("search failed with status {}", resp.status());
-                        e.error(from, &why)
+                        // the answer the node would have given the client,
+                        // status and body, so the coordinator can hand the
+                        // same one back rather than turning every refusal
+                        // into "the shards would not answer"
+                        let status = resp.status().as_u16();
+                        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                            .await
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .unwrap_or_default();
+                        e.error(from, &json!({"status": status, "body": body}).to_string())
                     }
                     Err(err) => e.error(from, &format!("search panicked: {err}")),
                 }
@@ -844,4 +901,151 @@ fn lookup_indices(body: &Value) -> Vec<String> {
     let mut out = Vec::new();
     walk(body, &mut out);
     out
+}
+
+/// Does this request ask for no documents, only aggregations?
+fn want_no_hits(body: &Value, p: &Params) -> bool {
+    let size = body
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| p.get("size").and_then(|v| v.parse().ok()));
+    size == Some(0)
+}
+
+/// Ask every node holding part of what was named, and add the answers up.
+///
+/// Each node runs the whole request over its own indices -- aggregations and
+/// all -- and the buckets are merged by key, the way a reduce phase merges
+/// what the shards send back.
+fn reduce_over_holders(
+    store: &Store,
+    body: &Value,
+    p: &Params,
+    plan: &Plan,
+    rt: Arc<super::runtime::Runtime>,
+) -> std::result::Result<Outcome, axum::response::Response> {
+    use axum::http::StatusCode;
+    let me = rt.local();
+    let caller = crate::security::layer::current_caller().unwrap_or_default();
+    let mut parts: Vec<Outcome> = Vec::new();
+    let mut asks: Vec<(NodeId, Vec<String>)> = Vec::new();
+    if !plan.local.is_empty() {
+        asks.push((me.clone(), plan.local.clone()));
+    }
+    for (node, names) in &plan.remote {
+        asks.push((node.clone(), names.clone()));
+    }
+    for (node, names) in asks {
+        let expr = names.join(",");
+        let mut p2 = p.clone();
+        p2.insert("_local_only".into(), "1".into());
+        if node == me {
+            match crate::search::run(store, &expr, body, &p2) {
+                Ok(o) => parts.push(o),
+                Err(e) => return Err(e),
+            }
+        } else {
+            let (_, reply) = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(ask(
+                    rt.clone(),
+                    node,
+                    expr,
+                    body.clone(),
+                    p2,
+                    caller.clone(),
+                ))
+            });
+            match reply {
+                Reply::Ok(o) => parts.push(o),
+                Reply::Failed(why) => {
+                    return Err(refusal(&why).unwrap_or_else(|| {
+                        crate::api::err(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "search_phase_execution_exception",
+                            why,
+                        )
+                    }));
+                }
+            }
+        }
+    }
+    let mut out = parts.pop().ok_or_else(|| {
+        crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "search_phase_execution_exception",
+            "no node answered",
+        )
+    })?;
+    let keys = sort_keys_of(body);
+    let size = body.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    for other in parts {
+        out.total += other.total;
+        out.shards += other.shards;
+        out.skipped += other.skipped;
+        out.failures.extend(other.failures);
+        out.took_ms = out.took_ms.max(other.took_ms);
+        out.hits.extend(other.hits);
+        out.max_score = match (out.max_score, other.max_score) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        match (out.aggs.as_mut(), other.aggs) {
+            (Some(a), Some(b)) => merge_agg_json(a, &b),
+            (None, b) => out.aggs = b,
+            _ => {}
+        }
+    }
+    // the documents of every node, in the order the request asked for
+    let mut hits: Vec<(usize, Value)> = out.hits.drain(..).map(|h| (0, h)).collect();
+    hits.sort_by(|a, b| cmp_hits(a, b, &keys));
+    out.hits = hits.into_iter().take(size).map(|(_, h)| h).collect();
+    Ok(out)
+}
+
+/// Add one node's aggregation answer into another: buckets are matched by
+/// their key and their counts added, and anything else keeps what the first
+/// node said.
+fn merge_agg_json(a: &mut Value, b: &Value) {
+    match (a, b) {
+        (Value::Object(ao), Value::Object(bo)) => {
+            for (k, bv) in bo {
+                match ao.get_mut(k) {
+                    Some(av) => {
+                        if k == "doc_count"
+                            || k == "sum_other_doc_count"
+                            || k == "doc_count_error_upper_bound"
+                        {
+                            let sum = av.as_f64().unwrap_or(0.0) + bv.as_f64().unwrap_or(0.0);
+                            *av = json!(sum as i64);
+                        } else {
+                            merge_agg_json(av, bv);
+                        }
+                    }
+                    None => {
+                        ao.insert(k.clone(), bv.clone());
+                    }
+                }
+            }
+        }
+        (Value::Array(aa), Value::Array(ba)) => {
+            // buckets: by key, if they carry one
+            for bv in ba {
+                let key = bv.get("key");
+                match key.and_then(|k| {
+                    aa.iter_mut().find(|x| x.get("key").map(|xk| xk == k).unwrap_or(false))
+                }) {
+                    Some(av) => merge_agg_json(av, bv),
+                    None => aa.push(bv.clone()),
+                }
+            }
+            aa.sort_by(|x, y| {
+                let (dx, dy) = (
+                    x.get("doc_count").and_then(|v| v.as_i64()).unwrap_or(0),
+                    y.get("doc_count").and_then(|v| v.as_i64()).unwrap_or(0),
+                );
+                dy.cmp(&dx)
+            });
+        }
+        _ => {}
+    }
 }

@@ -35,6 +35,13 @@ pub trait MetadataSource: Send + Sync {
     fn has_tombstones(&self) -> bool {
         false
     }
+    /// Does this node's copy of the index hold any document?
+    ///
+    /// An index just made holds none, and the cluster is free to place it
+    /// wherever there is room; one with documents belongs where they are.
+    fn holds_documents(&self, _index: &str) -> bool {
+        true
+    }
     /// Templates, component templates, pipelines and scripts.
     fn customs(&self) -> Value {
         json!({})
@@ -273,6 +280,16 @@ impl ShardHost for StoreSource {
 }
 
 impl MetadataSource for StoreSource {
+    fn holds_documents(&self, index: &str) -> bool {
+        self.store
+            .get(index)
+            .map(|st| {
+                let g = st.read();
+                g.reader.searcher().num_docs() > 0 || !g.pending.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
     fn cluster_settings(&self) -> Value {
         self.store.cluster_settings()
     }

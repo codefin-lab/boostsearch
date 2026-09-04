@@ -376,6 +376,18 @@ impl ClusterState {
                 }
             }
             if r.state != ShardState::Started && r.state != ShardState::Relocating {
+                // the target of a move is being filled while the copy it comes
+                // from still answers: the shard is not without a primary
+                let moving_here = r.relocating_node.is_some()
+                    && r.state == ShardState::Initializing
+                    && self.routing.shards_of(&r.index).any(|c| {
+                        c.shard == r.shard
+                            && c.primary == r.primary
+                            && c.state == ShardState::Relocating
+                    });
+                if moving_here {
+                    continue;
+                }
                 if r.primary {
                     return "red";
                 }
