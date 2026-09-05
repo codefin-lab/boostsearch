@@ -6,6 +6,9 @@ impl IdxState {
     /// Persist the learned field information next to the index so a reopen does
     /// not lose dynamic mappings or the range-narrowing kinds.
     pub fn save_meta(&self) {
+        // mappings, settings and aliases all travel through here, and each of
+        // them can change what a search answers
+        self.moved_on();
         let Some(path) = &self.path else { return };
         let meta = serde_json::json!({
             "name": self.name,

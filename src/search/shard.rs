@@ -64,7 +64,6 @@ pub(crate) fn search_one_shard(
     shard_idx: usize,
     name: &str,
     body: &Value,
-    p: &Params,
     query_json: &Option<Value>,
     sort_keys: &[SortKey],
     search_after: &Option<Vec<SortValue>>,
@@ -110,9 +109,6 @@ pub(crate) fn search_one_shard(
     };
     let g = st.read();
     g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if p.get("request_cache").map(|v| v == "true").unwrap_or(false) {
-        g.request_cache_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
     let mut shards = 0u64;
     let mut cands: Vec<Cand> = Vec::new();
     let mut agg_acc: Option<IntermediateAggregationResults> = None;

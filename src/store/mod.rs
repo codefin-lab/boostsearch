@@ -21,6 +21,7 @@ pub use dates::*;
 mod derive;
 pub use derive::*;
 mod ids;
+pub(crate) use ids::alive_address;
 mod mapping;
 mod net;
 pub use net::*;
@@ -107,6 +108,13 @@ impl std::hash::Hasher for IdHasher {
 
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
+
+/// Handed out so that no two indices, and no two lives of one index, ever
+/// stand behind the same generation number.
+pub(crate) fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
@@ -327,8 +335,20 @@ pub struct IdxState {
     /// search never needs a write lock -- taking one here would deadlock any
     /// caller that already holds the read guard.
     pub search_count: std::sync::atomic::AtomicU64,
-    /// misses recorded for `request_cache=true` searches, reported by _stats
+    /// searches answered out of the request cache, and searches that could
+    /// have been but were not there yet, reported by _stats
+    pub request_cache_hit: std::sync::atomic::AtomicU64,
     pub request_cache_miss: std::sync::atomic::AtomicU64,
+    /// Which state of this index a cached answer belongs to. Every write,
+    /// every refresh and every change to what the index is moves it on, so a
+    /// remembered answer from before the change can no longer be found under
+    /// the key that would be built now.
+    ///
+    /// It counts from a number no index has had before rather than from zero:
+    /// an index deleted and made again under the same name would otherwise
+    /// start where the old one started, and inherit answers about documents
+    /// that are no longer there.
+    pub search_gen: std::sync::atomic::AtomicU64,
     /// per-group query counts, from the `stats` field of a search body
     pub search_groups: RwLock<HashMap<String, u64>>,
     /// Fields whose ordinals have been read into memory: sorting on a field
@@ -448,6 +468,8 @@ pub struct Store {
     /// open points in time, each remembering where every index it covers had
     /// got to when it was opened
     pits: Arc<RwLock<HashMap<String, PitState>>>,
+    /// What a search over an unchanged index already answered.
+    pub request_cache: Arc<crate::search::RequestCache>,
     /// Data streams by name, each remembering the template it was made from.
     data_streams: Arc<RwLock<HashMap<String, String>>>,
     /// Pipelines by kind ("ingest" or "search") and then by name.

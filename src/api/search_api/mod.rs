@@ -67,6 +67,29 @@ pub async fn search(
     if implicit_sort {
         body["sort"] = json!([{"_seq": "asc"}]);
     }
+    // A search that asks for no documents over an index nothing has touched
+    // is the same question with the same answer every time it is asked, and a
+    // dashboard asks it once per panel per viewer. What was worked out before
+    // is handed back, and the time it took to hand back is the time it took.
+    let targets = store.resolve(&expr);
+    let cache_key = crate::search::request_cache::cacheable(&store, &targets, &body, &p)
+        .then(|| crate::search::request_cache::key(&store, &expr, &targets, &body, &p));
+    if let Some(k) = &cache_key {
+        let found = store.request_cache.get(k);
+        let counter: fn(&IdxState) -> &std::sync::atomic::AtomicU64 = match found {
+            Some(_) => |st| &st.request_cache_hit,
+            None => |st| &st.request_cache_miss,
+        };
+        for name in &targets {
+            if let Some(st) = store.get(name) {
+                counter(&st.read()).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(mut hit) = found {
+            hit["took"] = json!(0);
+            return respond(&p, hit);
+        }
+    }
     match crate::search::run(&store, &expr, &body, &p) {
         Ok(out) => {
             let n = out.hits.len();
@@ -98,6 +121,9 @@ pub async fn search(
                     implicit_sort,
                 );
                 env["_scroll_id"] = json!(id);
+            }
+            if let Some(k) = cache_key {
+                store.request_cache.put(k, env.clone());
             }
             respond(&p, env)
         }

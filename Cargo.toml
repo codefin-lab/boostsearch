@@ -29,7 +29,7 @@ postcard = { version = "1.0", features = ["alloc"] }
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2", features = ["zstd-compression"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

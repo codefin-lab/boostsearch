@@ -107,6 +107,7 @@ pub(crate) fn index_stats(
     on_disk: u64,
     want_groups: Option<&[String]>,
     p: &Params,
+    cache: Option<&crate::search::RequestCache>,
 ) -> Value {
     let searcher = st.reader.searcher();
     let docs = searcher.num_docs();
@@ -254,7 +255,11 @@ pub(crate) fn index_stats(
                      "earliest_last_modified_age": 0,
                      "remote_store": {"upload": {"total_uploads": {"started": 0, "failed": 0, "succeeded": 0}}}},
         "request_cache": {
-            "memory_size_in_bytes": 0, "evictions": 0, "hit_count": 0,
+            "memory_size_in_bytes": cache.map(|c| c.bytes()).unwrap_or(0),
+            "evictions": cache
+                .map(|c| c.evictions.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0),
+            "hit_count": st.request_cache_hit.load(std::sync::atomic::Ordering::Relaxed),
             "miss_count": st.request_cache_miss.load(std::sync::atomic::Ordering::Relaxed)
         },
         "recovery": {"current_as_source": 0, "current_as_target": 0, "throttle_time_in_millis": 0},
@@ -436,7 +441,13 @@ pub(crate) fn stats_value(
     let mut all = json!({});
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
-        let s = index_stats(&st.read(), store.index_size(n), want_groups.as_deref(), p);
+        let s = index_stats(
+            &st.read(),
+            store.index_size(n),
+            want_groups.as_deref(),
+            p,
+            Some(&store.request_cache),
+        );
         all = sum_stats(&all, &s);
         let mut entry = json!({
             "uuid": "_na_",

@@ -2225,3 +2225,98 @@ flushes first now, insists on an answer an index holding documents could have,
 and a dimension it still cannot measure is printed as unmeasured and fails the
 gate. A measurement that cannot be made must not be allowed to hand either
 side a win.
+
+### 7.4 — What was losing, and why each one was
+
+Three dimensions were behind after 7.3: updates, deletes, and disk. Each was
+taken apart with a profiler rather than a guess, and two of them turned out to
+be one bug.
+
+**A write asked the index a question through a thread pool.** Every delete and
+every update begins by asking whether the document is already there. That
+question was answered by running a term query through the shared search
+executor -- which means handing a one-term lookup to a worker thread and
+sleeping on a condvar until it comes back. A sampling profile of a delete load
+put the whole request stack in `pthread_cond_wait` underneath
+`delete_doc → lookup_id → Searcher::search`. The same happened once more per
+update, in `read_source`, which fetched the current document by running a
+sorted top-1 search.
+
+Both now read the postings where they are: walk the segments, look the id up
+in each term dictionary, take the first document that is still alive. No
+collector, no executor, no hand-off.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| delete docs/s | 26,508 | 192,032 | 64,111-100,994 |
+| update docs/s | 14,923 | 71,271 | 17,020-27,935 |
+
+The measurements that pointed at it, kept here because they are what ruled
+everything else out: a bulk of a thousand deletes for ids that were never
+there ran at 272,000/s, so the request machinery was not the cost; the rate
+did not move between `translog.durability: request` and `async` (29,428
+against 30,931), so it was not the fsync; and it got faster as segments were
+merged away, which is what a per-segment lookup does.
+
+**Disk.** Half of an index of short documents is the stored source, and LZ4
+was leaving most of that on the floor: the same blocks under zstd are 30%
+smaller. Measured against what it costs -- 3% of a scroll and 7% of an update,
+both dimensions we win by multiples -- it is worth taking. 14.1MiB to 9.9MiB,
+and the index as a whole 52.8MiB to 45.3.
+
+Two things measured and *not* taken, recorded so they are not tried again:
+dropping the `_id` fast field saved 0.1MiB, not the 5.6 expected, because
+sequential auto ids compress almost to nothing in a dictionary-encoded column;
+and field norms on the untouched view were already off. What remains is
+structural, and the numbers now say so exactly. With one view instead of two
+the same corpus takes 30MiB (untouched only) or 39MiB (analysed only) against
+56MiB for both. **The gap is that every value is indexed twice**, and closing
+it means deciding which values need which view -- a decision to write down
+before it is a patch to write. Disk is the one dimension still behind.
+
+**And one the fixing uncovered.** With updates and deletes won, the matrix put
+`queries/s (8 clients)` in the lost column, at 6,259 against 10,126. It had
+been hidden: the dimension opened a new connection per request, and this
+machine has 16,384 ephemeral ports with a thirty-second TIME_WAIT, so above
+about five hundred connections a second the port table is what is being
+measured -- and whichever engine went second inherited what the first one
+left. Every client library in existence keeps its connections; the dimension
+does now too.
+
+What that revealed was real. Per query, against OpenSearch: `match_all` 22,528
+against 11,492 and `sort_desc` 4,980 against 2,602 -- but `terms_agg` 6,396
+against 13,230, `date_histogram` 4,175 against 11,122, `nested_agg` 3,536
+against 13,039, `cardinality` 5,286 against 13,101. Every loss was a `size: 0`
+aggregation, asked over and over with the same answer. OpenSearch was not
+computing them. It was serving them from its shard request cache, which we
+counted misses for and never had.
+
+We have one now. It follows OpenSearch's rules: only a request that asks for
+no documents, never a scroll, never one that reads the clock, never one whose
+answer would say which shards it skipped, and never across two callers who may
+be allowed to see different documents. An entry goes stale the moment anything
+about the index changes -- every write, refresh, mapping, alias or settings
+change moves a generation number that the key is built from, so a stale answer
+cannot be found rather than being found and checked. The numbers come from a
+counter no index and no life of an index shares, because an index deleted and
+made again under the same name would otherwise inherit the old one's answers.
+That was not a hypothetical: it is what OpenSearch's own `50_filter.yml`
+caught within a minute of the cache existing. `_cache/clear?request=true`
+empties it, and `_stats` reports its hits, misses, bytes and evictions --
+three of which were reported as zero before and one of which was counted in
+the wrong place.
+
+The matrix on a quiet machine, both engines with security on, TLS on both
+sides -- the pass that is like for like:
+
+  - **LOST 1 of 18: store on disk.** Everything else ours, most of it by
+    multiples: updates 78,133 against 17,020, deletes 171,082 against 64,111,
+    eight concurrent clients 11,709 against 9,131, memory 461MiB against 2,094,
+    worst p99 2.26ms against 5.72, and every one of the ten query shapes.
+
+Plain against plain reports all eighteen, but that pass caught OpenSearch with
+55.1MiB on disk where its settled size is 27.2, so the disk column there is
+transient state rather than a result, and this is not claiming it.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 unchanged.

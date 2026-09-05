@@ -48,6 +48,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            request_cache: Arc::new(Default::default()),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
@@ -85,6 +86,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            request_cache: Arc::new(Default::default()),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
@@ -447,7 +449,18 @@ impl Store {
     fn open_index(&self, name: &str, body: &Value, path: PathBuf) -> Result<()> {
         let (schema, fields) = build_schema();
         let dir = MmapDirectory::open(&path)?;
-        let index = Index::open_or_create(dir, schema)?;
+        // The stored source is half of what an index of short documents takes
+        // on disk, and LZ4 leaves most of that on the table: the same blocks
+        // under zstd are about 45% smaller. An index already on disk keeps the
+        // codec it was written with -- the setting travels in its metadata --
+        // so this reaches new segments only.
+        let index = Index::builder()
+            .schema(schema)
+            .settings(boostcore::IndexSettings {
+                docstore_compression: boostcore::store::Compressor::Zstd(Default::default()),
+                ..Default::default()
+            })
+            .open_or_create(dir)?;
         self.finish_open(name, body, index, fields)?;
         if let Some(st) = self.get(name) {
             let mut g = st.write();
@@ -546,7 +559,9 @@ impl Store {
             seq_no: 0,
             applied_term: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
+            request_cache_hit: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
+            search_gen: std::sync::atomic::AtomicU64::new(crate::store::next_generation()),
             search_groups: RwLock::new(HashMap::new()),
             loaded_fielddata: RwLock::new(std::collections::HashSet::new()),
             auto_id: 0,
@@ -615,6 +630,12 @@ impl Store {
             targets.iter().filter_map(|t| guard.remove(t)).collect()
         };
         let any = !dropped.is_empty();
+        // an index that is gone has no answers worth keeping; the generation
+        // it left behind is already unreachable, so this is memory rather
+        // than correctness
+        for t in &targets {
+            self.request_cache.clear_index(t);
+        }
         // what was dropped is remembered by name and uuid
         if record {
             let now = std::time::SystemTime::now()

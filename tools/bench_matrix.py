@@ -17,7 +17,8 @@ p99 over a hundred and fifty requests moves more than a change usually does.
     BENCH_DATA          the corpus  (default: /tmp/bench_logs.ndjson)
     BENCH_OUT           where the numbers are written  (default: /tmp/matrix.json)
 """
-import urllib.request, json, time, statistics, subprocess, sys, os, ssl, base64
+import urllib.parse, urllib.request, http.client
+import json, time, statistics, subprocess, sys, os, ssl, base64
 import concurrent.futures
 
 _CTX = ssl.create_default_context()
@@ -212,17 +213,48 @@ def latency(base, name, body, n=150):
 
 def throughput(base, name, workers=8, seconds=5):
     """How many searches a second the engine answers when more than one
-    client is asking. A median latency says nothing about this."""
-    bodies = list(QUERIES.values())
+    client is asking. A median latency says nothing about this.
+
+    Each client keeps one connection and asks down it, the way every real
+    client library does. Opening a fresh one per request measures the
+    machine's ephemeral port table instead: sixteen thousand ports and a
+    thirty-second TIME_WAIT is about five hundred connections a second before
+    the table is the limit, and whichever engine is measured second inherits
+    what the first one left."""
+    bodies = [json.dumps(b) for b in QUERIES.values()]
     stop = time.time() + seconds
+    headers = {"Content-Type": "application/json"}
+    if os.environ.get("BENCH_AUTH"):
+        headers["Authorization"] = "Basic " + base64.b64encode(
+            os.environ["BENCH_AUTH"].encode()).decode()
+    parts = urllib.parse.urlparse(base)
+    tls = parts.scheme == "https"
+    port = parts.port or (443 if tls else 80)
+
+    def open_one():
+        if tls:
+            return http.client.HTTPSConnection(parts.hostname, port, context=_CTX)
+        return http.client.HTTPConnection(parts.hostname, port)
+
     def run():
+        c = open_one()
         n = 0
-        i = 0
         while time.time() < stop:
-            req(base, "POST", f"/{name}/_search", bodies[i % len(bodies)])
-            n += 1
-            i += 1
+            try:
+                c.request("POST", f"/{name}/_search", bodies[n % len(bodies)], headers)
+                c.getresponse().read()
+                n += 1
+            except Exception:
+                # a connection the server closed is reopened; the request it
+                # was carrying is not counted
+                try:
+                    c.close()
+                except Exception:
+                    pass
+                c = open_one()
+        c.close()
         return n
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         done = [f.result() for f in [pool.submit(run) for _ in range(workers)]]
     return sum(done) / seconds
