@@ -50,16 +50,16 @@ pub async fn put_repository(
                 ),
             );
         }
-        for (snap, record) in crate::snapshot::url::read_records(&url) {
-            store.put_snapshot(&name, &snap, record);
-        }
     }
-    // a repository that already holds snapshots says so as soon as it is
-    // registered: the records are on its disk, not in a cluster state this
-    // server keeps across a restart
-    if let Some(dir) = crate::snapshot::location(&body) {
-        let _ = std::fs::create_dir_all(&dir);
-        for (snap, record) in crate::snapshot::read_records(&dir) {
+    // A repository that already holds snapshots says so as soon as it is
+    // registered: the records are where the repository is, not in a cluster
+    // state this server keeps across a restart. Which is also how a second
+    // cluster reads what a first one wrote.
+    if let Some(from) = crate::snapshot::Source::of(&body) {
+        if let crate::snapshot::Source::Dir(dir) = &from {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        for (snap, record) in from.records() {
             store.put_snapshot(&name, &snap, record);
         }
     }
@@ -177,8 +177,13 @@ pub(crate) fn snapshot_record(
 /// rather than remembered from the moment it was registered.
 fn refresh_readonly(store: &Store, repo: &str) {
     let Some(found) = store.repositories().get(repo).cloned() else { return };
-    let Some(url) = crate::snapshot::url::url_of(&found) else { return };
-    for (snap, record) in crate::snapshot::url::read_records(&url) {
+    // a directory this node writes to is already known; anywhere else may
+    // have been written to by somebody else since it was last looked at
+    if crate::snapshot::location(&found).is_some() {
+        return;
+    }
+    let Some(from) = crate::snapshot::Source::of(&found) else { return };
+    for (snap, record) in from.records() {
         store.put_snapshot(repo, &snap, record);
     }
 }
@@ -275,13 +280,13 @@ pub async fn create_snapshot(
     }
     // A repository with somewhere to write gets the documents themselves; one
     // without keeps the bookkeeping and nothing else, and says so.
-    match store.repositories().get(&repo).and_then(crate::snapshot::location) {
-        Some(dir) => {
+    match store.repositories().get(&repo).and_then(crate::snapshot::Source::of) {
+        Some(to) => {
             let kept: Vec<String> = record["indices"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            if let Err(e) = crate::snapshot::write(&store, &dir, &name, &kept, &record) {
+            if let Err(e) = crate::snapshot::write(&store, &to, &name, &kept, &record) {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "repository_exception",
@@ -400,9 +405,9 @@ pub async fn delete_snapshot(
             format!("[{repo}:{name}] is missing"),
         );
     }
-    if let Some(dir) = store.repositories().get(&repo).and_then(crate::snapshot::location) {
+    if let Some(from) = store.repositories().get(&repo).and_then(crate::snapshot::Source::of) {
         for snap in held {
-            crate::snapshot::remove(&dir, &snap);
+            crate::snapshot::remove(&from, &snap);
         }
     }
     respond(&p, json!({"acknowledged": true}))

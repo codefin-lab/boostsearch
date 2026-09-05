@@ -7,16 +7,19 @@
 //! of the engine wrote it -- a restore re-indexes, so a snapshot outlives a
 //! change of format.
 
+pub mod blobs;
 pub mod url;
 
 /// Where a repository's files are, however they are reached.
 ///
-/// A repository on a filesystem is a directory and a repository read over a
-/// URL is not, but everything above them wants the same two things: read this
-/// file, and tell me what snapshots are here.
+/// A repository on a filesystem is a directory, a repository read over a URL
+/// is not, and one in an object store is neither. Everything above them wants
+/// the same four things: read this file, write this file, forget these files,
+/// and tell me what snapshots are here.
 pub enum Source {
     Dir(PathBuf),
     Url(String),
+    Blobs(Box<dyn blobs::Store>),
 }
 
 impl Source {
@@ -25,22 +28,82 @@ impl Source {
         if let Some(dir) = location(repo) {
             return Some(Source::Dir(dir));
         }
-        url::url_of(repo).map(Source::Url)
+        if let Some(url) = url::url_of(repo) {
+            return Some(Source::Url(url));
+        }
+        blobs::of(repo).map(Source::Blobs)
+    }
+
+    /// Whether anything may be written here.
+    pub fn writable(&self) -> bool {
+        !matches!(self, Source::Url(_))
     }
 
     pub fn read(&self, relative: &str) -> Option<Vec<u8>> {
         match self {
             Source::Dir(dir) => std::fs::read(dir.join(relative)).ok(),
             Source::Url(url) => url::fetch(url, relative),
+            Source::Blobs(store) => store.get(relative),
+        }
+    }
+
+    pub fn write(&self, relative: &str, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Source::Dir(dir) => {
+                let path = dir.join(relative);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(path, bytes)
+            }
+            Source::Url(_) => Err(std::io::Error::other("this repository is read-only")),
+            Source::Blobs(store) => store.put(relative, bytes),
+        }
+    }
+
+    /// Forget everything a snapshot left behind.
+    pub fn remove_prefix(&self, prefix: &str) {
+        match self {
+            Source::Dir(dir) => {
+                let _ = std::fs::remove_dir_all(dir.join(prefix));
+            }
+            Source::Url(_) => {}
+            Source::Blobs(store) => store.delete_prefix(prefix),
         }
     }
 
     /// The snapshots this source holds, and what each of them recorded.
+    ///
+    /// A directory is looked at; anything else is asked, through the index
+    /// its writer left behind.
     pub fn records(&self) -> Vec<(String, Value)> {
         match self {
             Source::Dir(dir) => read_records(dir),
             Source::Url(url) => url::read_records(url),
+            // an object store can be asked what is in it, so it is asked
+            // rather than being taken at the word of an index it wrote
+            // earlier -- which is also what keeps that index honest
+            Source::Blobs(store) => store
+                .list("")
+                .into_iter()
+                .filter_map(|name| Some(name.strip_suffix("/snapshot.json")?.to_string()))
+                .filter(|name| !name.contains('/'))
+                .filter_map(|name| {
+                    let raw = self.read(&format!("{name}/snapshot.json"))?;
+                    let record = serde_json::from_slice::<Value>(&raw).ok()?;
+                    Some((name, record))
+                })
+                .collect(),
         }
+    }
+
+    /// Write down what this source now holds, for a reader that cannot look.
+    pub fn write_index(&self) {
+        let names: Vec<String> = match self {
+            Source::Dir(dir) => read_records(dir).into_iter().map(|(n, _)| n).collect(),
+            _ => self.records().into_iter().map(|(n, _)| n).collect(),
+        };
+        let _ = self.write("index.json", json!({"snapshots": names}).to_string().as_bytes());
     }
 }
 
@@ -100,54 +163,36 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
 /// Everything an index needs to come back: what it was, and what was in it.
 pub fn write(
     store: &Store,
-    dir: &Path,
+    to: &Source,
     name: &str,
     indices: &[String],
     record: &Value,
 ) -> std::io::Result<()> {
-    let root = dir.join(name);
-    std::fs::create_dir_all(&root)?;
     for index in indices {
         let Some(st) = store.get(index) else { continue };
         // a snapshot is of what has been written, so what is waiting to be
         // written is committed first
         let _ = st.write().refresh();
         let g = st.read();
-        let idx_dir = root.join(crate::store::dir_name(index));
-        std::fs::create_dir_all(&idx_dir)?;
-        std::fs::write(
-            idx_dir.join("meta.json"),
+        let within = format!("{name}/{}", crate::store::dir_name(index));
+        to.write(
+            &format!("{within}/meta.json"),
             json!({
                 "name": index,
                 "mappings": g.mapping.raw,
                 "settings": g.settings,
                 "aliases": g.aliases,
             })
-            .to_string(),
+            .to_string()
+            .as_bytes(),
         )?;
-        let mut out = BufWriter::new(std::fs::File::create(idx_dir.join("docs.ndjson"))?);
-        dump(&g, &mut out)?;
-        out.flush()?;
+        let mut docs = Vec::new();
+        dump(&g, &mut docs)?;
+        to.write(&format!("{within}/docs.ndjson"), &docs)?;
     }
-    std::fs::write(root.join("snapshot.json"), record.to_string())?;
-    write_index(dir);
+    to.write(&format!("{name}/snapshot.json"), record.to_string().as_bytes())?;
+    to.write_index();
     Ok(())
-}
-
-/// The names a repository holds, written where a reader that cannot list a
-/// directory can find them.
-///
-/// A repository read over HTTP has no way to ask what is in it -- that is
-/// what OpenSearch keeps its `index-N` blob for, and this is the same idea
-/// under a plainer name. A repository on a filesystem does not need it and
-/// writes it anyway, because a URL repository may be pointed at the same
-/// directory later.
-pub fn write_index(dir: &Path) {
-    let names: Vec<String> = read_records(dir).into_iter().map(|(name, _)| name).collect();
-    let _ = std::fs::write(
-        dir.join("index.json"),
-        json!({"snapshots": names}).to_string(),
-    );
 }
 
 /// Write out every living document, as it was given to us.
@@ -242,7 +287,7 @@ pub fn restore_index(
 }
 
 /// Forget a snapshot, and everything it was keeping.
-pub fn remove(dir: &Path, name: &str) {
-    let _ = std::fs::remove_dir_all(dir.join(name));
-    write_index(dir);
+pub fn remove(from: &Source, name: &str) {
+    from.remove_prefix(name);
+    from.write_index();
 }

@@ -2623,3 +2623,57 @@ which satisfies a suite written to check that its plugin is the only one
 installed, and pretending otherwise would mean lying to every client that asks.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100.
+
+## Phase 9 — Repositories that are not directories
+
+S3, Google Cloud Storage and Azure Blob Storage, as snapshot repositories.
+
+**One interface, four backings.** A repository was a directory, then a
+directory or a URL, and is now a `Source` that reads a blob, writes a blob,
+forgets everything under a prefix and says what snapshots it holds. A
+filesystem, a URL, and an object store answer those four the same way; what
+differs is how a request is signed.
+
+**The signing is written here rather than taken from three vendor SDKs.** Each
+of those brings its own async runtime, its own HTTP client and its own error
+type, for four calls apiece. The algorithms are published and stable and come
+to a page each:
+
+  - **S3** signs with AWS Signature Version 4: the request in a canonical
+    form, hashed, signed with a key derived from the day, the region and the
+    service. Path-style addressing is the default for an endpoint that is not
+    Amazon's, which is what every S3-compatible store expects.
+  - **Azure** signs with the account's shared key over a canonical form that
+    is the method, eleven header fields, the `x-ms-` headers in order, and the
+    resource. The resource is the account followed by the URL's path -- which
+    against an emulator, whose URLs carry the account in the path, means the
+    account appears twice. That is what the rule says and what the emulator
+    checks, and getting it wrong is a 403 with no explanation.
+  - **GCS** trades a service account's signed JWT for an access token, kept
+    until it is close to expiring, because a snapshot writes many blobs and
+    each of them asking Google first would be a round trip apiece. An access
+    token given directly, or an emulator asking for nothing, are both taken.
+
+**A store that can be listed is listed.** The `index.json` a repository leaves
+behind exists for readers that cannot ask what is there -- a URL repository --
+and an object store is not one of those. It is asked, and the index it wrote
+earlier is not taken at its word, which is also what keeps that index honest.
+
+Checked against the emulators the vendors publish -- minio, Azurite,
+fake-gcs-server -- which speak the same protocols the real services speak, so
+what is proved is the signing, the layout, and a restore that reads it back.
+`tools/object_store_setup.sh` starts them and `tools/object_store_check.py`
+runs the round trip: take a snapshot, forget the repository, register it again
+from nothing so that what it holds comes out of the store rather than out of
+memory, restore, check the documents, delete, check the store is empty.
+
+    s3     ok
+    azure  ok
+    gcs    ok
+
+OpenSearch's own S3, GCS and Azure suites are written against cloud accounts
+and are not in the corpus this repository runs; this is what stands in for
+them, and it tests the part that can be got wrong.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+850/895 unchanged.
