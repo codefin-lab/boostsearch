@@ -73,16 +73,53 @@ def bulk_index(base, name, path, batch=4000):
     return n / el, n
 
 
-def ids_of(base, name, want):
-    """Some of the documents that are there, to write over and to take away."""
-    body = {"query": {"match_all": {}}, "size": want, "_source": False}
-    hits = req(base, "POST", f"/{name}/_search", body)["hits"]["hits"]
-    return [h["_id"] for h in hits]
+def settle(base, name):
+    """Let the engine finish with what the load left it.
+
+    A bulk load leaves segments to merge, and an engine measured while it is
+    still merging is measured doing something other than what is being asked
+    of it. Both are put in the same state -- one segment, refreshed -- before
+    anything after the load is timed."""
+    try:
+        req(base, "POST", f"/{name}/_forcemerge?max_num_segments=1")
+    except Exception:
+        pass
+    time.sleep(2)
+    req(base, "POST", f"/{name}/_refresh")
+
+
+def ids_of(base, name, want, page=5000):
+    """Some of the documents that are there, to write over and to take away.
+
+    Read through a scroll: more than a window's worth is wanted, and a window
+    is the one thing a plain search will not hand over."""
+    got = []
+    body = {"query": {"match_all": {}}, "size": min(page, want), "_source": False}
+    res = req(base, "POST", f"/{name}/_search?scroll=2m", body)
+    sid = res.get("_scroll_id")
+    got += [h["_id"] for h in res["hits"]["hits"]]
+    while sid and len(got) < want:
+        res = req(base, "POST", "/_search/scroll", {"scroll": "2m", "scroll_id": sid})
+        sid = res.get("_scroll_id")
+        hits = res["hits"]["hits"]
+        if not hits:
+            break
+        got += [h["_id"] for h in hits]
+    if sid:
+        try:
+            req(base, "DELETE", "/_search/scroll", {"scroll_id": [sid]})
+        except Exception:
+            pass
+    return got[:want]
 
 
 def update_rate(base, name, ids, batch=1000):
     """Writing over a document that is already there is not the same work as
-    writing a fresh one: the old one has to be found and put out of the way."""
+    writing a fresh one: the old one has to be found and put out of the way.
+
+    The caller warms this on one set of documents and times it on another: a
+    bulk load leaves both engines with work still in flight, and the first
+    thing done after one measures that instead."""
     if not ids:
         return 0.0
     lines = []
@@ -105,8 +142,8 @@ def delete_rate(base, name, ids, batch=1000):
     return len(ids) / (time.time() - t)
 
 
-def scroll_rate(base, name, pages=20, size=1000):
-    """Paging the whole index: what an export, a reindex or a backup costs."""
+def scroll_pass(base, name, pages, size):
+    """One walk of the index, and how long it took."""
     t = time.time()
     got = 0
     body = {"query": {"match_all": {}}, "size": size, "_source": False}
@@ -129,6 +166,16 @@ def scroll_rate(base, name, pages=20, size=1000):
         except Exception:
             pass
     return got / el if el > 0 else 0.0
+
+
+def scroll_rate(base, name, pages=20, size=1000):
+    """Paging the whole index: what an export, a reindex or a backup costs.
+
+    Walked once without being timed first. A bulk load leaves both engines
+    with work still in flight -- merges, a segment being written -- and the
+    first walk after one measures that rather than the walk."""
+    scroll_pass(base, name, pages, size)
+    return scroll_pass(base, name, pages, size)
 
 
 QUERIES = {
@@ -220,15 +267,19 @@ for label, base in (A, B):
     print(f"indexing into {label}...", flush=True)
     rate, count = bulk_index(base, INDEX, DATA)
     r = {"index_docs_per_s": rate, "docs": count}
+    settle(base, INDEX)
     r["store_bytes"] = store_bytes(base, INDEX)
     r["scroll_docs_per_s"] = scroll_rate(base, INDEX)
     r["latency"] = {q: latency(base, INDEX, body) for q, body in QUERIES.items()}
     r["queries_per_s"] = throughput(base, INDEX)
     # the writes that change what is already there come last: they leave the
-    # index a different size, and every read above should see the same one
-    touch = ids_of(base, INDEX, 5000)
-    r["update_docs_per_s"] = update_rate(base, INDEX, touch)
-    r["delete_docs_per_s"] = delete_rate(base, INDEX, touch)
+    # index a different size, and every read above should see the same one.
+    # Each is warmed on one set of documents and timed on another.
+    touch = ids_of(base, INDEX, 20000)
+    update_rate(base, INDEX, touch[:5000])
+    r["update_docs_per_s"] = update_rate(base, INDEX, touch[5000:10000])
+    delete_rate(base, INDEX, touch[10000:15000])
+    r["delete_docs_per_s"] = delete_rate(base, INDEX, touch[15000:20000])
     res[label] = r
 
 res["OpenSearch"]["rss_mib"] = rss_mib(

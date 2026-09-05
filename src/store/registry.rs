@@ -258,6 +258,12 @@ impl Store {
             let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
             let mut total = 0;
             for e in entries.flatten() {
+                // the translog is not part of the store: OpenSearch counts it
+                // under `translog.size_in_bytes` and not under `store.size`,
+                // and it is emptied by a flush rather than by a merge
+                if e.file_name() == crate::store::TRANSLOG {
+                    continue;
+                }
                 match e.metadata() {
                     Ok(m) if m.is_dir() => total += walk(&e.path()),
                     Ok(m) => total += m.len(),

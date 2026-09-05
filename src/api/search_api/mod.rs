@@ -56,6 +56,17 @@ pub async fn search(
     {
         return pipeline_failure(&e);
     }
+    // A scroll walks the index in an order of its own so that each batch can
+    // carry on from where the last one ended. Without one it would have to
+    // count from the beginning every time, which costs more with every batch.
+    // `_doc` is not that order: it numbers documents inside a segment, so the
+    // same number comes back once per segment and a cursor built on it would
+    // step over whole segments. `_seq` is the write order of the index as a
+    // whole, so a batch can say where it ended and be believed.
+    let implicit_sort = scrolling && body.get("sort").is_none() && !p.contains_key("sort");
+    if implicit_sort {
+        body["sort"] = json!([{"_seq": "asc"}]);
+    }
     match crate::search::run(&store, &expr, &body, &p) {
         Ok(out) => {
             let n = out.hits.len();
@@ -67,9 +78,25 @@ pub async fn search(
             }
             if scrolling {
                 let size = scroll_size(&body, &p);
-                let id = store.open_scroll(&expr, &body, n.max(size).min(size.max(n)));
-                // the cursor starts after what this response already returned
-                store.advance_scroll(&id, 0);
+                // where this batch ended, so the next one starts there
+                // one index numbers its writes for itself, so a cursor over
+                // `_seq` only names one document while the scroll reads a
+                // single index; across several it would name one per index and
+                // the batch after it would be short. Those count from the
+                // beginning instead.
+                let cursor = (implicit_sort && store.resolve(&expr).len() == 1)
+                    .then(|| last_sort_of(&env))
+                    .flatten();
+                if implicit_sort {
+                    strip_sort(&mut env);
+                }
+                let id = store.open_scroll(
+                    &expr,
+                    &body,
+                    n.max(size).min(size.max(n)),
+                    cursor,
+                    implicit_sort,
+                );
                 env["_scroll_id"] = json!(id);
             }
             respond(&p, env)
@@ -346,4 +373,27 @@ pub async fn search_shards(
 pub(crate) fn pipeline_failure(e: &crate::search::pipeline::PipelineError) -> Response {
     let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST);
     (status, axum::Json(json!({"error": e.body(), "status": e.status()}))).into_response()
+}
+
+/// The sort values of the last document a page returned, which is where the
+/// next page begins.
+pub(crate) fn last_sort_of(env: &Value) -> Option<Vec<Value>> {
+    env.pointer("/hits/hits")?
+        .as_array()?
+        .last()?
+        .get("sort")?
+        .as_array()
+        .map(|a| a.to_vec())
+}
+
+/// Take the sort values back off the hits, for an order the caller did not
+/// ask for and should not be told about.
+pub(crate) fn strip_sort(env: &mut Value) {
+    if let Some(hits) = env.pointer_mut("/hits/hits").and_then(|h| h.as_array_mut()) {
+        for hit in hits {
+            if let Some(o) = hit.as_object_mut() {
+                o.remove("sort");
+            }
+        }
+    }
 }

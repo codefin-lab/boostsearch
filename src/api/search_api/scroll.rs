@@ -193,8 +193,16 @@ pub async fn scroll(
         );
     };
     let mut req = state.body.clone();
-    req["from"] = json!(state.offset);
     req["size"] = json!(state.size);
+    // carried on from where the last batch ended; only a scroll opened before
+    // there was a cursor counts from the beginning
+    match &state.after {
+        Some(after) => {
+            req["search_after"] = json!(after);
+            req["from"] = json!(0);
+        }
+        None => req["from"] = json!(state.offset),
+    }
     // the scroll walks the index as it stood when it was opened, so a
     // document written since is not walked into halfway through
     req["pit"] = json!({"id": state.pit});
@@ -206,8 +214,19 @@ pub async fn scroll(
     match crate::search::run(&store, &state.expr, &req, &p) {
         Ok(out) => {
             let n = out.hits.len();
-            store.advance_scroll(&id, n);
             let mut env = crate::search::envelope(out, &req, &p);
+            // a scroll that began counting from the beginning carries on that
+            // way: a cursor taken up halfway would be read against an order
+            // the caller chose, not the one the scroll was opened in
+            let after = state
+                .after
+                .is_some()
+                .then(|| crate::api::search_api::last_sort_of(&env))
+                .flatten();
+            store.advance_scroll(&id, n, after);
+            if state.implicit_sort {
+                crate::api::search_api::strip_sort(&mut env);
+            }
             env["_scroll_id"] = json!(id);
             respond(&p, env)
         }

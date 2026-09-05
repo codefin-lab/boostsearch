@@ -12,8 +12,10 @@ pub(crate) fn source_of(
 ) -> Option<(String, Value)> {
     let doc: TantivyDocument = searcher.doc(addr).ok()?;
     let id = doc.get_first(st.fields.id)?.as_str()?.to_string();
-    let raw = doc.get_first(st.fields.source)?.as_str()?.to_string();
-    let src = serde_json::from_str(&raw).ok()?;
+    // read straight out of the stored document: copying it into a string of
+    // its own first costs a whole source per hit, and every hit on the page
+    // pays it
+    let src = serde_json::from_str(doc.get_first(st.fields.source)?.as_str()?).ok()?;
     Some((id, src))
 }
 

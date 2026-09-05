@@ -133,6 +133,10 @@ pub fn build_schema() -> (Schema, Fields) {
             .set_indexing_options(
                 TextFieldIndexing::default()
                     .set_tokenizer("raw")
+                    // the untouched view is never scored by how long a field
+                    // is -- that is what the analysed view is for -- and a
+                    // keyword field carries no norms in OpenSearch either
+                    .set_fieldnorms(false)
                     .set_index_option(IndexRecordOption::Basic),
             ),
     );
@@ -604,6 +608,13 @@ pub struct ScrollState {
     /// the point in time the scroll was opened over, so that documents
     /// written after it are not walked into
     pub pit: String,
+    /// where the last batch ended, as the sort values of its last document.
+    /// A scroll carried on by counting from the beginning costs more with
+    /// every batch; carried on from here it costs the same each time.
+    pub after: Option<Vec<Value>>,
+    /// whether the order the scroll walks in is one it chose for itself, in
+    /// which case the sort values do not belong in the answer
+    pub implicit_sort: bool,
 }
 
 fn walk_malformed(

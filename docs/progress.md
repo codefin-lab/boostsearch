@@ -2119,3 +2119,59 @@ What is not done here: the cloud hardware. The matrix takes both engines as
 URLs and runs anywhere -- `BENCH_A`, `BENCH_B`, `BENCH_AUTH`, `BENCH_DATA` --
 but the numbers above are from a laptop, and a laptop is not a release gate.
 Running it on the hardware a release is cut on is the part of 7.3 still owed.
+
+### 7.4 — A scroll that carries on from where it stopped
+
+The scroll dimension was measured wrong, and then it was slow for a reason of
+its own.
+
+Wrong first. A scroll answered its next batch by running the search again from
+a further offset, so batch two skipped a thousand documents, batch two hundred
+skipped two hundred thousand, and the cost of the export grew with every step
+of it. A cursor fixes that: each batch remembers the sort values of its last
+document, and the next one asks for what comes after them. Constant per batch,
+however deep the scroll has gone.
+
+The order the cursor is read against has to be an order that names one
+document. `_doc` is not one: it numbers documents inside a segment, so an
+index of three segments hands out the number 4 three times, and a cursor built
+on it steps over whole segments. That is what the corpus caught -- `scroll/10_
+basic_timeseries.yml` and `scroll/12_slices.yml` both went from full batches
+to empty ones. `_seq` is the write order of the index as a whole, so the
+implicit sort is over that instead; a scroll the caller gave its own order to
+keeps counting from the beginning, and so does one reading more than one index,
+where `_seq` names a document per index rather than one document.
+
+Measured on 200,000 documents, both engines force-merged and settled, in
+batches of a thousand:
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| scroll docs/s | 71,398 | ~170,000 | ~210,000 |
+
+Still behind, and the shape of what remains is now visible: at batches of five
+thousand OpenSearch goes on getting faster (377,000/s) while we flatten at
+200,000/s, so what is left is per-document, not per-batch. With `_source`
+turned off both engines roughly double and the ratio holds, so it is not the
+source handling either -- it is the per-hit path as a whole. That is the next
+thing to take apart.
+
+Two smaller things measured while here:
+
+  - **The translog is not the store.** `store.size` counted it; OpenSearch
+    reports it separately under `translog.size_in_bytes`, and a flush empties
+    it. Counting it made our disk figure worse than it is.
+  - **The untouched view carries no norms.** Every value is indexed twice, once
+    analysed and once raw, and the raw view was keeping field norms it is never
+    scored by. Off, that is about 2.7MiB of 52.8 on the bench corpus.
+
+Which leaves the disk gap where 7.3 found it: 52.8MiB against 27.6, both
+force-merged into a single segment. It divides as postings 11.4, term
+dictionary 10.8, fast fields 11.5, stored source 14.1, positions 2.4, norms
+2.7. Nothing there is fragmentation and nothing there is a setting -- it is
+that every value is indexed into both views. Closing it means changing which
+values go into which view, which is a decision to write down before it is a
+patch to write.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 unchanged.
