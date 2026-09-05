@@ -430,6 +430,9 @@ pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> b
         // a script makes the keys, which no engine reads from a field
         || def.pointer("/terms/script").is_some()
         || def.get("scripted_metric").is_some()
+        // a metric whose value is worked out per document rather than read
+        // out of a column
+        || crate::search::aggs::metric::scripted_metric_kind(def).is_some()
 }
 
 /// A date histogram this engine has to walk itself, a bucket at a time: one

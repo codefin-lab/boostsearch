@@ -14,6 +14,8 @@
 
 mod kstem;
 mod morph;
+mod phone;
+mod phonetic;
 mod rslp;
 mod snowball;
 mod stem;
@@ -74,6 +76,12 @@ enum Source {
     Classic,
     /// what `classic` keeps, and an address or a URL kept whole
     UaxUrlEmail,
+    /// A telephone number, cut into everything it may be searched for.
+    /// `ngrams` is what separates indexing from searching.
+    Phone {
+        region: String,
+        ngrams: bool,
+    },
     /// every prefix of a path: `a`, `a/b`, `a/b/c`
     PathHierarchy {
         delimiter: char,
@@ -128,6 +136,20 @@ pub enum Step {
     /// to the word itself
     KeywordRepeat,
     Truncate(usize),
+    /// a word written as it sounds, by one of the encoders OpenSearch's
+    /// phonetic plugin offers. `replace` says whether the word it was made
+    /// from stays beside it
+    Phonetic {
+        encoder: String,
+        replace: bool,
+        languages: Vec<String>,
+        /// how long a code may be, where the encoder has a length to cap
+        max_code_len: Option<usize>,
+        /// Beider-Morse reads a name against the tradition it comes from and
+        /// the closeness it is asked for
+        name_type: String,
+        rule_type: String,
+    },
     Limit(usize),
     /// each token replaced by, or joined with, what it also means
     Synonym(Vec<SynonymRule>),
@@ -547,7 +569,8 @@ impl Chain {
             | Source::Icu
             | Source::Thai
             | Source::Morph { .. }
-            | Source::CharGroup(_) => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
+            | Source::CharGroup(_)
+            | Source::Phone { .. } => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
             Source::Pattern(p) => match RegexTokenizer::new(p) {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
                 Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
@@ -628,6 +651,11 @@ impl Chain {
             Source::PathHierarchy { delimiter, replacement } => {
                 path_hierarchy(text, *delimiter, *replacement)
             }
+            Source::Phone { region, ngrams } => phone::tokens(text, region, *ngrams)
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| (t, i, 0, text.len(), 1))
+                .collect(),
             _ => {
                 let mut analyzer = self.boostcore_analyzer();
                 let mut stream = analyzer.token_stream(text);
@@ -1310,6 +1338,31 @@ fn apply_step(
             .collect(),
         Step::KStem => {
             tokens.into_iter().map(|(t, p, a, b, l)| (kstem::stem(&t), p, a, b, l)).collect()
+        }
+        Step::Phonetic { encoder, replace, languages, max_code_len, name_type, rule_type } => {
+            let how = phonetic::How {
+                encoder,
+                languages,
+                max_code_len: *max_code_len,
+                name_type,
+                rule_type,
+            };
+            let mut out = Vec::new();
+            for (t, p, a, b, l) in tokens {
+                match phonetic::encode(&how, &t) {
+                    // a code and the word it was made from stand in the same
+                    // place: a search for either finds the document
+                    Some(code) if *replace => out.push((code, p, a, b, l)),
+                    Some(code) => {
+                        out.push((code, p, a, b, l.clone()));
+                        out.push((t, p, a, b, l));
+                    }
+                    // an encoder that has nothing to say about a word leaves
+                    // the word alone
+                    None => out.push((t, p, a, b, l)),
+                }
+            }
+            out
         }
         Step::Apostrophe => tokens
             .into_iter()
@@ -2434,6 +2487,24 @@ impl Registry {
 /// An analyzer the index defined, out of the parts it named.
 /// The same, told about the char filters the index defined.
 fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) -> Option<Chain> {
+    // a phone analyzer is named by type and told which country to read an
+    // unprefixed number as belonging to
+    if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
+        && (kind == "phone" || kind == "phone-search")
+    {
+        return Some(Chain {
+            pre: Vec::new(),
+            source: Source::Phone {
+                region: spec
+                    .get("phone-region")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("ZZ")
+                    .to_string(),
+                ngrams: kind == "phone",
+            },
+            steps: Vec::new(),
+        });
+    }
     // `{"type": "english"}` names a built-in rather than describing a chain
     if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
         && kind != "custom"
@@ -2680,6 +2751,33 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             text("language").or_else(|| text("name")).unwrap_or("english").to_string(),
         )],
         "length" => vec![Step::Length { min: num("min", 0), max: num("max", usize::MAX) }],
+        "phonetic" => vec![Step::Phonetic {
+            encoder: text("encoder").unwrap_or("double_metaphone").to_string(),
+            // the word a code was made from is dropped unless the filter is
+            // told to keep it, which is what OpenSearch does
+            replace: spec
+                .get("replace")
+                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                .unwrap_or(true),
+            languages: spec
+                .get("languageset")
+                .map(|v| match v {
+                    Value::Array(a) => {
+                        a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                    }
+                    Value::String(one) => {
+                        one.split(',').map(|s| s.trim().to_string()).collect()
+                    }
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default(),
+            max_code_len: spec
+                .get("max_code_len")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .map(|n| n as usize),
+            name_type: text("name_type").unwrap_or("generic").to_string(),
+            rule_type: text("rule_type").unwrap_or("approx").to_string(),
+        }],
         "truncate" => vec![Step::Truncate(num("length", 10))],
         "limit" => vec![Step::Limit(num("max_token_count", 1))],
         "synonym" | "synonym_graph" => {
@@ -3039,6 +3137,14 @@ pub fn builtin(name: &str) -> Option<Chain> {
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
         },
         "keyword" | "raw" => Chain { pre: Vec::new(), source: Source::Keyword, steps: vec![] },
+        // the index keeps every prefix a number may be typed as; the search
+        // keeps the number alone, so that what was typed is matched against
+        // whole numbers rather than against every number that begins with it
+        "phone" | "phone-search" => Chain {
+            pre: Vec::new(),
+            source: Source::Phone { region: "ZZ".into(), ngrams: name == "phone" },
+            steps: Vec::new(),
+        },
         "pattern" => Chain {
             pre: Vec::new(),
             source: Source::PatternSplit(r"[^a-zA-Z0-9_]+".into()),

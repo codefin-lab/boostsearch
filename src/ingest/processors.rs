@@ -1357,12 +1357,86 @@ fn run_body(
             doc.set(&target, parsed.to_json(&text, properties.as_deref()))
                 .map_err(IngestError::illegal)?;
         }
+        "attachment" => {
+            let field = field_of(&doc, c, "field")?;
+            let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| "attachment".into());
+            let properties = c.strings_opt("properties")?;
+            // how much of a file is read. A field may carry the number for
+            // one document, which is how a large file is read further than
+            // the pipeline's own ceiling
+            let mut limit = c
+                .get("indexed_chars")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(100_000);
+            if let Some(from) = c.str_opt("indexed_chars_field")?
+                && let Some(n) = doc.get(&from).and_then(|v| v.as_i64())
+            {
+                limit = n;
+            }
+            let limit = if limit < 0 { usize::MAX } else { limit as usize };
+            let Some(encoded) = string_at(&doc, &field, ignore_missing)? else {
+                return Ok(Some(doc));
+            };
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|_| {
+                    IngestError::illegal(format!(
+                        "field [{field}] is not a valid base64 value"
+                    ))
+                })?;
+            let found = super::attachment::extract(&bytes, limit);
+            let written = super::attachment::fields(&found, &found.content, properties.as_deref());
+            doc.set(&target, written).map_err(IngestError::illegal)?;
+        }
         "geoip" => {
             let field = field_of(&doc, c, "field")?;
-            if !doc.has(&field) && !ignore_missing {
+            let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| "geoip".into());
+            let database =
+                c.str_opt("database_file")?.unwrap_or_else(|| "GeoLite2-City.mmdb".into());
+            let properties = c.strings_opt("properties")?;
+            // the first address of a list is the one that stands for the
+            // document, unless the processor was told to keep them all
+            let first_only = c.bool_opt("first_only", true)?;
+            if !doc.has(&field) {
+                if ignore_missing {
+                    return Ok(Some(doc));
+                }
                 return Err(no_field(&field));
             }
-            // no database is shipped: the lookup yields nothing
+            let db = super::geoip::database(&database)?;
+            if let Some(p) = properties.as_deref() {
+                db.check(p)?;
+            }
+            let addresses: Vec<String> = match doc.get(&field) {
+                Some(Value::Array(items)) => {
+                    items.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                }
+                Some(Value::String(one)) => vec![one.clone()],
+                Some(_) => {
+                    return Err(IngestError::illegal(format!(
+                        "field [{field}] of type [java.lang.Object] cannot be cast to \
+                         [java.lang.String]"
+                    )));
+                }
+                None => Vec::new(),
+            };
+            let found: Vec<Option<Value>> =
+                addresses.iter().map(|a| db.lookup(a, properties.as_deref())).collect();
+            if first_only {
+                // the first address anything is known about is the one that
+                // stands for the document; the ones before it are passed over
+                if let Some(one) = found.into_iter().flatten().next() {
+                    doc.set(&target, one).map_err(IngestError::illegal)?;
+                }
+            } else if found.iter().any(|f| f.is_some()) {
+                // every address keeps its place, so that the answers line up
+                // with the addresses they came from; one nothing is known
+                // about is a null in that place
+                let all: Vec<Value> =
+                    found.into_iter().map(|f| f.unwrap_or(Value::Null)).collect();
+                doc.set(&target, Value::Array(all)).map_err(IngestError::illegal)?;
+            }
         }
         other => {
             return Err(IngestError::illegal(format!(

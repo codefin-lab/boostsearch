@@ -7,6 +7,43 @@
 //! of the engine wrote it -- a restore re-indexes, so a snapshot outlives a
 //! change of format.
 
+pub mod url;
+
+/// Where a repository's files are, however they are reached.
+///
+/// A repository on a filesystem is a directory and a repository read over a
+/// URL is not, but everything above them wants the same two things: read this
+/// file, and tell me what snapshots are here.
+pub enum Source {
+    Dir(PathBuf),
+    Url(String),
+}
+
+impl Source {
+    /// The source a registered repository stands for.
+    pub fn of(repo: &Value) -> Option<Source> {
+        if let Some(dir) = location(repo) {
+            return Some(Source::Dir(dir));
+        }
+        url::url_of(repo).map(Source::Url)
+    }
+
+    pub fn read(&self, relative: &str) -> Option<Vec<u8>> {
+        match self {
+            Source::Dir(dir) => std::fs::read(dir.join(relative)).ok(),
+            Source::Url(url) => url::fetch(url, relative),
+        }
+    }
+
+    /// The snapshots this source holds, and what each of them recorded.
+    pub fn records(&self) -> Vec<(String, Value)> {
+        match self {
+            Source::Dir(dir) => read_records(dir),
+            Source::Url(url) => url::read_records(url),
+        }
+    }
+}
+
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -93,7 +130,24 @@ pub fn write(
         out.flush()?;
     }
     std::fs::write(root.join("snapshot.json"), record.to_string())?;
+    write_index(dir);
     Ok(())
+}
+
+/// The names a repository holds, written where a reader that cannot list a
+/// directory can find them.
+///
+/// A repository read over HTTP has no way to ask what is in it -- that is
+/// what OpenSearch keeps its `index-N` blob for, and this is the same idea
+/// under a plainer name. A repository on a filesystem does not need it and
+/// writes it anyway, because a URL repository may be pointed at the same
+/// directory later.
+pub fn write_index(dir: &Path) {
+    let names: Vec<String> = read_records(dir).into_iter().map(|(name, _)| name).collect();
+    let _ = std::fs::write(
+        dir.join("index.json"),
+        json!({"snapshots": names}).to_string(),
+    );
 }
 
 /// Write out every living document, as it was given to us.
@@ -143,15 +197,15 @@ pub fn read_records(dir: &Path) -> Vec<(String, Value)> {
 /// one version can be restored by another.
 pub fn restore_index(
     store: &Store,
-    dir: &Path,
+    from: &Source,
     snapshot: &str,
     index: &str,
     as_name: &str,
 ) -> Result<usize, String> {
-    let idx_dir = dir.join(snapshot).join(crate::store::dir_name(index));
-    let meta: Value = std::fs::read_to_string(idx_dir.join("meta.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
+    let meta: Value = from
+        .read(&format!("{within}/meta.json"))
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
         .ok_or_else(|| format!("[{snapshot}] holds nothing for index [{index}]"))?;
     let body = json!({
         "mappings": meta.get("mappings").cloned().unwrap_or_else(|| json!({})),
@@ -162,13 +216,14 @@ pub fn restore_index(
     let Some(st) = store.get(as_name) else {
         return Err(format!("[{as_name}] could not be created"));
     };
-    let Ok(file) = std::fs::File::open(idx_dir.join("docs.ndjson")) else {
+    let Some(docs) = from.read(&format!("{within}/docs.ndjson")) else {
         return Ok(0);
     };
     let mut count = 0usize;
     let mut g = st.write();
-    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-        let Ok(record) = serde_json::from_str::<Value>(&line) else { continue };
+    for line in docs.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let Ok(line) = std::str::from_utf8(line) else { continue };
+        let Ok(record) = serde_json::from_str::<Value>(line) else { continue };
         let Some(id) = record.get("_id").and_then(|v| v.as_str()) else { continue };
         let Some(raw) = record.get("_source").and_then(|v| v.as_str()) else { continue };
         let Ok(source) = serde_json::from_str::<Value>(raw) else { continue };
@@ -189,4 +244,5 @@ pub fn restore_index(
 /// Forget a snapshot, and everything it was keeping.
 pub fn remove(dir: &Path, name: &str) {
     let _ = std::fs::remove_dir_all(dir.join(name));
+    write_index(dir);
 }

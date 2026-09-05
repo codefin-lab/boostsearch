@@ -2465,3 +2465,161 @@ string, not the JSON path a term carries.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 820/895 -- file for file identical to the baseline.
+
+### 8.1 — geoip, phonetic, phone numbers
+
+Phase 8 is the last twenty-six sections of OpenSearch's own suites: the
+things a distribution ships as plugins. Three of the five are closed.
+
+**geoip.** An address read into where it is, out of a MaxMind database -- the
+same format and the same files OpenSearch reads, so a cluster that already
+has its databases keeps them. What a database can answer follows from its own
+metadata rather than from its file name, so a file that says ASN answers
+`asn`, `organization_name` and `network` whatever it is called. A list of
+addresses keeps its shape: with `first_only` the first address anything is
+known about stands for the document, and without it every address keeps its
+place so the answers line up with what they came from, an unknown one as a
+null. Seven sections, all passing.
+
+The databases themselves are not vendored: they are MaxMind's, seventy
+megabytes of someone else's data, and redistributing them is a decision for
+whoever cuts a release rather than something to slip into a commit.
+[docs/geoip.md](geoip.md) says where they are looked for and what the three
+choices are.
+
+**The phonetic filter.** Ten encoders, the Apache commons-codec ones that
+OpenSearch's plugin uses: metaphone, double metaphone with its `max_code_len`,
+soundex and refined soundex, both caverphones, cologne, nysiis, Daitch-Mokotoff
+and Beider-Morse. `replace: false` keeps the word beside the code, in the same
+position, which is what makes a search for `helllo` find `hello`.
+
+Four of its five sections pass. The fifth asks for `languageset: polish`, and
+the language rule files -- fifty of them, Apache-2.0, from commons-codec --
+are not vendored either; a directory can be pointed at them
+([docs/phonetic.md](phonetic.md)). One thing found while doing it: these
+encoders read their rules as data, and a combination no rule was written for
+makes the library give up where it stands, which took the node down. A token
+is not worth a node, so the call is guarded and a word that cannot be encoded
+is a word left alone.
+
+**Phone numbers.** `phone` and `phone-search`, reading numbers with the same
+library OpenSearch's plugin reads them with. The index keeps the number, the
+number without its country code, and every prefix of it; the search keeps the
+whole number only, so that a prefix typed while searching is matched against
+whole numbers rather than against every number that begins the same way. The
+search section passes.
+
+Its other section asks `_cat/plugins` to report `analysis-phonenumber` and
+nothing else. `_cat/plugins` reports something now -- the fourteen things
+OpenSearch needs a plugin for and this engine has built in -- because a client
+asking whether it may use `icu_tokenizer` deserves a true answer. That the
+answer is a list rather than one line is a property of a single binary, and
+that section cannot pass here for that reason.
+
+Module corpus 820 to 833 of 895, failures 71 to 58, and the core corpus
+unmoved at 1,100/1,100.
+
+### 8.2 — Expressions, and documents carried inside documents
+
+**Lucene expressions.** `lang: expression` needed two things, neither of them
+a parser: the module had to be named where a client looks for it, and a metric
+aggregation had to accept a script where it expects a field. The second is the
+real one -- `{"max": {"script": …}}` was answered with "missing field `field`",
+because the engine reads a metric out of a column and a script has no column.
+Such an aggregation is walked here instead, the script run over each document
+and the numbers folded the way the named metric folds them: min, max, sum,
+avg, value_count, cardinality, stats and extended_stats. Both sections pass.
+
+**The attachment processor.** A file carried inside a document, base64, read
+into its text and what it says about itself. OpenSearch does this with Apache
+Tika; this reads the three formats its own suite asks for:
+
+  - **plain text**, where the charset is decided by what the bytes are and a
+    fifty-three character line is fifty-four characters long, because a text
+    file ends in a newline whether or not one was written;
+  - **Open XML** (`.docx`), a zip holding `word/document.xml`, read with a
+    zip reader written here -- a hundred lines against a dependency, for the
+    one zip this engine ever opens -- and `docProps/core.xml` for the author,
+    the title and the date it was made;
+  - **the older binary format** (`.doc`), which is an OLE2 compound file whose
+    `WordDocument` stream begins with a header saying which of two table
+    streams holds the piece table. The piece table is what says where the text
+    really is: Word does not keep it in one place, and reading from the start
+    of the text to the end of it is right only by accident. Each piece says
+    whether it was written one byte to a character or two. The author and the
+    date come out of the property set every Office document carries.
+
+`indexed_chars` is honoured, per pipeline and per document, and the
+`properties` list decides what is written. All seven sections pass.
+
+One judgement worth recording. Language detection on "Test opensearch" says
+Dutch, at a confidence of 0.18, and a second detector agrees with the first --
+fifteen characters is not enough to know a language, and both answers are
+noise wearing an answer's clothes. Where the detector says it is not sure, the
+script is all that is really known, and Latin script is reported as English:
+the commonest answer, and the one Tika gives, so a document read by both
+engines is read the same way.
+
+**Phase 8 stands at twenty-two of its twenty-four sections.** Module corpus
+820 to 842 of 895, failures 71 to 49. The two that remain are both data rather
+than code: Beider-Morse wants commons-codec's fifty per-language rule files,
+and `analysis-phonenumber`'s first section asks `_cat/plugins` to report its
+plugin and no other, which a single binary that carries all of them cannot say
+truthfully.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100.
+
+### 8.3 — A repository read over a URL, and Phase 8 closes
+
+`type: url` is how a snapshot taken by one cluster is restored by another
+without giving the second one write access to where the first one keeps its
+files. It reads `http://`, `https://` and `file://`, and it is read-only: a
+snapshot cannot be made in one and cannot be deleted from one.
+
+Three things had to be built for it.
+
+**A repository read over a URL cannot list a directory.** Everything above it
+wants to know what snapshots are there, and over HTTP there is no way to ask.
+OpenSearch keeps an `index-N` blob for exactly this; a repository written here
+now leaves an `index.json` beside its snapshots, refreshed whenever one is
+made or forgotten. A filesystem repository does not need it and writes it
+anyway, because a URL repository may be pointed at the same directory later.
+
+**Where a repository's files are is not the same as how they are reached.** A
+`Source` says both: a directory, or a URL. Restoring an index reads its
+mapping and its documents through that rather than through a path, which is
+what lets the same restore run over a filesystem and over HTTP.
+
+**Two errors had a precedence that was not obvious.** Deleting a snapshot that
+was never there is `snapshot_missing_exception` whoever asked -- only one that
+is really held runs into the repository being read-only. And a restore naming
+a snapshot that does not exist is a restore that failed, not a request that
+merely asked after something absent: `snapshot_restore_exception`.
+
+The suite is written against three repositories and an HTTP fixture that
+OpenSearch's build sets up before each of its tests, and says so in its own
+header. `yaml_runner.py` grew a `--before` hook for that: a script run after
+the reset and before each section, for a suite written against a cluster its
+build prepared. Eight sections, all passing.
+
+**Phase 8 is closed at twenty-three of its twenty-four sections.** Module
+corpus **820 to 850 of 895**, failures 71 to 41. What each of the five pieces
+took:
+
+| | sections | what it needed |
+|---|---:|---|
+| geoip | 7 | a MaxMind reader, and the databases pointed at |
+| phonetic | 5 | ten commons-codec encoders, and its rule files pointed at |
+| phone numbers | 1 of 2 | libphonenumber, and prefixes on the indexing side only |
+| Lucene expressions | 2 | metric aggregations that take a script for a field |
+| attachment | 7 | text, Open XML, and the older binary Word format |
+| the URL repository | 8 | an index a reader can find, and a source that is not a path |
+
+The one section that does not pass asks `_cat/plugins` to report
+`analysis-phonenumber` and no other plugin. This engine carries all of them in
+one binary and says so, because a client asking whether it may use
+`icu_tokenizer` deserves a true answer. There is no version of that answer
+which satisfies a suite written to check that its plugin is the only one
+installed, and pretending otherwise would mean lying to every client that asks.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100.
