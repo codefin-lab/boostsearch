@@ -38,7 +38,7 @@ impl IdxState {
         for seg in searcher.segment_readers() {
             let ff = seg.fast_fields();
             for (path, _) in self.all_field_types() {
-                for prefix in [DYN, RAW] {
+                for prefix in [DYN, RAW, FIELDDATA] {
                     let col = format!("{prefix}.{path}");
                     if let Ok(bytes) = ff.column_num_bytes(&col) {
                         let n = bytes.get_bytes();

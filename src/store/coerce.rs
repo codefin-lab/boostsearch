@@ -459,20 +459,143 @@ pub fn expand_for_indexing(source: Value, mapping: &Mapping) -> Value {
     out
 }
 
-pub fn make_doc(fields: &Fields, id: &str, source: Value, raw: &str, seq: u64) -> TantivyDocument {
+pub fn make_doc(
+    fields: &Fields,
+    mapping: &crate::store::Mapping,
+    id: &str,
+    source: Value,
+    raw: &str,
+    seq: u64,
+) -> TantivyDocument {
     let mut d = TantivyDocument::default();
     d.add_text(fields.id, id);
     d.add_text(fields.source, raw);
     d.add_u64(fields.seq, seq);
-    if let Value::Object(obj) = source {
+    let Value::Object(obj) = source else { return d };
+    // A mapping that declares nothing sends every value both ways, and then
+    // there is nothing to decide: the document is converted once and both
+    // views point at it, which is most of what writing one costs.
+    if mapping.every_field_both {
         let converted: BTreeMap<String, OwnedValue> =
             obj.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect();
-        // The two views hold the same document, one tokenized and one not.
-        // Converting it into the form BoostCore keeps is most of what writing
-        // a document costs, so it is done once and both fields point at it.
         d.add_object_to(&[fields.dynamic, fields.raw], converted);
+        return d;
+    }
+    // Otherwise each value goes where its field can be asked for and nowhere
+    // else. A value that goes both ways is converted twice; a value that goes
+    // one way is converted once, which is one fewer than before.
+    let (analysed, untouched, fielddata) = split_by_view(mapping, "", obj);
+    for (view, part) in
+        [(fields.dynamic, analysed), (fields.raw, untouched), (fields.fielddata, fielddata)]
+    {
+        if let Some(part) = part {
+            d.add_object_to(
+                &[view],
+                part.into_iter().map(|(k, v)| (k, OwnedValue::from(v))).collect(),
+            );
+        }
     }
     d
+}
+
+/// Split one object into what the analysed view holds and what the untouched
+/// view holds, keeping the paths identical in both.
+///
+/// Returns `None` for a view that ends up with nothing in it, so that an
+/// empty object is never written.
+type Split = (
+    Option<serde_json::Map<String, Value>>,
+    Option<serde_json::Map<String, Value>>,
+    Option<serde_json::Map<String, Value>>,
+);
+
+fn split_by_view(
+    mapping: &crate::store::Mapping,
+    prefix: &str,
+    obj: serde_json::Map<String, Value>,
+) -> Split {
+    let mut analysed = serde_json::Map::new();
+    let mut untouched = serde_json::Map::new();
+    let mut fielddata = serde_json::Map::new();
+    for (key, value) in obj {
+        let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+        // An object is walked into, so that where a value goes is decided per
+        // field rather than per subtree -- an object may hold a text field and
+        // a keyword field, which belong in different views. A `flat_object` or
+        // a range is not walked into: its inner keys are not fields of their
+        // own, and the mapping says nothing about them.
+        let opaque = matches!(
+            mapping.type_of(&path),
+            Some(t) if t == "flat_object" || t.ends_with("_range")
+        );
+        let walk =
+            !opaque && matches!(mapping.type_of(&path), None | Some("object") | Some("nested"));
+        match value {
+            Value::Object(inner) if walk => {
+                let (a, u, f) = split_by_view(mapping, &path, inner);
+                if let Some(a) = a {
+                    analysed.insert(key.clone(), Value::Object(a));
+                }
+                if let Some(u) = u {
+                    untouched.insert(key.clone(), Value::Object(u));
+                }
+                if let Some(f) = f {
+                    fielddata.insert(key, Value::Object(f));
+                }
+            }
+            Value::Array(items) if walk && items.iter().any(|i| i.is_object()) => {
+                let mut a_items = Vec::new();
+                let mut u_items = Vec::new();
+                let mut f_items = Vec::new();
+                for item in items {
+                    match item {
+                        Value::Object(inner) => {
+                            let (a, u, f) = split_by_view(mapping, &path, inner);
+                            if let Some(a) = a {
+                                a_items.push(Value::Object(a));
+                            }
+                            if let Some(u) = u {
+                                u_items.push(Value::Object(u));
+                            }
+                            if let Some(f) = f {
+                                f_items.push(Value::Object(f));
+                            }
+                        }
+                        other => {
+                            a_items.push(other.clone());
+                            u_items.push(other);
+                        }
+                    }
+                }
+                if !a_items.is_empty() {
+                    analysed.insert(key.clone(), Value::Array(a_items));
+                }
+                if !u_items.is_empty() {
+                    untouched.insert(key.clone(), Value::Array(u_items));
+                }
+                if !f_items.is_empty() {
+                    fielddata.insert(key, Value::Array(f_items));
+                }
+            }
+            leaf => {
+                let views = mapping.views_of(&path);
+                if views.analysed {
+                    analysed.insert(key.clone(), leaf.clone());
+                }
+                if views.fielddata {
+                    fielddata.insert(key.clone(), leaf.clone());
+                }
+                if views.untouched {
+                    untouched.insert(key, leaf);
+                }
+            }
+        }
+    }
+    (
+        (!analysed.is_empty()).then_some(analysed),
+        (!untouched.is_empty()).then_some(untouched),
+        (!fielddata.is_empty()).then_some(fielddata),
+    )
 }
 
 /// The runs of words a `search_as_you_type` field is also written as.

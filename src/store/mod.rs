@@ -22,7 +22,7 @@ mod derive;
 pub use derive::*;
 mod ids;
 pub(crate) use ids::alive_address;
-mod mapping;
+pub mod mapping;
 mod net;
 pub use net::*;
 mod objects;
@@ -36,10 +36,15 @@ mod writer;
 pub struct Fields {
     pub id: Field,
     pub source: Field,
-    /// analysed JSON view -- backs `text` fields and numerics
+    /// analysed JSON view -- backs `text` fields: the words, with their
+    /// positions and the frequencies a score is worked out from
     pub dynamic: Field,
-    /// raw (untokenised) JSON view -- backs `keyword` fields, sorts and term aggs
+    /// untouched JSON view -- backs everything exact: keywords, numbers,
+    /// dates, and every column a sort or an aggregation reads
     pub raw: Field,
+    /// the analysed words again, with a column over them, for the text
+    /// fields that declared `fielddata: true` and nothing else
+    pub fielddata: Field,
     /// the order the write arrived in, which is what `_seq_no` reports and
     /// what settles ties between equally-ranked documents
     pub seq: Field,
@@ -108,6 +113,8 @@ impl std::hash::Hasher for IdHasher {
 
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
+/// The view that carries a column for a text field that asked for one.
+pub const FIELDDATA: &str = "_fd";
 
 /// Handed out so that no two indices, and no two lives of one index, ever
 /// stand behind the same generation number.
@@ -122,7 +129,11 @@ pub fn build_schema() -> (Schema, Fields) {
     let source = sb.add_text_field("_source", STORED);
     let dynamic = sb.add_json_field(
         DYN,
-        JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
+        // No columns. A column is read to sort by a field or to aggregate over
+        // it, and neither is done on analysed words: everything that has a
+        // column has it on the untouched view. Keeping one here as well was a
+        // second copy of every value in the index.
+        JsonObjectOptions::default().set_expand_dots_enabled().set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer("default")
                 .set_fieldnorms(true)
@@ -152,14 +163,33 @@ pub fn build_schema() -> (Schema, Fields) {
     // document's segment and doc id do not follow the order it was sent in.
     // Recording that order is what lets two equally-scored hits come back the
     // same way twice.
+    // The column a `fielddata: true` text field is sorted and aggregated by.
+    // OpenSearch makes that opt-in because holding a text field's terms in
+    // memory is expensive, and this is the same bargain: a mapping that never
+    // asks for it never writes a byte here.
+    let fielddata = sb.add_json_field(
+        FIELDDATA,
+        JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("default")
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let seq = sb.add_u64_field("_seq", FAST);
-    (sb.build(), Fields { id, source, dynamic, raw, seq })
+    (sb.build(), Fields { id, source, dynamic, raw, fielddata, seq })
 }
 
 /// Declared field types, flattened to dotted paths (`user.name` -> `keyword`).
 #[derive(Default, Clone, Debug)]
 pub struct Mapping {
     pub types: HashMap<String, String>,
+    /// Which of the two views each declared field's values are written into,
+    /// worked out when the mapping changes rather than per document.
+    pub views: HashMap<String, crate::store::mapping::Views>,
+    /// whether every declared field goes to both views, in which case a
+    /// document does not need splitting at all
+    pub every_field_both: bool,
     /// the mapping body exactly as the user sent it, for GET _mapping
     pub raw: Value,
     /// The multi-fields with a normalizer, worked out once when the mapping

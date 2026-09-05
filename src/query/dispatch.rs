@@ -222,8 +222,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             if field == "_id" || field == "_index" || field == "_seq_no" || field == "_version" {
                 return Ok(Box::new(AllQuery));
             }
-            let col = ctx.column_name(field, false);
-            Box::new(ExistsQuery::new(col, true))
+            ctx.exists_query(field)?
         }
         // a shape, a box or a radius all ask where a point is; the field has
         // to be there and the answer is worked out once the candidates are
@@ -255,8 +254,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         // worked out once the candidates are known
         "distance_feature" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
-            let col = ctx.column_name(field, false);
-            Box::new(ExistsQuery::new(col, true))
+            ctx.exists_query(field)?
         }
         "prefix" => {
             let (field, val, opts) = field_and_value(&body)?;

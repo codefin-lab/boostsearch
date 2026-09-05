@@ -2320,3 +2320,76 @@ transient state rather than a result, and this is not claiming it.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 820/895 unchanged.
+
+### 7.4 — Every value written once, where it can be asked for
+
+The disk gap was the last dimension behind, and 7.4 recorded it as
+structural: every value went into both JSON views, analysed and untouched,
+whatever the mapping said about it. Both views also carried a column, though
+only one was ever read from. [ADR 0007](adr/0007-a-value-is-written-where-it-can-be-asked-for.md)
+is the decision; this is what it took.
+
+**Columns first.** `_dyn` had fast fields because `set_fast(None)` enables
+them -- the schema's own comment said otherwise, which is how it survived.
+Removing them broke 142 corpus sections in one build, every one of them
+naming a numeric aggregation, because numerics were deliberately read from
+`_dyn`: a path holding only numbers resolves without a string column beside
+it. Measured again over 200,000 documents, that is worth 0.14ms on a date
+histogram and nothing at all on avg, stats, histogram, numeric terms and
+numeric range -- so the reason is gone, and with it a whole column of every
+value in the index.
+
+**Then the writer.** A value now goes to the view its field can be queried
+through: analysed words to `_dyn`, everything exact to `_raw`, and a string
+with nothing declared about it to both -- which is what OpenSearch's dynamic
+mapping does when it gives a string a `text` field and a `.keyword`
+sub-field. One rule, `Mapping::views_of`, consulted by the writer and by the
+reader.
+
+Three things had to be built to pay for it, and each was found by the corpus
+rather than by reasoning:
+
+  - **`exists` asked a column that no longer existed** for analysed-only
+    fields. It asks the postings now -- has this document any term under this
+    path -- which is the question OpenSearch answers out of `_field_names`.
+  - **`fielddata: true` needs a column over the analysed words**, which is the
+    one thing `_dyn`'s columns were legitimately for. It has a view of its own
+    now, written only by the text fields that ask for it, so a mapping that
+    never asks never writes a byte there. OpenSearch makes it opt-in for the
+    same reason.
+  - **The profiler named an aggregator after the column it read**, and
+    reported `GlobalOrdinalsStringTermsAggregator` where OpenSearch reports
+    `NumericTermsAggregator`. It reads the mapping now, which is where
+    OpenSearch reads it from.
+
+And two mistakes of mine that the corpus caught before anything else did: a
+`term` query against a declared `text` field briefly read the untouched value
+instead of the analysed words -- the write rule and the read rule are not the
+same function, and `title.keyword` is how the other view is addressed -- and a
+derived `object` was treated as a leaf, so a `text` field inside it was
+written untouched and never matched. Three painless sections failed for that,
+found by diffing the module corpus file-for-file against the previous commit
+rather than by eye.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| every field declared | -- | **22.0MiB** | 22.7MiB |
+| the bench's mapping | 45.3MiB | 30.7MiB | 27.1MiB |
+
+An index whose fields are declared is now smaller than OpenSearch's. The
+bench declares seven of its ten, and the three it leaves to dynamic mapping
+are what is left of the gap: both engines write an undeclared string twice,
+and our two copies cost more than theirs. The bench mapping is left as it
+was; completing it would have won the dimension by changing the question.
+
+The matrix, quiet machine, security and TLS on both sides:
+
+  - **LOST 1 of 18: store on disk, 30.7MiB against 27.2** -- from 1.67 times
+    to 1.13. Everything else ours: index 81,123/s against 46,764, updates
+    67,687 against 19,420, deletes 169,267 against 49,331, scroll 224,002
+    against 160,786, eight concurrent clients 14,024 against 9,529, memory
+    448MiB against 2,154, worst p99 3.10ms against 6.58, and every one of the
+    ten query shapes between three and five times faster.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 -- the same 820, file for file.

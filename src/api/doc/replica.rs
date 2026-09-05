@@ -55,7 +55,7 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
             let _ = st.mapping.learn_dynamic(&source);
             let indexed = crate::store::expand_for_indexing(source, &st.mapping);
             st.observe(&indexed);
-            let doc = crate::store::make_doc(&st.fields, &op.id, indexed, raw, op.seq);
+            let doc = crate::store::make_doc(&st.fields, &st.mapping, &op.id, indexed, raw, op.seq);
             if existed {
                 st.queue_op(shard, crate::store::PendingOp::Delete(op.id.clone()));
             }

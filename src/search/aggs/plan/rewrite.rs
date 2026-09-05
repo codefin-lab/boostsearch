@@ -203,6 +203,7 @@ pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // analysed view rather than the stored one
                 if f.starts_with(&format!("{}.", crate::store::DYN))
                     || f.starts_with(&format!("{}.", crate::store::RAW))
+                    || f.starts_with(&format!("{}.", crate::store::FIELDDATA))
                 {
                     for (_, v) in o.iter_mut() {
                         rewrite_agg_fields(v, ctx);
@@ -216,22 +217,15 @@ pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
                 // plain keyword sub-field under another name; but a field
                 // called `keyword` under an object is a field of its own
                 let base = ctx.mapping.raw_view_parent(f).unwrap_or(f);
-                // Both views carry the numerics, but resolving a purely numeric
-                // path is measurably cheaper on `_dyn` -- `_raw` also holds a
-                // string column for every path, which the lookup has to consider.
-                // Strings must stay on `_raw`, whose values are untokenised.
-                let numeric_only = std::env::var("BOOSTSEARCH_NO_NUMERIC_DYN_AGG").is_err()
-                    && ctx
-                        .observed_kinds
-                        .get(base)
-                        .map(|k| {
-                            *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0
-                        })
-                        .unwrap_or(false);
+                // Every column lives on `_raw`. Numerics were read from `_dyn`
+                // for a while, because a path that holds only numbers resolves
+                // without a string column beside it -- measured again over
+                // 200,000 documents, that is worth 0.14ms on a date histogram
+                // and nothing at all on the other five agg shapes, which is
+                // not worth a second column of every value in the index.
                 let analyzed =
                     matches!(ctx.view(f, false), View::Dyn) && ctx.mapping.type_of(f).is_some();
-                let prefix =
-                    if analyzed || numeric_only { crate::store::DYN } else { crate::store::RAW };
+                let prefix = if analyzed { crate::store::DYN } else { crate::store::RAW };
                 let rewritten = format!("{prefix}.{base}");
                 o.insert("field".into(), json!(rewritten));
             }
