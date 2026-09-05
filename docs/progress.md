@@ -2075,3 +2075,47 @@ their own: an answer is written without waiting to fill a packet
 (`TCP_NODELAY`, which Netty sets and hyper does not), and a response is
 gathered before it is encrypted rather than becoming a TLS record per
 piece.
+
+## 7.3 -- eighteen dimensions, and a gate that can fail
+
+The matrix had twelve dimensions: how fast an engine takes a corpus, how much
+memory it holds, and ten query shapes. Twelve is not many, and the twelve were
+chosen when the only questions being asked were about reads. Two other things
+were wrong with it: the file had been pasted over itself, so every run
+measured everything twice and printed the second half, and the docstring's
+promise -- "exits non-zero if any dimension is lost" -- was not in the code.
+
+Eighteen now, and the exit code is real:
+
+  - **index docs/s** -- a corpus, taken whole
+  - **update docs/s** -- writing over documents that are already there, which
+    is not the same work as writing fresh ones
+  - **delete docs/s**
+  - **scroll docs/s** -- paging the whole index, which is what an export, a
+    reindex or a backup costs
+  - **queries/s with eight clients** -- a median latency says nothing about
+    what happens when more than one person is asking
+  - **memory**
+  - **store on disk**
+  - **the worst p99 of the ten queries** -- the tail, not the middle
+  - **the ten query shapes**, p50 gated and p99 printed beside it
+
+The first run of it found two things the twelve could not have:
+
+  - **A scroll could not read past the result window.** We answer a scroll by
+    running the search again from a further offset, and the ceiling on
+    `from + size` was applied to that -- so a scroll stopped at ten thousand
+    documents, which is the one thing a scroll exists to get past. The batch
+    size is checked when the scroll is opened; the batch being read is not
+    checked against a window again.
+  - **Two dimensions are behind**: a scroll reads half as fast as OpenSearch's
+    (71,398 against 144,244 documents a second), and an index takes more than
+    twice the disk (61.4MiB against 27.8MiB). Both are Phase 7.4's to close.
+
+Sixteen of eighteen ahead. The two that are not are named in the gate's own
+output, which is the point of having one.
+
+What is not done here: the cloud hardware. The matrix takes both engines as
+URLs and runs anywhere -- `BENCH_A`, `BENCH_B`, `BENCH_AUTH`, `BENCH_DATA` --
+but the numbers above are from a laptop, and a laptop is not a release gate.
+Running it on the hardware a release is cut on is the part of 7.3 still owed.

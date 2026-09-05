@@ -198,6 +198,11 @@ pub async fn scroll(
     // the scroll walks the index as it stood when it was opened, so a
     // document written since is not walked into halfway through
     req["pit"] = json!({"id": state.pit});
+    // a scroll is how a caller reads past the result window, so the window is
+    // not what limits the batch it is reading now; the batch size was checked
+    // when the scroll was opened
+    let mut p = p;
+    p.insert("scroll".to_string(), "1m".to_string());
     match crate::search::run(&store, &state.expr, &req, &p) {
         Ok(out) => {
             let n = out.hits.len();
