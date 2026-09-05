@@ -342,6 +342,138 @@ pub(crate) fn run_mad_agg(
     Ok(json!({ "value": crate::hdr::median_absolute_deviation(&mut values) }))
 }
 
+/// The metric aggregations that take a value per document, where the value is
+/// worked out by a script rather than read from a field.
+pub(crate) const SCRIPTED_METRICS: &[&str] =
+    &["min", "max", "sum", "avg", "value_count", "stats", "extended_stats", "cardinality"];
+
+/// Which of them this definition is, where it names a script and no field.
+pub(crate) fn scripted_metric_kind(def: &Value) -> Option<&'static str> {
+    SCRIPTED_METRICS.iter().copied().find(|k| {
+        def.pointer(&format!("/{k}/script")).is_some() && def.pointer(&format!("/{k}/field")).is_none()
+    })
+}
+
+/// A metric over what a script says each document is worth.
+///
+/// The engine reads a metric out of a column, and a script has no column to
+/// read: the documents are walked here instead, the script run over each of
+/// them, and the numbers folded the way the named metric folds them.
+pub(crate) fn run_scripted_value_metric(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+    kind: &str,
+) -> std::result::Result<Value, Response> {
+    use crate::painless::contexts::Compiled;
+    let spec = def.get(kind).cloned().unwrap_or(json!({}));
+    let index = targets.first().cloned().unwrap_or_default();
+    let script = spec.get("script").cloned().unwrap_or(json!({}));
+    let compiled = Compiled::of(&script, &|id| store.stored_script(id))
+        .map_err(|e| crate::search::search_script_failure(e, &index))?;
+    let missing = spec.get("missing").and_then(|v| v.as_f64());
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    // `track_scores` because `_score` is one of the things such a script is
+    // most often written over
+    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
+    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    let mut values: Vec<f64> = Vec::new();
+    for hit in &found.hits {
+        let name = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(st) = store.get(name) else { continue };
+        let mapping = st.read().mapping.clone();
+        let source = hit.get("_source").cloned().unwrap_or(json!({}));
+        let expanded = crate::store::expand_for_indexing(source, &mapping);
+        let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let out = crate::painless::contexts::run_on_doc(&compiled_spec(&script), &expanded, &mapping, score)
+            .map_err(|e| crate::search::search_script_failure(e, &index))?;
+        match out.to_json() {
+            Value::Number(n) => values.extend(n.as_f64()),
+            // a script may hand back the several values of a field at once
+            Value::Array(a) => values.extend(a.iter().filter_map(|v| v.as_f64())),
+            Value::Bool(b) => values.push(f64::from(b)),
+            Value::Null => values.extend(missing),
+            _ => {}
+        }
+    }
+    Ok(fold_metric(kind, &values))
+}
+
+/// The script as `run_on_doc` wants it, with its params carried along.
+fn compiled_spec(script: &Value) -> Value {
+    match script {
+        Value::String(s) => json!({"source": s}),
+        other => other.clone(),
+    }
+}
+
+/// The numbers a metric leaves behind, folded the way that metric folds them.
+fn fold_metric(kind: &str, values: &[f64]) -> Value {
+    let count = values.len() as u64;
+    let sum: f64 = values.iter().sum();
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let avg = (count > 0).then(|| sum / count as f64);
+    let empty = count == 0;
+    match kind {
+        "value_count" => json!({"value": count}),
+        "cardinality" => {
+            let mut seen: Vec<u64> = values.iter().map(|v| v.to_bits()).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            json!({"value": seen.len()})
+        }
+        "sum" => json!({"value": sum}),
+        "avg" => json!({"value": avg}),
+        "min" => json!({"value": (!empty).then_some(min)}),
+        "max" => json!({"value": (!empty).then_some(max)}),
+        "stats" => json!({
+            "count": count,
+            "min": (!empty).then_some(min),
+            "max": (!empty).then_some(max),
+            "avg": avg,
+            "sum": sum,
+        }),
+        "extended_stats" => {
+            let mean = avg.unwrap_or(0.0);
+            let variance = if empty {
+                None
+            } else {
+                Some(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64)
+            };
+            json!({
+                "count": count,
+                "min": (!empty).then_some(min),
+                "max": (!empty).then_some(max),
+                "avg": avg,
+                "sum": sum,
+                "sum_of_squares": values.iter().map(|v| v * v).sum::<f64>(),
+                "variance": variance,
+                "variance_population": variance,
+                "variance_sampling": (count > 1).then(|| {
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1) as f64
+                }),
+                "std_deviation": variance.map(f64::sqrt),
+                "std_deviation_population": variance.map(f64::sqrt),
+                "std_deviation_sampling": (count > 1).then(|| {
+                    (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1) as f64)
+                        .sqrt()
+                }),
+                "std_deviation_bounds": {
+                    "upper": variance.map(|v| mean + 2.0 * v.sqrt()),
+                    "lower": variance.map(|v| mean - 2.0 * v.sqrt()),
+                    "upper_population": variance.map(|v| mean + 2.0 * v.sqrt()),
+                    "lower_population": variance.map(|v| mean - 2.0 * v.sqrt()),
+                    "upper_sampling": variance.map(|v| mean + 2.0 * v.sqrt()),
+                    "lower_sampling": variance.map(|v| mean - 2.0 * v.sqrt()),
+                },
+            })
+        }
+        _ => json!({"value": avg}),
+    }
+}
+
 /// `scripted_metric`: four scripts and a `state` they share -- one to set
 /// the state up, one run over each document, one to fold the state down,
 /// and one over the folded states of every shard.

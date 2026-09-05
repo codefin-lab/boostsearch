@@ -183,6 +183,8 @@ pub(crate) fn run_peeled_agg(
         run_scripted_terms_agg(store, targets, query_json, def, weighted)
     } else if def.get("scripted_metric").is_some() {
         run_scripted_metric_agg(store, targets, query_json, def)
+    } else if let Some(kind) = crate::search::aggs::metric::scripted_metric_kind(def) {
+        run_scripted_value_metric(store, targets, query_json, def, kind)
     } else if def
         .get("terms")
         .and_then(|t| t.get("field"))

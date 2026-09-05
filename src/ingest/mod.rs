@@ -16,6 +16,7 @@ pub mod dissect;
 pub mod grok;
 mod hash;
 mod processors;
+pub mod attachment;
 pub mod geoip;
 pub mod user_agent;
 
@@ -572,6 +573,7 @@ pub const PROCESSOR_TYPES: &[&str] = &[
     "copy",
     "csv",
     "date",
+    "attachment",
     "date_index_name",
     "dissect",
     "dot_expander",

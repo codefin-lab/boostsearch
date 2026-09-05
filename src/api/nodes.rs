@@ -414,6 +414,43 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
 /// suites ask which of them a node carries before they test what one does, so
 /// the list names the ones whose behaviour is answered rather than the ones
 /// whose code is present.
+/// The plugins a distribution of OpenSearch would install, and this engine
+/// answers for without one. Reported for the same reason `_cat/plugins`
+/// reports them: a client asking whether it may use `attachment` should be
+/// told the truth.
+fn plugins() -> Value {
+    const NAMED: &[&str] = &[
+        "analysis-icu",
+        "analysis-kuromoji",
+        "analysis-nori",
+        "analysis-phonenumber",
+        "analysis-phonetic",
+        "analysis-smartcn",
+        "analysis-stempel",
+        "analysis-ukrainian",
+        "ingest-attachment",
+        "opensearch-security",
+    ];
+    Value::Array(
+        NAMED
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "version": "3.9.0",
+                    "opensearch_version": "3.9.0",
+                    "java_version": "11",
+                    "description": format!("the {name} plugin"),
+                    "classname": "",
+                    "custom_foldername": "",
+                    "extended_plugins": [],
+                    "has_native_controller": false,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn modules() -> Value {
     const NAMED: &[&str] = &[
         "aggs-matrix-stats",
@@ -422,6 +459,7 @@ fn modules() -> Value {
         "ingest-common",
         "ingest-geoip",
         "ingest-user-agent",
+        "lang-expression",
         "lang-mustache",
         "lang-painless",
         "mapper-extras",
@@ -523,7 +561,7 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                    "allocated_processors": num_cpus()},
             "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
                         "mlockall": false},
-            "plugins": [], "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
+            "plugins": plugins(), "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
             "search_pipelines": {
                 "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
                 "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),

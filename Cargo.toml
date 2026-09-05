@@ -70,6 +70,11 @@ rphonetic = { version = "4", features = ["embedded"] }
 # Google's libphonenumber, for the `phone` analyzers: a number is read the
 # same way OpenSearch's plugin reads it.
 phonenumber = "0.3"
+# What language a piece of text is in, for the attachment processor
+whatlang = "0.16"
+# The OLE2 container the older Office formats are written in. What is inside
+# it -- the Word streams -- is read in src/ingest/attachment.rs.
+cfb = "0.14"
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
 boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
 icu_normalizer = "2.3.0"

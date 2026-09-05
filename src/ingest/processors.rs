@@ -1357,6 +1357,38 @@ fn run_body(
             doc.set(&target, parsed.to_json(&text, properties.as_deref()))
                 .map_err(IngestError::illegal)?;
         }
+        "attachment" => {
+            let field = field_of(&doc, c, "field")?;
+            let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| "attachment".into());
+            let properties = c.strings_opt("properties")?;
+            // how much of a file is read. A field may carry the number for
+            // one document, which is how a large file is read further than
+            // the pipeline's own ceiling
+            let mut limit = c
+                .get("indexed_chars")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(100_000);
+            if let Some(from) = c.str_opt("indexed_chars_field")?
+                && let Some(n) = doc.get(&from).and_then(|v| v.as_i64())
+            {
+                limit = n;
+            }
+            let limit = if limit < 0 { usize::MAX } else { limit as usize };
+            let Some(encoded) = string_at(&doc, &field, ignore_missing)? else {
+                return Ok(Some(doc));
+            };
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|_| {
+                    IngestError::illegal(format!(
+                        "field [{field}] is not a valid base64 value"
+                    ))
+                })?;
+            let found = super::attachment::extract(&bytes, limit);
+            let written = super::attachment::fields(&found, &found.content, properties.as_deref());
+            doc.set(&target, written).map_err(IngestError::illegal)?;
+        }
         "geoip" => {
             let field = field_of(&doc, c, "field")?;
             let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| "geoip".into());
