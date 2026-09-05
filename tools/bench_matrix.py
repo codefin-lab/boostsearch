@@ -229,12 +229,28 @@ def throughput(base, name, workers=8, seconds=5):
 
 
 def store_bytes(base, name):
-    """What the index takes on disk."""
+    """What the index takes on disk.
+
+    An engine accounts for its store when the segments are on disk, not when
+    the documents are accepted, so this flushes first and then insists on an
+    answer that can be true: an index holding documents does not take two
+    hundred bytes. A run that cannot get one says so rather than reporting a
+    number that would hand somebody the dimension."""
     try:
-        rows = req(base, "GET", f"/_cat/indices/{name}?format=json&bytes=b")
-        return int(rows[0].get("store.size") or rows[0].get("pri.store.size") or 0)
+        req(base, "POST", f"/{name}/_flush?wait_if_ongoing=true")
     except Exception:
-        return 0
+        pass
+    for attempt in range(5):
+        try:
+            rows = req(base, "GET", f"/_cat/indices/{name}?format=json&bytes=b")
+            size = int(rows[0].get("store.size") or rows[0].get("pri.store.size") or 0)
+            docs = int(rows[0].get("docs.count") or 0)
+            if docs == 0 or size > 1024:
+                return size
+        except Exception:
+            pass
+        time.sleep(2)
+    return None
 
 
 def rss_mib(container=None, pid=None):
@@ -295,6 +311,13 @@ lost = []
 
 
 def row(name, ov, bv, higher_wins, fmt=lambda v: f"{v:,.0f}", note=""):
+    # a dimension that could not be measured is not a dimension that was won:
+    # it is named as unmeasured and it fails the gate, so that a broken
+    # measurement is never mistaken for a result either way
+    if ov is None or bv is None:
+        lost.append(f"{name} (not measured)")
+        print(f"{name:<24}{'?':>14}{'?':>14}   not measured")
+        return
     won = bv > ov if higher_wins else bv < ov
     winner = "BoostSearch" if won else "OpenSearch"
     if not won:

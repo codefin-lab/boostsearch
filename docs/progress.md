@@ -2175,3 +2175,53 @@ patch to write.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 820/895 unchanged.
+
+### 7.4 — The matrix on a quiet machine
+
+Everything else on the machine was stopped for this -- nineteen containers of
+two unrelated stacks -- and started again afterwards. Three passes, the same
+200,000 documents each time.
+
+**Plain against plain.** Thirteen of eighteen ours: index 94,182/s against
+52,123, scroll 269,535 against 224,795, eight concurrent clients 3,390/s
+against 3,283, memory 334MiB against 1,489, and every query shape but two.
+Lost: update, delete, store on disk, `nested_agg` and `cardinality` p50 -- the
+last two by fractions of a millisecond (1.59 against 1.21, 1.15 against 1.08).
+
+**TLS against TLS**, both engines with their security plugin on: fourteen of
+eighteen ours, and the query shapes are not close -- 0.78ms against 5.10 for
+`match_all`, 1.69 against 3.59 for `cardinality`, a worst p99 of 2.62ms
+against 10.59. Lost: update, delete, store, and eight concurrent clients.
+
+**Our TLS against their plain HTTP** is the pass that is not like for like,
+and it is kept because it is the honest shape of a migration where only one
+side has been secured. Eight lost there, which is what carrying TLS against
+something that is not costs.
+
+Two things the quiet machine settled:
+
+  - **The scroll fix holds.** 269,535/s against 224,795 plain, 214,378 against
+    144,107 with security on. The dimension 7.3 lost is won.
+  - **Updates and deletes are genuinely behind**, in every pass and by the same
+    ratio: roughly 13,000 against 20,000-26,000 updates a second, and 30,000
+    against 50,000-90,000 deletes. Not a measurement artefact.
+
+Where that time goes, measured rather than guessed. A bulk of a thousand
+deletes for documents that were never there runs at 272,000/s, so the request
+machinery is not it: a real delete costs about 25 microseconds of its own. It
+scales with how many segments the index is in -- 25,000/s across four
+segments, 35,000/s after a force-merge into one -- and it does not move with
+translog durability at all (29,428/s asking for a sync against 30,931/s
+without one), so it is not the fsync either. A sampling profile of a sustained
+update load puts 22% in the indexing engine, 16% in JSON, 13% in allocation
+and copying, 12% in our own code. It is spread, which is why there is no knob:
+it is the write path as a whole, and closing it is a piece of work rather than
+a setting.
+
+One fix to the gate itself: `store on disk` read 208 bytes for OpenSearch in
+the third pass, which is an empty index, not a result -- an engine accounts for
+its store when segments reach disk, and the read happened before they had. It
+flushes first now, insists on an answer an index holding documents could have,
+and a dimension it still cannot measure is printed as unmeasured and fails the
+gate. A measurement that cannot be made must not be allowed to hand either
+side a win.
