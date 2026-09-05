@@ -2393,3 +2393,75 @@ The matrix, quiet machine, security and TLS on both sides:
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 820/895 -- the same 820, file for file.
+
+### 7.4 — The stored source, squeezed, and where the rest of the gap lives
+
+Store on disk was 30.7MiB against 27.2 after the views were split. Two things
+were left in the stored source, and one of them was not a knob at all.
+
+**A compressor is only as good as the window it gets.** Documents of a few
+hundred bytes repeat *each other* far more than they repeat themselves, and a
+sixteen-kilobyte block is too small a window to see that. Measured over
+200,000 log documents:
+
+| block | level | on disk | gets/s | updates/s |
+|---|---|---|---|---|
+| 16KiB | 3 | 30.35MiB | 6,111 | 78,489 |
+| 64KiB | 3 | 28.60MiB | 6,494 | 81,322 |
+| 64KiB | 9 | 27.64MiB | 6,260 | 77,546 |
+| 256KiB | 9 | 26.99MiB | 6,068 | 78,273 |
+
+Reading did not get slower -- the differences above are noise -- because
+everything measured here is in the page cache. That is exactly why the wider
+window is not the default: a cold read of one two-hundred-byte document costs
+a whole block off disk, and this bench cannot see that. 64KiB is where
+Lucene's own most-compressed setting lands, and it is where ours lands.
+
+**`index.codec` is honoured now**, which it never was: `default` takes the
+64KiB window at level 9, `best_compression` takes 256KiB at level 12, and an
+index says back which it was made with. That is the same choice OpenSearch
+offers under the same name, and it is the right home for the trade above --
+the user who fetches documents one at a time keeps the narrow window, and the
+user who writes and searches far more than they fetch can widen it.
+
+Also gone: field norms on `_id`. An id is looked up, never scored, and a norm
+is a byte per document that nothing reads.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| default codec | 30.7MiB | **27.7MiB** | 27.2MiB |
+| every field declared | 22.0MiB | 21.3MiB | 22.7MiB |
+
+**Where the last 0.5MiB is, measured rather than guessed.** With the source
+compressed as hard as it goes on both sides -- `best_compression` against
+`best_compression` -- the stored source stops being the difference and the
+inverted index is all that is left:
+
+| | BoostSearch | Lucene |
+|---|---|---|
+| stored source | **6.25MiB** | 6.70MiB |
+| term dictionary | 7.51 | **5.35** |
+| postings | 6.05 | **3.81** |
+| columns | 5.00 | 4.82 |
+| norms | 1.14 | **0.57** |
+| positions | 0.98 | **0.41** |
+
+We win the source and are level on columns. Everything behind is the
+inverted-index format itself: postings twice the size for the same terms over
+the same documents, and norms and positions each about twice. Lucene stores a
+term whose posting list is one document inline in the term dictionary rather
+than in the postings file, and blocks the rest at 128 documents with skip
+data; norms with a constant value cost it nothing. None of that is a setting
+on our side -- it is BoostCore's index format, and closing it is engine work
+with its own ADR, not more tuning here.
+
+Two smaller things this measurement settled, recorded so they are not
+re-tried: our numerics are *already cheaper* than Lucene's BKD points (9.2MiB
+against 10.4 for the same four fields, whole index), so moving them out of the
+inverted index would optimise something we win; and a single-field text index
+shows our term dictionary smaller than Lucene's (0.29MiB against 0.95), so the
+dictionary gap on the whole index is the two views of a dynamically mapped
+string, not the JSON path a term carries.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 -- file for file identical to the baseline.

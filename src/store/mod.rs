@@ -125,7 +125,18 @@ pub(crate) fn next_generation() -> u64 {
 
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
-    let id = sb.add_text_field("_id", STRING | STORED | FAST);
+    // no field norms: an id is looked up, never scored, and a norm is a byte
+    // per document per field that nothing reads
+    let id_options = TextOptions::default()
+        .set_stored()
+        .set_fast(None)
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        );
+    let id = sb.add_text_field("_id", id_options);
     let source = sb.add_text_field("_source", STORED);
     let dynamic = sb.add_json_field(
         DYN,
