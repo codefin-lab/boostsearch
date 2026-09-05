@@ -2465,3 +2465,56 @@ string, not the JSON path a term carries.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 820/895 -- file for file identical to the baseline.
+
+### 8.1 — geoip, phonetic, phone numbers
+
+Phase 8 is the last twenty-six sections of OpenSearch's own suites: the
+things a distribution ships as plugins. Three of the five are closed.
+
+**geoip.** An address read into where it is, out of a MaxMind database -- the
+same format and the same files OpenSearch reads, so a cluster that already
+has its databases keeps them. What a database can answer follows from its own
+metadata rather than from its file name, so a file that says ASN answers
+`asn`, `organization_name` and `network` whatever it is called. A list of
+addresses keeps its shape: with `first_only` the first address anything is
+known about stands for the document, and without it every address keeps its
+place so the answers line up with what they came from, an unknown one as a
+null. Seven sections, all passing.
+
+The databases themselves are not vendored: they are MaxMind's, seventy
+megabytes of someone else's data, and redistributing them is a decision for
+whoever cuts a release rather than something to slip into a commit.
+[docs/geoip.md](geoip.md) says where they are looked for and what the three
+choices are.
+
+**The phonetic filter.** Ten encoders, the Apache commons-codec ones that
+OpenSearch's plugin uses: metaphone, double metaphone with its `max_code_len`,
+soundex and refined soundex, both caverphones, cologne, nysiis, Daitch-Mokotoff
+and Beider-Morse. `replace: false` keeps the word beside the code, in the same
+position, which is what makes a search for `helllo` find `hello`.
+
+Four of its five sections pass. The fifth asks for `languageset: polish`, and
+the language rule files -- fifty of them, Apache-2.0, from commons-codec --
+are not vendored either; a directory can be pointed at them
+([docs/phonetic.md](phonetic.md)). One thing found while doing it: these
+encoders read their rules as data, and a combination no rule was written for
+makes the library give up where it stands, which took the node down. A token
+is not worth a node, so the call is guarded and a word that cannot be encoded
+is a word left alone.
+
+**Phone numbers.** `phone` and `phone-search`, reading numbers with the same
+library OpenSearch's plugin reads them with. The index keeps the number, the
+number without its country code, and every prefix of it; the search keeps the
+whole number only, so that a prefix typed while searching is matched against
+whole numbers rather than against every number that begins the same way. The
+search section passes.
+
+Its other section asks `_cat/plugins` to report `analysis-phonenumber` and
+nothing else. `_cat/plugins` reports something now -- the fourteen things
+OpenSearch needs a plugin for and this engine has built in -- because a client
+asking whether it may use `icu_tokenizer` deserves a true answer. That the
+answer is a list rather than one line is a property of a single binary, and
+that section cannot pass here for that reason.
+
+Module corpus 820 to 833 of 895, failures 71 to 58, and the core corpus
+unmoved at 1,100/1,100.

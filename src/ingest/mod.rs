@@ -16,6 +16,7 @@ pub mod dissect;
 pub mod grok;
 mod hash;
 mod processors;
+pub mod geoip;
 pub mod user_agent;
 
 /// A document as a pipeline sees it.

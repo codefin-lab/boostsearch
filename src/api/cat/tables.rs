@@ -383,8 +383,49 @@ pub async fn cat_nodeattrs(Query(p): Query<Params>) -> Response {
 }
 
 /// `_cat/plugins` -- nothing is loaded, so the table is empty.
-pub async fn cat_plugins(Query(p): Query<Params>) -> Response {
-    cat_render_cols(CAT_PLUGINS_COLS, Vec::new(), &p)
+/// `_cat/plugins` -- what OpenSearch would need a plugin installed for, and
+/// this engine has built in.
+///
+/// They are reported because a client that asks whether it may use `icu_
+/// tokenizer` deserves a true answer, and the answer is yes. It does mean a
+/// suite written to check that its own plugin is the *only* one installed
+/// cannot pass here, which is a property of a single binary rather than of a
+/// missing feature.
+pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let me = crate::cluster::identity();
+    let (id, node) = (me.id.to_string(), me.name.to_string());
+    let version = env!("CARGO_PKG_VERSION");
+    let _ = &store;
+    let built_in: &[(&str, &str)] = &[
+        ("analysis-icu", "The ICU analysis plugin integrates the Lucene ICU module"),
+        ("analysis-kuromoji", "The Japanese (kuromoji) analysis plugin"),
+        ("analysis-nori", "The Korean (nori) analysis plugin"),
+        ("analysis-phonenumber", "The phone number analysis plugin"),
+        ("analysis-phonetic", "The Phonetic Analysis plugin"),
+        ("analysis-smartcn", "Smart Chinese analysis plugin"),
+        ("analysis-stempel", "The Stempel (Polish) analysis plugin"),
+        ("analysis-ukrainian", "The Ukrainian analysis plugin"),
+        ("ingest-user-agent", "Ingest processor that parses user agent strings"),
+        ("ingest-geoip", "Ingest processor that adds information about the geographical \
+                          location of ip addresses"),
+        ("lang-painless", "An easy, safe and fast scripting language for OpenSearch"),
+        ("lang-expression", "Lucene expressions integration for OpenSearch"),
+        ("lang-mustache", "Mustache scripting integration for OpenSearch"),
+        ("opensearch-security", "Provide access control related features for OpenSearch"),
+    ];
+    let rows: Vec<Vec<(&str, String)>> = built_in
+        .iter()
+        .map(|(name, description)| {
+            vec![
+                ("id", id.clone()),
+                ("name", node.clone()),
+                ("component", (*name).to_string()),
+                ("version", version.to_string()),
+                ("description", (*description).to_string()),
+            ]
+        })
+        .collect();
+    cat_render_cols(CAT_PLUGINS_COLS, rows, &p)
 }
 
 /// `_cat/thread_pool` -- the pools a search passes through.

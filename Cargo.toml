@@ -61,6 +61,15 @@ rayon = "1"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+# The MaxMind database format, for the geoip ingest processor. The databases
+# themselves are not vendored here: see docs/geoip.md.
+maxminddb = "0.30"
+# The phonetic encoders, a port of the Apache commons-codec ones OpenSearch
+# uses, so a token encoded here is the token encoded there.
+rphonetic = { version = "4", features = ["embedded"] }
+# Google's libphonenumber, for the `phone` analyzers: a number is read the
+# same way OpenSearch's plugin reads it.
+phonenumber = "0.3"
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
 boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
 icu_normalizer = "2.3.0"
