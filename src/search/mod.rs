@@ -19,6 +19,8 @@ use boostcore::{DocAddress, Searcher, TantivyDocument};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
 
+pub(crate) mod request_cache;
+pub(crate) use request_cache::RequestCache;
 mod run;
 pub use run::*;
 pub(crate) use run::{Finish, finish_search};

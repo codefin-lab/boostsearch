@@ -13,6 +13,7 @@ impl IdxState {
     /// External versioning hands the index a number kept somewhere else, so
     /// the index follows it rather than counting for itself.
     pub fn bump_to(&mut self, id: &str, live: bool, version: u64) -> (u64, u64) {
+        self.moved_on();
         let fp = id_fingerprint(id);
         self.versions.insert(id.to_string(), DocMeta { version, live });
         if live {
@@ -24,6 +25,7 @@ impl IdxState {
     }
 
     pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
+        self.moved_on();
         let fp = id_fingerprint(id);
         let known = existed || self.versions.contains_key(id);
         let version = if known {
@@ -59,6 +61,26 @@ impl IdxState {
         self.seq_no = self.seq_no.max(seq + 1);
     }
 
+    /// Which state of this index its answers belong to. Read into the key of
+    /// a cached search, so that anything which moves it on leaves what was
+    /// cached before unreachable.
+    pub fn generation(&self) -> u64 {
+        self.search_gen.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Something changed that an answer could depend on.
+    ///
+    /// The next number comes from the counter every index draws from, not
+    /// from this one plus one: an index that is deleted and made again would
+    /// otherwise walk back over numbers it has already used, and find answers
+    /// filed under them.
+    pub fn moved_on(&self) {
+        self.search_gen.store(
+            crate::store::next_generation(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     pub fn version_of(&self, id: &str) -> u64 {
         self.versions.get(id).map(|m| m.version).unwrap_or(1)
     }
@@ -84,12 +106,7 @@ impl IdxState {
     }
 
     fn lookup_id(&self, id: &str) -> bool {
-        let searcher = self.realtime.searcher();
-        let q = boostcore::query::TermQuery::new(
-            Term::from_field_text(self.fields.id, id),
-            boostcore::schema::IndexRecordOption::Basic,
-        );
-        searcher.search(&q, &boostcore::collector::Count).map(|c| c > 0).unwrap_or(false)
+        alive_address(&self.realtime.searcher(), self.fields.id, id).is_some()
     }
 
     /// Scan the committed index for live document ids. Runs off the write lock
@@ -161,3 +178,40 @@ impl IdxState {
         format!("auto-{:016x}", self.auto_id)
     }
 }
+
+/// Where an id's live document sits, or nothing if there is none.
+///
+/// One id in one term dictionary is not work to spread over a thread pool:
+/// handing it to one and waiting on the answer costs more than the answer
+/// does, and a write asks this question once per document. The postings are
+/// read where they are, and a document that is there but no longer alive does
+/// not count as there.
+pub(crate) fn alive_address(
+    searcher: &boostcore::Searcher,
+    id_field: Field,
+    id: &str,
+) -> Option<boostcore::DocAddress> {
+    use boostcore::DocSet;
+    let term = Term::from_field_text(id_field, id);
+    for (ord, seg) in searcher.segment_readers().iter().enumerate() {
+        let Ok(inv) = seg.inverted_index(id_field) else { continue };
+        let Ok(Some(mut postings)) =
+            inv.read_postings(&term, boostcore::schema::IndexRecordOption::Basic)
+        else {
+            continue;
+        };
+        let alive = seg.alive_bitset();
+        loop {
+            let doc = postings.doc();
+            if doc == boostcore::TERMINATED {
+                break;
+            }
+            if alive.map(|a| a.is_alive(doc)).unwrap_or(true) {
+                return Some(boostcore::DocAddress::new(ord as u32, doc));
+            }
+            postings.advance();
+        }
+    }
+    None
+}
+

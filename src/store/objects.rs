@@ -6,7 +6,14 @@ use super::*;
 impl Store {
     /// `size` is how many documents each batch returns; the cursor is placed
     /// after the batch the opening search already delivered.
-    pub fn open_scroll(&self, expr: &str, body: &Value, size: usize) -> String {
+    pub fn open_scroll(
+        &self,
+        expr: &str,
+        body: &Value,
+        size: usize,
+        after: Option<Vec<Value>>,
+        implicit_sort: bool,
+    ) -> String {
         let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let id = format!("boostsearch-scroll-{n:016x}");
         self.scrolls.write().insert(
@@ -17,6 +24,8 @@ impl Store {
                 offset: size,
                 size,
                 pit: self.open_pit(expr, 0),
+                after,
+                implicit_sort,
             },
         );
         id
@@ -26,9 +35,12 @@ impl Store {
         self.scrolls.read().get(id).cloned()
     }
 
-    pub fn advance_scroll(&self, id: &str, by: usize) {
+    pub fn advance_scroll(&self, id: &str, by: usize, after: Option<Vec<Value>>) {
         if let Some(s) = self.scrolls.write().get_mut(id) {
             s.offset += by;
+            if after.is_some() {
+                s.after = after;
+            }
         }
     }
 

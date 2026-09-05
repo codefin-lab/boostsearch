@@ -2075,3 +2075,393 @@ their own: an answer is written without waiting to fill a packet
 (`TCP_NODELAY`, which Netty sets and hyper does not), and a response is
 gathered before it is encrypted rather than becoming a TLS record per
 piece.
+
+## 7.3 -- eighteen dimensions, and a gate that can fail
+
+The matrix had twelve dimensions: how fast an engine takes a corpus, how much
+memory it holds, and ten query shapes. Twelve is not many, and the twelve were
+chosen when the only questions being asked were about reads. Two other things
+were wrong with it: the file had been pasted over itself, so every run
+measured everything twice and printed the second half, and the docstring's
+promise -- "exits non-zero if any dimension is lost" -- was not in the code.
+
+Eighteen now, and the exit code is real:
+
+  - **index docs/s** -- a corpus, taken whole
+  - **update docs/s** -- writing over documents that are already there, which
+    is not the same work as writing fresh ones
+  - **delete docs/s**
+  - **scroll docs/s** -- paging the whole index, which is what an export, a
+    reindex or a backup costs
+  - **queries/s with eight clients** -- a median latency says nothing about
+    what happens when more than one person is asking
+  - **memory**
+  - **store on disk**
+  - **the worst p99 of the ten queries** -- the tail, not the middle
+  - **the ten query shapes**, p50 gated and p99 printed beside it
+
+The first run of it found two things the twelve could not have:
+
+  - **A scroll could not read past the result window.** We answer a scroll by
+    running the search again from a further offset, and the ceiling on
+    `from + size` was applied to that -- so a scroll stopped at ten thousand
+    documents, which is the one thing a scroll exists to get past. The batch
+    size is checked when the scroll is opened; the batch being read is not
+    checked against a window again.
+  - **Two dimensions are behind**: a scroll reads half as fast as OpenSearch's
+    (71,398 against 144,244 documents a second), and an index takes more than
+    twice the disk (61.4MiB against 27.8MiB). Both are Phase 7.4's to close.
+
+Sixteen of eighteen ahead. The two that are not are named in the gate's own
+output, which is the point of having one.
+
+What is not done here: the cloud hardware. The matrix takes both engines as
+URLs and runs anywhere -- `BENCH_A`, `BENCH_B`, `BENCH_AUTH`, `BENCH_DATA` --
+but the numbers above are from a laptop, and a laptop is not a release gate.
+Running it on the hardware a release is cut on is the part of 7.3 still owed.
+
+### 7.4 — A scroll that carries on from where it stopped
+
+The scroll dimension was measured wrong, and then it was slow for a reason of
+its own.
+
+Wrong first. A scroll answered its next batch by running the search again from
+a further offset, so batch two skipped a thousand documents, batch two hundred
+skipped two hundred thousand, and the cost of the export grew with every step
+of it. A cursor fixes that: each batch remembers the sort values of its last
+document, and the next one asks for what comes after them. Constant per batch,
+however deep the scroll has gone.
+
+The order the cursor is read against has to be an order that names one
+document. `_doc` is not one: it numbers documents inside a segment, so an
+index of three segments hands out the number 4 three times, and a cursor built
+on it steps over whole segments. That is what the corpus caught -- `scroll/10_
+basic_timeseries.yml` and `scroll/12_slices.yml` both went from full batches
+to empty ones. `_seq` is the write order of the index as a whole, so the
+implicit sort is over that instead; a scroll the caller gave its own order to
+keeps counting from the beginning, and so does one reading more than one index,
+where `_seq` names a document per index rather than one document.
+
+Measured on 200,000 documents, both engines force-merged and settled, in
+batches of a thousand:
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| scroll docs/s | 71,398 | ~170,000 | ~210,000 |
+
+Still behind, and the shape of what remains is now visible: at batches of five
+thousand OpenSearch goes on getting faster (377,000/s) while we flatten at
+200,000/s, so what is left is per-document, not per-batch. With `_source`
+turned off both engines roughly double and the ratio holds, so it is not the
+source handling either -- it is the per-hit path as a whole. That is the next
+thing to take apart.
+
+Two smaller things measured while here:
+
+  - **The translog is not the store.** `store.size` counted it; OpenSearch
+    reports it separately under `translog.size_in_bytes`, and a flush empties
+    it. Counting it made our disk figure worse than it is.
+  - **The untouched view carries no norms.** Every value is indexed twice, once
+    analysed and once raw, and the raw view was keeping field norms it is never
+    scored by. Off, that is about 2.7MiB of 52.8 on the bench corpus.
+
+Which leaves the disk gap where 7.3 found it: 52.8MiB against 27.6, both
+force-merged into a single segment. It divides as postings 11.4, term
+dictionary 10.8, fast fields 11.5, stored source 14.1, positions 2.4, norms
+2.7. Nothing there is fragmentation and nothing there is a setting -- it is
+that every value is indexed into both views. Closing it means changing which
+values go into which view, which is a decision to write down before it is a
+patch to write.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 unchanged.
+
+### 7.4 — The matrix on a quiet machine
+
+Everything else on the machine was stopped for this -- nineteen containers of
+two unrelated stacks -- and started again afterwards. Three passes, the same
+200,000 documents each time.
+
+**Plain against plain.** Thirteen of eighteen ours: index 94,182/s against
+52,123, scroll 269,535 against 224,795, eight concurrent clients 3,390/s
+against 3,283, memory 334MiB against 1,489, and every query shape but two.
+Lost: update, delete, store on disk, `nested_agg` and `cardinality` p50 -- the
+last two by fractions of a millisecond (1.59 against 1.21, 1.15 against 1.08).
+
+**TLS against TLS**, both engines with their security plugin on: fourteen of
+eighteen ours, and the query shapes are not close -- 0.78ms against 5.10 for
+`match_all`, 1.69 against 3.59 for `cardinality`, a worst p99 of 2.62ms
+against 10.59. Lost: update, delete, store, and eight concurrent clients.
+
+**Our TLS against their plain HTTP** is the pass that is not like for like,
+and it is kept because it is the honest shape of a migration where only one
+side has been secured. Eight lost there, which is what carrying TLS against
+something that is not costs.
+
+Two things the quiet machine settled:
+
+  - **The scroll fix holds.** 269,535/s against 224,795 plain, 214,378 against
+    144,107 with security on. The dimension 7.3 lost is won.
+  - **Updates and deletes are genuinely behind**, in every pass and by the same
+    ratio: roughly 13,000 against 20,000-26,000 updates a second, and 30,000
+    against 50,000-90,000 deletes. Not a measurement artefact.
+
+Where that time goes, measured rather than guessed. A bulk of a thousand
+deletes for documents that were never there runs at 272,000/s, so the request
+machinery is not it: a real delete costs about 25 microseconds of its own. It
+scales with how many segments the index is in -- 25,000/s across four
+segments, 35,000/s after a force-merge into one -- and it does not move with
+translog durability at all (29,428/s asking for a sync against 30,931/s
+without one), so it is not the fsync either. A sampling profile of a sustained
+update load puts 22% in the indexing engine, 16% in JSON, 13% in allocation
+and copying, 12% in our own code. It is spread, which is why there is no knob:
+it is the write path as a whole, and closing it is a piece of work rather than
+a setting.
+
+One fix to the gate itself: `store on disk` read 208 bytes for OpenSearch in
+the third pass, which is an empty index, not a result -- an engine accounts for
+its store when segments reach disk, and the read happened before they had. It
+flushes first now, insists on an answer an index holding documents could have,
+and a dimension it still cannot measure is printed as unmeasured and fails the
+gate. A measurement that cannot be made must not be allowed to hand either
+side a win.
+
+### 7.4 — What was losing, and why each one was
+
+Three dimensions were behind after 7.3: updates, deletes, and disk. Each was
+taken apart with a profiler rather than a guess, and two of them turned out to
+be one bug.
+
+**A write asked the index a question through a thread pool.** Every delete and
+every update begins by asking whether the document is already there. That
+question was answered by running a term query through the shared search
+executor -- which means handing a one-term lookup to a worker thread and
+sleeping on a condvar until it comes back. A sampling profile of a delete load
+put the whole request stack in `pthread_cond_wait` underneath
+`delete_doc → lookup_id → Searcher::search`. The same happened once more per
+update, in `read_source`, which fetched the current document by running a
+sorted top-1 search.
+
+Both now read the postings where they are: walk the segments, look the id up
+in each term dictionary, take the first document that is still alive. No
+collector, no executor, no hand-off.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| delete docs/s | 26,508 | 192,032 | 64,111-100,994 |
+| update docs/s | 14,923 | 71,271 | 17,020-27,935 |
+
+The measurements that pointed at it, kept here because they are what ruled
+everything else out: a bulk of a thousand deletes for ids that were never
+there ran at 272,000/s, so the request machinery was not the cost; the rate
+did not move between `translog.durability: request` and `async` (29,428
+against 30,931), so it was not the fsync; and it got faster as segments were
+merged away, which is what a per-segment lookup does.
+
+**Disk.** Half of an index of short documents is the stored source, and LZ4
+was leaving most of that on the floor: the same blocks under zstd are 30%
+smaller. Measured against what it costs -- 3% of a scroll and 7% of an update,
+both dimensions we win by multiples -- it is worth taking. 14.1MiB to 9.9MiB,
+and the index as a whole 52.8MiB to 45.3.
+
+Two things measured and *not* taken, recorded so they are not tried again:
+dropping the `_id` fast field saved 0.1MiB, not the 5.6 expected, because
+sequential auto ids compress almost to nothing in a dictionary-encoded column;
+and field norms on the untouched view were already off. What remains is
+structural, and the numbers now say so exactly. With one view instead of two
+the same corpus takes 30MiB (untouched only) or 39MiB (analysed only) against
+56MiB for both. **The gap is that every value is indexed twice**, and closing
+it means deciding which values need which view -- a decision to write down
+before it is a patch to write. Disk is the one dimension still behind.
+
+**And one the fixing uncovered.** With updates and deletes won, the matrix put
+`queries/s (8 clients)` in the lost column, at 6,259 against 10,126. It had
+been hidden: the dimension opened a new connection per request, and this
+machine has 16,384 ephemeral ports with a thirty-second TIME_WAIT, so above
+about five hundred connections a second the port table is what is being
+measured -- and whichever engine went second inherited what the first one
+left. Every client library in existence keeps its connections; the dimension
+does now too.
+
+What that revealed was real. Per query, against OpenSearch: `match_all` 22,528
+against 11,492 and `sort_desc` 4,980 against 2,602 -- but `terms_agg` 6,396
+against 13,230, `date_histogram` 4,175 against 11,122, `nested_agg` 3,536
+against 13,039, `cardinality` 5,286 against 13,101. Every loss was a `size: 0`
+aggregation, asked over and over with the same answer. OpenSearch was not
+computing them. It was serving them from its shard request cache, which we
+counted misses for and never had.
+
+We have one now. It follows OpenSearch's rules: only a request that asks for
+no documents, never a scroll, never one that reads the clock, never one whose
+answer would say which shards it skipped, and never across two callers who may
+be allowed to see different documents. An entry goes stale the moment anything
+about the index changes -- every write, refresh, mapping, alias or settings
+change moves a generation number that the key is built from, so a stale answer
+cannot be found rather than being found and checked. The numbers come from a
+counter no index and no life of an index shares, because an index deleted and
+made again under the same name would otherwise inherit the old one's answers.
+That was not a hypothetical: it is what OpenSearch's own `50_filter.yml`
+caught within a minute of the cache existing. `_cache/clear?request=true`
+empties it, and `_stats` reports its hits, misses, bytes and evictions --
+three of which were reported as zero before and one of which was counted in
+the wrong place.
+
+The matrix on a quiet machine, both engines with security on, TLS on both
+sides -- the pass that is like for like:
+
+  - **LOST 1 of 18: store on disk.** Everything else ours, most of it by
+    multiples: updates 78,133 against 17,020, deletes 171,082 against 64,111,
+    eight concurrent clients 11,709 against 9,131, memory 461MiB against 2,094,
+    worst p99 2.26ms against 5.72, and every one of the ten query shapes.
+
+Plain against plain reports all eighteen, but that pass caught OpenSearch with
+55.1MiB on disk where its settled size is 27.2, so the disk column there is
+transient state rather than a result, and this is not claiming it.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 unchanged.
+
+### 7.4 — Every value written once, where it can be asked for
+
+The disk gap was the last dimension behind, and 7.4 recorded it as
+structural: every value went into both JSON views, analysed and untouched,
+whatever the mapping said about it. Both views also carried a column, though
+only one was ever read from. [ADR 0007](adr/0007-a-value-is-written-where-it-can-be-asked-for.md)
+is the decision; this is what it took.
+
+**Columns first.** `_dyn` had fast fields because `set_fast(None)` enables
+them -- the schema's own comment said otherwise, which is how it survived.
+Removing them broke 142 corpus sections in one build, every one of them
+naming a numeric aggregation, because numerics were deliberately read from
+`_dyn`: a path holding only numbers resolves without a string column beside
+it. Measured again over 200,000 documents, that is worth 0.14ms on a date
+histogram and nothing at all on avg, stats, histogram, numeric terms and
+numeric range -- so the reason is gone, and with it a whole column of every
+value in the index.
+
+**Then the writer.** A value now goes to the view its field can be queried
+through: analysed words to `_dyn`, everything exact to `_raw`, and a string
+with nothing declared about it to both -- which is what OpenSearch's dynamic
+mapping does when it gives a string a `text` field and a `.keyword`
+sub-field. One rule, `Mapping::views_of`, consulted by the writer and by the
+reader.
+
+Three things had to be built to pay for it, and each was found by the corpus
+rather than by reasoning:
+
+  - **`exists` asked a column that no longer existed** for analysed-only
+    fields. It asks the postings now -- has this document any term under this
+    path -- which is the question OpenSearch answers out of `_field_names`.
+  - **`fielddata: true` needs a column over the analysed words**, which is the
+    one thing `_dyn`'s columns were legitimately for. It has a view of its own
+    now, written only by the text fields that ask for it, so a mapping that
+    never asks never writes a byte there. OpenSearch makes it opt-in for the
+    same reason.
+  - **The profiler named an aggregator after the column it read**, and
+    reported `GlobalOrdinalsStringTermsAggregator` where OpenSearch reports
+    `NumericTermsAggregator`. It reads the mapping now, which is where
+    OpenSearch reads it from.
+
+And two mistakes of mine that the corpus caught before anything else did: a
+`term` query against a declared `text` field briefly read the untouched value
+instead of the analysed words -- the write rule and the read rule are not the
+same function, and `title.keyword` is how the other view is addressed -- and a
+derived `object` was treated as a leaf, so a `text` field inside it was
+written untouched and never matched. Three painless sections failed for that,
+found by diffing the module corpus file-for-file against the previous commit
+rather than by eye.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| every field declared | -- | **22.0MiB** | 22.7MiB |
+| the bench's mapping | 45.3MiB | 30.7MiB | 27.1MiB |
+
+An index whose fields are declared is now smaller than OpenSearch's. The
+bench declares seven of its ten, and the three it leaves to dynamic mapping
+are what is left of the gap: both engines write an undeclared string twice,
+and our two copies cost more than theirs. The bench mapping is left as it
+was; completing it would have won the dimension by changing the question.
+
+The matrix, quiet machine, security and TLS on both sides:
+
+  - **LOST 1 of 18: store on disk, 30.7MiB against 27.2** -- from 1.67 times
+    to 1.13. Everything else ours: index 81,123/s against 46,764, updates
+    67,687 against 19,420, deletes 169,267 against 49,331, scroll 224,002
+    against 160,786, eight concurrent clients 14,024 against 9,529, memory
+    448MiB against 2,154, worst p99 3.10ms against 6.58, and every one of the
+    ten query shapes between three and five times faster.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 -- the same 820, file for file.
+
+### 7.4 — The stored source, squeezed, and where the rest of the gap lives
+
+Store on disk was 30.7MiB against 27.2 after the views were split. Two things
+were left in the stored source, and one of them was not a knob at all.
+
+**A compressor is only as good as the window it gets.** Documents of a few
+hundred bytes repeat *each other* far more than they repeat themselves, and a
+sixteen-kilobyte block is too small a window to see that. Measured over
+200,000 log documents:
+
+| block | level | on disk | gets/s | updates/s |
+|---|---|---|---|---|
+| 16KiB | 3 | 30.35MiB | 6,111 | 78,489 |
+| 64KiB | 3 | 28.60MiB | 6,494 | 81,322 |
+| 64KiB | 9 | 27.64MiB | 6,260 | 77,546 |
+| 256KiB | 9 | 26.99MiB | 6,068 | 78,273 |
+
+Reading did not get slower -- the differences above are noise -- because
+everything measured here is in the page cache. That is exactly why the wider
+window is not the default: a cold read of one two-hundred-byte document costs
+a whole block off disk, and this bench cannot see that. 64KiB is where
+Lucene's own most-compressed setting lands, and it is where ours lands.
+
+**`index.codec` is honoured now**, which it never was: `default` takes the
+64KiB window at level 9, `best_compression` takes 256KiB at level 12, and an
+index says back which it was made with. That is the same choice OpenSearch
+offers under the same name, and it is the right home for the trade above --
+the user who fetches documents one at a time keeps the narrow window, and the
+user who writes and searches far more than they fetch can widen it.
+
+Also gone: field norms on `_id`. An id is looked up, never scored, and a norm
+is a byte per document that nothing reads.
+
+| | before | after | OpenSearch |
+|---|---|---|---|
+| default codec | 30.7MiB | **27.7MiB** | 27.2MiB |
+| every field declared | 22.0MiB | 21.3MiB | 22.7MiB |
+
+**Where the last 0.5MiB is, measured rather than guessed.** With the source
+compressed as hard as it goes on both sides -- `best_compression` against
+`best_compression` -- the stored source stops being the difference and the
+inverted index is all that is left:
+
+| | BoostSearch | Lucene |
+|---|---|---|
+| stored source | **6.25MiB** | 6.70MiB |
+| term dictionary | 7.51 | **5.35** |
+| postings | 6.05 | **3.81** |
+| columns | 5.00 | 4.82 |
+| norms | 1.14 | **0.57** |
+| positions | 0.98 | **0.41** |
+
+We win the source and are level on columns. Everything behind is the
+inverted-index format itself: postings twice the size for the same terms over
+the same documents, and norms and positions each about twice. Lucene stores a
+term whose posting list is one document inline in the term dictionary rather
+than in the postings file, and blocks the rest at 128 documents with skip
+data; norms with a constant value cost it nothing. None of that is a setting
+on our side -- it is BoostCore's index format, and closing it is engine work
+with its own ADR, not more tuning here.
+
+Two smaller things this measurement settled, recorded so they are not
+re-tried: our numerics are *already cheaper* than Lucene's BKD points (9.2MiB
+against 10.4 for the same four fields, whole index), so moving them out of the
+inverted index would optimise something we win; and a single-field text index
+shows our term dictionary smaller than Lucene's (0.29MiB against 0.95), so the
+dictionary gap on the whole index is the two views of a dynamically mapped
+string, not the JSON path a term carries.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+820/895 -- file for file identical to the baseline.

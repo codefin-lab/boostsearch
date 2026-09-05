@@ -18,12 +18,9 @@ pub(crate) fn source_enabled(st: &IdxState) -> bool {
 /// writer's -- which is how a caller checks whether a write is visible yet.
 pub fn read_source_refreshed(st: &IdxState, id: &str) -> Option<Value> {
     let searcher = st.reader.searcher();
-    let q = TermQuery::new(Term::from_field_text(st.fields.id, id), IndexRecordOption::Basic);
-    let hits = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
-    let (_, addr) = hits.first()?;
-    let doc: TantivyDocument = searcher.doc(*addr).ok()?;
-    let raw = doc.get_first(st.fields.source)?.as_str()?.to_string();
-    serde_json::from_str(&raw).ok()
+    let addr = crate::store::alive_address(&searcher, st.fields.id, id)?;
+    let doc: TantivyDocument = searcher.doc(addr).ok()?;
+    serde_json::from_str(doc.get_first(st.fields.source)?.as_str()?).ok()
 }
 
 /// The document however it can be reached: `realtime` is the default, and
@@ -42,12 +39,9 @@ pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
     }
     // the realtime reader sees flushed-but-unrefreshed writes
     let searcher = st.realtime.searcher();
-    let q = TermQuery::new(Term::from_field_text(st.fields.id, id), IndexRecordOption::Basic);
-    let hits = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
-    let (_, addr) = hits.first()?;
-    let doc: TantivyDocument = searcher.doc(*addr).ok()?;
-    let raw = doc.get_first(st.fields.source)?.as_str()?.to_string();
-    serde_json::from_str(&raw).ok()
+    let addr = crate::store::alive_address(&searcher, st.fields.id, id)?;
+    let doc: TantivyDocument = searcher.doc(addr).ok()?;
+    serde_json::from_str(doc.get_first(st.fields.source)?.as_str()?).ok()
 }
 
 /// `refresh=true` on a read asks for the index to be brought up to date first,

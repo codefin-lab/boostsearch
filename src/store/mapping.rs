@@ -13,6 +13,8 @@ impl Mapping {
         }
         let mut m = Mapping {
             types,
+            views: HashMap::new(),
+            every_field_both: true,
             raw: body,
             subs: Vec::new(),
             aliases: HashMap::new(),
@@ -456,6 +458,16 @@ impl Mapping {
             found.sort();
             found
         };
+        // where each declared field's values go, worked out once here rather
+        // than once per document per field
+        self.views = self
+            .types
+            .keys()
+            .map(|path| (path.clone(), self.compute_views(path)))
+            .collect();
+        // a mapping that declares nothing sends every value to both views,
+        // and a document written under one needs no walking at all
+        self.every_field_both = self.views.values().all(|v| v.analysed && v.untouched);
         self.ranges = of(&|t| t.ends_with("_range"));
         self.flats = of(&|t| t == "flat_object").into_iter().map(|(p, _)| p).collect();
         self.shingled = of(&|t| t == "search_as_you_type").into_iter().map(|(p, _)| p).collect();
@@ -558,6 +570,62 @@ impl Mapping {
     /// The format a date path declares, if it declares one.
     pub fn date_format(&self, field: &str) -> Option<&str> {
         self.formats.get(field).map(|s| s.as_str())
+    }
+
+    /// Which of the two views a field's values are written into.
+    ///
+    /// This is the one rule; the writer puts values where it says, and a
+    /// query looks for them where it says. Analysed words go to `_dyn`,
+    /// everything exact goes to `_raw`, and a string with nothing declared
+    /// about it goes to both -- which is what OpenSearch's dynamic mapping
+    /// does when it gives a string a `text` field and a `.keyword` sub-field.
+    pub fn views_of(&self, field: &str) -> Views {
+        if let Some(v) = self.views.get(field) {
+            return *v;
+        }
+        if let Some(target) = self.aliases.get(field)
+            && let Some(v) = self.views.get(target.as_str())
+        {
+            return *v;
+        }
+        self.compute_views(field)
+    }
+
+    fn compute_views(&self, field: &str) -> Views {
+        match self.type_of(field) {
+            Some("text") | Some("match_only_text") | Some("search_as_you_type") => Views {
+                analysed: true,
+                // a text field that declares a keyword sub-field is asked
+                // about both ways, so it is written both ways
+                untouched: self.has_keyword_sub(field),
+                // and one that asked to be sorted or aggregated needs its
+                // words in a column, which is what `fielddata` buys
+                fielddata: self.wants_fielddata(field),
+            },
+            // everything else that is declared is exact: a keyword, an ip, a
+            // number, a date, a boolean, a range, a shape
+            Some(_) => Views { analysed: false, untouched: true, fielddata: false },
+            // nothing declared. A string is dynamically mapped as text with a
+            // keyword sub-field, and so is written twice; anything else is a
+            // value with no words in it
+            None => Views { analysed: true, untouched: true, fielddata: false },
+        }
+    }
+
+    /// Whether a text field asked for its words to be held in a column.
+    pub fn wants_fielddata(&self, field: &str) -> bool {
+        self.raw
+            .pointer(&pointer_of(field))
+            .and_then(|n| n.get("fielddata"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Whether a text field declares a sub-field that is its untouched view.
+    pub fn has_keyword_sub(&self, field: &str) -> bool {
+        let Some(node) = self.raw.pointer(&pointer_of(field)) else { return false };
+        let Some(fields) = node.get("fields").and_then(|f| f.as_object()) else { return false };
+        fields.values().any(|sub| sub.get("type").and_then(|t| t.as_str()) == Some("keyword"))
     }
 
     /// Types the mapping treats as a single value rather than a container.
@@ -788,4 +856,13 @@ fn collect_lenient(props: &Map<String, Value>, prefix: &str, out: &mut HashMap<S
             collect_lenient(sub, &path, out);
         }
     }
+}
+
+/// The views a field's values are written into and looked for in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Views {
+    pub analysed: bool,
+    pub untouched: bool,
+    /// the analysed words again, in a column, for sorting and aggregating
+    pub fielddata: bool,
 }

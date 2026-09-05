@@ -149,6 +149,7 @@ impl IdxState {
     ///
     /// What other shards have queued stays queued, and stays invisible.
     pub fn refresh_shard(&mut self, shard: u64) -> Result<()> {
+        self.moved_on();
         self.apply_ops(Some(shard))?;
         if let Some(w) = self.writer.as_mut() {
             w.commit()?;
@@ -177,6 +178,7 @@ impl IdxState {
 
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
+        self.moved_on();
         self.apply_ops(None)?;
         // nothing was ever written, so there is nothing to commit
         if let Some(w) = self.writer.as_mut() {

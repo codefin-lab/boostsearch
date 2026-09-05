@@ -333,3 +333,29 @@ pub async fn indices_upgrade(
 pub async fn shards_ok(Query(p): Query<Params>) -> Response {
     respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
 }
+
+/// `_cache/clear`. The caches this engine keeps are the request cache and
+/// whatever the readers hold; naming `request`, `query` or nothing at all
+/// empties what there is to empty. The answer is the shard count either way,
+/// the way OpenSearch answers it.
+pub async fn cache_clear(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+) -> Response {
+    let named = ["request", "query", "fielddata"]
+        .iter()
+        .any(|k| p.get(*k).map(|v| v != "false").unwrap_or(false));
+    let all = !named;
+    if all || p.get("request").map(|v| v != "false").unwrap_or(false) {
+        match index.map(|Path(i)| i) {
+            Some(expr) => {
+                for name in store.resolve(&expr) {
+                    store.request_cache.clear_index(&name);
+                }
+            }
+            None => store.request_cache.clear(),
+        }
+    }
+    respond(&p, json!({"_shards": {"total": 1, "successful": 1, "failed": 0}}))
+}

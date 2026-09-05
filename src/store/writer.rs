@@ -6,6 +6,9 @@ impl IdxState {
     /// Persist the learned field information next to the index so a reopen does
     /// not lose dynamic mappings or the range-narrowing kinds.
     pub fn save_meta(&self) {
+        // mappings, settings and aliases all travel through here, and each of
+        // them can change what a search answers
+        self.moved_on();
         let Some(path) = &self.path else { return };
         let meta = serde_json::json!({
             "name": self.name,
@@ -35,7 +38,7 @@ impl IdxState {
         for seg in searcher.segment_readers() {
             let ff = seg.fast_fields();
             for (path, _) in self.all_field_types() {
-                for prefix in [DYN, RAW] {
+                for prefix in [DYN, RAW, FIELDDATA] {
                     let col = format!("{prefix}.{path}");
                     if let Ok(bytes) = ff.column_num_bytes(&col) {
                         let n = bytes.get_bytes();

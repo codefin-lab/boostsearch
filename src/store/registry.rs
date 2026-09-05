@@ -48,6 +48,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            request_cache: Arc::new(Default::default()),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
@@ -85,6 +86,7 @@ impl Store {
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
+            request_cache: Arc::new(Default::default()),
             data_streams: Arc::new(RwLock::new(HashMap::new())),
             pipelines: Arc::new(RwLock::new(HashMap::new())),
             ingest_stats: Arc::new(RwLock::new(HashMap::new())),
@@ -258,6 +260,12 @@ impl Store {
             let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
             let mut total = 0;
             for e in entries.flatten() {
+                // the translog is not part of the store: OpenSearch counts it
+                // under `translog.size_in_bytes` and not under `store.size`,
+                // and it is emptied by a flush rather than by a merge
+                if e.file_name() == crate::store::TRANSLOG {
+                    continue;
+                }
                 match e.metadata() {
                     Ok(m) if m.is_dir() => total += walk(&e.path()),
                     Ok(m) => total += m.len(),
@@ -441,7 +449,8 @@ impl Store {
     fn open_index(&self, name: &str, body: &Value, path: PathBuf) -> Result<()> {
         let (schema, fields) = build_schema();
         let dir = MmapDirectory::open(&path)?;
-        let index = Index::open_or_create(dir, schema)?;
+        let index =
+            Index::builder().schema(schema).settings(codec_settings(body)).open_or_create(dir)?;
         self.finish_open(name, body, index, fields)?;
         if let Some(st) = self.get(name) {
             let mut g = st.write();
@@ -540,7 +549,9 @@ impl Store {
             seq_no: 0,
             applied_term: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
+            request_cache_hit: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
+            search_gen: std::sync::atomic::AtomicU64::new(crate::store::next_generation()),
             search_groups: RwLock::new(HashMap::new()),
             loaded_fielddata: RwLock::new(std::collections::HashSet::new()),
             auto_id: 0,
@@ -609,6 +620,12 @@ impl Store {
             targets.iter().filter_map(|t| guard.remove(t)).collect()
         };
         let any = !dropped.is_empty();
+        // an index that is gone has no answers worth keeping; the generation
+        // it left behind is already unreachable, so this is memory rather
+        // than correctness
+        for t in &targets {
+            self.request_cache.clear_index(t);
+        }
         // what was dropped is remembered by name and uuid
         if record {
             let now = std::time::SystemTime::now()
@@ -638,5 +655,44 @@ impl Store {
     /// The indices deleted since the node came up.
     pub fn tombstones(&self) -> Value {
         Value::Array(self.graveyard.read().clone())
+    }
+}
+
+/// How an index stores what it keeps, from `index.codec`.
+///
+/// The stored source is half of what an index of short documents takes on
+/// disk. A block is the window a compressor gets to find repetition in, and
+/// documents of a few hundred bytes repeat each other far more than they
+/// repeat themselves, so the window matters more than the level does.
+/// Measured over 200,000 log documents, force-merged:
+///
+///     16KiB   zstd 3   30.35 MiB      64KiB   zstd 9   27.64 MiB
+///     64KiB   zstd 3   28.60 MiB     256KiB   zstd 9   26.99 MiB
+///
+/// `default` takes the 64KiB window, which is where Lucene's own most
+/// compressed setting lands, and where a document can still be read back
+/// without decompressing a quarter of a megabyte to find it.
+/// `best_compression` takes the wider window, for an index whose documents
+/// are written and searched far more often than they are fetched one at a
+/// time -- which is the same trade OpenSearch offers under the same name.
+///
+/// An index already on disk keeps what it was written with: the setting
+/// travels in its own metadata, so this reaches new segments only.
+fn codec_settings(body: &Value) -> boostcore::IndexSettings {
+    let codec = body
+        .pointer("/settings/index/codec")
+        .or_else(|| body.pointer("/settings/index.codec"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    let (level, block) = match codec {
+        "best_compression" | "zstd_no_dict" | "zstd" => (12, 262_144),
+        _ => (9, 65_536),
+    };
+    boostcore::IndexSettings {
+        docstore_compression: boostcore::store::Compressor::Zstd(
+            boostcore::store::ZstdCompressor { compression_level: Some(level) },
+        ),
+        docstore_blocksize: block,
+        ..Default::default()
     }
 }

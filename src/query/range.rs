@@ -97,7 +97,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if let Some(r) = build_range_field_query(ctx, &field, &spec) {
         return r;
     }
-    let (f, path, _) = ctx.resolve(&field, false);
+    let (f, path, _) = ctx.resolve_exact(&field);
     let get = |keys: [&str; 2]| -> Option<(Value, bool)> {
         for (i, k) in keys.iter().enumerate() {
             if let Some(v) = spec.get(*k)

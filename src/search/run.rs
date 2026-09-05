@@ -1039,7 +1039,6 @@ pub fn run(
                 shard_idx,
                 name,
                 body,
-                p,
                 &query_json,
                 &sort_keys,
                 &search_after,

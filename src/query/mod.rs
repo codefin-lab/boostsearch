@@ -56,6 +56,9 @@ pub struct Ctx<'a> {
 pub enum View {
     Dyn,
     Raw,
+    /// the analysed words with a column over them, which only a text field
+    /// that declared `fielddata: true` has
+    Fielddata,
 }
 
 impl<'a> Ctx<'a> {
@@ -63,6 +66,7 @@ impl<'a> Ctx<'a> {
         match v {
             View::Dyn => self.fields.dynamic,
             View::Raw => self.fields.raw,
+            View::Fielddata => self.fields.fielddata,
         }
     }
 
@@ -71,25 +75,43 @@ impl<'a> Ctx<'a> {
     /// `analyzed` is true for full-text contexts (`match`), false for exact ones
     /// (`term`, sorting, term aggregations) -- mirroring the text/keyword split.
     pub fn view(&self, field: &str, analyzed: bool) -> View {
-        match self.mapping.type_of(field) {
-            Some("text") | Some("match_only_text") | Some("search_as_you_type") => View::Dyn,
-            Some("keyword")
-            | Some("constant_keyword")
-            | Some("wildcard")
-            | Some("ip")
-            | Some("flat_object") => View::Raw,
-            Some(_) => View::Dyn, // numeric, date, boolean: identical in both views
-            None => {
-                // a path inside a flat_object is exact, like a keyword; the
-                // mapping never names it, so the ancestor has to be consulted
-                let mut prefix = field;
-                while let Some((head, _)) = prefix.rsplit_once('.') {
-                    if self.mapping.type_of(head) == Some("flat_object") {
-                        return View::Raw;
-                    }
-                    prefix = head;
+        // a path inside a flat_object is exact, like a keyword; the mapping
+        // never names the path itself, so the ancestor has to be consulted
+        if self.mapping.type_of(field).is_none() {
+            let mut prefix = field;
+            while let Some((head, _)) = prefix.rsplit_once('.') {
+                if self.mapping.type_of(head) == Some("flat_object") {
+                    return View::Raw;
                 }
-                if analyzed { View::Dyn } else { View::Raw }
+                prefix = head;
+            }
+        }
+        match self.mapping.type_of(field) {
+            // A declared text field is its analysed words, and that is what a
+            // name standing alone asks about -- a `term` against it matches a
+            // word, not the whole value. Its untouched view, where it has one,
+            // is addressed as `field.keyword` and resolved before this.
+            // Sorting or aggregating asks for a column, which such a field has
+            // only where the mapping asked for one.
+            Some("text") | Some("match_only_text") | Some("search_as_you_type") => {
+                if !analyzed && self.mapping.views_of(field).fielddata {
+                    View::Fielddata
+                } else {
+                    View::Dyn
+                }
+            }
+            // everything else declared is exact, and lives untouched
+            Some(_) => View::Raw,
+            // Nothing declared. The value was written both ways, the way
+            // OpenSearch's dynamic mapping writes a string as a text field
+            // with a keyword sub-field, so the context decides: words for a
+            // `match`, the value as it arrived for everything else.
+            None => {
+                if analyzed {
+                    View::Dyn
+                } else {
+                    View::Raw
+                }
             }
         }
     }
@@ -127,9 +149,41 @@ impl<'a> Ctx<'a> {
         (self.field_of(v), field.to_string(), v)
     }
 
+    /// Whether a document has any value under this field.
+    ///
+    /// The untouched view carries a column, and a column knows directly. A
+    /// field that is only ever analysed has no column to ask -- it has
+    /// postings, so the question becomes whether any term stands under its
+    /// path, which is the same question OpenSearch answers out of
+    /// `_field_names`.
+    pub fn exists_query(&self, field: &str) -> Result<Box<dyn Query>> {
+        let (f, path, view) = self.resolve(field, false);
+        if matches!(view, View::Raw | View::Fielddata) {
+            return Ok(Box::new(ExistsQuery::new(self.column_name(field, false), true)));
+        }
+        crate::query::pattern::regex_query(f, &path, ".*")
+    }
+
+    /// Where a comparison reads a field from.
+    ///
+    /// A range compares values, not words: `gte: "192.168.0.3"` is a question
+    /// about the string that arrived, and a field the dynamic mapping happened
+    /// to call text still has the value it arrived as in the untouched view.
+    pub fn resolve_exact(&self, field: &str) -> (Field, String, View) {
+        let (f, path, view) = self.resolve(field, false);
+        if view == View::Dyn && self.mapping.views_of(field).untouched {
+            return (self.fields.raw, path, View::Raw);
+        }
+        (f, path, view)
+    }
+
     pub fn column_name(&self, field: &str, analyzed: bool) -> String {
         let (_, path, view) = self.resolve(field, analyzed);
-        let prefix = if view == View::Raw { crate::store::RAW } else { crate::store::DYN };
+        let prefix = match view {
+            View::Raw => crate::store::RAW,
+            View::Fielddata => crate::store::FIELDDATA,
+            View::Dyn => crate::store::DYN,
+        };
         format!("{prefix}.{path}")
     }
 }

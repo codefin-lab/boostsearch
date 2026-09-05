@@ -223,7 +223,7 @@ pub fn write_doc_versioned(
             );
         }
     }
-    let doc = make_doc(&st.fields, id, indexed, &raw, seq);
+    let doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
     st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     // recorded before it is answered for: the index has it only after a commit

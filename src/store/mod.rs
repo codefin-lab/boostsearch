@@ -21,7 +21,8 @@ pub use dates::*;
 mod derive;
 pub use derive::*;
 mod ids;
-mod mapping;
+pub(crate) use ids::alive_address;
+pub mod mapping;
 mod net;
 pub use net::*;
 mod objects;
@@ -35,10 +36,15 @@ mod writer;
 pub struct Fields {
     pub id: Field,
     pub source: Field,
-    /// analysed JSON view -- backs `text` fields and numerics
+    /// analysed JSON view -- backs `text` fields: the words, with their
+    /// positions and the frequencies a score is worked out from
     pub dynamic: Field,
-    /// raw (untokenised) JSON view -- backs `keyword` fields, sorts and term aggs
+    /// untouched JSON view -- backs everything exact: keywords, numbers,
+    /// dates, and every column a sort or an aggregation reads
     pub raw: Field,
+    /// the analysed words again, with a column over them, for the text
+    /// fields that declared `fielddata: true` and nothing else
+    pub fielddata: Field,
     /// the order the write arrived in, which is what `_seq_no` reports and
     /// what settles ties between equally-ranked documents
     pub seq: Field,
@@ -107,14 +113,38 @@ impl std::hash::Hasher for IdHasher {
 
 pub const DYN: &str = "_dyn";
 pub const RAW: &str = "_raw";
+/// The view that carries a column for a text field that asked for one.
+pub const FIELDDATA: &str = "_fd";
+
+/// Handed out so that no two indices, and no two lives of one index, ever
+/// stand behind the same generation number.
+pub(crate) fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
-    let id = sb.add_text_field("_id", STRING | STORED | FAST);
+    // no field norms: an id is looked up, never scored, and a norm is a byte
+    // per document per field that nothing reads
+    let id_options = TextOptions::default()
+        .set_stored()
+        .set_fast(None)
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        );
+    let id = sb.add_text_field("_id", id_options);
     let source = sb.add_text_field("_source", STORED);
     let dynamic = sb.add_json_field(
         DYN,
-        JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
+        // No columns. A column is read to sort by a field or to aggregate over
+        // it, and neither is done on analysed words: everything that has a
+        // column has it on the untouched view. Keeping one here as well was a
+        // second copy of every value in the index.
+        JsonObjectOptions::default().set_expand_dots_enabled().set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer("default")
                 .set_fieldnorms(true)
@@ -133,6 +163,10 @@ pub fn build_schema() -> (Schema, Fields) {
             .set_indexing_options(
                 TextFieldIndexing::default()
                     .set_tokenizer("raw")
+                    // the untouched view is never scored by how long a field
+                    // is -- that is what the analysed view is for -- and a
+                    // keyword field carries no norms in OpenSearch either
+                    .set_fieldnorms(false)
                     .set_index_option(IndexRecordOption::Basic),
             ),
     );
@@ -140,14 +174,33 @@ pub fn build_schema() -> (Schema, Fields) {
     // document's segment and doc id do not follow the order it was sent in.
     // Recording that order is what lets two equally-scored hits come back the
     // same way twice.
+    // The column a `fielddata: true` text field is sorted and aggregated by.
+    // OpenSearch makes that opt-in because holding a text field's terms in
+    // memory is expensive, and this is the same bargain: a mapping that never
+    // asks for it never writes a byte here.
+    let fielddata = sb.add_json_field(
+        FIELDDATA,
+        JsonObjectOptions::default().set_fast(None).set_expand_dots_enabled().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("default")
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let seq = sb.add_u64_field("_seq", FAST);
-    (sb.build(), Fields { id, source, dynamic, raw, seq })
+    (sb.build(), Fields { id, source, dynamic, raw, fielddata, seq })
 }
 
 /// Declared field types, flattened to dotted paths (`user.name` -> `keyword`).
 #[derive(Default, Clone, Debug)]
 pub struct Mapping {
     pub types: HashMap<String, String>,
+    /// Which of the two views each declared field's values are written into,
+    /// worked out when the mapping changes rather than per document.
+    pub views: HashMap<String, crate::store::mapping::Views>,
+    /// whether every declared field goes to both views, in which case a
+    /// document does not need splitting at all
+    pub every_field_both: bool,
     /// the mapping body exactly as the user sent it, for GET _mapping
     pub raw: Value,
     /// The multi-fields with a normalizer, worked out once when the mapping
@@ -323,8 +376,20 @@ pub struct IdxState {
     /// search never needs a write lock -- taking one here would deadlock any
     /// caller that already holds the read guard.
     pub search_count: std::sync::atomic::AtomicU64,
-    /// misses recorded for `request_cache=true` searches, reported by _stats
+    /// searches answered out of the request cache, and searches that could
+    /// have been but were not there yet, reported by _stats
+    pub request_cache_hit: std::sync::atomic::AtomicU64,
     pub request_cache_miss: std::sync::atomic::AtomicU64,
+    /// Which state of this index a cached answer belongs to. Every write,
+    /// every refresh and every change to what the index is moves it on, so a
+    /// remembered answer from before the change can no longer be found under
+    /// the key that would be built now.
+    ///
+    /// It counts from a number no index has had before rather than from zero:
+    /// an index deleted and made again under the same name would otherwise
+    /// start where the old one started, and inherit answers about documents
+    /// that are no longer there.
+    pub search_gen: std::sync::atomic::AtomicU64,
     /// per-group query counts, from the `stats` field of a search body
     pub search_groups: RwLock<HashMap<String, u64>>,
     /// Fields whose ordinals have been read into memory: sorting on a field
@@ -444,6 +509,8 @@ pub struct Store {
     /// open points in time, each remembering where every index it covers had
     /// got to when it was opened
     pits: Arc<RwLock<HashMap<String, PitState>>>,
+    /// What a search over an unchanged index already answered.
+    pub request_cache: Arc<crate::search::RequestCache>,
     /// Data streams by name, each remembering the template it was made from.
     data_streams: Arc<RwLock<HashMap<String, String>>>,
     /// Pipelines by kind ("ingest" or "search") and then by name.
@@ -604,6 +671,13 @@ pub struct ScrollState {
     /// the point in time the scroll was opened over, so that documents
     /// written after it are not walked into
     pub pit: String,
+    /// where the last batch ended, as the sort values of its last document.
+    /// A scroll carried on by counting from the beginning costs more with
+    /// every batch; carried on from here it costs the same each time.
+    pub after: Option<Vec<Value>>,
+    /// whether the order the scroll walks in is one it chose for itself, in
+    /// which case the sort values do not belong in the answer
+    pub implicit_sort: bool,
 }
 
 fn walk_malformed(

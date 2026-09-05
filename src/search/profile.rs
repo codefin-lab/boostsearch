@@ -88,7 +88,7 @@ pub(crate) fn profiled_agg_search(
                     o.iter()
                         .map(|(cname, cdef)| {
                             json!({
-                                "type": agg_profile_type(cdef),
+                                "type": agg_profile_type(cdef, Some(ctx)),
                                 "description": cname,
                                 "time_in_nanos": 0,
                                 "breakdown": breakdown,
@@ -99,7 +99,7 @@ pub(crate) fn profiled_agg_search(
                 })
                 .unwrap_or_default();
             let mut entry = json!({
-                "type": agg_profile_type(&def),
+                "type": agg_profile_type(&def, Some(ctx)),
                 "description": name,
                 "time_in_nanos": total,
                 "breakdown": breakdown,
@@ -120,18 +120,53 @@ pub(crate) fn profiled_agg_search(
     (res, profile)
 }
 
+/// Whether the field an aggregation names holds numbers rather than strings.
+///
+/// The name it arrives under is the column it was rewritten to, so the view
+/// prefix comes off before the mapping is asked.
+fn numeric_field(field: &str, ctx: Option<&Ctx>) -> bool {
+    let bare = field
+        .strip_prefix(&format!("{}.", crate::store::RAW))
+        .or_else(|| field.strip_prefix(&format!("{}.", crate::store::DYN)))
+        .or_else(|| field.strip_prefix(&format!("{}.", crate::store::FIELDDATA)))
+        .unwrap_or(field);
+    let Some(ctx) = ctx else { return false };
+    match ctx.mapping.type_of(bare) {
+        Some(t) => matches!(
+            t,
+            "long"
+                | "integer"
+                | "short"
+                | "byte"
+                | "double"
+                | "float"
+                | "half_float"
+                | "scaled_float"
+                | "unsigned_long"
+        ),
+        // nothing declared: what the documents actually put there decides
+        None => ctx
+            .observed_kinds
+            .get(bare)
+            .map(|k| *k != 0 && k & (crate::store::KIND_STR | crate::store::KIND_DATE) == 0)
+            .unwrap_or(false),
+    }
+}
+
 /// The aggregator name OpenSearch reports for a request of this shape.
-pub(crate) fn agg_profile_type(def: &Value) -> String {
+pub(crate) fn agg_profile_type(def: &Value, ctx: Option<&Ctx>) -> String {
     let kind = def.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
     match kind.as_str() {
         "cardinality" => "CardinalityAggregator".into(),
         "terms" => {
             let body = def.get("terms").cloned().unwrap_or(Value::Null);
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
-            // the aggregator OpenSearch names depends on where the terms live:
+            // The aggregator OpenSearch names depends on what the field holds:
             // an ordinal map for a keyword column, a hash map when the request
-            // asks for one, and neither for a numeric column
-            if field.starts_with(crate::store::DYN) {
+            // asks for one, and neither for numbers. Both live in the same
+            // column now, so the mapping is what says which this is -- which
+            // is where OpenSearch reads it from as well.
+            if numeric_field(field, ctx) {
                 "NumericTermsAggregator".into()
             } else if body.get("execution_hint").and_then(|h| h.as_str()) == Some("map") {
                 "MapStringTermsAggregator".into()
@@ -180,8 +215,9 @@ pub(crate) fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
         // which kind of term was bucketed, which is what the strategy names
         let field = body.get("field").and_then(|f| f.as_str()).unwrap_or("");
         // the strategy names what was bucketed: numbers are collected as
-        // longs, everything else as terms
-        let strategy = if field.starts_with(crate::store::DYN) { "long_terms" } else { "terms" };
+        // longs, everything else as terms. Both are read from the same column
+        // now, so it is the mapping that says which this is
+        let strategy = if numeric_field(field, Some(ctx)) { "long_terms" } else { "terms" };
         let mut out = json!({
             "result_strategy": strategy,
             "collection_strategy": "dense",
@@ -381,7 +417,9 @@ pub(crate) fn own_agg_profiles(
         // there is no leaf left for it to walk
         let visited = if query_json.is_some() { 0 } else { 1 };
         own.push(json!({
-            "type": agg_profile_type(def),
+            // the aggregations peeled out here are `filter` and `filters`,
+            // which are never named after the column they read
+            "type": agg_profile_type(def, None),
             "description": name,
             "time_in_nanos": 0,
             "breakdown": {
