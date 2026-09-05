@@ -57,6 +57,8 @@ md5 = "0.7"
 sha3 = "0.10"
 percent-encoding = "2"
 sha2 = "0.10"
+# request signing for the object-store repositories
+hmac = "0.12"
 rayon = "1"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }

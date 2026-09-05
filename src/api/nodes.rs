@@ -430,6 +430,9 @@ fn plugins() -> Value {
         "analysis-ukrainian",
         "ingest-attachment",
         "opensearch-security",
+        "repository-azure",
+        "repository-gcs",
+        "repository-s3",
     ];
     Value::Array(
         NAMED

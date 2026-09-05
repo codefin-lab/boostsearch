@@ -412,6 +412,11 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
         ("lang-expression", "Lucene expressions integration for OpenSearch"),
         ("lang-mustache", "Mustache scripting integration for OpenSearch"),
         ("opensearch-security", "Provide access control related features for OpenSearch"),
+        ("repository-azure", "The Azure Repository plugin adds support for Azure storage \
+                             repositories"),
+        ("repository-gcs", "The GCS repository plugin adds Google Cloud Storage support for \
+                           repositories"),
+        ("repository-s3", "The S3 repository plugin adds S3 repositories"),
     ];
     let rows: Vec<Vec<(&str, String)>> = built_in
         .iter()
