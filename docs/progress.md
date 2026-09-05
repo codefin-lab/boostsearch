@@ -2568,3 +2568,58 @@ plugin and no other, which a single binary that carries all of them cannot say
 truthfully.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100.
+
+### 8.3 — A repository read over a URL, and Phase 8 closes
+
+`type: url` is how a snapshot taken by one cluster is restored by another
+without giving the second one write access to where the first one keeps its
+files. It reads `http://`, `https://` and `file://`, and it is read-only: a
+snapshot cannot be made in one and cannot be deleted from one.
+
+Three things had to be built for it.
+
+**A repository read over a URL cannot list a directory.** Everything above it
+wants to know what snapshots are there, and over HTTP there is no way to ask.
+OpenSearch keeps an `index-N` blob for exactly this; a repository written here
+now leaves an `index.json` beside its snapshots, refreshed whenever one is
+made or forgotten. A filesystem repository does not need it and writes it
+anyway, because a URL repository may be pointed at the same directory later.
+
+**Where a repository's files are is not the same as how they are reached.** A
+`Source` says both: a directory, or a URL. Restoring an index reads its
+mapping and its documents through that rather than through a path, which is
+what lets the same restore run over a filesystem and over HTTP.
+
+**Two errors had a precedence that was not obvious.** Deleting a snapshot that
+was never there is `snapshot_missing_exception` whoever asked -- only one that
+is really held runs into the repository being read-only. And a restore naming
+a snapshot that does not exist is a restore that failed, not a request that
+merely asked after something absent: `snapshot_restore_exception`.
+
+The suite is written against three repositories and an HTTP fixture that
+OpenSearch's build sets up before each of its tests, and says so in its own
+header. `yaml_runner.py` grew a `--before` hook for that: a script run after
+the reset and before each section, for a suite written against a cluster its
+build prepared. Eight sections, all passing.
+
+**Phase 8 is closed at twenty-three of its twenty-four sections.** Module
+corpus **820 to 850 of 895**, failures 71 to 41. What each of the five pieces
+took:
+
+| | sections | what it needed |
+|---|---:|---|
+| geoip | 7 | a MaxMind reader, and the databases pointed at |
+| phonetic | 5 | ten commons-codec encoders, and its rule files pointed at |
+| phone numbers | 1 of 2 | libphonenumber, and prefixes on the indexing side only |
+| Lucene expressions | 2 | metric aggregations that take a script for a field |
+| attachment | 7 | text, Open XML, and the older binary Word format |
+| the URL repository | 8 | an index a reader can find, and a source that is not a path |
+
+The one section that does not pass asks `_cat/plugins` to report
+`analysis-phonenumber` and no other plugin. This engine carries all of them in
+one binary and says so, because a client asking whether it may use
+`icu_tokenizer` deserves a true answer. There is no version of that answer
+which satisfies a suite written to check that its plugin is the only one
+installed, and pretending otherwise would mean lying to every client that asks.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100.

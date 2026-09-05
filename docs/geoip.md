@@ -53,3 +53,11 @@ The suites are run against the databases OpenSearch's own container carries,
 copied to a directory outside the repository. That is enough to prove the
 processor reads what OpenSearch reads and answers what OpenSearch answers; it
 is not a decision about what a release contains.
+
+## What the suites are run against
+
+`BOOSTSEARCH_GEOIP_PATH` points at a directory holding the three GeoLite2
+databases, copied out of OpenSearch's own container. The same shape is used
+for the Beider-Morse rules and for the repository fixture: the code is proved
+against the real data, and the data stays out of the tree until someone
+decides it belongs there.

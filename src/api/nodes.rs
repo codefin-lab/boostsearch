@@ -468,6 +468,7 @@ fn modules() -> Value {
         "percolator",
         "rank-eval",
         "reindex",
+        "repository-url",
         "search-pipeline-common",
         "transport-netty4",
     ];

@@ -39,12 +39,13 @@ Point one of those at a directory holding commons-codec's `bm` rule files and
 left as it is rather than encoded -- the filter does not fail, and neither
 does anything else.
 
-**This is the one section of OpenSearch's phonetic suite that does not pass**:
-`30_beider_morse.yml`, which asks for `languageset: polish`. It is a missing
-data file rather than missing code, and vendoring commons-codec's rules closes
-it. That is a deliberate choice to make rather than something to slip into a
-commit: fifty files of someone else's data, even under a licence that allows
-it.
+**With those files in place the whole phonetic suite passes**, including
+`30_beider_morse.yml` and its `languageset: polish` -- checked against
+commons-codec 1.18.0's own rule files, pointed at from outside this
+repository. What is missing is the data, not the code, and whether a release
+carries a hundred and twenty-seven files of somebody else's data -- even under
+a licence that allows it -- is a decision to make rather than something to
+slip into a commit.
 
 ## A note on why the encoders are guarded
 

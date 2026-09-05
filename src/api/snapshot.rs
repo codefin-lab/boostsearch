@@ -34,6 +34,26 @@ pub async fn put_repository(
             ),
         );
     }
+    // A repository read over a URL is one nothing writes to, and a cluster
+    // will not read from anywhere it was not told it may: a `file://` URL has
+    // to sit under the repository root, and any other has to be named in
+    // `repositories.url.allowed_urls`.
+    if let Some(url) = crate::snapshot::url::url_of(&body) {
+        let allowed_urls = allowed_urls(&store);
+        if !crate::snapshot::url::allowed(&url, &allowed_urls) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "repository_exception",
+                format!(
+                    "[{name}] file url [{url}] doesn't match any of the locations \
+                     specified by path.repo or repositories.url.allowed_urls"
+                ),
+            );
+        }
+        for (snap, record) in crate::snapshot::url::read_records(&url) {
+            store.put_snapshot(&name, &snap, record);
+        }
+    }
     // a repository that already holds snapshots says so as soon as it is
     // registered: the records are on its disk, not in a cluster state this
     // server keeps across a restart
@@ -150,6 +170,60 @@ pub(crate) fn snapshot_record(
     })
 }
 
+/// Read again what a repository nothing writes to has come to hold.
+///
+/// A repository read over a URL is written to by somebody else -- that is the
+/// whole point of one -- so what it holds is looked at when it is asked about
+/// rather than remembered from the moment it was registered.
+fn refresh_readonly(store: &Store, repo: &str) {
+    let Some(found) = store.repositories().get(repo).cloned() else { return };
+    let Some(url) = crate::snapshot::url::url_of(&found) else { return };
+    for (snap, record) in crate::snapshot::url::read_records(&url) {
+        store.put_snapshot(repo, &snap, record);
+    }
+}
+
+/// Where this node is willing to read a repository from.
+///
+/// A cluster setting says so if one was set, and the node's own configuration
+/// says so otherwise -- which is where OpenSearch reads it from as well, its
+/// `repositories.url.allowed_urls` being a node setting rather than a cluster
+/// one. A pattern may end in `*`.
+pub(crate) fn allowed_urls(store: &Store) -> Vec<String> {
+    let listed = |v: Value| -> Vec<String> {
+        match v {
+            Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+            Value::String(one) => one.split(',').map(|s| s.trim().to_string()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    if let Some(v) = store.cluster_setting("repositories.url.allowed_urls") {
+        return listed(v);
+    }
+    std::env::var("BOOSTSEARCH_URL_ALLOWED")
+        .ok()
+        .map(|v| listed(Value::String(v)))
+        .unwrap_or_default()
+}
+
+/// A repository read over a URL, or one told it is read-only, refuses to be
+/// written to -- and says so in the words OpenSearch says it in.
+fn refuse_if_readonly(store: &Store, repo: &str) -> Option<Response> {
+    let found = store.repositories().get(repo).cloned()?;
+    let readonly = crate::snapshot::url::url_of(&found).is_some()
+        || found
+            .pointer("/settings/readonly")
+            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+            .unwrap_or(false);
+    readonly.then(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "repository_exception",
+            format!("[{repo}] cannot delete snapshot from a readonly repository"),
+        )
+    })
+}
+
 pub async fn create_snapshot(
     State(store): State<Store>,
     Path((repo, name)): Path<(String, String)>,
@@ -162,6 +236,9 @@ pub async fn create_snapshot(
             "repository_missing_exception",
             format!("[{repo}] missing"),
         );
+    }
+    if let Some(r) = refuse_if_readonly(&store, &repo) {
+        return r;
     }
     let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
     let asked = match body.get("indices") {
@@ -267,6 +344,7 @@ pub async fn get_snapshot(
             format!("[{repo}] missing"),
         );
     }
+    refresh_readonly(&store, &repo);
     let (mut found, missing) = pick_snapshots(&store, &repo, &name);
     if let Some(gone) = missing
         && !ignore_unavailable(&p)
@@ -298,6 +376,16 @@ pub async fn delete_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    refresh_readonly(&store, &repo);
+    // a snapshot that was never there is missing whoever asked: only one that
+    // is really held runs into the repository being read-only
+    let exists = store
+        .snapshots(&repo)
+        .keys()
+        .any(|n| *n == name || crate::store::glob_match(&name, n));
+    if exists && let Some(r) = refuse_if_readonly(&store, &repo) {
+        return r;
+    }
     // what the repository was keeping goes with the record of it
     let held: Vec<String> = store
         .snapshots(&repo)
@@ -372,12 +460,15 @@ pub async fn clone_snapshot(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    refresh_readonly(&store, &repo);
     let held = store.snapshots(&repo);
+    // a restore that names a snapshot which is not there failed to restore,
+    // which is not the same as a request that merely asked after it
     let Some(source) = held.get(&name) else {
         return err(
-            StatusCode::NOT_FOUND,
-            "snapshot_missing_exception",
-            format!("[{repo}:{name}] is missing"),
+            StatusCode::BAD_REQUEST,
+            "snapshot_restore_exception",
+            format!("[{repo}:{name}] snapshot does not exist"),
         );
     };
     let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
@@ -405,12 +496,15 @@ pub async fn restore_snapshot(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    refresh_readonly(&store, &repo);
     let held = store.snapshots(&repo);
+    // a restore that names a snapshot which is not there failed to restore,
+    // which is not the same as a request that merely asked after it
     let Some(source) = held.get(&name) else {
         return err(
-            StatusCode::NOT_FOUND,
-            "snapshot_missing_exception",
-            format!("[{repo}:{name}] is missing"),
+            StatusCode::BAD_REQUEST,
+            "snapshot_restore_exception",
+            format!("[{repo}:{name}] snapshot does not exist"),
         );
     };
     let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
@@ -439,7 +533,7 @@ pub async fn restore_snapshot(
             Err(_) => n.to_string(),
         }
     };
-    let dir = store.repositories().get(&repo).and_then(crate::snapshot::location);
+    let from = store.repositories().get(&repo).and_then(crate::snapshot::Source::of);
     // an index comes back from a snapshot open, and says so when asked how it
     // was recovered
     let mut restored = Vec::new();
@@ -458,10 +552,10 @@ pub async fn restore_snapshot(
             continue;
         }
         // gone: this is what a snapshot is for
-        let Some(dir) = dir.as_ref() else {
+        let Some(from) = from.as_ref() else {
             continue;
         };
-        match crate::snapshot::restore_index(&store, dir, &name, n, &target) {
+        match crate::snapshot::restore_index(&store, from, &name, n, &target) {
             Ok(docs) => {
                 tracing::info!("restored [{target}] from [{repo}:{name}] with {docs} documents");
                 restored.push(target);

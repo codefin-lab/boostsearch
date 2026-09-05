@@ -6,7 +6,7 @@ implementation under test is ours. Nothing here is rewritten by hand, so a
 passing test means we match OpenSearch's documented behaviour, not our idea
 of it.
 """
-import argparse, datetime, json, os, pathlib, re, sys, time, traceback
+import argparse, datetime, json, os, pathlib, re, subprocess, sys, time, traceback
 import yaml
 import requests
 
@@ -486,6 +486,12 @@ def main():
     ap.add_argument("--json-out", default="")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--show", type=int, default=15, help="how many failures to print")
+    ap.add_argument(
+        "--before",
+        default="",
+        help="a script run after the reset and before each section, for a suite "
+        "written against a cluster its build set something up on",
+    )
     args = ap.parse_args()
 
     specs = load_api_specs()
@@ -537,6 +543,12 @@ def main():
                 fs += 1
                 continue
             reset(args.url)
+            # Some suites are written against a cluster whose build registered
+            # something first -- repository-url is written against three
+            # repositories and an HTTP fixture. The reset above takes those
+            # with everything else, so they are put back here.
+            if args.before:
+                subprocess.run([sys.executable, args.before], check=False)
             r = Runner(args.url, specs, args.verbose)
             try:
                 r.run_steps(setup)
