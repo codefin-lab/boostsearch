@@ -25,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use boostsearch::console::Console;
 use boostsearch::console::engine::{Engine, Failed};
+use boostsearch::console::metrics::Metrics;
 use boostsearch::console::saved::{Looking, Saved, Writing};
 use boostsearch::console::settings::Settings;
 use serde_json::Value;
@@ -33,6 +34,7 @@ use serde_json::Value;
 struct Serving {
     console: Console,
     engine: Engine,
+    metrics: Metrics,
 }
 
 type Shared = Arc<Serving>;
@@ -76,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
 
     let build = console.pinned.build_number;
     let base = console.base_path.clone();
-    let console = Arc::new(Serving { console, engine: Engine::at(&engine_url) });
+    let console =
+        Arc::new(Serving { console, engine: Engine::at(&engine_url), metrics: Metrics::default() });
     let routes: Router<Shared> = Router::new()
         .route("/", get(root))
         .route("/app/{app}", get(page))
@@ -123,6 +126,18 @@ async fn main() -> anyhow::Result<()> {
             "/api/opensearch-dashboards/management/saved_objects/{kind}/{id}",
             get(management_one),
         )
+        .route("/api/index_patterns/_fields_for_wildcard", get(fields_for_wildcard))
+        .route("/api/index_patterns/_fields_for_time_pattern", get(fields_for_time_pattern))
+        .route("/internal/_msearch", post(msearch))
+        .route("/internal/search/{strategy}", post(search_strategy))
+        .route("/internal/search/{strategy}/{id}", post(search_strategy).delete(cancel_search))
+        .route("/api/opensearch-dashboards/suggestions/values/{index}", post(suggestions))
+        .route("/api/opensearch-dashboards/scripts/languages", get(script_languages))
+        .route("/api/shorten_url", post(shorten_url))
+        .route("/api/short_url/{id}", get(short_url))
+        .route("/goto/{id}", get(goto))
+        .route("/api/console/proxy", post(console_proxy))
+        .route("/api/console/opensearch_config", get(opensearch_config))
         .route("/api/saved_objects/_bulk_get", post(bulk_get))
         .route("/api/saved_objects/_bulk_create", post(bulk_create))
         .route("/api/saved_objects/_bulk_update", axum::routing::put(bulk_update))
@@ -137,7 +152,9 @@ async fn main() -> anyhow::Result<()> {
         "" => routes,
         base => Router::new().nest(base, routes).route("/", get(root)),
     };
-    let app = routes.with_state(console.clone());
+    let app = routes
+        .layer(axum::middleware::from_fn_with_state(console.clone(), counted))
+        .with_state(console.clone());
 
     // the index everything is kept in, made if nothing has and moved on if
     // its shape has changed. A console that cannot do this can still serve
@@ -301,9 +318,22 @@ async fn status(State(serving): State<Shared>) -> Response {
                 "uiColor": ui_colour,
             }],
         },
-        "metrics": serde_json::Value::Null,
+        "metrics": serving.metrics.report(),
     }))
     .into_response()
+}
+
+/// Every request counted on its way through, for the status page.
+async fn counted(
+    State(serving): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let started = std::time::Instant::now();
+    serving.metrics.arrived();
+    let response = next.run(request).await;
+    serving.metrics.answered(response.status().as_u16(), started.elapsed().as_millis() as u64);
+    response
 }
 
 /// What a caller may do.
@@ -339,7 +369,13 @@ where
     match tokio::task::spawn_blocking(move || work(&serving)).await {
         Ok(Ok(found)) => axum::Json(found).into_response(),
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!("{e}"),
+        }),
     }
 }
 
@@ -352,6 +388,12 @@ fn refused(e: Failed) -> Response {
     });
     if let Some(objects) = e.objects {
         body["attributes"] = serde_json::json!({"objects": objects});
+    }
+    if let Some(error) = e.error {
+        body["attributes"] = serde_json::json!({"error": *error});
+    }
+    if let Some(attributes) = e.attributes {
+        body["attributes"] = *attributes;
     }
     (status, axum::Json(body)).into_response()
 }
@@ -417,7 +459,13 @@ async fn migrate_now(State(serving): State<Shared>) -> Response {
     match found {
         Ok(Ok(_)) => axum::Json(serde_json::json!({"success": true})).into_response(),
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!("{e}"),
+        }),
     }
 }
 
@@ -572,6 +620,8 @@ async fn find(
     if looking.types.is_empty() {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message:
                 "[request query.type]: expected at least one defined value but got [undefined]"
@@ -582,7 +632,13 @@ async fn find(
         match boostsearch::console::filter::parse(&filter, &looking.types) {
             Ok(query) => looking.filter_query = Some(query),
             Err(message) => {
-                return refused(Failed { objects: None, status: 400, message });
+                return refused(Failed {
+                    objects: None,
+                    error: None,
+                    attributes: None,
+                    status: 400,
+                    message,
+                });
             }
         }
     }
@@ -634,6 +690,8 @@ async fn export(State(serving): State<Shared>, body: String) -> Response {
         _ => {
             return refused(Failed {
                 objects: None,
+                error: None,
+                attributes: None,
                 status: 400,
                 message: "[request body]: expected a plain object value, but found [null] instead."
                     .into(),
@@ -670,7 +728,13 @@ async fn export(State(serving): State<Shared>, body: String) -> Response {
                 .into_response()
         }
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!("{e}"),
+        }),
     }
 }
 
@@ -685,6 +749,8 @@ async fn import(
     if !is_form_upload(&headers) {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 415,
             message: "Unsupported Media Type".into(),
         });
@@ -693,6 +759,8 @@ async fn import(
     let Some(lines) = file_part(&body) else {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: "[request body.file]: expected value of type [Stream] but got [undefined]"
                 .into(),
@@ -720,6 +788,8 @@ async fn resolve_import_errors(
     if !is_form_upload(&headers) {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 415,
             message: "Unsupported Media Type".into(),
         });
@@ -727,6 +797,8 @@ async fn resolve_import_errors(
     let Some(lines) = file_part(&body) else {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: "[request body.file]: expected value of type [Stream] but got [undefined]"
                 .into(),
@@ -855,6 +927,8 @@ async fn management_find(
     if raw.contains("searchFields=") {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: "[request query.searchFields]: definition for this key is missing".into(),
         });
@@ -863,6 +937,8 @@ async fn management_find(
     if looking.types.is_empty() {
         return refused(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message:
                 "[request query.type]: expected at least one defined value but got [undefined]"
@@ -899,4 +975,329 @@ async fn relationships(
         }
     }
     on_engine(serving, move |s| management_of(s).relationships(&kind, &id, &types, size)).await
+}
+
+// ---- what the pages ask for (13.4) -----------------------------------------
+
+/// A query string as pairs, in order, so that a key given twice is a list.
+fn query_pairs(query: Option<String>) -> Vec<(String, String)> {
+    form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+/// The refusal the server being replaced gives a request whose query does
+/// not fit its schema: the key named, and what was wrong with it.
+fn bad_query(key: &str, what: &str) -> Response {
+    refused(Failed::of(400, format!("[request query.{key}]: {what}")))
+}
+
+/// `meta_fields` as the route takes it: given several times it is a list,
+/// given once it is a JSON list, and anything else is refused.
+fn meta_fields_of(pairs: &[(String, String)]) -> Result<Vec<String>, Box<Response>> {
+    let given: Vec<&String> =
+        pairs.iter().filter(|(k, _)| k == "meta_fields").map(|(_, v)| v).collect();
+    match given.len() {
+        0 => Ok(Vec::new()),
+        1 => {
+            let parsed: Result<Vec<String>, _> = serde_json::from_str(given[0]);
+            parsed.map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "statusCode": 400, "error": "Bad Request", "message": "Bad Request",
+                    })),
+                )
+                    .into_response()
+                    .into()
+            })
+        }
+        _ => Ok(given.into_iter().cloned().collect()),
+    }
+}
+
+async fn fields_for_wildcard(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let pairs = query_pairs(query);
+    for (key, _) in &pairs {
+        if !matches!(key.as_str(), "pattern" | "meta_fields" | "data_source") {
+            return bad_query(key, "definition for this key is missing");
+        }
+    }
+    let Some(pattern) = pairs.iter().find(|(k, _)| k == "pattern").map(|(_, v)| v.clone()) else {
+        return bad_query("pattern", "expected value of type [string] but got [undefined]");
+    };
+    let meta_fields = match meta_fields_of(&pairs) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    on_engine(serving, move |s| {
+        boostsearch::console::fields::for_wildcard(&s.engine, &pattern, &meta_fields)
+            .map(|fields| serde_json::json!({"fields": fields}))
+            .map_err(not_found_for_fields)
+    })
+    .await
+}
+
+/// A pattern nothing matches is a 404 whose attributes carry the code the
+/// index-pattern page looks for; any other trouble is a plain 404, as the
+/// server being replaced answers.
+fn not_found_for_fields(e: Failed) -> Failed {
+    if e.message.starts_with("No indices match pattern") {
+        let message = e.message.clone();
+        Failed::of(404, e.message).with_attributes(serde_json::json!({
+            "statusCode": 404, "error": "Not Found", "message": message,
+            "code": "no_matching_indices",
+        }))
+    } else {
+        Failed::of(404, "Not Found")
+    }
+}
+
+async fn fields_for_time_pattern(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let pairs = query_pairs(query);
+    for (key, _) in &pairs {
+        if !matches!(
+            key.as_str(),
+            "pattern" | "interval" | "look_back" | "meta_fields" | "data_source"
+        ) {
+            return bad_query(key, "definition for this key is missing");
+        }
+    }
+    let Some(pattern) = pairs.iter().find(|(k, _)| k == "pattern").map(|(_, v)| v.clone()) else {
+        return bad_query("pattern", "expected value of type [string] but got [undefined]");
+    };
+    let look_back = match pairs.iter().find(|(k, _)| k == "look_back").map(|(_, v)| v) {
+        None => {
+            return bad_query("look_back", "expected value of type [number] but got [undefined]");
+        }
+        Some(text) => match text.parse::<f64>() {
+            Err(_) => {
+                return bad_query("look_back", "expected value of type [number] but got [string]");
+            }
+            Ok(n) if n < 1.0 => {
+                return bad_query("look_back", "Value must be equal to or greater than [1].");
+            }
+            Ok(n) => n as usize,
+        },
+    };
+    let meta_fields = match meta_fields_of(&pairs) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    on_engine(serving, move |s| {
+        boostsearch::console::fields::for_time_pattern(&s.engine, &pattern, look_back, &meta_fields)
+            .map(|fields| serde_json::json!({"fields": fields}))
+            .map_err(|_| Failed::of(404, "Not Found"))
+    })
+    .await
+}
+
+async fn msearch(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let body = body.0;
+    on_engine(serving, move |s| boostsearch::console::search::msearch(&s.engine, &body)).await
+}
+
+async fn search_strategy(
+    State(serving): State<Shared>,
+    Path(params): Path<Vec<(String, String)>>,
+    body: axum::Json<Value>,
+) -> Response {
+    let strategy =
+        params.iter().find(|(k, _)| k == "strategy").map(|(_, v)| v.clone()).unwrap_or_default();
+    if strategy != "opensearch" {
+        return refused(Failed::of(404, format!("Search strategy {strategy} not found")));
+    }
+    let body = body.0;
+    on_engine(serving, move |s| boostsearch::console::search::search(&s.engine, &body)).await
+}
+
+/// A search that cannot be cancelled -- the engine answers each in one
+/// piece -- is answered for as the server being replaced answers: done.
+async fn cancel_search() -> Response {
+    StatusCode::OK.into_response()
+}
+
+async fn suggestions(
+    State(serving): State<Shared>,
+    Path(index): Path<String>,
+    body: axum::Json<Value>,
+) -> Response {
+    let body = body.0;
+    let Some(field) = body.get("field").and_then(|v| v.as_str()).map(String::from) else {
+        return refused(Failed::of(
+            400,
+            "[request body.field]: expected value of type [string] but got [undefined]",
+        ));
+    };
+    let Some(query) = body.get("query").and_then(|v| v.as_str()).map(String::from) else {
+        return refused(Failed::of(
+            400,
+            "[request body.query]: expected value of type [string] but got [undefined]",
+        ));
+    };
+    let bool_filter = body.get("boolFilter").cloned();
+    on_engine(serving, move |s| {
+        boostsearch::console::search::suggestions(
+            &s.engine,
+            &saved_of(s),
+            &index,
+            &field,
+            &query,
+            bool_filter.as_ref(),
+        )
+    })
+    .await
+}
+
+async fn script_languages() -> Response {
+    axum::Json(serde_json::json!(["painless", "expression"])).into_response()
+}
+
+async fn shorten_url(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let Some(url) = body.get("url").and_then(|v| v.as_str()).map(String::from) else {
+        return refused(Failed::of(
+            400,
+            "[request body.url]: expected value of type [string] but got [undefined]",
+        ));
+    };
+    on_engine(serving, move |s| {
+        boostsearch::console::urls::shorten(&saved_of(s), &url)
+            .map(|id| serde_json::json!({"urlId": id}))
+    })
+    .await
+}
+
+async fn short_url(State(serving): State<Shared>, Path(id): Path<String>) -> Response {
+    on_engine(serving, move |s| {
+        boostsearch::console::urls::resolve(&saved_of(s), &id)
+            .map(|url| serde_json::json!({"url": url}))
+    })
+    .await
+}
+
+/// The browser sent on to the long address -- or, where the operator keeps
+/// state in session storage and the address is not the whole of it, the
+/// application itself, which knows what to do with the id.
+async fn goto(State(serving): State<Shared>, Path(id): Path<String>) -> Response {
+    let resolved = tokio::task::spawn_blocking({
+        let serving = serving.clone();
+        move || {
+            let url = boostsearch::console::urls::resolve(&saved_of(&serving), &id)?;
+            let in_session = settings_of(&serving)
+                .read()
+                .ok()
+                .and_then(|found| {
+                    found.pointer("/settings/state:storeInSessionStorage/userValue").cloned()
+                })
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok::<_, Failed>((url, in_session))
+        }
+    })
+    .await;
+    match resolved {
+        Ok(Ok((url, false))) => {
+            let location = match url.starts_with('/') {
+                true => format!("{}{url}", serving.console.base_path),
+                false => url,
+            };
+            (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+        }
+        Ok(Ok((_, true))) => page(State(serving), Path("goto".to_string())).await,
+        Ok(Err(e)) => refused(e),
+        Err(e) => refused(Failed::of(500, format!("{e}"))),
+    }
+}
+
+/// The Dev Tools page's way to the engine: the request as typed, carried
+/// through, and the answer as given.
+async fn console_proxy(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let pairs = query_pairs(query);
+    let value = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    let Some(method) = value("method") else {
+        return bad_query("method", "expected value of type [string] but got [undefined]");
+    };
+    let method = method.to_ascii_uppercase();
+    if !matches!(method.as_str(), "HEAD" | "GET" | "POST" | "PUT" | "DELETE") {
+        return bad_query(
+            "method",
+            &format!(
+                "Method must be one of, case insensitive ['HEAD', 'GET', 'POST', 'PUT', 'DELETE']. Received '{method}'."
+            ),
+        );
+    }
+    let path = match value("path") {
+        Some(p) if !p.is_empty() => p,
+        Some(_) => return bad_query("path", "Expected non-empty string"),
+        None => return bad_query("path", "expected value of type [string] but got [undefined]"),
+    };
+    // the engine's answer pretty-printed unless the caller said otherwise,
+    // as the page shows it
+    let mut path = format!("/{}", path.trim_start_matches('/'));
+    if !path.contains("pretty=") {
+        path.push(if path.contains('?') { '&' } else { '?' });
+        path.push_str("pretty=true");
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let answered = tokio::task::spawn_blocking({
+        let serving = serving.clone();
+        move || serving.engine.raw(&method, &path, &body, &content_type).map(|a| (method, a))
+    })
+    .await;
+    match answered {
+        Ok(Ok((method, answer))) => {
+            let status = StatusCode::from_u16(answer.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let warning = answer.warning.unwrap_or_default();
+            if method == "HEAD" {
+                let text = format!("{} - {}", answer.status, String::from_utf8_lossy(&answer.body));
+                return (
+                    status,
+                    [(header::CONTENT_TYPE, "text/plain".to_string()), (header::WARNING, warning)],
+                    text,
+                )
+                    .into_response();
+            }
+            let json = answer.content_type.contains("application/json");
+            let mut response = (status, answer.body).into_response();
+            let headers = response.headers_mut();
+            if json {
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json; charset=utf-8"),
+                );
+            } else if let Ok(v) = HeaderValue::from_str(&answer.content_type) {
+                headers.insert(header::CONTENT_TYPE, v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&warning) {
+                headers.insert(header::WARNING, v);
+            }
+            response
+        }
+        Ok(Err(e)) => (
+            StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY),
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({"message": e.message}).to_string(),
+        )
+            .into_response(),
+        Err(e) => refused(Failed::of(500, format!("{e}"))),
+    }
+}
+
+async fn opensearch_config(State(serving): State<Shared>) -> Response {
+    axum::Json(serde_json::json!({"host": serving.engine.host()})).into_response()
 }

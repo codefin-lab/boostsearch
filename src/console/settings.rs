@@ -86,6 +86,8 @@ impl<'a> Settings<'a> {
         if let Some(key) = changes.keys().find(|k| self.overrides.contains_key(*k)) {
             return Err(Failed {
                 objects: None,
+                error: None,
+                attributes: None,
                 status: 400,
                 message: format!("Unable to update \"{key}\" because it is overridden"),
             });
