@@ -11,6 +11,9 @@
 !/tools/test_inventory.json
 !/tools/phase1_manifest.json
 !/tools/phase3_manifest.json
+!/tools/modules_manifest.json
+# what the server Phase 13 replaces scores against its own suite
+!/tools/dashboards_baseline.json
 
 # Benchmark output. Keep the Phase 2 progression and the final clean
 # head-to-head, which are what the docs report; the rest are working runs.

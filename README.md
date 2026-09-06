@@ -140,7 +140,10 @@ passes and adds them up.
 - **Not an OpenSearch product**, and not endorsed by the OpenSearch project. It
   implements the same HTTP API and says so.
 - **Not the console.** OpenSearch Dashboards' Node server is Phase 13 and is
-  not written yet; the browser application it serves is left alone.
+  not written yet; the browser application it serves is left alone. The gate it
+  will be measured by exists (`tools/dashboards_gate.py`, and
+  `tools/dashboards_check.py` for what that suite never asks about) and is
+  measured itself: the real Node server scores 140 of its own 166 cases.
 - **Not tested at every scale.** The cluster is checked in simulation across
   ten thousand seeds and on real nodes with real partitions, and the bench
   matrix is measured on a developer machine. Numbers from hardware a release

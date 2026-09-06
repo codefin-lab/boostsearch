@@ -179,7 +179,7 @@ HNSW, filtered search, nested vectors, the on-disk format, the k-NN API.
 Two query languages: lexer, parser, planner, execution against the search
 layer, and the response shapes their drivers expect.
 
-### 13. The console's server — 30 days
+### 13. The console's server — 33 days
 
 OpenSearch Dashboards is two programs. One is a Node server: it keeps the
 saved objects, migrates them, proxies the search API, serves the front end and
@@ -197,6 +197,7 @@ instead of most of a minute and holds tens of megabytes instead of hundreds.
 
 | | | days |
 |---|---|---:|
+| 13.0 | The gate before the work: Dashboards' own API suite pointed at the Node server, its baseline recorded, and our own checks for what that suite never asks about | 3 |
 | 13.1 | The shell: the built assets, the metadata the front end boots from, the base path, the CSP, the translations | 6 |
 | 13.2 | Settings and status: `uiSettings` and the config object behind it, `/api/status` | 3 |
 | 13.3 | Saved objects: the store, the migrations that make `.kibana_N` and move the alias, the API and the management routes | 8 |
@@ -204,11 +205,20 @@ instead of most of a minute and holds tens of megabytes instead of hundreds.
 | 13.5 | The plugin routes the pages we answer for need; a plain refusal for the rest | 4 |
 | 13.6 | The gate: every Phase 7.1 flow, through our server, against the same browser | 4 |
 
-Gate: the flows Phase 7.1 drives -- migration, Discover, the Visualize
-editor, a saved dashboard, the saved-object round trip, Index Management --
-pass against our server with the front end unchanged; resident memory under
-64MiB against the Node server's several hundred; ready to serve in under a
-second against its thirty.
+Gate: `tools/dashboards_gate.py` -- OpenSearch Dashboards' own
+`test/api_integration`, 166 cases -- with no failure our server has that the
+Node server does not; `tools/dashboards_check.py` for the shell, settings,
+capabilities, the console proxy and the management routes that suite never
+asks about; the flows Phase 7.1 drives passing against our server with the
+front end unchanged; resident memory under 64MiB against the Node server's
+several hundred; ready to serve in under a second against its thirty.
+
+13.0 comes first for the reason every other phase learned the hard way: a
+number is worth what the gate behind it is worth, and a gate nobody has run
+against a known-good implementation is not one yet. Run against the real Node
+server the suite scores 140 of 166 -- so 166 was never the target, and finding
+that out after writing the server would have meant chasing twenty-six failures
+that were never ours.
 
 What is not claimed: the plugin system. Dashboards loads fifty-four plugins,
 most of them for features this plan does not have. Our server answers the
