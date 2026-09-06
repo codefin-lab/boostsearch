@@ -16,6 +16,8 @@ mod kstem;
 mod morph;
 mod phone;
 mod phonetic;
+mod romaji;
+mod unicode_set;
 mod rslp;
 mod snowball;
 mod stem;
@@ -100,6 +102,9 @@ enum Source {
         drop_grammar: bool,
         /// keep each word as it stands on its own
         base_form: bool,
+        /// read for a search box: a long compound is offered whole and in
+        /// pieces, so that a search for either finds it
+        search: bool,
     },
     Ngram {
         min: usize,
@@ -262,10 +267,14 @@ pub enum Step {
         hashes: usize,
     },
     /// the word written the one way Unicode says it is written, in the case
-    /// it is compared in: `Ruß` is `russ`
-    IcuNormalize,
+    /// it is compared in: `Ruß` is `russ`. A set, where one is given, says
+    /// which characters may be changed and leaves the rest alone.
+    IcuNormalize(Option<unicode_set::UnicodeSet>),
     /// the same, and the marks written on the letters dropped as well
-    IcuFold,
+    IcuFold(Option<unicode_set::UnicodeSet>),
+    /// `icu_collation`: two words a language considers the same at this
+    /// strength become the same token, so a search for one finds the other
+    Collate { strength: Strength },
     /// a word is kept as it stands on its own: `飲み` is `飲む`
     BaseForm(morph::Language),
     /// the parts of speech a search has no use for -- a particle, an ending --
@@ -273,6 +282,12 @@ pub enum Step {
     PartOfSpeech(morph::Language),
     /// how the word is read, rather than how it is written
     Reading(morph::Language),
+    /// `kuromoji_stemmer`: a katakana word long enough to have been written
+    /// with a long mark loses it, so `サーバー` and `サーバ` are one word
+    KatakanaStem { minimum: usize },
+    /// `kuromoji_completion`: the word, and its reading written in the Latin
+    /// alphabet in both of the systems that write it differently
+    Completion { index: bool },
 }
 
 impl Step {
@@ -309,7 +324,7 @@ pub enum CharFilter {
         pattern: String,
         replacement: String,
     },
-    IcuNormalize,
+    IcuNormalize(Option<unicode_set::UnicodeSet>),
 }
 
 impl CharFilter {
@@ -426,7 +441,10 @@ impl CharFilter {
                 Ok(re) => re.replace_all(text, replacement.as_str()).into_owned(),
                 Err(_) => text.to_string(),
             },
-            CharFilter::IcuNormalize => icu_normalize(text),
+            CharFilter::IcuNormalize(set) => match set {
+                Some(set) => unicode_set::within(text, set, |c| icu_normalize(c)),
+                None => icu_normalize(text),
+            },
         }
     }
 }
@@ -622,11 +640,15 @@ impl Chain {
                 .into_iter()
                 .map(|(t, p, a, b, l)| (t.to_lowercase(), p, a, b, l))
                 .collect(),
-            Source::Morph { language, drop_grammar, base_form } => {
+            Source::Morph { language, drop_grammar, base_form, search } => {
                 // the dictionary says what each word is while it is reading
                 // the text; asking again about one word on its own would not
                 // give the same answer, so the choice is made here
-                morph::words(*language, text)
+                let read = match (search, language) {
+                    (true, morph::Language::Japanese) => morph::search_words(text),
+                    _ => morph::words(*language, text),
+                };
+                read
                     .into_iter()
                     .filter(|w| {
                         if !drop_grammar {
@@ -1291,6 +1313,46 @@ fn apply_step(
                 (reading, p, a, b, l)
             })
             .collect(),
+        Step::KatakanaStem { minimum } => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| {
+                let long = t.chars().count() >= *minimum;
+                let all_katakana = t.chars().all(|c| matches!(c, 'ァ'..='ヶ' | 'ー'));
+                match long && all_katakana && t.ends_with('ー') {
+                    true => (t.trim_end_matches('ー').to_string(), p, a, b, l),
+                    false => (t, p, a, b, l),
+                }
+            })
+            .collect(),
+        Step::Completion { index } => {
+            // the word stays where it is and its readings stand beside it, so
+            // a search for `sushi` and one for `寿司` find the same document
+            let mut out = Vec::new();
+            for (t, p, a, b, l) in tokens {
+                let reading = morph::words(morph::Language::Japanese, &t)
+                    .into_iter()
+                    .next()
+                    .and_then(|w| w.reading);
+                // a word already written in kana is its own reading
+                let reading = reading.unwrap_or_else(|| t.clone());
+                let kunrei = romaji::of(&reading, romaji::System::Kunrei);
+                let hepburn = romaji::of(&reading, romaji::System::Hepburn);
+                // at search time the word is what was typed, not what it
+                // stands for, so only the readings are offered
+                if !index {
+                    out.push((t, p, a, b, l));
+                    continue;
+                }
+                out.push((t.clone(), p, a, b, l));
+                for written in [kunrei, hepburn] {
+                    if written != t && !out.iter().any(|(o, op, _, _, _)| *o == written && *op == p)
+                    {
+                        out.push((written, p, a, b, 1));
+                    }
+                }
+            }
+            out
+        }
         Step::MinHash { buckets, hashes } => {
             let mut out = Vec::with_capacity(*buckets);
             for bucket in 0..*buckets {
@@ -1312,12 +1374,30 @@ fn apply_step(
             }
             out
         }
-        Step::IcuNormalize => {
-            tokens.into_iter().map(|(t, p, a, b, l)| (icu_normalize(&t), p, a, b, l)).collect()
-        }
-        Step::IcuFold => {
-            tokens.into_iter().map(|(t, p, a, b, l)| (icu_fold(&t), p, a, b, l)).collect()
-        }
+        Step::IcuNormalize(set) => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| {
+                let written = match set {
+                    Some(set) => unicode_set::within(&t, set, |c| icu_normalize(c)),
+                    None => icu_normalize(&t),
+                };
+                (written, p, a, b, l)
+            })
+            .collect(),
+        Step::Collate { strength } => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| (collate(&t, *strength), p, a, b, l))
+            .collect(),
+        Step::IcuFold(set) => tokens
+            .into_iter()
+            .map(|(t, p, a, b, l)| {
+                let written = match set {
+                    Some(set) => unicode_set::within(&t, set, |c| icu_fold(c)),
+                    None => icu_fold(&t),
+                };
+                (written, p, a, b, l)
+            })
+            .collect(),
         Step::Uppercase => tokens
             .into_iter()
             .map(|(t, p, a, b, l)| {
@@ -1655,6 +1735,53 @@ fn apply_step(
 /// This is what `icu_normalizer` does: NFKC, and then the case a comparison
 /// uses -- which writes the German sharp s as two letters, the way a reader
 /// typing it on a keyboard without one would.
+/// How much of a difference between two words counts as a difference.
+///
+/// A collation compares in passes: the letters first, then the marks written
+/// on them, then the case, then the punctuation. A strength says which pass
+/// to stop after, and everything past it is a difference the comparison does
+/// not see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Strength {
+    /// the letters only: `bâton` and `Baton` are the same word
+    Primary,
+    /// the marks count: `bâton` and `baton` are different, `Baton` is not
+    Secondary,
+    /// the case counts too
+    Tertiary,
+}
+
+/// A word as the words it is equal to at this strength.
+///
+/// This is a folding, not a sort key. A collation proper answers "which of
+/// these two comes first in this language", which is a question about a
+/// locale's own order -- Swedish puts `ä` after `z`, and no folding of the
+/// letters can say that. What this answers is the question the filter is
+/// used for: whether two words are the same at a given strength, so that a
+/// search for one finds the other. Sorting on a field this produced would
+/// sort by the folded text, which is the right order for most of the Latin
+/// alphabet and not a claim about any particular language's.
+fn collate(word: &str, strength: Strength) -> String {
+    match strength {
+        // the marks and the case both dropped
+        Strength::Primary => icu_fold(word),
+        // the marks kept, the case dropped
+        Strength::Secondary => icu_normalize(word),
+        // everything kept but the way the characters are written
+        Strength::Tertiary => {
+            use icu_normalizer::ComposingNormalizerBorrowed;
+            ComposingNormalizerBorrowed::new_nfkc().normalize(word).into_owned()
+        }
+    }
+}
+
+/// The set a filter's settings name, if it names one this can read.
+fn unicode_set_of(spec: &Value) -> Option<unicode_set::UnicodeSet> {
+    spec.get("unicode_set_filter")
+        .and_then(|v| v.as_str())
+        .and_then(unicode_set::UnicodeSet::parse)
+}
+
 pub(crate) fn icu_normalize(word: &str) -> String {
     use icu_normalizer::ComposingNormalizerBorrowed;
     let folded: String = word
@@ -2451,7 +2578,11 @@ impl Registry {
             "pattern_replace" => {
                 CharFilter::Replace { pattern: text("pattern"), replacement: text("replacement") }
             }
-            "icu_normalizer" => CharFilter::IcuNormalize,
+            "icu_normalizer" => CharFilter::IcuNormalize(
+                spec.get("unicode_set_filter")
+                    .and_then(|v| v.as_str())
+                    .and_then(unicode_set::UnicodeSet::parse),
+            ),
             _ => return None,
         })
     }
@@ -2670,20 +2801,25 @@ fn source_of_name(name: &str) -> Source {
         // the tokenizers that ask a dictionary where the words are
         "icu_tokenizer" | "thai" => Source::Icu,
         // and the ones whose dictionary also says what each word is
+        // kuromoji reads for a search box by default, which means a long
+        // compound is offered whole and in pieces
         "kuromoji_tokenizer" | "kuromoji" => Source::Morph {
             language: morph::Language::Japanese,
             drop_grammar: false,
             base_form: false,
+            search: true,
         },
         "nori_tokenizer" | "nori" => Source::Morph {
             language: morph::Language::Korean,
             drop_grammar: false,
             base_form: false,
+            search: false,
         },
         "smartcn_tokenizer" | "smartcn" => Source::Morph {
             language: morph::Language::Chinese,
             drop_grammar: true,
             base_form: false,
+            search: false,
         },
         "lowercase" => Source::LetterLower,
         "classic" => Source::Classic,
@@ -2812,11 +2948,27 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "decimal_digit" => vec![Step::DecimalDigits],
         "cjk_width" => vec![Step::CjkWidth],
         "cjk_bigram" => vec![Step::CjkBigram],
-        "icu_normalizer" => vec![Step::IcuNormalize],
-        "icu_folding" => vec![Step::IcuFold],
+        "icu_normalizer" => vec![Step::IcuNormalize(unicode_set_of(spec))],
+        "icu_folding" => vec![Step::IcuFold(unicode_set_of(spec))],
+        "icu_collation" | "icu_collation_keyword" => vec![Step::Collate {
+            strength: match spec.get("strength").and_then(|v| v.as_str()).unwrap_or("tertiary") {
+                "primary" => Strength::Primary,
+                "secondary" => Strength::Secondary,
+                _ => Strength::Tertiary,
+            },
+        }],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
         "kuromoji_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Japanese)],
         "kuromoji_readingform" => vec![Step::Reading(morph::Language::Japanese)],
+        "kuromoji_stemmer" => vec![Step::KatakanaStem {
+            minimum: spec
+                .get("minimum_length")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(4) as usize,
+        }],
+        "kuromoji_completion" => vec![Step::Completion {
+            index: spec.get("mode").and_then(|v| v.as_str()).unwrap_or("index") == "index",
+        }],
         "nori_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Korean)],
         "nori_readingform" => vec![Step::Reading(morph::Language::Korean)],
         "keyword_marker" => {
@@ -2971,11 +3123,14 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "flatten_graph" => vec![Step::FlattenGraph],
         "remove_duplicates" => vec![],
         "keyword_repeat" => vec![Step::KeywordRepeat],
-        "icu_normalizer" => vec![Step::IcuNormalize],
-        "icu_folding" => vec![Step::IcuFold],
+        "icu_normalizer" => vec![Step::IcuNormalize(None)],
+        "icu_folding" => vec![Step::IcuFold(None)],
+        "icu_collation" => vec![Step::Collate { strength: Strength::Tertiary }],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
         "kuromoji_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Japanese)],
         "kuromoji_readingform" => vec![Step::Reading(morph::Language::Japanese)],
+        "kuromoji_stemmer" => vec![Step::KatakanaStem { minimum: 4 }],
+        "kuromoji_completion" => vec![Step::Completion { index: true }],
         "nori_part_of_speech" => vec![Step::PartOfSpeech(morph::Language::Korean)],
         "nori_readingform" => vec![Step::Reading(morph::Language::Korean)],
         "arabic_normalization" => vec![Step::Normalize("arabic")],
@@ -3323,8 +3478,21 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 language: morph::Language::Japanese,
                 drop_grammar: true,
                 base_form: true,
+                search: true,
             },
             steps: vec![Step::Lowercase],
+        },
+        // the same words, each one followed by how it is typed on a Latin
+        // keyboard, for a search box that completes as somebody types
+        "kuromoji_completion" => Chain {
+            pre: Vec::new(),
+            source: Source::Morph {
+                language: morph::Language::Japanese,
+                drop_grammar: false,
+                base_form: false,
+                search: true,
+            },
+            steps: vec![Step::Completion { index: true }],
         },
         "nori" => Chain {
             pre: Vec::new(),
@@ -3332,6 +3500,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 language: morph::Language::Korean,
                 drop_grammar: true,
                 base_form: false,
+                search: false,
             },
             steps: vec![Step::Lowercase],
         },
@@ -3341,6 +3510,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 language: morph::Language::Chinese,
                 drop_grammar: true,
                 base_form: false,
+                search: false,
             },
             steps: vec![Step::Lowercase],
         },

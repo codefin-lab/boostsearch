@@ -250,6 +250,18 @@ pub async fn bulk(
             && (asked_pipeline.is_some()
                 || !crate::api::pipelines_for_write(&store, &idx, None).is_empty())
         {
+            // where to run a pipeline is decided for the request, not for one
+            // line of it: a cluster with no ingest node has nowhere to send
+            // any of them, so the whole bulk is refused rather than each line
+            // failing on its own
+            if !crate::api::ingest::any_ingest_node() {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "There are no ingest nodes in this cluster, unable to forward request to \
+                     an ingest node.",
+                );
+            }
             let src_now = source.take().unwrap_or_else(|| json!({}));
             let routing = meta.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
             // the store is asked while this index's lock is held: the

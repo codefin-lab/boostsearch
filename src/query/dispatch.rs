@@ -14,6 +14,14 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         ));
     }
     let (kind, body) = single_key(q)?;
+    // what follows a query's name is that query's options, and the complaint
+    // when it is not says so before the name is looked up at all -- a
+    // `{"garbage": "not a query"}` is malformed, not an unknown query, and
+    // telling the caller the name is unknown sends them looking in the wrong
+    // place
+    if !body.is_object() && !matches!(kind.as_str(), "ids" | "match_all" | "match_none") {
+        return Err(anyhow!("[{kind}] query malformed, no start_object after query name"));
+    }
     let inner: Box<dyn Query> = match kind.as_str() {
         "match_all" => {
             let boost = body.get("boost").and_then(|b| b.as_f64());

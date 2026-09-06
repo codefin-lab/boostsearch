@@ -156,9 +156,12 @@ pub fn cast(class: &str, v: Value) -> Result<Value, String> {
     Ok(match class {
         "int" | "Integer" | "short" | "byte" | "char" => match &v {
             x if x.is_number() => Value::Int(x.as_i64().unwrap_or(0) as i32 as i64),
-            Value::Str(s) if class == "char" => {
-                Value::str(&s.chars().next().map(|c| c.to_string()).unwrap_or_default())
-            }
+            // a char is not a one-letter String: it is its own type, and
+            // what a document may hold is decided by that difference
+            Value::Str(s) if class == "char" => match s.chars().next() {
+                Some(c) => Value::Char(c),
+                None => return no("Cannot cast from [String] to [char].".to_string()),
+            },
             _ => return no(format!("Cannot cast from [{}] to [{class}].", v.type_name())),
         },
         "long" | "Long" => match &v {

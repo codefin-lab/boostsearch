@@ -433,12 +433,156 @@ fn remote_complaint(remote: &Value) -> Option<Response> {
     }
     // a host that could be read is still not one this node was told it may
     // read from
-    let named = host.trim_start_matches("http://").trim_start_matches("https://");
+    let named = named_host(host);
+    if remote_allowed(&named) {
+        return None;
+    }
     Some(err(
         StatusCode::BAD_REQUEST,
         "illegal_argument_exception",
         format!("[{named}] not allowlisted in reindex.remote.allowlist"),
     ))
+}
+
+/// A remote host as the allowlist spells it: the authority, without a scheme
+/// and without a path.
+fn named_host(host: &str) -> String {
+    host.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Whether this node was told it may read from a host.
+///
+/// `reindex.remote.allowlist` is a node setting rather than a cluster one --
+/// reading from another cluster is a thing an operator allows, not something
+/// a client may allow itself -- so it is read from the node's configuration,
+/// as `host:port` entries where either half may be `*`. Nothing is allowed
+/// unless it is named, which is why a node with no setting refuses every
+/// remote.
+fn remote_allowed(named: &str) -> bool {
+    let Ok(listed) = std::env::var("BOOSTSEARCH_REINDEX_ALLOWLIST") else {
+        return false;
+    };
+    let (host, port) = named.rsplit_once(':').unwrap_or((named, ""));
+    listed.split(',').map(str::trim).filter(|s| !s.is_empty()).any(|entry| {
+        let (allowed_host, allowed_port) = entry.rsplit_once(':').unwrap_or((entry, "*"));
+        let host_ok = allowed_host == "*" || allowed_host == host;
+        let port_ok = allowed_port == "*" || allowed_port == port;
+        host_ok && port_ok
+    })
+}
+
+/// The documents a remote cluster holds for a query.
+///
+/// A remote is read the way any client reads it: a search over HTTP, then
+/// scrolls until it stops giving anything back, and the scroll closed
+/// afterwards so the other cluster is not left holding a context. What comes
+/// back is the same `Seen` a local read produces, so everything downstream --
+/// the script, the destination, the tally -- cannot tell the difference.
+fn found_remote(
+    remote: &Value,
+    expr: &str,
+    source: &Value,
+    limit: usize,
+    batch: usize,
+) -> std::result::Result<Vec<Seen>, Response> {
+    let host = remote.get("host").and_then(|v| v.as_str()).unwrap_or_default().trim_end_matches('/');
+    let query = source.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
+    let mut request = json!({"query": query, "size": batch.min(limit.max(1))});
+    if let Some(kept) = source.get("_source") {
+        request["_source"] = kept.clone();
+    }
+    let timeout = remote
+        .get("socket_timeout")
+        .and_then(|v| v.as_str())
+        .and_then(crate::search::extras::parse_time_amount)
+        .unwrap_or(30_000.0);
+    let call = |url: String, body: Value| -> std::result::Result<Value, Response> {
+        // a refusal is an answer with a body, and the body says what was
+        // wrong with the request -- which is what the caller asked for, so it
+        // must not be turned into an error that throws the body away
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_millis(timeout.max(1.0) as u64)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut request = agent.post(&url).header("content-type", "application/json");
+        if let (Some(user), Some(password)) = (
+            remote.get("username").and_then(|v| v.as_str()),
+            remote.get("password").and_then(|v| v.as_str()),
+        ) {
+            use base64::Engine;
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+            request = request.header("authorization", format!("Basic {encoded}"));
+        }
+        for (name, value) in remote.get("headers").and_then(|v| v.as_object()).into_iter().flatten()
+        {
+            if let Some(text) = value.as_str() {
+                request = request.header(name, text);
+            }
+        }
+        match request.send_json(&body) {
+            Ok(mut answer) => {
+                answer.body_mut().read_json::<Value>().map_err(|e| remote_failure(format!("{e}")))
+            }
+            Err(e) => Err(remote_failure(format!("{e}"))),
+        }
+    };
+    let first = call(format!("{host}/{expr}/_search?scroll=5m"), request)?;
+    if let Some(reason) = first.pointer("/error/reason").and_then(|v| v.as_str()) {
+        return Err(remote_failure(reason.to_string()));
+    }
+    let mut out = Vec::new();
+    let mut scroll = first.get("_scroll_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut page = first;
+    loop {
+        let hits: Vec<Value> = page
+            .pointer("/hits/hits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if hits.is_empty() {
+            break;
+        }
+        for hit in hits {
+            if out.len() >= limit {
+                break;
+            }
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            out.push(Seen {
+                index: hit.get("_index").and_then(|v| v.as_str()).unwrap_or(expr).to_string(),
+                id: id.to_string(),
+                source: hit.get("_source").cloned().unwrap_or_else(|| json!({})),
+                // a document read from another cluster stands at no sequence
+                // number here, so a write of it is not conditional on one
+                seq_no: None,
+            });
+        }
+        if out.len() >= limit {
+            break;
+        }
+        let Some(held) = scroll.clone() else { break };
+        page = call(format!("{host}/_search/scroll"), json!({"scroll": "5m", "scroll_id": held}))?;
+        scroll = page.get("_scroll_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    }
+    // the other cluster should not be left holding a context this walk is done
+    // with, whether or not it minds
+    if let Some(held) = scroll {
+        let _ = ureq::delete(&format!("{host}/_search/scroll?scroll_id={held}")).call();
+    }
+    Ok(out)
+}
+
+/// A remote that could not be read, in the words a client expects.
+fn remote_failure(reason: String) -> Response {
+    err(StatusCode::INTERNAL_SERVER_ERROR, "connect_exception", reason)
 }
 
 /// Whether the request asked for the walk to be done in the background.
@@ -485,6 +629,8 @@ pub async fn delete_by_query(
     let mut tally = Tally { total: hits.len(), ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
+    // `?pipeline=` names one every rewritten document goes through
+    let through = p.get("pipeline").cloned();
     for seen in hits {
         let Some(st) = store.get(&seen.index) else { continue };
         let mut g = st.write();
@@ -545,6 +691,8 @@ pub async fn update_by_query(
     let mut tally = Tally { total: hits.len(), ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
+    // `?pipeline=` names one every rewritten document goes through
+    let through = p.get("pipeline").cloned();
     for seen in hits {
         let Some(st) = store.get(&seen.index) else { continue };
         let mut g = st.write();
@@ -600,6 +748,36 @@ pub async fn update_by_query(
             }
             _ => {}
         }
+        // a document rewritten in place is written the way any document is,
+        // so a pipeline the request named runs over it. The index is held for
+        // writing here, and a pipeline may read the store, so it runs with
+        // the lock let go and taken again.
+        if let Some(named) = &through {
+            drop(g);
+            let piped = crate::api::ingest::ingest_for_write(
+                &store,
+                &seen.index,
+                &seen.id,
+                next,
+                Some(named),
+                None,
+            );
+            g = st.write();
+            match piped {
+                Ok(Some(doc)) => next = doc.source,
+                Ok(None) => {
+                    tally.noops += 1;
+                    continue;
+                }
+                Err(e) => {
+                    tally.failures.push(json!({
+                        "index": seen.index, "id": seen.id, "status": 400,
+                        "cause": {"type": e.kind, "reason": e.reason},
+                    }));
+                    continue;
+                }
+            }
+        }
         match write_doc_raw(&mut g, &seen.id, next, "index", None) {
             Ok(_) => tally.updated += 1,
             Err(_) => {
@@ -645,13 +823,7 @@ pub async fn reindex(
     };
     let source = body.get("source").cloned().unwrap_or_else(|| json!({}));
     let dest = body.get("dest").cloned().unwrap_or_else(|| json!({}));
-    if source.get("remote").is_some() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            "reindex from a remote cluster is not supported yet",
-        );
-    }
+    let remote = source.get("remote").cloned();
     let Some(from) = index_name(source.get("index")) else {
         return err(StatusCode::BAD_REQUEST, "action_request_validation_exception", "source index");
     };
@@ -662,7 +834,9 @@ pub async fn reindex(
             "Validation Failed: 1: index is missing;",
         );
     };
-    if store.resolve(&from).contains(&to) {
+    // reading from another cluster, an index of the same name is a different
+    // index, so writing into it is not writing into what is being read
+    if remote.is_none() && store.resolve(&from).contains(&to) {
         return err(
             StatusCode::BAD_REQUEST,
             "action_request_validation_exception",
@@ -671,14 +845,37 @@ pub async fn reindex(
             ),
         );
     }
-    let hits = match found(&store, &from, &source, max_docs(&p, &body)) {
-        Ok(hits) => hits,
-        Err(e) => return e,
+    let wanted = max_docs(&p, &body);
+    let hits = match &remote {
+        // reading another cluster is waiting on a socket, and waiting on a
+        // socket from inside a request handler is how a node stops answering:
+        // the wait holds a worker, and what it is waiting for may be this
+        // node itself. So it happens off the runtime.
+        Some(remote) => {
+            let (remote, from, source) = (remote.clone(), from.clone(), source.clone());
+            let batch = batch_size(&p, &source);
+            let read = tokio::task::spawn_blocking(move || {
+                found_remote(&remote, &from, &source, wanted, batch)
+            })
+            .await;
+            match read {
+                Ok(Ok(hits)) => hits,
+                Ok(Err(e)) => return e,
+                Err(e) => return remote_failure(format!("{e}")),
+            }
+        }
+        None => match found(&store, &from, &source, wanted) {
+            Ok(hits) => hits,
+            Err(e) => return e,
+        },
     };
     // a document may be written only where it is not already, if asked
     let create_only = dest.get("op_type").and_then(|v| v.as_str()) == Some("create");
     let conflicts_proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed");
     let kept = source.get("_source").cloned();
+    // `dest.pipeline` names a pipeline every document goes through on the way
+    // in, the same one an index request would name in its URL
+    let through = dest.get("pipeline").and_then(|v| v.as_str()).map(|s| s.to_string());
     // a destination that is not there yet is created, unless the cluster was
     // told which names may be created on the fly
     if store.get(&to).is_none()
@@ -784,6 +981,32 @@ pub async fn reindex(
                 id = String::new();
             }
             scripted_routing = changed_routing;
+        }
+        // a document written by a walk is written the way any document is, so
+        // the pipelines that would have run over it run over it here too: the
+        // one the request named, and whatever the destination's own settings
+        // and templates say. A processor that drops the document drops it
+        // from the walk as well.
+        match crate::api::ingest::ingest_for_write(
+            &store,
+            &to,
+            &id,
+            document.clone(),
+            through.as_deref(),
+            None,
+        ) {
+            Ok(Some(piped)) => document = piped.source,
+            Ok(None) => {
+                tally.noops += 1;
+                continue;
+            }
+            Err(e) => {
+                tally.failures.push(json!({
+                    "index": to, "id": seen.id, "status": 400,
+                    "cause": {"type": e.kind, "reason": e.reason},
+                }));
+                continue;
+            }
         }
         // the destination is made on the first document written to it, so a
         // script that sends every document elsewhere, or drops them all,

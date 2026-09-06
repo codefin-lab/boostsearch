@@ -27,6 +27,9 @@ pub enum Value {
     Float(f64),
     Double(f64),
     Str(Rc<str>),
+    /// a `char`, which is its own type in Painless and not a short string:
+    /// `(char)'a'` is not a `String`, and a document field cannot hold one
+    Char(char),
     List(ListRef),
     Map(MapRef),
     /// milliseconds since the epoch, in a zone named by an offset in seconds
@@ -149,6 +152,7 @@ impl Value {
                 None => Json::Null,
             },
             Value::Str(s) => Json::String(s.to_string()),
+            Value::Char(c) => Json::String(c.to_string()),
             Value::List(_) | Value::Map(_) => self.to_json(),
             Value::Date { .. } => Json::String(self.as_text()),
             Value::DocValues(d) => Json::Array(d.values.iter().map(|v| v.to_json()).collect()),
@@ -204,6 +208,7 @@ impl Value {
             Value::Int(i) | Value::Long(i) => i.to_string(),
             Value::Float(f) | Value::Double(f) => java_double(*f),
             Value::Str(s) => s.to_string(),
+            Value::Char(c) => c.to_string(),
             Value::List(l) => {
                 let items: Vec<String> = l.borrow().iter().map(|v| v.as_text()).collect();
                 format!("[{}]", items.join(", "))
@@ -238,6 +243,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Double(_) => "double",
             Value::Str(_) => "String",
+            Value::Char(_) => "char",
             Value::List(_) => "ArrayList",
             Value::Map(_) => "HashMap",
             Value::Date { .. } => "ZonedDateTime",

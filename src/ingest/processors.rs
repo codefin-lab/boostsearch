@@ -2003,7 +2003,12 @@ fn has_foreign_value(v: &crate::painless::Value) -> bool {
 fn foreign_within(v: &crate::painless::Value, seen: &mut Vec<usize>) -> bool {
     use crate::painless::Value as V;
     match v {
-        V::Regex(_) | V::Lambda(_) | V::Native(_) | V::Builder(_) | V::Error(_) => true,
+        // a char is a Painless type with no JSON of its own: writing one into
+        // a document would have to guess whether it meant a string or a
+        // number, so OpenSearch refuses it and so does this
+        V::Regex(_) | V::Lambda(_) | V::Native(_) | V::Builder(_) | V::Error(_) | V::Char(_) => {
+            true
+        }
         V::List(l) => {
             let addr = std::rc::Rc::as_ptr(l) as *const () as usize;
             if seen.contains(&addr) {

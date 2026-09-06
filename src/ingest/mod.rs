@@ -659,6 +659,19 @@ impl Pipeline {
     }
 }
 
+/// Every template a processor's configuration holds, checked.
+fn templates_within(cfg: &serde_json::Map<String, Value>) -> Result<(), String> {
+    fn walk(v: &Value) -> Result<(), String> {
+        match v {
+            Value::String(text) => crate::api::mustache::check(text),
+            Value::Array(items) => items.iter().try_for_each(walk),
+            Value::Object(o) => o.values().try_for_each(walk),
+            _ => Ok(()),
+        }
+    }
+    cfg.values().try_for_each(walk)
+}
+
 fn parse_processors(list: &[Value]) -> Result<Vec<ProcessorSpec>, IngestError> {
     let mut out = Vec::new();
     for item in list {
@@ -687,6 +700,15 @@ fn parse_processors(list: &[Value]) -> Result<Vec<ProcessorSpec>, IngestError> {
                 None,
             ));
         };
+        // a value in a processor's configuration may be a template, and one
+        // that cannot be rendered is refused now rather than at the first
+        // document that goes through it
+        if let Err(reason) = templates_within(cfg) {
+            return Err(IngestError {
+                processor_type: Some(kind.to_string()),
+                ..IngestError::of("script_exception", reason)
+            });
+        }
         let mut config = cfg.clone();
         let tag = config.remove("tag").and_then(|v| v.as_str().map(|s| s.to_string()));
         let description =
