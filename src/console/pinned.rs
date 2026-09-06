@@ -50,6 +50,8 @@ pub struct Pinned {
     /// the script that runs before anything else, to pick the theme out of
     /// what the browser remembered
     pub startup: String,
+    /// what a caller may do, as the plugins between them decided
+    pub capabilities: Value,
 }
 
 impl Pinned {
