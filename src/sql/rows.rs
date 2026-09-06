@@ -50,10 +50,8 @@ pub fn shape(planned: &Planned, answer: &Value) -> Table {
         let at = *at;
         let ascending = *ascending;
         rows.sort_by(|a, b| {
-            let (left, right) = (
-                a.get(at).unwrap_or(&Value::Null),
-                b.get(at).unwrap_or(&Value::Null),
-            );
+            let (left, right) =
+                (a.get(at).unwrap_or(&Value::Null), b.get(at).unwrap_or(&Value::Null));
             let order = order_of(left, right);
             if ascending { order } else { order.reverse() }
         });
@@ -275,9 +273,11 @@ fn evaluate_over(expr: &Expr, holder: &Value, count: u64) -> Value {
                 })
                 .unwrap_or(Value::Null)
         }
-        Expr::Binary { op, left, right } => {
-            arithmetic(op, &evaluate_over(left, holder, count), &evaluate_over(right, holder, count))
-        }
+        Expr::Binary { op, left, right } => arithmetic(
+            op,
+            &evaluate_over(left, holder, count),
+            &evaluate_over(right, holder, count),
+        ),
         Expr::Negate(inner) => match as_number(&evaluate_over(inner, holder, count)) {
             Some(n) => json!(-n),
             None => Value::Null,
@@ -333,11 +333,8 @@ pub fn holds(condition: &Condition, source: &Value) -> bool {
             compare(&evaluate(left, source), op, &evaluate(right, source))
         }
         Condition::Between { value, low, high, negated } => {
-            let (v, l, h) = (
-                evaluate(value, source),
-                evaluate(low, source),
-                evaluate(high, source),
-            );
+            let (v, l, h) =
+                (evaluate(value, source), evaluate(low, source), evaluate(high, source));
             (compare(&v, ">=", &l) && compare(&v, "<=", &h)) != *negated
         }
         Condition::In { value, options, negated } => {
@@ -410,10 +407,7 @@ fn order_of(left: &Value, right: &Value) -> std::cmp::Ordering {
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
             (Value::Null, _) => std::cmp::Ordering::Greater,
             (_, Value::Null) => std::cmp::Ordering::Less,
-            _ => left
-                .as_str()
-                .unwrap_or("")
-                .cmp(right.as_str().unwrap_or("")),
+            _ => left.as_str().unwrap_or("").cmp(right.as_str().unwrap_or("")),
         },
     }
 }

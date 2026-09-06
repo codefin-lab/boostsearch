@@ -18,10 +18,10 @@ mod morph;
 mod phone;
 mod phonetic;
 mod romaji;
-mod unicode_set;
 mod rslp;
 mod snowball;
 mod stem;
+mod unicode_set;
 
 use std::collections::HashMap;
 
@@ -277,7 +277,9 @@ pub enum Step {
     KoreanNumber,
     /// `icu_collation`: two words a language considers the same at this
     /// strength become the same token, so a search for one finds the other
-    Collate { strength: Strength },
+    Collate {
+        strength: Strength,
+    },
     /// a word is kept as it stands on its own: `飲み` is `飲む`
     BaseForm(morph::Language),
     /// the parts of speech a search has no use for -- a particle, an ending --
@@ -290,10 +292,14 @@ pub enum Step {
     Reading(morph::Language),
     /// `kuromoji_stemmer`: a katakana word long enough to have been written
     /// with a long mark loses it, so `サーバー` and `サーバ` are one word
-    KatakanaStem { minimum: usize },
+    KatakanaStem {
+        minimum: usize,
+    },
     /// `kuromoji_completion`: the word, and its reading written in the Latin
     /// alphabet in both of the systems that write it differently
-    Completion { index: bool },
+    Completion {
+        index: bool,
+    },
 }
 
 impl Step {
@@ -529,7 +535,8 @@ impl Chain {
                 pre: self.pre.clone(),
                 source: self.source.clone(),
                 steps: self.steps[..at].to_vec(),
-            annotated: false };
+                annotated: false,
+            };
             let cut = |words: &[String]| -> Vec<String> {
                 let text = words.join(" ");
                 let terms = before.terms(&text);
@@ -635,9 +642,7 @@ impl Chain {
             (true, morph::Language::Japanese) => morph::search_words(text),
             _ => morph::words(*language, text),
         };
-        read.into_iter()
-            .filter_map(|w| w.part.map(|part| ((w.from, w.to), part)))
-            .collect()
+        read.into_iter().filter_map(|w| w.part.map(|part| ((w.from, w.to), part))).collect()
     }
 
     /// The tokens alone, which is what a query needs.
@@ -726,8 +731,7 @@ impl Chain {
                     (true, morph::Language::Japanese) => morph::search_words(text),
                     _ => morph::words(*language, text),
                 };
-                read
-                    .into_iter()
+                read.into_iter()
                     .filter(|w| {
                         if !drop_grammar {
                             return true;
@@ -1385,9 +1389,10 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
             .filter(|(t, _, a, b, _)| {
                 // what the dictionary called it where it stood, and only
                 // failing that what it would be called on its own
-                let part = held.parts.get(&(*a, *b)).cloned().or_else(|| {
-                    morph::words(*language, t).into_iter().next().and_then(|w| w.part)
-                });
+                let part =
+                    held.parts.get(&(*a, *b)).cloned().or_else(|| {
+                        morph::words(*language, t).into_iter().next().and_then(|w| w.part)
+                    });
                 match (&part, stoptags) {
                     // a filter that names its own tags drops those and no others
                     (Some(part), Some(tags)) => !tags.iter().any(|tag| part.starts_with(tag)),
@@ -1516,15 +1521,11 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
             }
             close(&mut run, &mut out);
             // the positions are the ones the shorter list has
-            out.into_iter()
-                .enumerate()
-                .map(|(at, (t, _, a, b, l))| (t, at, a, b, l))
-                .collect()
+            out.into_iter().enumerate().map(|(at, (t, _, a, b, l))| (t, at, a, b, l)).collect()
         }
-        Step::Collate { strength } => tokens
-            .into_iter()
-            .map(|(t, p, a, b, l)| (collate(&t, *strength), p, a, b, l))
-            .collect(),
+        Step::Collate { strength } => {
+            tokens.into_iter().map(|(t, p, a, b, l)| (collate(&t, *strength), p, a, b, l)).collect()
+        }
         Step::IcuFold(set) => tokens
             .into_iter()
             .map(|(t, p, a, b, l)| {
@@ -1936,9 +1937,7 @@ impl Held {
 
 /// The set a filter's settings name, if it names one this can read.
 fn unicode_set_of(spec: &Value) -> Option<unicode_set::UnicodeSet> {
-    spec.get("unicode_set_filter")
-        .and_then(|v| v.as_str())
-        .and_then(unicode_set::UnicodeSet::parse)
+    spec.get("unicode_set_filter").and_then(|v| v.as_str()).and_then(unicode_set::UnicodeSet::parse)
 }
 
 pub(crate) fn icu_normalize(word: &str) -> String {
@@ -2800,7 +2799,8 @@ fn build_with(spec: &Value, tokenizers: &Value, filters: &Value, chars: &Value) 
                 ngrams: kind == "phone",
             },
             steps: Vec::new(),
-        annotated: false });
+            annotated: false,
+        });
     }
     // `{"type": "english"}` names a built-in rather than describing a chain
     if let Some(kind) = spec.get("type").and_then(|t| t.as_str())
@@ -3069,9 +3069,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
                     Value::Array(a) => {
                         a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
                     }
-                    Value::String(one) => {
-                        one.split(',').map(|s| s.trim().to_string()).collect()
-                    }
+                    Value::String(one) => one.split(',').map(|s| s.trim().to_string()).collect(),
                     _ => Vec::new(),
                 })
                 .unwrap_or_default(),
@@ -3302,17 +3300,15 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "icu_folding" => vec![Step::IcuFold(None)],
         "icu_collation" => vec![Step::Collate { strength: Strength::Tertiary }],
         "kuromoji_baseform" => vec![Step::BaseForm(morph::Language::Japanese)],
-        "kuromoji_part_of_speech" => vec![Step::PartOfSpeech {
-            language: morph::Language::Japanese,
-            stoptags: None,
-        }],
+        "kuromoji_part_of_speech" => {
+            vec![Step::PartOfSpeech { language: morph::Language::Japanese, stoptags: None }]
+        }
         "kuromoji_readingform" => vec![Step::Reading(morph::Language::Japanese)],
         "kuromoji_stemmer" => vec![Step::KatakanaStem { minimum: 4 }],
         "kuromoji_completion" => vec![Step::Completion { index: true }],
-        "nori_part_of_speech" => vec![Step::PartOfSpeech {
-            language: morph::Language::Korean,
-            stoptags: None,
-        }],
+        "nori_part_of_speech" => {
+            vec![Step::PartOfSpeech { language: morph::Language::Korean, stoptags: None }]
+        }
         "nori_readingform" => vec![Step::Reading(morph::Language::Korean)],
         "nori_number" => vec![Step::KoreanNumber],
         "arabic_normalization" => vec![Step::Normalize("arabic")],
@@ -3455,25 +3451,40 @@ pub fn builtin(name: &str) -> Option<Chain> {
         pre: Vec::new(),
         source: Source::Standard,
         steps: vec![Step::Lowercase, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
-    annotated: false };
+        annotated: false,
+    };
     // the languages whose stemmer wants the word written one way first
     let normalized = |l: &str, first: Step| Chain {
         pre: Vec::new(),
         source: Source::Standard,
         steps: vec![Step::Lowercase, first, Step::Stop(stop_words(l)), Step::Stem(l.to_string())],
-    annotated: false };
+        annotated: false,
+    };
     Some(match name {
-        "standard" | "default" => {
-            Chain { pre: Vec::new(), source: Source::Standard, steps: vec![Step::Lowercase], annotated: false }
+        "standard" | "default" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![Step::Lowercase],
+            annotated: false,
+        },
+        "simple" => Chain {
+            pre: Vec::new(),
+            source: Source::Letter,
+            steps: vec![Step::Lowercase],
+            annotated: false,
+        },
+        "whitespace" => {
+            Chain { pre: Vec::new(), source: Source::Whitespace, steps: vec![], annotated: false }
         }
-        "simple" => Chain { pre: Vec::new(), source: Source::Letter, steps: vec![Step::Lowercase], annotated: false },
-        "whitespace" => Chain { pre: Vec::new(), source: Source::Whitespace, steps: vec![], annotated: false },
         "stop" => Chain {
             pre: Vec::new(),
             source: Source::Letter,
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
-        annotated: false },
-        "keyword" | "raw" => Chain { pre: Vec::new(), source: Source::Keyword, steps: vec![], annotated: false },
+            annotated: false,
+        },
+        "keyword" | "raw" => {
+            Chain { pre: Vec::new(), source: Source::Keyword, steps: vec![], annotated: false }
+        }
         // the index keeps every prefix a number may be typed as; the search
         // keeps the number alone, so that what was typed is matched against
         // whole numbers rather than against every number that begins with it
@@ -3481,17 +3492,20 @@ pub fn builtin(name: &str) -> Option<Chain> {
             pre: Vec::new(),
             source: Source::Phone { region: "ZZ".into(), ngrams: name == "phone" },
             steps: Vec::new(),
-        annotated: false },
+            annotated: false,
+        },
         "pattern" => Chain {
             pre: Vec::new(),
             source: Source::PatternSplit(r"[^a-zA-Z0-9_]+".into()),
             steps: vec![Step::Lowercase],
-        annotated: false },
+            annotated: false,
+        },
         "fingerprint" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::AsciiFolding, Step::Fingerprint(' ')],
-        annotated: false },
+            annotated: false,
+        },
         "en_stem" => lang("english"),
         // English drops the possessive before it stems, and stems with the
         // algorithm Porter first wrote
@@ -3504,7 +3518,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("_english_")),
                 Step::Stem("porter".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         // a Snowball analyzer is the English one under the name of the
         // algorithm it runs
         "snowball" => lang("english"),
@@ -3514,7 +3529,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
             pre: Vec::new(),
             source: Source::Standard,
             steps: vec![Step::Lowercase, Step::Stop(stop_words("_english_"))],
-        annotated: false },
+            annotated: false,
+        },
         // Chinese, Japanese and Korean are not written with spaces between
         // words, so a pair of characters stands in for one
         "cjk" => Chain {
@@ -3526,7 +3542,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::CjkBigram,
                 Step::Stop(stop_words("_english_")),
             ],
-        annotated: false },
+            annotated: false,
+        },
         // the languages whose stemmer is a light one, or wants the word
         // written its way first
         "french" => Chain {
@@ -3538,7 +3555,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("french")),
                 Step::Stem("french_light".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "italian" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3548,7 +3566,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("italian")),
                 Step::Stem("italian_light".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "spanish" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3557,7 +3576,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("spanish")),
                 Step::Stem("spanish_light".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "portuguese" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3566,7 +3586,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("portuguese")),
                 Step::Stem("portuguese_light".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "irish" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3576,7 +3597,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("irish")),
                 Step::Stem("irish".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "catalan" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3586,7 +3608,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("catalan")),
                 Step::Stem("catalan".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "greek" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3595,7 +3618,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("greek")),
                 Step::Stem("greek".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "persian" => Chain {
             // the joiner Persian writes inside a word is not part of any word:
             // what stands either side of it is two words
@@ -3616,12 +3640,14 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 ),
                 Step::Stem("persian".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "thai" => Chain {
             pre: Vec::new(),
             source: Source::Thai,
             steps: vec![Step::Lowercase, Step::DecimalDigits],
-        annotated: false },
+            annotated: false,
+        },
         "sorani" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3630,7 +3656,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("sorani")),
                 Step::Stem("sorani".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "romanian" => normalized("romanian", Step::RomanianNormalize),
         "turkish" => Chain {
             pre: Vec::new(),
@@ -3641,7 +3668,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Stop(stop_words("turkish")),
                 Step::Stem("turkish".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         "german" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
@@ -3651,7 +3679,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 Step::Normalize("german"),
                 Step::Stem("german_light".into()),
             ],
-        annotated: false },
+            annotated: false,
+        },
         // Japanese: the words a dictionary finds, each as it stands on its
         // own, without the particles and endings a search has no use for
         "kuromoji" => Chain {
@@ -3663,7 +3692,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 search: true,
             },
             steps: vec![Step::Lowercase],
-        annotated: false },
+            annotated: false,
+        },
         // the same words, each one followed by how it is typed on a Latin
         // keyboard, for a search box that completes as somebody types
         "kuromoji_completion" => Chain {
@@ -3675,7 +3705,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 search: true,
             },
             steps: vec![Step::Completion { index: true }],
-        annotated: false },
+            annotated: false,
+        },
         "nori" => Chain {
             pre: Vec::new(),
             source: Source::Morph {
@@ -3685,7 +3716,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 search: false,
             },
             steps: vec![Step::Lowercase],
-        annotated: false },
+            annotated: false,
+        },
         "smartcn" => Chain {
             pre: Vec::new(),
             source: Source::Morph {
@@ -3695,7 +3727,8 @@ pub fn builtin(name: &str) -> Option<Chain> {
                 search: false,
             },
             steps: vec![Step::Lowercase],
-        annotated: false },
+            annotated: false,
+        },
         other => {
             // a language with a light stemmer of its own, or one BoostCore has
             // an algorithm for

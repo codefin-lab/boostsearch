@@ -104,9 +104,7 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         .get::<axum::extract::ConnectInfo<crate::http_compat::Peer>>()
         .map(|c| c.0.0)
         .or_else(|| {
-            req.extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0)
+            req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0)
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_default();

@@ -926,8 +926,6 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
         .await
 }
 
-
-
 /// Put a `cat` table's rows in the order the request asked for, the way one
 /// node would have ordered them before its rows were joined with the others'.
 fn sort_cat_json(rows: &mut [Value], spec: Option<&str>) {
@@ -944,9 +942,7 @@ fn sort_cat_json(rows: &mut [Value], spec: Option<&str>) {
         None => rows
             .first()
             .and_then(|r| r.as_object())
-            .and_then(|o| {
-                o.keys().find(|k| *k == "index").or_else(|| o.keys().next()).cloned()
-            })
+            .and_then(|o| o.keys().find(|k| *k == "index").or_else(|| o.keys().next()).cloned())
             .map(|k| vec![(k, false)])
             .unwrap_or_default(),
     };

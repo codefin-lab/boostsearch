@@ -112,7 +112,10 @@ pub async fn delete_policy(
             format!("Policy with id {id} does not exist"),
         );
     }
-    respond(&p, json!({"_id": id, "result": "deleted", "_shards": {"total": 1, "successful": 1, "failed": 0}}))
+    respond(
+        &p,
+        json!({"_id": id, "result": "deleted", "_shards": {"total": 1, "successful": 1, "failed": 0}}),
+    )
 }
 
 /// `POST _plugins/_ism/add/{index}` -- put indices under a policy.
@@ -124,15 +127,13 @@ pub async fn add_policy(
 ) -> Response {
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let Some(policy) = body.get("policy_id").and_then(|v| v.as_str()) else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "illegal_argument_exception",
-            "Missing policy_id",
-        );
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "Missing policy_id");
     };
     each_index(&store, index, &p, |store, name| {
         if crate::ism::managed(store, name).is_some() {
-            return Err(format!("This index already has a policy, use the update policy API to update index policies"));
+            return Err(format!(
+                "This index already has a policy, use the update policy API to update index policies"
+            ));
         }
         crate::ism::attach(store, name, policy)
     })

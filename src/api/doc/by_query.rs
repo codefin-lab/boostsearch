@@ -490,7 +490,8 @@ fn found_remote(
     limit: usize,
     batch: usize,
 ) -> std::result::Result<Vec<Seen>, Response> {
-    let host = remote.get("host").and_then(|v| v.as_str()).unwrap_or_default().trim_end_matches('/');
+    let host =
+        remote.get("host").and_then(|v| v.as_str()).unwrap_or_default().trim_end_matches('/');
     let query = source.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
     let mut request = json!({"query": query, "size": batch.min(limit.max(1))});
     if let Some(kept) = source.get("_source") {
@@ -541,11 +542,8 @@ fn found_remote(
     let mut scroll = first.get("_scroll_id").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mut page = first;
     loop {
-        let hits: Vec<Value> = page
-            .pointer("/hits/hits")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let hits: Vec<Value> =
+            page.pointer("/hits/hits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         if hits.is_empty() {
             break;
         }

@@ -91,7 +91,6 @@ pub(crate) fn run_filters_agg(
     }
 }
 
-
 /// How many objects sit at a nested path across the documents a query finds.
 fn nested_object_count(
     store: &Store,

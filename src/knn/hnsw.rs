@@ -183,8 +183,14 @@ impl Hnsw {
 
         // and join the layers it does belong to
         for layer in (0..=level.min(top)).rev() {
-            let found =
-                self.search_layer(vector, &[here], layer, self.parameters.ef_construction, vectors, None);
+            let found = self.search_layer(
+                vector,
+                &[here],
+                layer,
+                self.parameters.ef_construction,
+                vectors,
+                None,
+            );
             let wanted = if layer == 0 { self.parameters.m * 2 } else { self.parameters.m };
             let chosen = self.choose(vector, found, wanted, vectors);
             for other in &chosen {
@@ -304,11 +310,7 @@ impl Hnsw {
         }
         let ef = ef.unwrap_or(self.parameters.ef_search).max(k);
         let found = self.search_layer(query, &[here], 0, ef, vectors, keep);
-        found
-            .into_iter()
-            .take(k)
-            .map(|c| (self.nodes[c.node as usize].item, c.distance))
-            .collect()
+        found.into_iter().take(k).map(|c| (self.nodes[c.node as usize].item, c.distance)).collect()
     }
 
     /// Which of the candidates a node should keep as neighbours.
@@ -433,11 +435,8 @@ mod tests {
     }
 
     fn exactly(vectors: &[Vec<f32>], query: &[f32], k: usize, space: Space) -> Vec<u32> {
-        let mut all: Vec<(u32, f32)> = vectors
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i as u32, space.distance(query, v)))
-            .collect();
+        let mut all: Vec<(u32, f32)> =
+            vectors.iter().enumerate().map(|(i, v)| (i as u32, space.distance(query, v))).collect();
         all.sort_by(|a, b| a.1.total_cmp(&b.1));
         all.into_iter().take(k).map(|(i, _)| i).collect()
     }
@@ -451,8 +450,11 @@ mod tests {
         let queries = scattered(40, 8);
         for query in &queries {
             let want = exactly(&vectors, query, 10, Space::L2);
-            let got: Vec<u32> =
-                graph.nearest(query, 10, Some(100), &read, None).into_iter().map(|(i, _)| i).collect();
+            let got: Vec<u32> = graph
+                .nearest(query, 10, Some(100), &read, None)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
             hits += got.iter().filter(|i| want.contains(i)).count();
         }
         // an approximate search is allowed to miss; missing more than a tenth
@@ -504,8 +506,11 @@ mod tests {
         let query = &scattered(1, 10)[0];
         let want = exactly(&vectors, query, 10, Space::L2);
         let recall_at = |ef: usize| {
-            let got: Vec<u32> =
-                graph.nearest(query, 10, Some(ef), &read, None).into_iter().map(|(i, _)| i).collect();
+            let got: Vec<u32> = graph
+                .nearest(query, 10, Some(ef), &read, None)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect();
             got.iter().filter(|i| want.contains(i)).count()
         };
         assert!(

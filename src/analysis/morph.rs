@@ -283,8 +283,8 @@ mod tests {
     #[test]
     #[cfg(feature = "cjk")]
     fn a_sentence_keeps_its_words_in_order() {
-        let read: Vec<String> = search_words("寿司がおいしいね").into_iter().map(|w| w.text).collect();
+        let read: Vec<String> =
+            search_words("寿司がおいしいね").into_iter().map(|w| w.text).collect();
         assert_eq!(read, vec!["寿司", "が", "おいしい", "ね"]);
     }
 }
-

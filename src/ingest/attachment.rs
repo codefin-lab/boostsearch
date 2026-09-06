@@ -134,20 +134,75 @@ pub fn language_of(text: &str) -> Option<String> {
 
 fn two_letter(code: &str) -> Option<&'static str> {
     const MAP: &[(&str, &str)] = &[
-        ("afr", "af"), ("aka", "ak"), ("amh", "am"), ("ara", "ar"), ("aze", "az"),
-        ("bel", "be"), ("ben", "bn"), ("bul", "bg"), ("cat", "ca"), ("ces", "cs"),
-        ("cmn", "zh"), ("dan", "da"), ("deu", "de"), ("ell", "el"), ("eng", "en"),
-        ("epo", "eo"), ("est", "et"), ("fin", "fi"), ("fra", "fr"), ("guj", "gu"),
-        ("heb", "he"), ("hin", "hi"), ("hrv", "hr"), ("hun", "hu"), ("hye", "hy"),
-        ("ind", "id"), ("ita", "it"), ("jav", "jv"), ("jpn", "ja"), ("kan", "kn"),
-        ("kat", "ka"), ("khm", "km"), ("kor", "ko"), ("lat", "la"), ("lav", "lv"),
-        ("lit", "lt"), ("mal", "ml"), ("mar", "mr"), ("mkd", "mk"), ("mya", "my"),
-        ("nep", "ne"), ("nld", "nl"), ("nob", "nb"), ("ori", "or"), ("pan", "pa"),
-        ("pes", "fa"), ("pol", "pl"), ("por", "pt"), ("ron", "ro"), ("rus", "ru"),
-        ("sin", "si"), ("slk", "sk"), ("slv", "sl"), ("sna", "sn"), ("spa", "es"),
-        ("srp", "sr"), ("swe", "sv"), ("tam", "ta"), ("tel", "te"), ("tgl", "tl"),
-        ("tha", "th"), ("tuk", "tk"), ("tur", "tr"), ("ukr", "uk"), ("urd", "ur"),
-        ("uzb", "uz"), ("vie", "vi"), ("yid", "yi"), ("zul", "zu"),
+        ("afr", "af"),
+        ("aka", "ak"),
+        ("amh", "am"),
+        ("ara", "ar"),
+        ("aze", "az"),
+        ("bel", "be"),
+        ("ben", "bn"),
+        ("bul", "bg"),
+        ("cat", "ca"),
+        ("ces", "cs"),
+        ("cmn", "zh"),
+        ("dan", "da"),
+        ("deu", "de"),
+        ("ell", "el"),
+        ("eng", "en"),
+        ("epo", "eo"),
+        ("est", "et"),
+        ("fin", "fi"),
+        ("fra", "fr"),
+        ("guj", "gu"),
+        ("heb", "he"),
+        ("hin", "hi"),
+        ("hrv", "hr"),
+        ("hun", "hu"),
+        ("hye", "hy"),
+        ("ind", "id"),
+        ("ita", "it"),
+        ("jav", "jv"),
+        ("jpn", "ja"),
+        ("kan", "kn"),
+        ("kat", "ka"),
+        ("khm", "km"),
+        ("kor", "ko"),
+        ("lat", "la"),
+        ("lav", "lv"),
+        ("lit", "lt"),
+        ("mal", "ml"),
+        ("mar", "mr"),
+        ("mkd", "mk"),
+        ("mya", "my"),
+        ("nep", "ne"),
+        ("nld", "nl"),
+        ("nob", "nb"),
+        ("ori", "or"),
+        ("pan", "pa"),
+        ("pes", "fa"),
+        ("pol", "pl"),
+        ("por", "pt"),
+        ("ron", "ro"),
+        ("rus", "ru"),
+        ("sin", "si"),
+        ("slk", "sk"),
+        ("slv", "sl"),
+        ("sna", "sn"),
+        ("spa", "es"),
+        ("srp", "sr"),
+        ("swe", "sv"),
+        ("tam", "ta"),
+        ("tel", "te"),
+        ("tgl", "tl"),
+        ("tha", "th"),
+        ("tuk", "tk"),
+        ("tur", "tr"),
+        ("ukr", "uk"),
+        ("urd", "ur"),
+        ("uzb", "uz"),
+        ("vie", "vi"),
+        ("yid", "yi"),
+        ("zul", "zu"),
     ];
     MAP.iter().find(|(three, _)| *three == code).map(|(_, two)| *two)
 }
@@ -173,9 +228,7 @@ fn kind_of(bytes: &[u8]) -> Kind {
         return Kind::Doc;
     }
     // text is what has no byte in it that text does not have
-    let printable = bytes
-        .iter()
-        .all(|b| *b >= 0x20 || matches!(*b, b'\n' | b'\r' | b'\t' | 0x0c));
+    let printable = bytes.iter().all(|b| *b >= 0x20 || matches!(*b, b'\n' | b'\r' | b'\t' | 0x0c));
     if printable && std::str::from_utf8(bytes).is_ok() {
         return Kind::Text;
     }
@@ -492,10 +545,10 @@ fn piece_table(clx: &[u8]) -> Option<Vec<(usize, usize, bool)>> {
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
         '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}',
-        '\u{2021}', '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}',
-        '\u{17D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
-        '\u{2022}', '\u{2013}', '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}',
-        '\u{153}', '\u{9D}', '\u{17E}', '\u{178}',
+        '\u{2021}', '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}',
+        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}',
+        '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}',
+        '\u{178}',
     ];
     match b {
         0x80..=0x9F => HIGH[(b - 0x80) as usize],
@@ -508,9 +561,16 @@ pub fn fields(found: &Extracted, text: &str, wanted: Option<&[String]>) -> Value
     // everything the processor can write, in the order OpenSearch names them.
     // Only what the file actually said is written: a document with no author
     // has no `author` field rather than an empty one
-    let all =
-        ["content", "title", "author", "keywords", "date", "content_type", "content_length",
-         "language"];
+    let all = [
+        "content",
+        "title",
+        "author",
+        "keywords",
+        "date",
+        "content_type",
+        "content_length",
+        "language",
+    ];
     let take: Vec<String> = match wanted {
         Some(w) => w.to_vec(),
         None => all.iter().map(|s| s.to_string()).collect(),
@@ -557,4 +617,3 @@ pub fn fields(found: &Extracted, text: &str, wanted: Option<&[String]>) -> Value
     }
     Value::Object(out)
 }
-

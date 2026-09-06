@@ -229,9 +229,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .get("vector")
                 .and_then(crate::knn::as_vector)
                 .ok_or_else(|| anyhow!("[knn] requires a [vector]"))?;
-            let declared = ctx.mapping.vector_fields.get(&field).ok_or_else(|| {
-                anyhow!("field [{field}] is not knn_vector type")
-            })?;
+            let declared = ctx
+                .mapping
+                .vector_fields
+                .get(&field)
+                .ok_or_else(|| anyhow!("field [{field}] is not knn_vector type"))?;
             if asked.len() != declared.dimension {
                 return Err(anyhow!(
                     "Query vector has invalid dimension: {}. Dimension should be: {}",
@@ -247,9 +249,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 Some(filter) => Some(ids_matching(ctx, filter)?),
                 None => None,
             };
-            let keep = allowed.as_ref().map(|set| {
-                move |id: &str| set.contains(id)
-            });
+            let keep = allowed.as_ref().map(|set| move |id: &str| set.contains(id));
             let keep_ref: Option<&dyn Fn(&str) -> bool> =
                 keep.as_ref().map(|f| f as &dyn Fn(&str) -> bool);
             let held = ctx.vectors.read();
@@ -260,13 +260,9 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 spec.get("min_score").and_then(|v| v.as_f64()),
                 spec.get("max_distance").and_then(|v| v.as_f64()),
             ) {
-                (Some(score), _) => held.within(
-                    &field,
-                    space,
-                    &asked,
-                    space.distance_of(score as f32),
-                    keep_ref,
-                ),
+                (Some(score), _) => {
+                    held.within(&field, space, &asked, space.distance_of(score as f32), keep_ref)
+                }
                 (_, Some(distance)) => {
                     held.within(&field, space, &asked, distance as f32, keep_ref)
                 }
@@ -719,11 +715,8 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
 /// which is what this is for.
 fn ids_matching(ctx: &Ctx, filter: &Value) -> Result<std::collections::HashSet<String>> {
     let query = super::build(ctx, filter)?;
-    let reader = ctx
-        .index
-        .reader_builder()
-        .reload_policy(boostcore::ReloadPolicy::Manual)
-        .try_into()?;
+    let reader =
+        ctx.index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
     let searcher: boostcore::Searcher = reader.searcher();
     let found = searcher.search(&query, &boostcore::collector::DocSetCollector)?;
     let mut out = std::collections::HashSet::with_capacity(found.len());

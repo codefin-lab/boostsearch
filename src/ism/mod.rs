@@ -31,9 +31,7 @@ pub fn job_interval_ms(store: &Store) -> u64 {
         .cluster_setting("plugins.index_state_management.job_interval")
         .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
         .map(|minutes| minutes * 60_000)
-        .or_else(|| {
-            std::env::var("BOOSTSEARCH_ISM_INTERVAL_MS").ok().and_then(|v| v.parse().ok())
-        })
+        .or_else(|| std::env::var("BOOSTSEARCH_ISM_INTERVAL_MS").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(5 * 60_000)
 }
 
@@ -170,9 +168,10 @@ pub fn template_for(store: &Store, index: &str) -> Option<String> {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let matched = patterns.iter().filter_map(|p| p.as_str()).any(|p| {
-                p == index || crate::store::glob_match(p, index)
-            });
+            let matched = patterns
+                .iter()
+                .filter_map(|p| p.as_str())
+                .any(|p| p == index || crate::store::glob_match(p, index));
             if !matched {
                 continue;
             }

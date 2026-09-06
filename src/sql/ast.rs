@@ -38,13 +38,23 @@ pub enum Expr {
     Boolean(bool),
     Null,
     /// `count(*)`, `avg(price)`, `date_format(ts, 'yyyy')`
-    Call { name: String, args: Vec<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
     /// `a + b`, `a || b`
-    Binary { op: String, left: Box<Expr>, right: Box<Expr> },
+    Binary {
+        op: String,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     /// `-a`
     Negate(Box<Expr>),
     /// `CASE WHEN … THEN … ELSE … END`
-    Case { whens: Vec<(Condition, Expr)>, otherwise: Option<Box<Expr>> },
+    Case {
+        whens: Vec<(Condition, Expr)>,
+        otherwise: Option<Box<Expr>>,
+    },
 }
 
 impl Expr {
@@ -96,8 +106,18 @@ impl Expr {
 pub fn is_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "count" | "count_distinct" | "sum" | "avg" | "min" | "max" | "var_pop" | "var_samp"
-            | "stddev_pop" | "stddev_samp" | "percentile" | "percentile_approx"
+        "count"
+            | "count_distinct"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "var_pop"
+            | "var_samp"
+            | "stddev_pop"
+            | "stddev_samp"
+            | "percentile"
+            | "percentile_approx"
     )
 }
 
@@ -108,17 +128,40 @@ pub enum Condition {
     Or(Box<Condition>, Box<Condition>),
     Not(Box<Condition>),
     /// `a = 1`, `a > 1`, `a <> 1`
-    Compare { left: Expr, op: String, right: Expr },
+    Compare {
+        left: Expr,
+        op: String,
+        right: Expr,
+    },
     /// `a BETWEEN 1 AND 2`
-    Between { value: Expr, low: Expr, high: Expr, negated: bool },
+    Between {
+        value: Expr,
+        low: Expr,
+        high: Expr,
+        negated: bool,
+    },
     /// `a IN (1, 2, 3)`
-    In { value: Expr, options: Vec<Expr>, negated: bool },
+    In {
+        value: Expr,
+        options: Vec<Expr>,
+        negated: bool,
+    },
     /// `a LIKE 'ann%'`
-    Like { value: Expr, pattern: String, negated: bool },
+    Like {
+        value: Expr,
+        pattern: String,
+        negated: bool,
+    },
     /// `a IS NULL`
-    IsNull { value: Expr, negated: bool },
+    IsNull {
+        value: Expr,
+        negated: bool,
+    },
     /// `MATCH(field, 'words')` and its relatives, which have no SQL meaning
     /// and every meaning here
-    Search { name: String, args: Vec<Expr> },
+    Search {
+        name: String,
+        args: Vec<Expr>,
+    },
     Always(bool),
 }

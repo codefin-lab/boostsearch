@@ -394,10 +394,7 @@ pub(crate) fn any_ingest_node() -> bool {
     if mine.iter().any(|r| r == "ingest") {
         return true;
     }
-    crate::cluster::current_state()
-        .nodes
-        .values()
-        .any(|n| n.roles.iter().any(|r| r == "ingest"))
+    crate::cluster::current_state().nodes.values().any(|n| n.roles.iter().any(|r| r == "ingest"))
 }
 
 /// Run pipelines by name over a document, counting each run.

@@ -355,8 +355,7 @@ pub(crate) fn split_peelable(
     let Some(o) = sub_aggs.as_ref().and_then(|s| s.as_object()) else {
         return (None, sub_aggs.clone());
     };
-    let (mine, theirs): (Vec<_>, Vec<_>) =
-        o.iter().partition(|(_, d)| peelable(d, store, targets));
+    let (mine, theirs): (Vec<_>, Vec<_>) = o.iter().partition(|(_, d)| peelable(d, store, targets));
     let pack = |v: Vec<(&String, &Value)>| {
         if v.is_empty() {
             None

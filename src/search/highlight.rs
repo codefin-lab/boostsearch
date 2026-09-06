@@ -183,8 +183,7 @@ pub(crate) fn build_highlight(
             if annotated {
                 let hits: Vec<String> = terms.iter().map(|(t, _)| t.clone()).collect();
                 let readers = vec![analyzer.clone()];
-                if let Some(marked) =
-                    mark_annotated(index, text, &terms, &hits, &readers, analysis)
+                if let Some(marked) = mark_annotated(index, text, &terms, &hits, &readers, analysis)
                 {
                     fragments.push(marked);
                 }
@@ -592,10 +591,8 @@ fn mark_annotated(
     // between them, made once
     let byte_of: Vec<usize> =
         plain.char_indices().map(|(at, _)| at).chain(std::iter::once(plain.len())).collect();
-    let spans: Vec<(usize, usize)> = spans
-        .into_iter()
-        .filter_map(|(a, b)| Some((*byte_of.get(a)?, *byte_of.get(b)?)))
-        .collect();
+    let spans: Vec<(usize, usize)> =
+        spans.into_iter().filter_map(|(a, b)| Some((*byte_of.get(a)?, *byte_of.get(b)?))).collect();
     let hit_of = |annotation: &Annotation| -> Option<String> {
         annotation.raw.split('&').find(|value| hits.iter().any(|h| h == value)).map(str::to_string)
     };
@@ -674,23 +671,19 @@ pub(crate) fn mark_terms(
         let end = word.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(word.len());
         let (word, tail) = word.split_at(end);
         let lower = word.to_lowercase();
-        let hit = whole.contains(&lower)
-            || starts.iter().any(|p| lower.starts_with(p))
-            || {
-                let forms = forms_of.entry(lower.clone()).or_insert_with(|| {
-                    let mut f: Vec<String> = Vec::new();
-                    for analyzer in analyzers {
-                        f.extend(match analyzer.as_deref().and_then(|named| analysis.get(named)) {
-                            Some(chain) => chain.terms(&lower),
-                            None => crate::query::analyze_text(index, &lower, analyzer.as_deref()),
-                        });
-                    }
-                    f
-                });
-                forms
-                    .iter()
-                    .any(|t| whole.contains(t) || starts.iter().any(|p| t.starts_with(p)))
-            };
+        let hit = whole.contains(&lower) || starts.iter().any(|p| lower.starts_with(p)) || {
+            let forms = forms_of.entry(lower.clone()).or_insert_with(|| {
+                let mut f: Vec<String> = Vec::new();
+                for analyzer in analyzers {
+                    f.extend(match analyzer.as_deref().and_then(|named| analysis.get(named)) {
+                        Some(chain) => chain.terms(&lower),
+                        None => crate::query::analyze_text(index, &lower, analyzer.as_deref()),
+                    });
+                }
+                f
+            });
+            forms.iter().any(|t| whole.contains(t) || starts.iter().any(|p| t.starts_with(p)))
+        };
         if hit {
             out.push_str(pre);
             out.push_str(word);

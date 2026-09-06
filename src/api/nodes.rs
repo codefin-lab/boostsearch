@@ -515,10 +515,7 @@ pub fn node_attrs() -> Vec<(String, String)> {
 
 /// `/_nodes/{*rest}` -- the node information, or one of the two reports that
 /// live under the same prefix and are told apart by their last part.
-pub async fn nodes_info_scoped(
-    Path(rest): Path<String>,
-    Query(p): Query<Params>,
-) -> Response {
+pub async fn nodes_info_scoped(Path(rest): Path<String>, Query(p): Query<Params>) -> Response {
     if rest.split('/').next_back() == Some("usage") {
         return nodes_usage(Query(p)).await;
     }

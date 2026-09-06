@@ -352,7 +352,8 @@ pub(crate) const SCRIPTED_METRICS: &[&str] =
 /// Which of them this definition is, where it names a script and no field.
 pub(crate) fn scripted_metric_kind(def: &Value) -> Option<&'static str> {
     SCRIPTED_METRICS.iter().copied().find(|k| {
-        def.pointer(&format!("/{k}/script")).is_some() && def.pointer(&format!("/{k}/field")).is_none()
+        def.pointer(&format!("/{k}/script")).is_some()
+            && def.pointer(&format!("/{k}/field")).is_none()
     })
 }
 
@@ -388,8 +389,13 @@ pub(crate) fn run_scripted_value_metric(
         let source = hit.get("_source").cloned().unwrap_or(json!({}));
         let expanded = crate::store::expand_for_indexing(source, &mapping);
         let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let out = crate::painless::contexts::run_on_doc(&compiled_spec(&script), &expanded, &mapping, score)
-            .map_err(|e| crate::search::search_script_failure(e, &index))?;
+        let out = crate::painless::contexts::run_on_doc(
+            &compiled_spec(&script),
+            &expanded,
+            &mapping,
+            score,
+        )
+        .map_err(|e| crate::search::search_script_failure(e, &index))?;
         match out.to_json() {
             Value::Number(n) => values.extend(n.as_f64()),
             // a script may hand back the several values of a field at once

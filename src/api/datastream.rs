@@ -187,8 +187,11 @@ pub async fn data_stream_stats(
                 "aggs": {"newest": {"max": {"field": field}}},
             });
             if let Ok(found) = crate::search::run(&store, idx, &probe, &Params::new())
-                && let Some(v) =
-                    found.aggs.as_ref().and_then(|a| a.pointer("/newest/value")).and_then(|v| v.as_f64())
+                && let Some(v) = found
+                    .aggs
+                    .as_ref()
+                    .and_then(|a| a.pointer("/newest/value"))
+                    .and_then(|v| v.as_f64())
             {
                 latest = latest.max(v as i64);
             }

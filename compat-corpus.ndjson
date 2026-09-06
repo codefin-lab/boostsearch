@@ -1,0 +1,183 @@
+{"method": "DELETE", "path": "/compat", "body": null}
+{"method": "PUT", "path": "/compat", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0, "analysis": {"analyzer": {"folded": {"type": "custom", "tokenizer": "standard", "filter": ["lowercase", "asciifolding"]}}}}, "mappings": {"properties": {"title": {"type": "text"}, "folded": {"type": "text", "analyzer": "folded"}, "tag": {"type": "keyword"}, "n": {"type": "long"}, "price": {"type": "double"}, "when": {"type": "date"}, "ok": {"type": "boolean"}, "ip": {"type": "ip"}, "loc": {"type": "geo_point"}, "span": {"type": "date_range"}, "obj": {"type": "nested", "properties": {"k": {"type": "keyword"}, "v": {"type": "long"}}}}}}}
+{"method": "PUT", "path": "/compat/_doc/1?refresh=true", "body": {"title": "the quick brown fox", "folded": "Caf\u00e9 R\u00e9sum\u00e9", "tag": "a", "n": 1, "price": 9.5, "when": "2024-01-01", "ok": true, "ip": "10.0.0.1", "loc": {"lat": 13.7, "lon": 100.5}, "span": {"gte": "2024-01-01", "lte": "2024-06-01"}, "obj": [{"k": "x", "v": 1}, {"k": "y", "v": 2}]}}
+{"method": "PUT", "path": "/compat/_doc/2?refresh=true", "body": {"title": "a quick red dog", "folded": "cafe resume", "tag": "b", "n": 20, "price": 12.0, "when": "2025-06-15", "ok": false, "ip": "10.0.0.9", "loc": {"lat": 51.5, "lon": -0.1}, "span": {"gte": "2025-01-01", "lte": "2025-06-01"}, "obj": [{"k": "x", "v": 5}]}}
+{"method": "PUT", "path": "/compat/_doc/3?refresh=true", "body": {"title": "brown dogs jumping over", "folded": "CAF\u00c9", "tag": "a", "n": 300, "price": 3.25, "when": "2026-02-02", "ok": true, "ip": "192.168.1.4", "loc": {"lat": -33.9, "lon": 151.2}, "span": {"gte": "2026-01-01", "lte": "2026-03-01"}, "obj": [{"k": "z", "v": 9}]}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "simple", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "simple", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "simple", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "simple", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "whitespace", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "whitespace", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "whitespace", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "whitespace", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "stop", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "stop", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "stop", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "stop", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "keyword", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "keyword", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "keyword", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "keyword", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "pattern", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "pattern", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "pattern", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "pattern", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "english", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "english", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "english", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "english", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "french", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "french", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "french", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "french", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "german", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "german", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "german", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "german", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "italian", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "italian", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "italian", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "italian", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "spanish", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "spanish", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "spanish", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "spanish", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "portuguese", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "portuguese", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "portuguese", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "portuguese", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "russian", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "russian", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "russian", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "russian", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "arabic", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "arabic", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "arabic", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "arabic", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "thai", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "thai", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "thai", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "thai", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "chinese", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "chinese", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "chinese", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "chinese", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "cjk", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "cjk", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "cjk", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "cjk", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "fingerprint", "text": "The Quick Brown Foxes"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "fingerprint", "text": "Caf\u00e9 R\u00e9sum\u00e9 na\u00efve"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "fingerprint", "text": "running runner ran"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "fingerprint", "text": "ELASTIC search 2024"}}
+{"method": "POST", "path": "/compat/_analyze", "body": {"analyzer": "folded", "text": "Caf\u00e9 R\u00e9sum\u00e9"}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match": {"title": "quick"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_phrase": {"title": "quick brown"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_bool_prefix": {"title": "quick bro"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_phrase_prefix": {"title": "quick bro"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"multi_match": {"query": "quick", "fields": ["title", "tag"]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"term": {"tag": "a"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"terms": {"tag": ["a", "b"]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"ids": {"values": ["1", "2"]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"range": {"n": {"gte": 2, "lt": 500}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"exists": {"field": "ip"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"prefix": {"tag": "a"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"wildcard": {"tag": "a*"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"regexp": {"tag": "a|b"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"fuzzy": {"title": {"value": "quik", "fuzziness": 1}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"bool": {"must": [{"match": {"title": "quick"}}], "filter": [{"term": {"tag": "a"}}]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"dis_max": {"queries": [{"match": {"title": "quick"}}, {"term": {"tag": "b"}}]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"boosting": {"positive": {"match": {"title": "quick"}}, "negative": {"term": {"tag": "b"}}, "negative_boost": 0.2}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"constant_score": {"filter": {"term": {"tag": "a"}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"query_string": {"query": "title:quick AND tag:a"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"simple_query_string": {"query": "quick + brown", "fields": ["title"]}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"nested": {"path": "obj", "query": {"term": {"obj.k": "x"}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"geo_distance": {"distance": "100km", "loc": {"lat": 13.75, "lon": 100.5}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"geo_bounding_box": {"loc": {"top_left": {"lat": 60, "lon": -10}, "bottom_right": {"lat": -40, "lon": 160}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"terms_set": {"tag": {"terms": ["a", "b"], "minimum_should_match_script": {"source": "1"}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"distance_feature": {"field": "when", "pivot": "30d", "origin": "2025-01-01"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"intervals": {"title": {"match": {"query": "quick brown", "max_gaps": 1}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"rank_feature": {"field": "price"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"function_score": {"query": {"match_all": {}}, "boost": 2}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1.0"}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"script": {"script": {"source": "true"}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"wrapper": {"query": "eyJ0ZXJtIjp7InRhZyI6ImEifX0="}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"more_like_this": {"fields": ["title"], "like": "quick brown", "min_term_freq": 1, "min_doc_freq": 1}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"span_term": {"title": "quick"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"span_near": {"clauses": [{"span_term": {"title": "quick"}}, {"span_term": {"title": "brown"}}], "slop": 1, "in_order": true}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"percolate": {"field": "query", "document": {"title": "quick"}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"knn": {"loc": {"vector": [1, 2], "k": 1}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"has_child": {"type": "x", "query": {"match_all": {}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"has_parent": {"parent_type": "x", "query": {"match_all": {}}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"parent_id": {"type": "x", "id": "1"}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"common": {"title": {"query": "quick brown"}}}, "size": 3, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"terms": {"field": "tag"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"histogram": {"field": "n", "interval": 50}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"date_histogram": {"field": "when", "calendar_interval": "year"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"date_range": {"field": "when", "ranges": [{"to": "2025-01-01"}, {"from": "2025-01-01"}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"range": {"field": "n", "ranges": [{"to": 50}, {"from": 50}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"ip_range": {"field": "ip", "ranges": [{"to": "10.0.0.5"}, {"from": "10.0.0.5"}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"avg": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"sum": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"min": {"field": "n"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"max": {"field": "n"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"stats": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"extended_stats": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"value_count": {"field": "tag"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"cardinality": {"field": "tag"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"percentiles": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"percentile_ranks": {"field": "price", "values": [5, 10]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"median_absolute_deviation": {"field": "price"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"missing": {"field": "nothing"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"filter": {"term": {"tag": "a"}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"filters": {"filters": {"a": {"term": {"tag": "a"}}, "b": {"term": {"tag": "b"}}}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"global": {}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"nested": {"path": "obj"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"sampler": {"shard_size": 2}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"diversified_sampler": {"field": "tag", "shard_size": 2}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"significant_terms": {"field": "tag"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"rare_terms": {"field": "tag"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"multi_terms": {"terms": [{"field": "tag"}, {"field": "ok"}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"composite": {"sources": [{"t": {"terms": {"field": "tag"}}}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"auto_date_histogram": {"field": "when", "buckets": 2}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"variable_width_histogram": {"field": "n", "buckets": 2}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"geo_distance": {"field": "loc", "origin": "13.7,100.5", "ranges": [{"to": 1000}]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"geo_bounds": {"field": "loc"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"geo_centroid": {"field": "loc"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"geohash_grid": {"field": "loc", "precision": 3}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"top_hits": {"size": 1}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"weighted_avg": {"value": {"field": "price"}, "weight": {"field": "n"}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"matrix_stats": {"fields": ["n", "price"]}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"scripted_metric": {"init_script": "state.s=0", "map_script": "state.s+=1", "combine_script": "return state.s", "reduce_script": "return 1"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"probe": {"adjacency_matrix": {"filters": {"a": {"term": {"tag": "a"}}, "b": {"term": {"tag": "b"}}}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"per": {"date_histogram": {"field": "when", "calendar_interval": "year"}, "aggs": {"total": {"sum": {"field": "price"}}}}, "sum_total": {"sum_bucket": {"buckets_path": "per>total"}}, "max_total": {"max_bucket": {"buckets_path": "per>total"}}, "avg_total": {"avg_bucket": {"buckets_path": "per>total"}}, "stats_total": {"stats_bucket": {"buckets_path": "per>total"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"size": 0, "aggs": {"per": {"date_histogram": {"field": "when", "calendar_interval": "year"}, "aggs": {"total": {"sum": {"field": "price"}}, "run": {"cumulative_sum": {"buckets_path": "total"}}, "diff": {"derivative": {"buckets_path": "total"}}, "mv": {"moving_fn": {"buckets_path": "total", "window": 2, "script": "MovingFunctions.max(values)"}}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match": {"title": "quick"}}, "highlight": {"fields": {"title": {}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "collapse": {"field": "tag"}, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "_source": ["title", "tag"], "size": 2}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "fields": ["tag", {"field": "when", "format": "yyyy"}], "size": 2}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "docvalue_fields": ["n"], "size": 2}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "sort": [{"obj.v": {"order": "desc", "nested": {"path": "obj"}}}]}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "search_after": [20], "sort": [{"n": "asc"}], "size": 2}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "rescore": {"window_size": 3, "query": {"rescore_query": {"match": {"title": "brown"}}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"suggest": {"s": {"text": "quik", "term": {"field": "title"}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match": {"title": "quick"}}, "explain": true}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"nested": {"path": "obj", "query": {"term": {"obj.k": "x"}}, "inner_hits": {}}}}}
+{"method": "POST", "path": "/compat/_search", "body": {"query": {"match_all": {}}, "aggs": {"t": {"terms": {"field": "tag", "order": {"p": "desc"}}, "aggs": {"p": {"avg": {"field": "price"}}}}}}}
+{"method": "GET", "path": "/compat/_mapping", "body": null}
+{"method": "GET", "path": "/compat/_settings", "body": null}
+{"method": "GET", "path": "/compat/_count", "body": null}
+{"method": "POST", "path": "/compat/_field_caps?fields=*", "body": null}
+{"method": "GET", "path": "/compat/_doc/1", "body": null}
+{"method": "POST", "path": "/compat/_mget", "body": {"ids": ["1", "2"]}}
+{"method": "POST", "path": "/compat/_msearch", "body": "{\"index\":\"compat\"}\n{\"query\":{\"match_all\":{}}}\n"}
+{"method": "POST", "path": "/compat/_termvectors/1", "body": {"fields": ["title"]}}
+{"method": "POST", "path": "/compat/_update/1", "body": {"doc": {"n": 2}}}
+{"method": "POST", "path": "/compat/_delete_by_query", "body": {"query": {"term": {"tag": "zzz"}}}}
+{"method": "POST", "path": "/compat/_update_by_query", "body": {"query": {"term": {"tag": "zzz"}}}}

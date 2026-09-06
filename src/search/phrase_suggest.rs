@@ -147,10 +147,7 @@ pub(crate) fn phrase_suggest(
     // index actually reads that way. With `prune` the answer is reported
     // beside each suggestion; without it, the ones that match nothing go.
     let collate = spec.get("collate");
-    let prune = collate
-        .and_then(|c| c.get("prune"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let prune = collate.and_then(|c| c.get("prune")).and_then(|v| v.as_bool()).unwrap_or(false);
     let mut options: Vec<Value> = Vec::new();
     for (score, line) in scored {
         let mut option = json!({"text": line.clone(), "score": score.max(0.0) + 0.01});

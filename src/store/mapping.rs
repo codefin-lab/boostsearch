@@ -463,11 +463,8 @@ impl Mapping {
         self.vector_fields = crate::knn::fields_of(&self.raw);
         // where each declared field's values go, worked out once here rather
         // than once per document per field
-        self.views = self
-            .types
-            .keys()
-            .map(|path| (path.clone(), self.compute_views(path)))
-            .collect();
+        self.views =
+            self.types.keys().map(|path| (path.clone(), self.compute_views(path))).collect();
         // a mapping that declares nothing sends every value to both views,
         // and a document written under one needs no walking at all
         self.every_field_both = self.views.values().all(|v| v.analysed && v.untouched);
@@ -596,7 +593,9 @@ impl Mapping {
 
     fn compute_views(&self, field: &str) -> Views {
         match self.type_of(field) {
-            Some("text") | Some("match_only_text") | Some("search_as_you_type")
+            Some("text")
+            | Some("match_only_text")
+            | Some("search_as_you_type")
             | Some("annotated_text") => Views {
                 analysed: true,
                 // a text field that declares a keyword sub-field is asked

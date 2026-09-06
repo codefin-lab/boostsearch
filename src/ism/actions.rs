@@ -46,11 +46,8 @@ pub fn run(store: &Store, index: &str, kind: &str, spec: &Value) -> Result<Strin
         }
         "force_merge" => {
             let Some(st) = store.get(index) else { return Err(missing(index)) };
-            let segments = body
-                .get("max_num_segments")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1)
-                .max(1) as usize;
+            let segments =
+                body.get("max_num_segments").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
             let mut g = st.write();
             g.refresh().map_err(|e| e.to_string())?;
             // merge down to the count asked for, a batch at a time, the way
@@ -161,7 +158,9 @@ fn rollover_conditions_met(store: &Store, index: &str, conditions: &Value) -> bo
         "max_age" => {
             let made = store
                 .get(index)
-                .and_then(|st| st.read().setting("creation_date").and_then(|v| v.parse::<i64>().ok()))
+                .and_then(|st| {
+                    st.read().setting("creation_date").and_then(|v| v.parse::<i64>().ok())
+                })
                 .unwrap_or(now);
             now - made >= super::engine::duration_ms(value).unwrap_or(i64::MAX)
         }

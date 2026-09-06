@@ -625,9 +625,8 @@ pub async fn bulk(
                             now,
                             "index",
                         );
-                        let mut runner =
-                            crate::painless::contexts::Runner::new(&compiled.params)
-                                .with_ctx(ctx.clone());
+                        let mut runner = crate::painless::contexts::Runner::new(&compiled.params)
+                            .with_ctx(ctx.clone());
                         if let Err(e) = runner.run(&compiled.script) {
                             errors = true;
                             items.push(json!({"update": {

@@ -970,8 +970,7 @@ pub fn run(
     // a narrowing that happens after the candidates are in hand -- a
     // `post_filter`, a score floor -- decides both the page and the total, so
     // the collection cannot stop at a page's worth
-    let narrowed_after =
-        body.get("post_filter").is_some() || body.get("min_score").is_some();
+    let narrowed_after = body.get("post_filter").is_some() || body.get("min_score").is_some();
     let page_want = if slice.is_some()
         || body.get("collapse").is_some()
         || nested_filtered

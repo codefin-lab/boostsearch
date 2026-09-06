@@ -20,8 +20,8 @@ mod query;
 mod search;
 mod security;
 mod snapshot;
-mod sql;
 mod source;
+mod sql;
 mod store;
 mod tls;
 mod tz;
@@ -44,11 +44,8 @@ async fn root() -> impl IntoResponse {
     // way a client that pins a node by name expects
     let me = cluster::identity();
     let state = cluster::current_state();
-    let uuid = if state.cluster_uuid.is_empty() {
-        "_na_".to_string()
-    } else {
-        state.cluster_uuid.clone()
-    };
+    let uuid =
+        if state.cluster_uuid.is_empty() { "_na_".to_string() } else { state.cluster_uuid.clone() };
     axum::Json(json!({
         "name": me.name,
         "cluster_name": me.cluster_name,
@@ -408,10 +405,7 @@ fn app(store: Store) -> Router {
         // stops at 2 MB by default, which is smaller than any bulk helper's
         // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
         // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
-        .route(
-            "/_plugins/_ism/policies",
-            get(api::ism::get_policy),
-        )
+        .route("/_plugins/_ism/policies", get(api::ism::get_policy))
         .route(
             "/_plugins/_ism/policies/{id}",
             put(api::ism::put_policy).get(api::ism::get_policy).delete(api::ism::delete_policy),
@@ -591,8 +585,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
             http_compat::LenientListener(listener),
-            app(store.clone())
-                .into_make_service_with_connect_info::<http_compat::Peer>(),
+            app(store.clone()).into_make_service_with_connect_info::<http_compat::Peer>(),
         )
         .with_graceful_shutdown(shutdown_signal(store))
         .await?;

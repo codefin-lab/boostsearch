@@ -75,10 +75,8 @@ impl IdxState {
     /// otherwise walk back over numbers it has already used, and find answers
     /// filed under them.
     pub fn moved_on(&self) {
-        self.search_gen.store(
-            crate::store::next_generation(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.search_gen
+            .store(crate::store::next_generation(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn version_of(&self, id: &str) -> u64 {
@@ -214,4 +212,3 @@ pub(crate) fn alive_address(
     }
     None
 }
-

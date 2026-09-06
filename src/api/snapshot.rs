@@ -384,10 +384,8 @@ pub async fn delete_snapshot(
     refresh_readonly(&store, &repo);
     // a snapshot that was never there is missing whoever asked: only one that
     // is really held runs into the repository being read-only
-    let exists = store
-        .snapshots(&repo)
-        .keys()
-        .any(|n| *n == name || crate::store::glob_match(&name, n));
+    let exists =
+        store.snapshots(&repo).keys().any(|n| *n == name || crate::store::glob_match(&name, n));
     if exists && let Some(r) = refuse_if_readonly(&store, &repo) {
         return r;
     }

@@ -404,12 +404,7 @@ pub(crate) fn pipeline_failure(e: &crate::search::pipeline::PipelineError) -> Re
 /// The sort values of the last document a page returned, which is where the
 /// next page begins.
 pub(crate) fn last_sort_of(env: &Value) -> Option<Vec<Value>> {
-    env.pointer("/hits/hits")?
-        .as_array()?
-        .last()?
-        .get("sort")?
-        .as_array()
-        .map(|a| a.to_vec())
+    env.pointer("/hits/hits")?.as_array()?.last()?.get("sort")?.as_array().map(|a| a.to_vec())
 }
 
 /// Take the sort values back off the hits, for an order the caller did not

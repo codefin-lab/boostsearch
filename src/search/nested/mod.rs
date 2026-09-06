@@ -240,8 +240,7 @@ pub(crate) fn objects_agg(
                         if let Ok(at) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
                             key as i128 * 1_000_000,
                         ) {
-                            b["key_as_string"] =
-                                json!(crate::search::aggs::iso_millis(at));
+                            b["key_as_string"] = json!(crate::search::aggs::iso_millis(at));
                         }
                     }
                     if let Some(Value::Object(inner)) =

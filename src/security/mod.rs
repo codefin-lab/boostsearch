@@ -1372,7 +1372,7 @@ pub fn doc_visible(store: &crate::store::Store, g: &crate::store::IdxState, id: 
         observed_kinds: &g.observed_kinds,
         kinds_complete: g.kinds_complete,
         stats: &g.stats,
-            vectors: &g.vectors,
+        vectors: &g.vectors,
     };
     let Ok(filter) = crate::query::build(&ctx, &dls) else { return false };
     let probe =

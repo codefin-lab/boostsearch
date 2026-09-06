@@ -12,12 +12,12 @@ use serde_json::{Map, Value, json};
 
 use crate::store::Store;
 
+pub mod attachment;
 pub mod dissect;
+pub mod geoip;
 pub mod grok;
 mod hash;
 mod processors;
-pub mod attachment;
-pub mod geoip;
 pub mod user_agent;
 
 /// A document as a pipeline sees it.

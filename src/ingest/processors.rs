@@ -1364,10 +1364,7 @@ fn run_body(
             // how much of a file is read. A field may carry the number for
             // one document, which is how a large file is read further than
             // the pipeline's own ceiling
-            let mut limit = c
-                .get("indexed_chars")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(100_000);
+            let mut limit = c.get("indexed_chars").and_then(|v| v.as_i64()).unwrap_or(100_000);
             if let Some(from) = c.str_opt("indexed_chars_field")?
                 && let Some(n) = doc.get(&from).and_then(|v| v.as_i64())
             {
@@ -1378,12 +1375,9 @@ fn run_body(
                 return Ok(Some(doc));
             };
             use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded.trim())
-                .map_err(|_| {
-                    IngestError::illegal(format!(
-                        "field [{field}] is not a valid base64 value"
-                    ))
+            let bytes =
+                base64::engine::general_purpose::STANDARD.decode(encoded.trim()).map_err(|_| {
+                    IngestError::illegal(format!("field [{field}] is not a valid base64 value"))
                 })?;
             let found = super::attachment::extract(&bytes, limit);
             let written = super::attachment::fields(&found, &found.content, properties.as_deref());
@@ -1433,8 +1427,7 @@ fn run_body(
                 // every address keeps its place, so that the answers line up
                 // with the addresses they came from; one nothing is known
                 // about is a null in that place
-                let all: Vec<Value> =
-                    found.into_iter().map(|f| f.unwrap_or(Value::Null)).collect();
+                let all: Vec<Value> = found.into_iter().map(|f| f.unwrap_or(Value::Null)).collect();
                 doc.set(&target, Value::Array(all)).map_err(IngestError::illegal)?;
             }
         }

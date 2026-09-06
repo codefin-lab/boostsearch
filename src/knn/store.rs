@@ -348,16 +348,14 @@ impl Vectors {
             Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize)
         };
         while at < bytes.len() {
-            let field = String::from_utf8(count(&mut at).and_then(|n| take(&mut at, n))?.to_vec())
-                .ok()?;
+            let field =
+                String::from_utf8(count(&mut at).and_then(|n| take(&mut at, n))?.to_vec()).ok()?;
             let id =
                 String::from_utf8(count(&mut at).and_then(|n| take(&mut at, n))?.to_vec()).ok()?;
             let dimension = count(&mut at)?;
             let raw = take(&mut at, dimension * 4)?;
-            let vector: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+            let vector: Vec<f32> =
+                raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             out.by_field.entry(field).or_default().put(&id, vector);
         }
         out.dirty = false;
