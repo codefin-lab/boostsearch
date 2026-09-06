@@ -51,6 +51,84 @@ def bundles_of(boot):
     return re.findall(r"'([^']+)'", block.group(1))
 
 
+def saved_object_index(engine):
+    """The mapping and settings the console's own index is made with."""
+    with urllib.request.urlopen(engine + "/.kibana_1", timeout=30) as answer:
+        found = json.loads(answer.read())
+    one = next(iter(found.values()))
+    index = one["settings"]["index"]
+    return {
+        "mappings": one["mappings"],
+        "settings": {
+            "number_of_shards": int(index["number_of_shards"]),
+            "auto_expand_replicas": index.get("auto_expand_replicas", "0-1"),
+        },
+    }
+
+
+def allowed_types(url):
+    """The types the management page is allowed to show."""
+    with urllib.request.urlopen(
+        url + "/api/opensearch-dashboards/management/saved_objects/_allowed_types", timeout=30
+    ) as answer:
+        return json.loads(answer.read())["types"]
+
+
+def probe_types(url, types):
+    """What each type is written at, and how the management page shows it.
+
+    Both are registered in compiled server code, so the only way to ask is to
+    write one of each and look at what came back. Each probe is deleted again.
+    """
+    versions, meta = {}, {}
+    for kind in types:
+        body = json.dumps({"attributes": {}}).encode()
+        made = urllib.request.Request(
+            f"{url}/api/saved_objects/{kind}/osd-pin-probe",
+            data=body,
+            headers={"content-type": "application/json", "osd-xsrf": "true"},
+        )
+        try:
+            with urllib.request.urlopen(made, timeout=30) as answer:
+                found = json.loads(answer.read())
+            if found.get("migrationVersion"):
+                versions[kind] = found["migrationVersion"]
+            shown = urllib.request.urlopen(
+                f"{url}/api/opensearch-dashboards/management/saved_objects/_find"
+                f"?type={kind}&perPage=100",
+                timeout=30,
+            )
+            for one in json.loads(shown.read()).get("saved_objects", []):
+                if one["id"] != "osd-pin-probe":
+                    continue
+                shape = dict(one.get("meta", {}))
+                shape.pop("title", None)
+                # the id is what makes each URL that object's own
+                for key in ("editUrl",):
+                    if key in shape:
+                        shape[key] = shape[key].replace("osd-pin-probe", "{id}")
+                if "inAppUrl" in shape and "path" in shape["inAppUrl"]:
+                    shape["inAppUrl"]["path"] = shape["inAppUrl"]["path"].replace(
+                        "osd-pin-probe", "{id}"
+                    )
+                meta[kind] = shape
+        except Exception:
+            # a type that refuses an empty object tells us nothing, which is
+            # the same as a type with no migrations
+            pass
+        finally:
+            gone = urllib.request.Request(
+                f"{url}/api/saved_objects/{kind}/osd-pin-probe",
+                method="DELETE",
+                headers={"osd-xsrf": "true"},
+            )
+            try:
+                urllib.request.urlopen(gone, timeout=30).read()
+            except Exception:
+                pass
+    return versions, meta
+
+
 def capabilities(url):
     """What a caller may do, with the part that depends on the request left out."""
     request = urllib.request.Request(
@@ -68,9 +146,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:5613")
     ap.add_argument("--app", default="home", help="any application; the shell is the same")
+    ap.add_argument("--engine", default="http://127.0.0.1:9222",
+                    help="the engine that Dashboards made its index in")
     args = ap.parse_args()
     url = args.url.rstrip("/")
 
+    probed = probe_types(url, allowed_types(url))
     page = fetch(url, f"/app/{args.app}")
     boot = fetch(url, "/bootstrap.js")
     meta = element(page, "osd-injected-metadata")
@@ -117,6 +198,23 @@ def main():
         # is left out: it is one entry per application the caller asked about,
         # so it is the request's shape rather than the server's.
         "capabilities": capabilities(url),
+        # The index the console keeps everything in, as the server it replaces
+        # makes it: strict, one property per saved-object type, and a `_meta`
+        # of hashes the migration reads to decide whether the mapping moved.
+        # It comes from the plugins' type registrations, which are compiled
+        # server code, so it is pinned like the rest of the contract.
+        "savedObjectIndex": saved_object_index(args.engine),
+        "allowedTypes": allowed_types(url),
+        # What version of itself each type's attributes are written at. It is
+        # decided by the migrations a plugin registers, so the only way to ask
+        # is to write one and look: this makes one of each, reads what came
+        # back, and deletes it again.
+        "migrationVersions": probed[0],
+        # What the management page shows for each type: which icon, which
+        # field is its title, and where its edit page is. Registered by the
+        # plugin that owns the type, so it is asked the same way -- by making
+        # one and looking at what came back.
+        "managementMeta": probed[1],
     }
 
     OUT.mkdir(exist_ok=True)

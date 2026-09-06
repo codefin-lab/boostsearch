@@ -19,12 +19,13 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use boostsearch::console::Console;
 use boostsearch::console::engine::{Engine, Failed};
+use boostsearch::console::saved::{Looking, Saved, Writing};
 use boostsearch::console::settings::Settings;
 use serde_json::Value;
 
@@ -91,6 +92,44 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/opensearch-dashboards/settings/{key}",
             post(write_setting).delete(reset_setting),
+        )
+        // the migration, asked for rather than done at startup. Anything
+        // that has written to the console's index behind its back -- a
+        // restore, a fixture loaded for a test -- says so this way, and the
+        // index is made right again.
+        .route("/internal/saved_objects/_migrate", post(migrate_now))
+        .route("/api/saved_objects/_find", get(find))
+        .route("/api/saved_objects/_export", post(export))
+        .route("/api/saved_objects/_import", post(import))
+        .route("/api/saved_objects/_resolve_import_errors", post(resolve_import_errors))
+        .route(
+            "/api/opensearch-dashboards/management/saved_objects/_allowed_types",
+            get(allowed_types),
+        )
+        .route("/api/opensearch-dashboards/management/saved_objects/_find", get(management_find))
+        .route(
+            "/api/opensearch-dashboards/management/saved_objects/scroll/counts",
+            post(scroll_counts),
+        )
+        .route(
+            "/api/opensearch-dashboards/management/saved_objects/scroll/export",
+            post(scroll_export),
+        )
+        .route(
+            "/api/opensearch-dashboards/management/saved_objects/relationships/{kind}/{id}",
+            get(relationships),
+        )
+        .route(
+            "/api/opensearch-dashboards/management/saved_objects/{kind}/{id}",
+            get(management_one),
+        )
+        .route("/api/saved_objects/_bulk_get", post(bulk_get))
+        .route("/api/saved_objects/_bulk_create", post(bulk_create))
+        .route("/api/saved_objects/_bulk_update", axum::routing::put(bulk_update))
+        .route("/api/saved_objects/{kind}", post(create_auto))
+        .route(
+            "/api/saved_objects/{kind}/{id}",
+            get(get_one).post(create_one).put(update_one).delete(delete_one),
         );
     // a base path is a prefix on every route, and the one route that is not
     // under it is the redirect that sends a reader to it
@@ -98,7 +137,26 @@ async fn main() -> anyhow::Result<()> {
         "" => routes,
         base => Router::new().nest(base, routes).route("/", get(root)),
     };
-    let app = routes.with_state(console);
+    let app = routes.with_state(console.clone());
+
+    // the index everything is kept in, made if nothing has and moved on if
+    // its shape has changed. A console that cannot do this can still serve
+    // every page, so it says what happened and carries on rather than
+    // refusing to start: an engine that is not up yet is the ordinary case
+    // when both are started at once.
+    {
+        let engine = console.engine.clone();
+        let mapping = console.console.pinned.saved_object_index.get("mappings").cloned();
+        let found = tokio::task::spawn_blocking(move || {
+            boostsearch::console::migrate::ensure(&engine, &mapping.unwrap_or_default())
+        })
+        .await;
+        match found {
+            Ok(Ok(what)) => println!("  {what:?}"),
+            Ok(Err(e)) => eprintln!("  the console's index: {}", e.message),
+            Err(e) => eprintln!("  the console's index: {e}"),
+        }
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -266,6 +324,7 @@ fn settings_of(serving: &Serving) -> Settings<'_> {
         &serving.console.pinned.version,
         serving.console.pinned.build_number,
         &serving.console.overrides,
+        &serving.console.mapping,
     )
 }
 
@@ -334,4 +393,339 @@ fn served(found: Option<boostsearch::console::assets::Served>, cache: &str) -> R
         response = response.header(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
     }
     response.body(Body::from(found.bytes)).expect("a response with a body")
+}
+
+/// Put the console's index back into the shape it should be in.
+///
+/// Something that wrote to it directly may have left it as a plain index
+/// where there should be an alias, or with a mapping that lets anything in.
+/// This is the same walk that runs at startup, so whatever it finds it does
+/// the right thing about.
+async fn migrate_now(State(serving): State<Shared>) -> Response {
+    let engine = serving.engine.clone();
+    let mapping = serving.console.pinned.saved_object_index.get("mappings").cloned();
+    let found = tokio::task::spawn_blocking(move || {
+        boostsearch::console::migrate::ensure(&engine, &mapping.unwrap_or_default())
+    })
+    .await;
+    match found {
+        Ok(Ok(_)) => axum::Json(serde_json::json!({"success": true})).into_response(),
+        Ok(Err(e)) => refused(e),
+        Err(e) => refused(Failed { status: 500, message: format!("{e}") }),
+    }
+}
+
+fn saved_of(serving: &Serving) -> Saved<'_> {
+    Saved::new(
+        &serving.engine,
+        &serving.console.pinned.migration_versions,
+        &serving.console.mapping,
+    )
+}
+
+/// What a request asked to write, however it named it.
+fn writing_of(kind: &str, id: Option<String>, body: &Value, overwrite: bool) -> Writing {
+    Writing {
+        kind: kind.to_string(),
+        id,
+        attributes: body.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({})),
+        references: body.get("references").cloned().unwrap_or_else(|| serde_json::json!([])),
+        migration_version: body.get("migrationVersion").cloned(),
+        overwrite,
+    }
+}
+
+async fn get_one(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    on_engine(serving, move |s| saved_of(s).get(&kind, &id)).await
+}
+
+async fn create_one(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+    Query(p): Query<std::collections::HashMap<String, String>>,
+    body: axum::Json<Value>,
+) -> Response {
+    let overwrite = p.get("overwrite").map(|v| v == "true").unwrap_or(false);
+    let writing = writing_of(&kind, Some(id), &body, overwrite);
+    on_engine(serving, move |s| saved_of(s).create(writing)).await
+}
+
+/// An object whose id the caller left to the server.
+async fn create_auto(
+    State(serving): State<Shared>,
+    Path(kind): Path<String>,
+    body: axum::Json<Value>,
+) -> Response {
+    let writing = writing_of(&kind, None, &body, false);
+    on_engine(serving, move |s| saved_of(s).create(writing)).await
+}
+
+async fn update_one(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+    body: axum::Json<Value>,
+) -> Response {
+    let attributes = body.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let references = body.get("references").cloned();
+    on_engine(serving, move |s| saved_of(s).update(&kind, &id, &attributes, references.as_ref()))
+        .await
+}
+
+async fn delete_one(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    on_engine(serving, move |s| saved_of(s).delete(&kind, &id)).await
+}
+
+async fn bulk_get(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let asked = body.as_array().cloned().unwrap_or_default();
+    on_engine(serving, move |s| saved_of(s).bulk_get(&asked)).await
+}
+
+/// Several objects written at once, each answered for on its own.
+async fn bulk_create(
+    State(serving): State<Shared>,
+    Query(p): Query<std::collections::HashMap<String, String>>,
+    body: axum::Json<Value>,
+) -> Response {
+    let overwrite = p.get("overwrite").map(|v| v == "true").unwrap_or(false);
+    let asked = body.as_array().cloned().unwrap_or_default();
+    on_engine(serving, move |s| {
+        let saved = saved_of(s);
+        let mut out = Vec::new();
+        for one in &asked {
+            let kind = one.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let id = one.get("id").and_then(|v| v.as_str()).map(String::from);
+            let named = id.clone().unwrap_or_default();
+            match saved.create(writing_of(&kind, id, one, overwrite)) {
+                Ok(found) => out.push(found),
+                // one that could not be written is reported where it stood,
+                // so a caller writing ten knows which of them failed
+                Err(e) => out.push(serde_json::json!({
+                    "id": named, "type": kind,
+                    "error": {"statusCode": e.status, "message": e.message},
+                })),
+            }
+        }
+        Ok(serde_json::json!({"saved_objects": out}))
+    })
+    .await
+}
+
+async fn bulk_update(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let asked = body.as_array().cloned().unwrap_or_default();
+    on_engine(serving, move |s| {
+        let saved = saved_of(s);
+        let mut out = Vec::new();
+        for one in &asked {
+            let kind = one.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            let id = one.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let attributes =
+                one.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({}));
+            match saved.update(kind, id, &attributes, one.get("references")) {
+                Ok(found) => out.push(found),
+                Err(e) => out.push(serde_json::json!({
+                    "id": id, "type": kind,
+                    "error": {"statusCode": e.status, "message": e.message},
+                })),
+            }
+        }
+        Ok(serde_json::json!({"saved_objects": out}))
+    })
+    .await
+}
+
+async fn find(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let looking = looking_from(query.as_deref().unwrap_or_default());
+    on_engine(serving, move |s| saved_of(s).find(&looking)).await
+}
+
+/// What a query string asked to look for.
+///
+/// A parameter that may be given more than once -- `type`, `fields` -- is a
+/// list, which is why this reads the query itself rather than taking a map:
+/// a map keeps one of them and the caller asked about all of them.
+fn looking_from(query: &str) -> Looking {
+    let mut looking = Looking::default();
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        let value = value.to_string();
+        match key.as_ref() {
+            "type" => looking.types.push(value),
+            "fields" => looking.fields.push(value),
+            "search_fields" => looking.search_fields.push(value),
+            "search" => looking.search = Some(value),
+            "page" => looking.page = value.parse().unwrap_or(1),
+            "per_page" => looking.per_page = value.parse().unwrap_or(20),
+            "sort_field" => looking.sort_field = Some(value),
+            "sort_order" => looking.sort_order = Some(value),
+            "default_search_operator" => looking.default_search_operator = value,
+            "has_reference" => looking.has_reference = serde_json::from_str(&value).ok(),
+            _ => {}
+        }
+    }
+    looking
+}
+
+fn management_of(serving: &Serving) -> boostsearch::console::management::Management<'_> {
+    boostsearch::console::management::Management {
+        saved: saved_of(serving),
+        engine: &serving.engine,
+        meta: &serving.console.pinned.management_meta,
+        allowed: &serving.console.pinned.allowed_types,
+    }
+}
+
+/// An export is a file, not a document: a line per object, read back a line
+/// at a time.
+async fn export(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let types: Vec<String> = listed(body.get("type"));
+    let objects = body.get("objects").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let include = body.get("includeReferencesDeep").and_then(|v| v.as_bool()).unwrap_or(false);
+    let exclude = body.get("excludeExportDetails").and_then(|v| v.as_bool()).unwrap_or(false);
+    let found = tokio::task::spawn_blocking(move || {
+        boostsearch::console::management::export(
+            &saved_of(&serving),
+            &types,
+            &objects,
+            include,
+            exclude,
+        )
+    })
+    .await;
+    match found {
+        Ok(Ok(lines)) => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/ndjson")], lines).into_response()
+        }
+        Ok(Err(e)) => refused(e),
+        Err(e) => refused(Failed { status: 500, message: format!("{e}") }),
+    }
+}
+
+async fn import(
+    State(serving): State<Shared>,
+    Query(p): Query<std::collections::HashMap<String, String>>,
+    body: String,
+) -> Response {
+    let overwrite = p.get("overwrite").map(|v| v == "true").unwrap_or(false);
+    let lines = ndjson_of(&body);
+    on_engine(serving, move |s| {
+        boostsearch::console::management::import(&saved_of(s), &lines, overwrite, &[])
+    })
+    .await
+}
+
+/// The reader has been shown the conflicts and said what to do about each.
+async fn resolve_import_errors(State(serving): State<Shared>, body: String) -> Response {
+    let lines = ndjson_of(&body);
+    let retries = retries_of(&body);
+    on_engine(serving, move |s| {
+        boostsearch::console::management::import(&saved_of(s), &lines, false, &retries)
+    })
+    .await
+}
+
+/// The file out of a form upload.
+///
+/// The front end sends an export as a file in a multipart body, so the lines
+/// are between the boundaries rather than being the whole of it.
+fn ndjson_of(body: &str) -> String {
+    if !body.starts_with("--") {
+        return body.to_string();
+    }
+    let mut out = String::new();
+    for part in body.split("\r\n\r\n").skip(1) {
+        for line in part.lines() {
+            if line.starts_with("--") || line.trim().is_empty() {
+                continue;
+            }
+            if serde_json::from_str::<Value>(line).is_ok() {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// What the reader said to do about each conflict.
+fn retries_of(body: &str) -> Vec<Value> {
+    body.split("\r\n\r\n")
+        .flat_map(|part| part.lines())
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter_map(|found| found.as_array().cloned())
+        .find(|list| {
+            list.iter()
+                .any(|one| one.get("overwrite").is_some() || one.get("destinationId").is_some())
+        })
+        .unwrap_or_default()
+}
+
+fn listed(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(Value::String(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+async fn allowed_types(State(serving): State<Shared>) -> Response {
+    axum::Json(management_of(&serving).allowed_types()).into_response()
+}
+
+async fn scroll_counts(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let types = listed(body.get("typesToInclude"));
+    let search = body.get("searchString").and_then(|v| v.as_str()).map(String::from);
+    on_engine(serving, move |s| management_of(s).counts(&types, search.as_deref())).await
+}
+
+async fn scroll_export(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let types = listed(body.get("typesToInclude"));
+    on_engine(serving, move |s| {
+        boostsearch::console::management::scroll_export(&saved_of(s), &types)
+    })
+    .await
+}
+
+async fn management_find(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let looking = looking_from(&management_query(query.as_deref().unwrap_or_default()));
+    on_engine(serving, move |s| management_of(s).find(&looking)).await
+}
+
+/// The management page spells two of its parameters differently.
+fn management_query(query: &str) -> String {
+    query.replace("perPage=", "per_page=").replace("sortField=", "sort_field=")
+}
+
+async fn management_one(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    on_engine(serving, move |s| management_of(s).one(&kind, &id)).await
+}
+
+async fn relationships(
+    State(serving): State<Shared>,
+    Path((kind, id)): Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let mut types = Vec::new();
+    let mut size = 10_000u64;
+    for (key, value) in form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "savedObjectTypes" => types.push(value.to_string()),
+            "size" => size = value.parse().unwrap_or(10_000),
+            _ => {}
+        }
+    }
+    on_engine(serving, move |s| management_of(s).relationships(&kind, &id, &types, size)).await
 }

@@ -179,7 +179,7 @@ HNSW, filtered search, nested vectors, the on-disk format, the k-NN API.
 Two query languages: lexer, parser, planner, execution against the search
 layer, and the response shapes their drivers expect.
 
-### 13. The console's server — 33 days
+### 13. The console's server — 43 days
 
 OpenSearch Dashboards is two programs. One is a Node server: it keeps the
 saved objects, migrates them, proxies the search API, serves the front end and
@@ -201,6 +201,7 @@ instead of most of a minute and holds tens of megabytes instead of hundreds.
 | 13.1 | The shell: the built assets, the metadata the front end boots from, the base path, the CSP, the translations | 6 |
 | 13.2 | Settings and status: `uiSettings` and the config object behind it, `/api/status` | 3 |
 | 13.3 | Saved objects: the store, the migrations that make `.kibana_N` and move the alias, the API and the management routes | 8 |
+| 13.3b | The migrations that change the *documents*: every type's own chain, run over an object written by an older console | 10 |
 | 13.4 | What the pages ask for: index patterns, `_fields_for_wildcard`, the internal search endpoints, the Dev Tools proxy, short URLs | 5 |
 | 13.5 | The plugin routes the pages we answer for need; a plain refusal for the rest | 4 |
 | 13.6 | The gate: every Phase 7.1 flow, through our server, against the same browser | 4 |
@@ -212,6 +213,17 @@ capabilities, the console proxy and the management routes that suite never
 asks about; the flows Phase 7.1 drives passing against our server with the
 front end unchanged; resident memory under 64MiB against the Node server's
 several hundred; ready to serve in under a second against its thirty.
+
+13.3b was not in this plan and is the reason the phase is ten days longer
+than it was. The index migration -- making `.kibana_N` and moving the alias --
+is what the plan named, and it is the smaller half. The other half is that an
+object written by an older console is in a shape the current mapping refuses:
+a dashboard from before 7.3 carries `uiStateJSON`, and putting it right means
+running that type's own migration over it. Those are code rather than data --
+eight hundred lines for `visualization` alone -- so unlike everything else in
+this contract they cannot be pinned from a running Dashboards. Until they are
+written, a console reads and writes its own objects correctly and refuses an
+old one loudly, naming the field.
 
 13.0 comes first for the reason every other phase learned the hard way: a
 number is worth what the gate behind it is worth, and a gate nobody has run

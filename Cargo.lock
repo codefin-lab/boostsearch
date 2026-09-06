@@ -448,6 +448,7 @@ dependencies = [
  "cfb",
  "fancy-regex",
  "flate2",
+ "form_urlencoded",
  "hmac",
  "hyper",
  "hyper-util",

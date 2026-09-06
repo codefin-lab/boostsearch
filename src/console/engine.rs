@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 ///
 /// OpenSearch Dashboards calls it `.kibana`, and the name is part of the
 /// contract rather than a choice: a console put in front of a cluster that
-/// already has one has to find what is there.
+/// already has one has to find what is there. It is an alias, and what it
+/// points at is [`super::migrate`]'s business.
 pub const INDEX: &str = ".kibana";
 
 #[derive(Clone)]
@@ -60,7 +61,7 @@ impl Engine {
         Engine { url: url.trim_end_matches('/').to_string(), agent, auth }
     }
 
-    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, Failed> {
+    pub fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, Failed> {
         let url = format!("{}{path}", self.url);
         // the two builders are different types -- one may carry a body and one
         // may not -- so the headers go on each rather than on both
@@ -91,20 +92,13 @@ impl Engine {
             .map_err(|e| Failed::of(502, format!("the engine's answer could not be read: {e}")))?;
         match status {
             200..=299 | 404 | 409 => Ok(found),
-            other => Err(Failed::of(
-                other,
-                found
-                    .pointer("/error/reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("the engine refused the request")
-                    .to_string(),
-            )),
+            other => Err(Failed::of(other, refusal(&found, method, path))),
         }
     }
 
     /// One saved object, or nothing where there is none.
     pub fn get(&self, id: &str) -> Result<Option<Value>, Failed> {
-        let found = self.send("GET", &format!("/{INDEX}/_doc/{}", escape(id)), None)?;
+        let found = self.call("GET", &format!("/{INDEX}/_doc/{}", escape(id)), None)?;
         match found.get("found").and_then(|v| v.as_bool()) {
             Some(true) => Ok(found.get("_source").cloned()),
             _ => Ok(None),
@@ -117,44 +111,35 @@ impl Engine {
     /// back the moment it writes one, and a write it cannot read is a setting
     /// that appears not to have been saved.
     pub fn put(&self, id: &str, source: &Value) -> Result<(), Failed> {
-        let path = format!("/{INDEX}/_doc/{}?refresh=wait_for", escape(id));
-        self.send("PUT", &path, Some(source))?;
-        Ok(())
+        let path = format!("/{INDEX}/_doc/{}?refresh=wait_for&require_alias=true", escape(id));
+        let found = self.call("PUT", &path, Some(source))?;
+        match found.pointer("/error/type").and_then(|v| v.as_str()) {
+            None => Ok(()),
+            Some(kind) => Err(Failed::of(500, format!("the console's index: {kind}"))),
+        }
     }
 
     /// Whether the engine is there and will answer.
     pub fn reachable(&self) -> Result<Value, Failed> {
-        self.send("GET", "/", None)
+        self.call("GET", "/", None)
     }
+}
 
-    /// Make the console's index if nothing has yet.
-    pub fn ensure_index(&self) -> Result<(), Failed> {
-        let found = self.send("GET", &format!("/{INDEX}"), None)?;
-        if found.get("error").is_none() {
-            return Ok(());
-        }
-        // a mapping the saved objects need: the type decides which of the
-        // per-type property bags a document's fields live in
-        let made = self.send(
-            "PUT",
-            &format!("/{INDEX}"),
-            Some(&json!({
-                "settings": {"number_of_shards": 1},
-                "mappings": {"dynamic": true, "properties": {
-                    "type": {"type": "keyword"},
-                    "updated_at": {"type": "date"},
-                    "references": {"type": "nested", "properties": {
-                        "name": {"type": "keyword"},
-                        "type": {"type": "keyword"},
-                        "id": {"type": "keyword"},
-                    }},
-                }},
-            })),
-        )?;
-        // somebody else making it at the same moment is not a failure
-        match made.pointer("/error/type").and_then(|v| v.as_str()) {
-            Some("resource_already_exists_exception") | None => Ok(()),
-            Some(other) => Err(Failed::of(500, format!("the console's index: {other}"))),
+/// Why the engine refused, in as much detail as it gave.
+///
+/// "the engine refused the request" is true and useless: the whole reason to
+/// pass a message on is that somebody reading a log needs to know which
+/// request and what was wrong with it.
+fn refusal(found: &Value, method: &str, path: &str) -> String {
+    let reason = found
+        .pointer("/error/reason")
+        .or_else(|| found.pointer("/error/root_cause/0/reason"))
+        .or_else(|| found.pointer("/failures/0/cause/reason"))
+        .and_then(|v| v.as_str());
+    match reason {
+        Some(reason) => format!("{method} {path}: {reason}"),
+        None => {
+            format!("{method} {path}: {}", found.to_string().chars().take(300).collect::<String>())
         }
     }
 }

@@ -14,7 +14,10 @@
 
 pub mod assets;
 pub mod engine;
+pub mod management;
+pub mod migrate;
 pub mod pinned;
+pub mod saved;
 pub mod settings;
 pub mod shell;
 
@@ -48,6 +51,9 @@ pub struct Console {
     /// settings an operator fixed when this server was started, which no
     /// reader may change
     pub overrides: BTreeMap<String, Value>,
+    /// the shape the console's index should have, taken out of the pin once
+    /// so that everything that may have to put it back has it
+    pub mapping: Value,
     /// what this server calls itself, kept for as long as it runs
     ///
     /// The one it replaces keeps its across restarts, in a file beside its
@@ -94,7 +100,8 @@ impl Console {
         let pinned = pinned::Pinned::read(&pins.join(format!("osd-{version}.json")), &version)?;
         let plugin_dirs = plugin_dirs(&home);
         let uuid = uuid_of();
-        Ok(Console { home, pinned, base_path, overrides, uuid, plugin_dirs })
+        let mapping = pinned.saved_object_index.get("mappings").cloned().unwrap_or_default();
+        Ok(Console { home, pinned, base_path, overrides, mapping, uuid, plugin_dirs })
     }
 }
 

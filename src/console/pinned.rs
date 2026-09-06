@@ -52,6 +52,19 @@ pub struct Pinned {
     pub startup: String,
     /// what a caller may do, as the plugins between them decided
     pub capabilities: Value,
+    /// the index the console keeps everything in, as the server it replaces
+    /// makes it: strict, one property per type, and a `_meta` of hashes
+    #[serde(rename = "savedObjectIndex")]
+    pub saved_object_index: Value,
+    /// the types the management page is allowed to show
+    #[serde(rename = "allowedTypes")]
+    pub allowed_types: Vec<String>,
+    /// what version of itself each type's attributes are written at
+    #[serde(rename = "migrationVersions")]
+    pub migration_versions: std::collections::BTreeMap<String, Value>,
+    /// what the management page shows for each type: the icon, where to edit
+    #[serde(rename = "managementMeta")]
+    pub management_meta: std::collections::BTreeMap<String, Value>,
 }
 
 impl Pinned {
