@@ -95,10 +95,9 @@ def main():
     our_meta, our_paths, our_bundles = shell(ours)
     ref_meta, ref_paths, ref_bundles = shell(theirs)
 
-    # the settings a user has changed are live state, and the reference is
-    # started with an override its own suite needs
-    for meta in (our_meta, ref_meta):
-        meta.get("legacyMetadata", {}).get("uiSettings", {}).pop("user", None)
+    # the settings somebody has changed are live state: the two servers are
+    # only comparable here if they were told the same things, and telling them
+    # so is the caller's business
 
     compare("metadata.", our_meta, ref_meta)
     compare("publicPath.", our_paths, ref_paths)

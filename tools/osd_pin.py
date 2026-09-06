@@ -51,6 +51,19 @@ def bundles_of(boot):
     return re.findall(r"'([^']+)'", block.group(1))
 
 
+def capabilities(url):
+    """What a caller may do, with the part that depends on the request left out."""
+    request = urllib.request.Request(
+        url + "/api/core/capabilities",
+        data=json.dumps({"applications": []}).encode(),
+        headers={"content-type": "application/json", "osd-xsrf": "true"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        found = json.loads(answer.read())
+    found.pop("navLinks", None)
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:5613")
@@ -100,6 +113,10 @@ def main():
         "shellHead": page[: page.index("<osd-csp")],
         "shellTail": page[page.index("</osd-injected-metadata>") + len("</osd-injected-metadata>") :],
         "startup": fetch(url, "/startup.js"),
+        # What a caller may do, as the plugins between them decide. `navLinks`
+        # is left out: it is one entry per application the caller asked about,
+        # so it is the request's shape rather than the server's.
+        "capabilities": capabilities(url),
     }
 
     OUT.mkdir(exist_ok=True)

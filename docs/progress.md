@@ -3218,3 +3218,59 @@ and nothing else, which is checked rather than asserted.
 Gates: unit 133/133, and `tools/dashboards_check.py`'s shell section passes
 against our server. The other five sections do not, and should not: they are
 13.2 to 13.4 and are not written.
+
+### 13.2 — Settings, capabilities and status
+
+Three answers the front end wants as soon as it is running, and the first
+time the console has to talk to an engine at all.
+
+**A setting has three states and the front end can tell them apart.** At its
+default, the server says nothing about it and the front end uses the default it
+was handed in the page. Changed by somebody, it comes back with a `userValue`.
+Fixed by an operator, it comes back `isOverridden` and refuses to be written --
+`Unable to update "…" because it is overridden`, in those words, because that
+is what the reference says and a front end reads the message.
+
+They live in the engine, in a document the console owns -- `config:3.1.0` in
+`.kibana` -- so that two consoles in front of one cluster agree and a restarted
+one has forgotten nothing. Verified by restarting it and reading the setting
+back.
+
+A value of null puts a setting back to its default rather than setting it to
+nothing, and the answer then leaves it out entirely: the front end is meant to
+fall back to the default it already has, and being told the value is nothing
+would mean something else. A write of several settings where one is overridden
+refuses all of them, because a front end that asked for two changes and got one
+has no way to find out which.
+
+**The page carries the settings rather than the front end fetching them.** A
+console that drew itself with the default theme and then redrew with the chosen
+one would flash white at every reader who did not want it. An engine that
+cannot be reached is still a page, with the defaults -- better than no page.
+
+**Capabilities are pinned but for one field.** What a caller may do is what the
+plugins between them decided, and that is version data like everything else in
+the contract. `navLinks` is not: it is one entry per application the caller
+asked about, so it is the request's shape rather than the server's, and it is
+built per request.
+
+**Status is a question about the engine, not about this process.** A console
+with no engine behind it can still serve every page and answer nothing useful
+on any of them, so reporting green because the process is running would be the
+least helpful true statement available. It asks the engine, off the runtime,
+and says what it found.
+
+`tools/console_diff.py` now compares the settings in the page as well, both
+servers having been told the same things, and still reports no difference.
+`tools/dashboards_check.py` passes three of its six areas against our server;
+the other three are 13.3 and 13.4 and are not written.
+
+**And the console renders.** Driven in a browser against our server, the Home
+page draws: the header, the navigation, Add data, Manage, Dev tools, the
+solution cards. The requests it makes that we do not answer are
+`/api/saved_objects/_find` (13.3), `/api/dataconnections` and
+`/api/ism/accountInfo` (13.5) -- the phase boundaries, exactly.
+
+Resident while serving: 6.1 MiB with the bundles handed out and not held.
+
+Gates: unit 138/138, fmt and clippy clean.

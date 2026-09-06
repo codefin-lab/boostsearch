@@ -91,7 +91,8 @@ a worse console.
 | `BOOSTSEARCH_CONSOLE_ADDR` | where to listen. Default `127.0.0.1:5601`, which is where OpenSearch Dashboards listens. |
 | `BOOSTSEARCH_CONSOLE_PATH` | an OpenSearch Dashboards distribution: the built front end this serves. Pointed at rather than carried, the way the geoip databases are — it is the OpenSearch project's to publish and it is a gigabyte. In their container it is `/usr/share/opensearch-dashboards`. |
 | `BOOSTSEARCH_CONSOLE_BASE_PATH` | the path everything is served under, for a console behind a proxy that gives it one. Empty by default. |
-| `BOOSTSEARCH_ENGINE` | the engine behind it. |
+| `BOOSTSEARCH_ENGINE` | the engine behind it, which is where everything the console knows is kept. Default `http://127.0.0.1:9200`; credentials may be given in the URL. |
+| `BOOSTSEARCH_CONSOLE_OVERRIDE` | settings an operator fixes, as `key=value` pairs separated by commas. A reader is shown them as `isOverridden` and refused when they try to change one — an operator's decision is not a reader's to undo. A value is JSON where it reads as JSON and the text it is otherwise, so `false` is a boolean and `Asia/Bangkok` is a string. |
 
 The distribution's version decides which pinned contract is read from
 `console/`. A distribution with no pin beside it is refused at startup and says

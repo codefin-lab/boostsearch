@@ -16,9 +16,9 @@ use super::Console;
 impl Console {
     /// The page for any application. Every application is served the same
     /// page: which one it is is in the URL, and the front end reads it.
-    pub fn page(&self) -> String {
+    pub fn page(&self, user: Value) -> String {
         let csp = json!({"strictCsp": self.strict_csp()});
-        let metadata = self.metadata();
+        let metadata = self.metadata_with(user);
         format!(
             "{head}<osd-csp data=\"{csp}\"></osd-csp>\
              <osd-injected-metadata data=\"{metadata}\"></osd-injected-metadata>{tail}",
@@ -32,8 +32,16 @@ impl Console {
     /// What the front end boots from.
     ///
     /// Most of it is the pinned contract as it stands. What is not: the base
-    /// path, which is this server's own, and the settings a user has changed,
-    /// which are live.
+    /// path, which is this server's own, and the settings somebody has
+    /// changed, which are read for the page rather than fetched by it -- a
+    /// console that drew itself with the default theme and then redrew with
+    /// the chosen one would flash white at every reader who did not want it.
+    pub fn metadata_with(&self, user: Value) -> Value {
+        let mut found = self.metadata();
+        found["legacyMetadata"]["uiSettings"]["user"] = user;
+        found
+    }
+
     pub fn metadata(&self) -> Value {
         json!({
             "version": self.pinned.version,
@@ -52,9 +60,10 @@ impl Console {
             "legacyMetadata": {
                 "uiSettings": {
                     "defaults": self.pinned.setting_defaults,
-                    // what somebody has actually set. Reading and writing
-                    // these is 13.2; until then the front end is told the
-                    // build number, which it checks against its own bundles
+                    // what somebody has actually set, which the page carries
+                    // rather than the front end fetching it. Put here by
+                    // `metadata_with`; the build number alone is what a page
+                    // served without reaching the engine can honestly say.
                     "user": {"buildNum": {"userValue": self.pinned.build_number}},
                 }
             },
@@ -239,13 +248,15 @@ mod tests {
             home: "/nowhere".into(),
             pinned,
             base_path: base_path.to_string(),
+            overrides: Default::default(),
+            uuid: "test".into(),
             plugin_dirs: Default::default(),
         }
     }
 
     #[test]
     fn the_page_carries_both_elements_the_front_end_reads() {
-        let page = console("").page();
+        let page = console("").page(json!({}));
         assert!(page.contains("<osd-csp data="), "no csp element");
         assert!(page.contains("<osd-injected-metadata data="), "no metadata element");
         assert!(page.contains("bootstrap.js"), "nothing would start");
@@ -253,7 +264,7 @@ mod tests {
 
     #[test]
     fn the_metadata_is_json_a_browser_can_read_back() {
-        let page = console("").page();
+        let page = console("").page(json!({}));
         let at = page.find("<osd-injected-metadata data=\"").expect("the element");
         let rest = &page[at + "<osd-injected-metadata data=\"".len()..];
         let raw = &rest[..rest.find('"').expect("the attribute ends")];
@@ -277,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_base_path_reaches_every_url_the_page_names() {
-        let page = console("/dash").page();
+        let page = console("/dash").page(json!({}));
         assert!(page.contains("\"/dash/bootstrap.js\""), "the boot script");
         assert!(page.contains("\"/dash/ui/"), "the images");
         assert!(!page.contains("\"/ui/"), "and nothing was left at the root");
@@ -311,6 +322,33 @@ mod tests {
         );
         // styles are a different question, and the front end writes them inline
         assert!(policy.contains("style-src 'unsafe-inline'"), "{policy}");
+    }
+
+    #[test]
+    fn the_page_carries_the_settings_somebody_changed() {
+        // fetched by the front end instead, a console would draw itself with
+        // the default theme and then redraw with the chosen one
+        let user = json!({"theme:darkMode": {"userValue": true}});
+        let page = console("").page(user.clone());
+        assert!(page.contains("theme:darkMode"), "the page does not carry it");
+        let found = console("").metadata_with(user);
+        assert_eq!(
+            found["legacyMetadata"]["uiSettings"]["user"]["theme:darkMode"]["userValue"],
+            true
+        );
+    }
+
+    #[test]
+    fn capabilities_answer_for_the_applications_that_were_asked_about() {
+        let console = console("");
+        let asked = vec!["home".to_string(), "discover".to_string()];
+        let found = console.capabilities(&asked);
+        assert_eq!(found["navLinks"]["home"], true);
+        assert_eq!(found["navLinks"]["discover"], true);
+        assert!(found["navLinks"].as_object().is_some_and(|o| o.len() == 2), "and no others");
+        // and the rest of it is what the plugins decided, whoever asked
+        assert!(found["catalogue"].is_object(), "the catalogue is missing");
+        assert_eq!(console.capabilities(&[])["navLinks"], json!({}));
     }
 
     #[test]

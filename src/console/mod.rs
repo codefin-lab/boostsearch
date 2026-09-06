@@ -13,10 +13,28 @@
 //! and `console/osd-<version>.json`.
 
 pub mod assets;
+pub mod engine;
 pub mod pinned;
+pub mod settings;
 pub mod shell;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use serde_json::Value;
+
+/// Now, as a saved object records the time it was written.
+///
+/// The same format the engine's own writes use, to the millisecond: a console
+/// and the engine behind it disagreeing about what time looks like would show
+/// up as a saved object that sorts oddly and nothing else.
+pub fn now() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default();
+    crate::store::format_millis(ms, "strict_date_optional_time").unwrap_or_default()
+}
 
 /// Where the console's front end and its pinned contract are.
 pub struct Console {
@@ -27,6 +45,17 @@ pub struct Console {
     pub pinned: pinned::Pinned,
     /// the path every URL this serves is under, `""` for none
     pub base_path: String,
+    /// settings an operator fixed when this server was started, which no
+    /// reader may change
+    pub overrides: BTreeMap<String, Value>,
+    /// what this server calls itself, kept for as long as it runs
+    ///
+    /// The one it replaces keeps its across restarts, in a file beside its
+    /// data. Nothing reads it but the status page, so a fresh one each start
+    /// is the difference between a console that has been restarted looking
+    /// like a different console and looking like the same one -- worth
+    /// keeping, and 13.2 does not need it yet.
+    pub(crate) uuid: String,
     /// where each plugin's built files are, by the id the browser asks for
     ///
     /// A URL names a plugin the way its manifest does -- `usageCollection` --
@@ -50,6 +79,7 @@ impl Console {
         home: PathBuf,
         pins: &std::path::Path,
         base_path: String,
+        overrides: BTreeMap<String, Value>,
     ) -> Result<Console, String> {
         let package = home.join("package.json");
         let raw = std::fs::read_to_string(&package)
@@ -63,8 +93,62 @@ impl Console {
             .to_string();
         let pinned = pinned::Pinned::read(&pins.join(format!("osd-{version}.json")), &version)?;
         let plugin_dirs = plugin_dirs(&home);
-        Ok(Console { home, pinned, base_path, plugin_dirs })
+        let uuid = uuid_of();
+        Ok(Console { home, pinned, base_path, overrides, uuid, plugin_dirs })
     }
+}
+
+impl Console {
+    /// What this server calls itself.
+    pub fn uuid(&self) -> &str {
+        &self.uuid
+    }
+
+    /// What a caller may do: what the plugins decided, and one entry per
+    /// application the caller asked about.
+    pub fn capabilities(&self, applications: &[String]) -> Value {
+        let mut found = self.pinned.capabilities.clone();
+        let links: serde_json::Map<String, Value> =
+            applications.iter().map(|id| (id.clone(), Value::Bool(true))).collect();
+        found["navLinks"] = Value::Object(links);
+        found
+    }
+}
+
+/// Settings an operator fixed when the server was started, which no reader
+/// may change.
+///
+/// `key=value` pairs separated by commas. A value is JSON where it reads as
+/// JSON and the text it is otherwise, so that `false` is a boolean and
+/// `Asia/Bangkok` is a string without anybody having to quote it on a command
+/// line that would eat the quotes.
+pub fn overrides_from(listed: &str) -> BTreeMap<String, Value> {
+    listed
+        .split(',')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| {
+            let value = value.trim();
+            let parsed =
+                serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+            (key.trim().to_string(), parsed)
+        })
+        .filter(|(key, _)| !key.is_empty())
+        .collect()
+}
+
+/// A name for this server, made from the time it started and where it is.
+fn uuid_of() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut seed = now as u64 ^ (std::process::id() as u64) << 32;
+    let mut hex = String::new();
+    for _ in 0..32 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        hex.push(char::from_digit(((seed >> 33) % 16) as u32, 16).unwrap_or('0'));
+    }
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
 /// Every plugin in a distribution, by the id its manifest gives it.
@@ -82,4 +166,33 @@ fn plugin_dirs(home: &std::path::Path) -> std::collections::HashMap<String, Path
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_override_reads_its_value_as_what_it_looks_like() {
+        let found =
+            overrides_from("query:enhancements:enabled=false,dateFormat:tz=Asia/Bangkok,n=3");
+        assert_eq!(found["query:enhancements:enabled"], json!(false), "a boolean");
+        assert_eq!(found["dateFormat:tz"], json!("Asia/Bangkok"), "a string nobody quoted");
+        assert_eq!(found["n"], json!(3), "a number");
+    }
+
+    #[test]
+    fn nothing_is_overridden_by_nothing() {
+        assert!(overrides_from("").is_empty());
+        assert!(overrides_from("nonsense-with-no-equals").is_empty());
+    }
+
+    #[test]
+    fn a_name_for_this_server_is_shaped_like_one() {
+        let name = uuid_of();
+        assert_eq!(name.len(), 36, "{name}");
+        assert_eq!(name.match_indices('-').count(), 4, "{name}");
+        assert_ne!(name, uuid_of(), "two starts are two servers");
+    }
 }
