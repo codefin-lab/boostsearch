@@ -148,13 +148,15 @@ async fn main() -> anyhow::Result<()> {
         let engine = console.engine.clone();
         let mapping = console.console.pinned.saved_object_index.get("mappings").cloned();
         let found = tokio::task::spawn_blocking(move || {
-            boostsearch::console::migrate::ensure(&engine, &mapping.unwrap_or_default())
+            boostsearch::console::migrate::ensure_because(
+                &engine,
+                &mapping.unwrap_or_default(),
+                "startup",
+            )
         })
         .await;
-        match found {
-            Ok(Ok(what)) => println!("  {what:?}"),
-            Ok(Err(e)) => eprintln!("  the console's index: {}", e.message),
-            Err(e) => eprintln!("  the console's index: {e}"),
+        if let Err(e) = found {
+            eprintln!("  the console's index: {e}");
         }
     }
 
@@ -337,21 +339,21 @@ where
     match tokio::task::spawn_blocking(move || work(&serving)).await {
         Ok(Ok(found)) => axum::Json(found).into_response(),
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
     }
 }
 
 fn refused(e: Failed) -> Response {
     let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (
-        status,
-        axum::Json(serde_json::json!({
-            "statusCode": e.status,
-            "error": status.canonical_reason().unwrap_or("Error"),
-            "message": e.message,
-        })),
-    )
-        .into_response()
+    let mut body = serde_json::json!({
+        "statusCode": e.status,
+        "error": status.canonical_reason().unwrap_or("Error"),
+        "message": e.message,
+    });
+    if let Some(objects) = e.objects {
+        body["attributes"] = serde_json::json!({"objects": objects});
+    }
+    (status, axum::Json(body)).into_response()
 }
 
 async fn read_settings(State(serving): State<Shared>) -> Response {
@@ -405,13 +407,17 @@ async fn migrate_now(State(serving): State<Shared>) -> Response {
     let engine = serving.engine.clone();
     let mapping = serving.console.pinned.saved_object_index.get("mappings").cloned();
     let found = tokio::task::spawn_blocking(move || {
-        boostsearch::console::migrate::ensure(&engine, &mapping.unwrap_or_default())
+        boostsearch::console::migrate::ensure_because(
+            &engine,
+            &mapping.unwrap_or_default(),
+            "the migrate route",
+        )
     })
     .await;
     match found {
         Ok(Ok(_)) => axum::Json(serde_json::json!({"success": true})).into_response(),
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
     }
 }
 
@@ -496,15 +502,29 @@ async fn bulk_create(
     let asked = body.as_array().cloned().unwrap_or_default();
     on_engine(serving, move |s| {
         let saved = saved_of(s);
+        let writings: Vec<_> = asked
+            .iter()
+            .map(|one| {
+                let kind = one.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                let id = one.get("id").and_then(|v| v.as_str()).map(String::from);
+                writing_of(kind, id, one, overwrite)
+            })
+            .collect();
         let mut out = Vec::new();
-        for one in &asked {
-            let kind = one.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let id = one.get("id").and_then(|v| v.as_str()).map(String::from);
-            let named = id.clone().unwrap_or_default();
-            match saved.create(writing_of(&kind, id, one, overwrite)) {
+        for (one, answer) in asked.iter().zip(saved.bulk_create(writings)?) {
+            let kind = one.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            let named = one.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            match answer {
                 Ok(found) => out.push(found),
                 // one that could not be written is reported where it stood,
-                // so a caller writing ten knows which of them failed
+                // so a caller writing ten knows which of them failed -- and
+                // a conflict is said in a few words here, where a single
+                // create says it in the engine's
+                Err(e) if e.status == 409 => out.push(serde_json::json!({
+                    "id": named, "type": kind,
+                    "error": {"statusCode": 409, "error": "Conflict",
+                              "message": format!("Saved object [{kind}/{named}] conflict")},
+                })),
                 Err(e) => out.push(serde_json::json!({
                     "id": named, "type": kind,
                     "error": {"statusCode": e.status, "message": e.message},
@@ -530,7 +550,12 @@ async fn bulk_update(State(serving): State<Shared>, body: axum::Json<Value>) -> 
                 Ok(found) => out.push(found),
                 Err(e) => out.push(serde_json::json!({
                     "id": id, "type": kind,
-                    "error": {"statusCode": e.status, "message": e.message},
+                    "error": {
+                        "statusCode": e.status,
+                        "error": StatusCode::from_u16(e.status).ok()
+                            .and_then(|s| s.canonical_reason()).unwrap_or("Error"),
+                        "message": e.message,
+                    },
                 })),
             }
         }
@@ -543,7 +568,24 @@ async fn find(
     State(serving): State<Shared>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Response {
-    let looking = looking_from(query.as_deref().unwrap_or_default());
+    let mut looking = looking_from(query.as_deref().unwrap_or_default());
+    if looking.types.is_empty() {
+        return refused(Failed {
+            objects: None,
+            status: 400,
+            message:
+                "[request query.type]: expected at least one defined value but got [undefined]"
+                    .into(),
+        });
+    }
+    if let Some(filter) = looking.filter.take() {
+        match boostsearch::console::filter::parse(&filter, &looking.types) {
+            Ok(query) => looking.filter_query = Some(query),
+            Err(message) => {
+                return refused(Failed { objects: None, status: 400, message });
+            }
+        }
+    }
     on_engine(serving, move |s| saved_of(s).find(&looking)).await
 }
 
@@ -567,6 +609,8 @@ fn looking_from(query: &str) -> Looking {
             "sort_order" => looking.sort_order = Some(value),
             "default_search_operator" => looking.default_search_operator = value,
             "has_reference" => looking.has_reference = serde_json::from_str(&value).ok(),
+            "namespaces" => looking.namespaces.push(value),
+            "filter" => looking.filter = Some(value),
             _ => {}
         }
     }
@@ -584,14 +628,25 @@ fn management_of(serving: &Serving) -> boostsearch::console::management::Managem
 
 /// An export is a file, not a document: a line per object, read back a line
 /// at a time.
-async fn export(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+async fn export(State(serving): State<Shared>, body: String) -> Response {
+    let body: Value = match serde_json::from_str::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            return refused(Failed {
+                objects: None,
+                status: 400,
+                message: "[request body]: expected a plain object value, but found [null] instead."
+                    .into(),
+            });
+        }
+    };
     let types: Vec<String> = listed(body.get("type"));
     let objects = body.get("objects").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let include = body.get("includeReferencesDeep").and_then(|v| v.as_bool()).unwrap_or(false);
     let exclude = body.get("excludeExportDetails").and_then(|v| v.as_bool()).unwrap_or(false);
     let found = tokio::task::spawn_blocking(move || {
         boostsearch::console::management::export(
-            &saved_of(&serving),
+            &management_of(&serving),
             &types,
             &objects,
             include,
@@ -601,70 +656,167 @@ async fn export(State(serving): State<Shared>, body: axum::Json<Value>) -> Respo
     .await;
     match found {
         Ok(Ok(lines)) => {
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/ndjson")], lines).into_response()
+            // no newline after the last line: a reader that splits on them
+            // and parses each piece would find an empty piece and fail on it
+            let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/ndjson"),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.ndjson\""),
+                ],
+                text.join("\n"),
+            )
+                .into_response()
         }
         Ok(Err(e)) => refused(e),
-        Err(e) => refused(Failed { status: 500, message: format!("{e}") }),
+        Err(e) => refused(Failed { objects: None, status: 500, message: format!("{e}") }),
     }
 }
 
 async fn import(
     State(serving): State<Shared>,
     Query(p): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
+    // an import is a file, sent as one: the front end uploads it as a form,
+    // and anything else is not the request this answers
+    if !is_form_upload(&headers) {
+        return refused(Failed {
+            objects: None,
+            status: 415,
+            message: "Unsupported Media Type".into(),
+        });
+    }
     let overwrite = p.get("overwrite").map(|v| v == "true").unwrap_or(false);
-    let lines = ndjson_of(&body);
+    let Some(lines) = file_part(&body) else {
+        return refused(Failed {
+            objects: None,
+            status: 400,
+            message: "[request body.file]: expected value of type [Stream] but got [undefined]"
+                .into(),
+        });
+    };
     on_engine(serving, move |s| {
-        boostsearch::console::management::import(&saved_of(s), &lines, overwrite, &[])
+        boostsearch::console::management::import(&management_of(s), &lines, overwrite, None)
     })
     .await
+}
+
+fn is_form_upload(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("multipart/form-data"))
 }
 
 /// The reader has been shown the conflicts and said what to do about each.
-async fn resolve_import_errors(State(serving): State<Shared>, body: String) -> Response {
-    let lines = ndjson_of(&body);
+async fn resolve_import_errors(
+    State(serving): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_form_upload(&headers) {
+        return refused(Failed {
+            objects: None,
+            status: 415,
+            message: "Unsupported Media Type".into(),
+        });
+    }
+    let Some(lines) = file_part(&body) else {
+        return refused(Failed {
+            objects: None,
+            status: 400,
+            message: "[request body.file]: expected value of type [Stream] but got [undefined]"
+                .into(),
+        });
+    };
     let retries = retries_of(&body);
     on_engine(serving, move |s| {
-        boostsearch::console::management::import(&saved_of(s), &lines, false, &retries)
+        boostsearch::console::management::import(&management_of(s), &lines, false, Some(&retries))
     })
     .await
 }
 
-/// The file out of a form upload.
+/// The parts of a form upload, by the name each was sent under.
 ///
-/// The front end sends an export as a file in a multipart body, so the lines
-/// are between the boundaries rather than being the whole of it.
-fn ndjson_of(body: &str) -> String {
-    if !body.starts_with("--") {
-        return body.to_string();
-    }
-    let mut out = String::new();
-    for part in body.split("\r\n\r\n").skip(1) {
-        for line in part.lines() {
-            if line.starts_with("--") || line.trim().is_empty() {
-                continue;
-            }
-            if serde_json::from_str::<Value>(line).is_ok() {
-                out.push_str(line);
-                out.push('\n');
-            }
+/// A multipart body is boundaries around parts, each with its own headers
+/// and a blank line before its content. Nothing here is more than that: no
+/// nested multiparts, no encodings, which is all the front end ever sends.
+fn form_parts(body: &str) -> Vec<(String, String)> {
+    let Some(boundary) = body.lines().next().filter(|l| l.starts_with("--")) else {
+        return Vec::new();
+    };
+    let boundary = boundary.trim_end();
+    let mut out = Vec::new();
+    for part in body.split(boundary) {
+        let part = part.trim_start_matches("\r\n").trim_start_matches('\n');
+        if part.is_empty() || part.starts_with("--") {
+            continue;
         }
+        let Some((head, content)) = part.split_once("\r\n\r\n").or_else(|| part.split_once("\n\n"))
+        else {
+            continue;
+        };
+        let name = head
+            .split(';')
+            .map(str::trim)
+            .find_map(|piece| piece.strip_prefix("name=\"").and_then(|n| n.strip_suffix('"')))
+            .unwrap_or_default();
+        let content = content.trim_end_matches("\r\n").trim_end_matches('\n');
+        out.push((name.to_string(), content.to_string()));
     }
     out
 }
 
-/// What the reader said to do about each conflict.
-fn retries_of(body: &str) -> Vec<Value> {
-    body.split("\r\n\r\n")
-        .flat_map(|part| part.lines())
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-        .filter_map(|found| found.as_array().cloned())
-        .find(|list| {
-            list.iter()
-                .any(|one| one.get("overwrite").is_some() || one.get("destinationId").is_some())
+/// The uploaded file, if the form carried one.
+fn file_part(body: &str) -> Option<String> {
+    if !body.starts_with("--") {
+        return Some(body.to_string()).filter(|b| !b.trim().is_empty());
+    }
+    form_parts(body).into_iter().find(|(name, _)| name == "file").map(|(_, content)| content)
+}
+
+/// What the reader said to do about each conflict, by type and id.
+fn retries_of(
+    body: &str,
+) -> std::collections::BTreeMap<(String, String), boostsearch::console::management::Retry> {
+    use boostsearch::console::management::Retry;
+    let raw = form_parts(body)
+        .into_iter()
+        .find(|(name, _)| name == "retries")
+        .map(|(_, content)| content)
+        .unwrap_or_else(|| "[]".into());
+    let listed: Vec<Value> = serde_json::from_str(&raw).unwrap_or_default();
+    listed
+        .into_iter()
+        .map(|one| {
+            let key = (
+                one.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                one.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            );
+            let replace = one
+                .get("replaceReferences")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    Some((
+                        r.get("type")?.as_str()?.to_string(),
+                        r.get("from")?.as_str()?.to_string(),
+                        r.get("to")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            let retry = Retry {
+                overwrite: one.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false),
+                destination: one.get("destinationId").and_then(|v| v.as_str()).map(String::from),
+                replace,
+            };
+            (key, retry)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn listed(value: Option<&Value>) -> Vec<String> {
@@ -697,7 +849,26 @@ async fn management_find(
     State(serving): State<Shared>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Response {
-    let looking = looking_from(&management_query(query.as_deref().unwrap_or_default()));
+    let raw = query.as_deref().unwrap_or_default();
+    // the management page's find is stricter than the API's: it must be told
+    // a type, and it does not take `searchFields` at all
+    if raw.contains("searchFields=") {
+        return refused(Failed {
+            objects: None,
+            status: 400,
+            message: "[request query.searchFields]: definition for this key is missing".into(),
+        });
+    }
+    let looking = looking_from(&management_query(raw));
+    if looking.types.is_empty() {
+        return refused(Failed {
+            objects: None,
+            status: 400,
+            message:
+                "[request query.type]: expected at least one defined value but got [undefined]"
+                    .into(),
+        });
+    }
     on_engine(serving, move |s| management_of(s).find(&looking)).await
 }
 

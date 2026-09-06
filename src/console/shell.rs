@@ -50,7 +50,7 @@ impl Console {
             "basePath": self.base_path,
             "serverBasePath": self.base_path,
             "env": self.pinned.env,
-            "anonymousStatusPage": self.pinned.anonymous_status_page,
+            "anonymousStatusPage": self.anonymous_status,
             "i18n": {"translationsUrl": self.at("/translations/en.json")},
             "csp": self.pinned.csp.get("warnLegacyBrowsers")
                 .map(|v| json!({"warnLegacyBrowsers": v}))
@@ -249,6 +249,7 @@ mod tests {
             pinned,
             base_path: base_path.to_string(),
             overrides: Default::default(),
+            anonymous_status: true,
             mapping: Default::default(),
             uuid: "test".into(),
             plugin_dirs: Default::default(),

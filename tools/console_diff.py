@@ -95,11 +95,19 @@ def main():
     our_meta, our_paths, our_bundles = shell(ours)
     ref_meta, ref_paths, ref_bundles = shell(theirs)
 
-    # the settings somebody has changed are live state: the two servers are
-    # only comparable here if they were told the same things, and telling them
-    # so is the caller's business
+    # the settings somebody has changed are live state, and the overrides are
+    # what each server was started with; neither is the contract
+    for meta in (our_meta, ref_meta):
+        meta.get("legacyMetadata", {}).get("uiSettings", {}).pop("user", None)
 
-    compare("metadata.", our_meta, ref_meta)
+    # the plugin list is in load order, which differs between two starts of the
+    # same Dashboards; compared by id rather than by position
+    ours_by_id = {p["id"]: p for p in our_meta.get("uiPlugins", [])}
+    theirs_by_id = {p["id"]: p for p in ref_meta.get("uiPlugins", [])}
+    compare("metadata.uiPlugins.", ours_by_id, theirs_by_id)
+    our_rest = {k: v for k, v in our_meta.items() if k != "uiPlugins"}
+    ref_rest = {k: v for k, v in ref_meta.items() if k != "uiPlugins"}
+    compare("metadata.", our_rest, ref_rest)
     compare("publicPath.", our_paths, ref_paths)
     if our_bundles != ref_bundles:
         only_ours = [b for b in our_bundles if b not in ref_bundles]
@@ -108,8 +116,14 @@ def main():
             failures.append(f"the bundle list differs: {len(only_ours)} only ours, "
                             f"{len(only_ref)} only the reference's")
         else:
-            failures.append("the bundles are the same but load in a different order, "
-                            "which decides what is defined when")
+            # Two starts of the same Dashboards load their plugins in different
+            # orders -- measured: two 3.1.0 containers disagree -- so the order
+            # is not the contract. Nor does it decide anything: the boot script
+            # defines every bundle before it resolves any, and the reference
+            # itself loads `usageCollection` before the utils it requires. The
+            # set is what has to match.
+            print("  (the bundles load in a different order from the reference, which two "
+                  "starts of the reference do as well)")
 
     missing = served(ours, our_bundles + [our_meta["i18n"]["translationsUrl"]])
     if missing:

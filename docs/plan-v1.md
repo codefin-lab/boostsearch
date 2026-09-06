@@ -221,9 +221,9 @@ object written by an older console is in a shape the current mapping refuses:
 a dashboard from before 7.3 carries `uiStateJSON`, and putting it right means
 running that type's own migration over it. Those are code rather than data --
 eight hundred lines for `visualization` alone -- so unlike everything else in
-this contract they cannot be pinned from a running Dashboards. Until they are
-written, a console reads and writes its own objects correctly and refuses an
-old one loudly, naming the field.
+this contract they cannot be pinned from a running Dashboards. They are
+written now: five chains, an object migrated on every path it can arrive by,
+and the suite's own fixtures -- documents from Kibana 7.0 -- load and answer.
 
 13.0 comes first for the reason every other phase learned the hard way: a
 number is worth what the gate behind it is worth, and a gate nobody has run

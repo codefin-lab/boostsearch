@@ -24,15 +24,22 @@ pub struct Engine {
 }
 
 /// What went wrong, in a form a handler can answer with.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Failed {
     pub status: u16,
     pub message: String,
+    /// the objects a refusal is about, where it is about particular ones
+    pub objects: Option<Vec<Value>>,
 }
 
 impl Failed {
-    fn of(status: u16, message: impl Into<String>) -> Failed {
-        Failed { status, message: message.into() }
+    pub fn of(status: u16, message: impl Into<String>) -> Failed {
+        Failed { status, message: message.into(), objects: None }
+    }
+
+    /// A refusal that names the objects it is about.
+    pub fn with_objects(message: impl Into<String>, objects: Vec<Value>) -> Failed {
+        Failed { status: 400, message: message.into(), objects: Some(objects) }
     }
 }
 
@@ -86,10 +93,14 @@ impl Engine {
         };
         let mut answer = sent.map_err(|e| Failed::of(503, format!("{e}")))?;
         let status = answer.status().as_u16();
-        let found: Value = answer
-            .body_mut()
-            .read_json()
-            .map_err(|e| Failed::of(502, format!("the engine's answer could not be read: {e}")))?;
+        // an export of ten thousand objects is tens of megabytes, and the
+        // client's own ceiling of ten is a ceiling for a different kind of
+        // answer
+        let found: Value =
+            answer.body_mut().with_config().limit(512 * 1024 * 1024).read_json().map_err(|e| {
+                eprintln!("  {method} {path}: the engine's answer could not be read: {e}");
+                Failed::of(502, format!("the engine's answer could not be read: {e}"))
+            })?;
         match status {
             200..=299 | 404 | 409 => Ok(found),
             other => Err(Failed::of(other, refusal(&found, method, path))),
@@ -119,6 +130,27 @@ impl Engine {
         }
     }
 
+    /// Several documents written at once, as the bulk API takes them.
+    pub fn bulk(&self, lines: &str) -> Result<Value, Failed> {
+        self.bulk_with("refresh=false", lines)
+    }
+
+    /// The same, with the caller's own query -- whether to wait for the
+    /// refresh, whether the target has to be an alias.
+    pub fn bulk_with(&self, query: &str, lines: &str) -> Result<Value, Failed> {
+        let url = format!("{}/_bulk?{query}", self.url);
+        let mut request = self.agent.post(&url).header("content-type", "application/x-ndjson");
+        if let Some(auth) = &self.auth {
+            request = request.header("authorization", auth);
+        }
+        let mut answer =
+            request.send(lines.as_bytes()).map_err(|e| Failed::of(503, format!("{e}")))?;
+        answer
+            .body_mut()
+            .read_json()
+            .map_err(|e| Failed::of(502, format!("the engine's answer could not be read: {e}")))
+    }
+
     /// Whether the engine is there and will answer.
     pub fn reachable(&self) -> Result<Value, Failed> {
         self.call("GET", "/", None)
@@ -146,5 +178,5 @@ fn refusal(found: &Value, method: &str, path: &str) -> String {
 
 /// An id as a URL path segment.
 fn escape(id: &str) -> String {
-    id.replace('%', "%25").replace('/', "%2F").replace('#', "%23").replace('?', "%3F")
+    super::saved::encoded(id)
 }

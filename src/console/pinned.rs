@@ -23,8 +23,6 @@ pub struct Pinned {
     pub csp: Value,
     pub i18n: Value,
     pub vars: Value,
-    #[serde(rename = "anonymousStatusPage")]
-    pub anonymous_status_page: bool,
     pub branding: Value,
     pub survey: Option<String>,
     #[serde(rename = "uiPlugins")]

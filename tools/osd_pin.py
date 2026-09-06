@@ -14,10 +14,17 @@ looking at the diff -- which is the point. A contract nobody wrote down should
 at least be one somebody has to change on purpose.
 
     tools/dashboards_reference.sh
-    tools/osd_pin.py --url http://127.0.0.1:5613
+    tools/osd_pin.py --url http://127.0.0.1:5613 --engine http://127.0.0.1:9221
+
+Take it from a Dashboards started by `dashboards_reference.sh` and nothing
+else. A plugin's browser configuration carries some of the server's own
+settings -- `data.search.aggs.shardDelay.enabled` is one -- so a pin taken
+from a Dashboards started differently carries the wrong values for them, and
+the difference shows up as a page that is subtly not the reference's.
 
 What is *not* pinned, because the server knows it: the base path, the
-per-request nonce, and the user's own settings, which are live state.
+per-request nonce, whether the status page answers anonymously, and the
+user's own settings, which are live state.
 """
 import argparse
 import html
@@ -52,8 +59,14 @@ def bundles_of(boot):
 
 
 def saved_object_index(engine):
-    """The mapping and settings the console's own index is made with."""
-    with urllib.request.urlopen(engine + "/.kibana_1", timeout=30) as answer:
+    """The mapping and settings the console's own index is made with.
+
+    Read through the alias rather than by number: a Dashboards that has had
+    a suite run against it has migrated more than once, and the index the
+    alias points at is the one it made last, with its own mapping. An older
+    number can be a fixture it adopted, whose mapping is the fixture's.
+    """
+    with urllib.request.urlopen(engine + "/.kibana", timeout=30) as answer:
         found = json.loads(answer.read())
     one = next(iter(found.values()))
     index = one["settings"]["index"]
@@ -173,7 +186,6 @@ def main():
         "csp": {**csp, **meta.get("csp", {})},
         "i18n": meta.get("i18n", {}),
         "vars": meta.get("vars", {}),
-        "anonymousStatusPage": meta.get("anonymousStatusPage", True),
         "branding": meta.get("branding", {}),
         "survey": meta.get("survey"),
         "uiPlugins": meta["uiPlugins"],

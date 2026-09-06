@@ -27,7 +27,6 @@
   "vars": {
     "apmConfig": null
   },
-  "anonymousStatusPage": false,
   "branding": {
     "assetFolderUrl": "/ui/default_branding",
     "logo": {},
@@ -59,34 +58,6 @@
           "batchingIntervalInS": 60
         }
       }
-    },
-    {
-      "id": "opensearchDashboardsLegacy",
-      "plugin": {
-        "id": "opensearchDashboardsLegacy",
-        "configPath": "opensearch_dashboards_legacy",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "defaultAppId": "home"
-      }
-    },
-    {
-      "id": "urlForwarding",
-      "plugin": {
-        "id": "urlForwarding",
-        "configPath": "url_forwarding",
-        "requiredPlugins": [
-          "opensearchDashboardsLegacy"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
     },
     {
       "id": "mapsLegacy",
@@ -132,6 +103,48 @@
       }
     },
     {
+      "id": "opensearchDashboardsLegacy",
+      "plugin": {
+        "id": "opensearchDashboardsLegacy",
+        "configPath": "opensearch_dashboards_legacy",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "defaultAppId": "home"
+      }
+    },
+    {
+      "id": "urlForwarding",
+      "plugin": {
+        "id": "urlForwarding",
+        "configPath": "url_forwarding",
+        "requiredPlugins": [
+          "opensearchDashboardsLegacy"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "share",
+      "plugin": {
+        "id": "share",
+        "configPath": "share",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
       "id": "visDefaultEditor",
       "plugin": {
         "id": "visDefaultEditor",
@@ -158,60 +171,6 @@
           "opensearchDashboardsUtils",
           "opensearchDashboardsReact"
         ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "share",
-      "plugin": {
-        "id": "share",
-        "configPath": "share",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "opensearchDashboardsReact",
-      "plugin": {
-        "id": "opensearchDashboardsReact",
-        "configPath": "opensearch_dashboards_react",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "opensearchUiShared",
-      "plugin": {
-        "id": "opensearchUiShared",
-        "configPath": "opensearch_ui_shared",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "data"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "opensearchDashboardsUtils",
-      "plugin": {
-        "id": "opensearchDashboardsUtils",
-        "configPath": "opensearch_dashboards_utils",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [],
         "requiredEnginePlugins": {}
       },
       "config": {}
@@ -264,6 +223,46 @@
       "config": {}
     },
     {
+      "id": "opensearchUiShared",
+      "plugin": {
+        "id": "opensearchUiShared",
+        "configPath": "opensearch_ui_shared",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "data"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "opensearchDashboardsReact",
+      "plugin": {
+        "id": "opensearchDashboardsReact",
+        "configPath": "opensearch_dashboards_react",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "opensearchDashboardsUtils",
+      "plugin": {
+        "id": "opensearchDashboardsUtils",
+        "configPath": "opensearch_dashboards_utils",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
       "id": "expressions",
       "plugin": {
         "id": "expressions",
@@ -301,6 +300,16 @@
         "requiredEnginePlugins": {}
       },
       "config": {
+        "search": {
+          "aggs": {
+            "shardDelay": {
+              "enabled": true
+            }
+          },
+          "usageTelemetry": {
+            "enabled": false
+          }
+        },
         "enhancements": {
           "supportedAppNames": [
             "discover"
@@ -312,16 +321,6 @@
           },
           "valueSuggestions": {
             "enabled": true
-          }
-        },
-        "search": {
-          "aggs": {
-            "shardDelay": {
-              "enabled": false
-            }
-          },
-          "usageTelemetry": {
-            "enabled": false
           }
         },
         "savedQueriesNewUI": {
@@ -483,30 +482,6 @@
       "config": {}
     },
     {
-      "id": "visTypeTable",
-      "plugin": {
-        "id": "visTypeTable",
-        "configPath": "vis_type_table",
-        "requiredPlugins": [
-          "expressions",
-          "visualizations",
-          "data"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact",
-          "share",
-          "charts",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
       "id": "visTypeVega",
       "plugin": {
         "id": "visTypeVega",
@@ -537,20 +512,21 @@
       }
     },
     {
-      "id": "visTypeMarkdown",
+      "id": "visTypeTable",
       "plugin": {
-        "id": "visTypeMarkdown",
-        "configPath": "vis_type_markdown",
+        "id": "visTypeTable",
+        "configPath": "vis_type_table",
         "requiredPlugins": [
           "expressions",
-          "visualizations"
+          "visualizations",
+          "data"
         ],
         "optionalPlugins": [],
         "requiredBundles": [
+          "opensearchDashboardsUtils",
           "opensearchDashboardsReact",
+          "share",
           "charts",
-          "visualizations",
-          "expressions",
           "visDefaultEditor"
         ],
         "requiredEnginePlugins": {}
@@ -604,6 +580,29 @@
       },
       "config": {
         "pluginAugmentationEnabled": true
+      }
+    },
+    {
+      "id": "visTypeMarkdown",
+      "plugin": {
+        "id": "visTypeMarkdown",
+        "configPath": "vis_type_markdown",
+        "requiredPlugins": [
+          "expressions",
+          "visualizations"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsReact",
+          "charts",
+          "visualizations",
+          "expressions",
+          "visDefaultEditor"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
       }
     },
     {
@@ -947,29 +946,6 @@
       "config": {}
     },
     {
-      "id": "indexManagementDashboards",
-      "plugin": {
-        "id": "indexManagementDashboards",
-        "configPath": [
-          "opensearch_index_management"
-        ],
-        "requiredPlugins": [
-          "navigation",
-          "opensearchDashboardsReact",
-          "opensearchDashboardsUtils"
-        ],
-        "optionalPlugins": [
-          "managementOverview",
-          "dataSourceManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
       "id": "mlCommonsDashboards",
       "plugin": {
         "id": "mlCommonsDashboards",
@@ -983,6 +959,29 @@
           "opensearchUiShared"
         ],
         "optionalPlugins": [
+          "dataSourceManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "indexManagementDashboards",
+      "plugin": {
+        "id": "indexManagementDashboards",
+        "configPath": [
+          "opensearch_index_management"
+        ],
+        "requiredPlugins": [
+          "navigation",
+          "opensearchDashboardsReact",
+          "opensearchDashboardsUtils"
+        ],
+        "optionalPlugins": [
+          "managementOverview",
           "dataSourceManagement"
         ],
         "requiredBundles": [],
@@ -1019,26 +1018,6 @@
         "opensearchVectorTileStyleUrl": "https://tiles.maps.opensearch.org/v3/manifest.json",
         "opensearchVectorTileGlyphsUrl": "https://tiles.maps.opensearch.org/fonts/{fontstack}/{range}.pbf"
       }
-    },
-    {
-      "id": "flowFrameworkDashboards",
-      "plugin": {
-        "id": "flowFrameworkDashboards",
-        "configPath": [
-          "flowFrameworkDashboards"
-        ],
-        "requiredPlugins": [
-          "navigation",
-          "opensearchDashboardsUtils"
-        ],
-        "optionalPlugins": [
-          "dataSourceManagement",
-          "contentManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
     },
     {
       "id": "assistantDashboards",
@@ -1095,37 +1074,6 @@
       }
     },
     {
-      "id": "alertingDashboards",
-      "plugin": {
-        "id": "alertingDashboards",
-        "configPath": [
-          "opensearch_alerting"
-        ],
-        "requiredPlugins": [
-          "uiActions",
-          "dashboard",
-          "navigation",
-          "embeddable",
-          "opensearchDashboardsReact",
-          "savedObjects",
-          "expressions",
-          "data",
-          "visAugmenter",
-          "opensearchDashboardsUtils",
-          "contentManagement"
-        ],
-        "optionalPlugins": [
-          "dataSourceManagement",
-          "assistantDashboards"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
       "id": "anomalyDetectionDashboards",
       "plugin": {
         "id": "anomalyDetectionDashboards",
@@ -1157,6 +1105,57 @@
       "config": {
         "enabled": true
       }
+    },
+    {
+      "id": "alertingDashboards",
+      "plugin": {
+        "id": "alertingDashboards",
+        "configPath": [
+          "opensearch_alerting"
+        ],
+        "requiredPlugins": [
+          "uiActions",
+          "dashboard",
+          "navigation",
+          "embeddable",
+          "opensearchDashboardsReact",
+          "savedObjects",
+          "expressions",
+          "data",
+          "visAugmenter",
+          "opensearchDashboardsUtils",
+          "contentManagement"
+        ],
+        "optionalPlugins": [
+          "dataSourceManagement",
+          "assistantDashboards"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "flowFrameworkDashboards",
+      "plugin": {
+        "id": "flowFrameworkDashboards",
+        "configPath": [
+          "flowFrameworkDashboards"
+        ],
+        "requiredPlugins": [
+          "navigation",
+          "opensearchDashboardsUtils"
+        ],
+        "optionalPlugins": [
+          "dataSourceManagement",
+          "contentManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
     },
     {
       "id": "queryInsightsDashboards",
@@ -3019,8 +3018,6 @@
     "osd-ui-shared-deps": "/8487/bundles/osd-ui-shared-deps/",
     "usageCollection": "/8487/bundles/plugin/usageCollection/",
     "opensearchDashboardsUtils": "/8487/bundles/plugin/opensearchDashboardsUtils/",
-    "opensearchDashboardsLegacy": "/8487/bundles/plugin/opensearchDashboardsLegacy/",
-    "urlForwarding": "/8487/bundles/plugin/urlForwarding/",
     "mapsLegacy": "/8487/bundles/plugin/mapsLegacy/",
     "opensearchDashboardsReact": "/8487/bundles/plugin/opensearchDashboardsReact/",
     "charts": "/8487/bundles/plugin/charts/",
@@ -3028,12 +3025,14 @@
     "data": "/8487/bundles/plugin/data/",
     "inspector": "/8487/bundles/plugin/inspector/",
     "dataSource": "/8487/bundles/plugin/dataSource/",
-    "uiActions": "/8487/bundles/plugin/uiActions/",
+    "opensearchDashboardsLegacy": "/8487/bundles/plugin/opensearchDashboardsLegacy/",
+    "urlForwarding": "/8487/bundles/plugin/urlForwarding/",
     "share": "/8487/bundles/plugin/share/",
-    "opensearchUiShared": "/8487/bundles/plugin/opensearchUiShared/",
+    "uiActions": "/8487/bundles/plugin/uiActions/",
     "embeddable": "/8487/bundles/plugin/embeddable/",
     "savedObjects": "/8487/bundles/plugin/savedObjects/",
     "contentManagement": "/8487/bundles/plugin/contentManagement/",
+    "opensearchUiShared": "/8487/bundles/plugin/opensearchUiShared/",
     "expressions": "/8487/bundles/plugin/expressions/",
     "queryEnhancements": "/8487/bundles/plugin/queryEnhancements/",
     "navigation": "/8487/bundles/plugin/navigation/",
@@ -3044,10 +3043,10 @@
     "discover": "/8487/bundles/plugin/discover/",
     "visAugmenter": "/8487/bundles/plugin/visAugmenter/",
     "savedObjectsManagement": "/8487/bundles/plugin/savedObjectsManagement/",
-    "visTypeTable": "/8487/bundles/plugin/visTypeTable/",
     "visTypeVega": "/8487/bundles/plugin/visTypeVega/",
-    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
+    "visTypeTable": "/8487/bundles/plugin/visTypeTable/",
     "visTypeTimeline": "/8487/bundles/plugin/visTypeTimeline/",
+    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
     "visBuilder": "/8487/bundles/plugin/visBuilder/",
     "visTypeVislib": "/8487/bundles/plugin/visTypeVislib/",
     "tileMap": "/8487/bundles/plugin/tileMap/",
@@ -3062,13 +3061,13 @@
     "securityAnalyticsDashboards": "/8487/bundles/plugin/securityAnalyticsDashboards/",
     "searchRelevanceDashboards": "/8487/bundles/plugin/searchRelevanceDashboards/",
     "reportsDashboards": "/8487/bundles/plugin/reportsDashboards/",
-    "indexManagementDashboards": "/8487/bundles/plugin/indexManagementDashboards/",
     "mlCommonsDashboards": "/8487/bundles/plugin/mlCommonsDashboards/",
+    "indexManagementDashboards": "/8487/bundles/plugin/indexManagementDashboards/",
     "customImportMapDashboards": "/8487/bundles/plugin/customImportMapDashboards/",
-    "flowFrameworkDashboards": "/8487/bundles/plugin/flowFrameworkDashboards/",
     "assistantDashboards": "/8487/bundles/plugin/assistantDashboards/",
-    "alertingDashboards": "/8487/bundles/plugin/alertingDashboards/",
     "anomalyDetectionDashboards": "/8487/bundles/plugin/anomalyDetectionDashboards/",
+    "alertingDashboards": "/8487/bundles/plugin/alertingDashboards/",
+    "flowFrameworkDashboards": "/8487/bundles/plugin/flowFrameworkDashboards/",
     "queryInsightsDashboards": "/8487/bundles/plugin/queryInsightsDashboards/",
     "notificationsDashboards": "/8487/bundles/plugin/notificationsDashboards/",
     "devTools": "/8487/bundles/plugin/devTools/",
@@ -3088,8 +3087,6 @@
     "/8487/bundles/core/core.entry.js",
     "/8487/bundles/plugin/usageCollection/usageCollection.plugin.js",
     "/8487/bundles/plugin/opensearchDashboardsUtils/opensearchDashboardsUtils.plugin.js",
-    "/8487/bundles/plugin/opensearchDashboardsLegacy/opensearchDashboardsLegacy.plugin.js",
-    "/8487/bundles/plugin/urlForwarding/urlForwarding.plugin.js",
     "/8487/bundles/plugin/mapsLegacy/mapsLegacy.plugin.js",
     "/8487/bundles/plugin/opensearchDashboardsReact/opensearchDashboardsReact.plugin.js",
     "/8487/bundles/plugin/charts/charts.plugin.js",
@@ -3097,12 +3094,14 @@
     "/8487/bundles/plugin/data/data.plugin.js",
     "/8487/bundles/plugin/inspector/inspector.plugin.js",
     "/8487/bundles/plugin/dataSource/dataSource.plugin.js",
-    "/8487/bundles/plugin/uiActions/uiActions.plugin.js",
+    "/8487/bundles/plugin/opensearchDashboardsLegacy/opensearchDashboardsLegacy.plugin.js",
+    "/8487/bundles/plugin/urlForwarding/urlForwarding.plugin.js",
     "/8487/bundles/plugin/share/share.plugin.js",
-    "/8487/bundles/plugin/opensearchUiShared/opensearchUiShared.plugin.js",
+    "/8487/bundles/plugin/uiActions/uiActions.plugin.js",
     "/8487/bundles/plugin/embeddable/embeddable.plugin.js",
     "/8487/bundles/plugin/savedObjects/savedObjects.plugin.js",
     "/8487/bundles/plugin/contentManagement/contentManagement.plugin.js",
+    "/8487/bundles/plugin/opensearchUiShared/opensearchUiShared.plugin.js",
     "/8487/bundles/plugin/expressions/expressions.plugin.js",
     "/8487/bundles/plugin/queryEnhancements/queryEnhancements.plugin.js",
     "/8487/bundles/plugin/navigation/navigation.plugin.js",
@@ -3113,10 +3112,10 @@
     "/8487/bundles/plugin/discover/discover.plugin.js",
     "/8487/bundles/plugin/visAugmenter/visAugmenter.plugin.js",
     "/8487/bundles/plugin/savedObjectsManagement/savedObjectsManagement.plugin.js",
-    "/8487/bundles/plugin/visTypeTable/visTypeTable.plugin.js",
     "/8487/bundles/plugin/visTypeVega/visTypeVega.plugin.js",
-    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
+    "/8487/bundles/plugin/visTypeTable/visTypeTable.plugin.js",
     "/8487/bundles/plugin/visTypeTimeline/visTypeTimeline.plugin.js",
+    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
     "/8487/bundles/plugin/visBuilder/visBuilder.plugin.js",
     "/8487/bundles/plugin/visTypeVislib/visTypeVislib.plugin.js",
     "/8487/bundles/plugin/tileMap/tileMap.plugin.js",
@@ -3131,13 +3130,13 @@
     "/8487/bundles/plugin/securityAnalyticsDashboards/securityAnalyticsDashboards.plugin.js",
     "/8487/bundles/plugin/searchRelevanceDashboards/searchRelevanceDashboards.plugin.js",
     "/8487/bundles/plugin/reportsDashboards/reportsDashboards.plugin.js",
-    "/8487/bundles/plugin/indexManagementDashboards/indexManagementDashboards.plugin.js",
     "/8487/bundles/plugin/mlCommonsDashboards/mlCommonsDashboards.plugin.js",
+    "/8487/bundles/plugin/indexManagementDashboards/indexManagementDashboards.plugin.js",
     "/8487/bundles/plugin/customImportMapDashboards/customImportMapDashboards.plugin.js",
-    "/8487/bundles/plugin/flowFrameworkDashboards/flowFrameworkDashboards.plugin.js",
     "/8487/bundles/plugin/assistantDashboards/assistantDashboards.plugin.js",
-    "/8487/bundles/plugin/alertingDashboards/alertingDashboards.plugin.js",
     "/8487/bundles/plugin/anomalyDetectionDashboards/anomalyDetectionDashboards.plugin.js",
+    "/8487/bundles/plugin/alertingDashboards/alertingDashboards.plugin.js",
+    "/8487/bundles/plugin/flowFrameworkDashboards/flowFrameworkDashboards.plugin.js",
     "/8487/bundles/plugin/queryInsightsDashboards/queryInsightsDashboards.plugin.js",
     "/8487/bundles/plugin/notificationsDashboards/notificationsDashboards.plugin.js",
     "/8487/bundles/plugin/devTools/devTools.plugin.js",

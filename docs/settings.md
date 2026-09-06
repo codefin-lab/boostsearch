@@ -76,6 +76,7 @@ badly on purpose.
 |---|---|
 | `BOOSTSEARCH_CHAOS` | drop and delay messages between nodes, to see what survives it. |
 | `BOOSTSEARCH_CLUSTER_DEBUG`, `BOOSTSEARCH_AUTH_DEBUG` | say out loud what the coordinator and the authenticator are deciding. |
+| `BOOSTSEARCH_CONSOLE_DEBUG` | the console says out loud each search it runs over its own index, and what it did to that index and why. |
 | `BOOSTSEARCH_SERIAL_BULK` | run a bulk one line at a time, so a crash names the line. |
 | `BOOSTSEARCH_NO_BLOCK_RANGE`, `BOOSTSEARCH_NO_BLOCK_SORT`, `BOOSTSEARCH_NO_KIND_NARROW` | turn off three optimisations, one at a time, to find out whether one of them is what made an answer wrong. |
 
@@ -92,6 +93,7 @@ a worse console.
 | `BOOSTSEARCH_CONSOLE_PATH` | an OpenSearch Dashboards distribution: the built front end this serves. Pointed at rather than carried, the way the geoip databases are — it is the OpenSearch project's to publish and it is a gigabyte. In their container it is `/usr/share/opensearch-dashboards`. |
 | `BOOSTSEARCH_CONSOLE_BASE_PATH` | the path everything is served under, for a console behind a proxy that gives it one. Empty by default. |
 | `BOOSTSEARCH_ENGINE` | the engine behind it, which is where everything the console knows is kept. Default `http://127.0.0.1:9200`; credentials may be given in the URL. |
+| `BOOSTSEARCH_CONSOLE_ANONYMOUS_STATUS` | whether `/api/status` and the status page answer without a sign-in. Default `true`, which is what the reference's own suite starts it with. |
 | `BOOSTSEARCH_CONSOLE_OVERRIDE` | settings an operator fixes, as `key=value` pairs separated by commas. A reader is shown them as `isOverridden` and refused when they try to change one — an operator's decision is not a reader's to undo. A value is JSON where it reads as JSON and the text it is otherwise, so `false` is a boolean and `Asia/Bangkok` is a string. |
 
 The distribution's version decides which pinned contract is read from
