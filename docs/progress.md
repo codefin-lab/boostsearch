@@ -2878,3 +2878,59 @@ slower than reading everything.
 
 Gates: unit 83/83, phase 1 398/398, core corpus 1,100/1,100, module corpus
 850/895 unchanged, and the eight vector checks still pass.
+
+## Phase 12 — Two languages that ask the same questions
+
+SQL and PPL are one plugin in OpenSearch, and they are one thing here for the
+same reason: a `SELECT` and a pipeline say the same things in a different
+order, so they can share everything after the reading. Six modules —
+`lexer`, `ast`, `parser`, `plan`, `rows`, `ppl` — and the two of them meet at
+`ast::Select`. `source=logs | where a = 1 | stats count() by b` builds the
+statement `SELECT count(*), b FROM logs WHERE a = 1 GROUP BY b` would have
+built, and from there nothing knows which language it came from.
+
+**A query is a search, and the answer is a table.** `plan` turns a statement
+into the search body the engine already takes — a `WHERE` becomes a query, a
+`GROUP BY` becomes nested `terms` aggregations, an aggregate becomes a metric
+under one — and hands back, beside it, how to read each column out of what
+comes back: a field of a hit, a bucket key, a metric, a bucket's count, a
+constant, or an expression to work out once the rest of the row is known.
+That last one is what makes `price * units` and `upper(region)` work without
+the engine having to know anything about them.
+
+**Everything the engine cannot do, the table does.** `HAVING`, `DISTINCT`,
+ordering by an aggregate, `LIMIT` over groups: all of them are shaping a
+table that has already come back, in that order, because that is the order
+SQL says they happen in. The one thing worth writing down is that a `HAVING`
+talks about the *columns of the answer*, so `HAVING count(*) > 1` and
+`HAVING n > 1` on a column aliased `n` are the same question — a row answers
+to both its alias and its expression's name, rather than the second form
+quietly working the count out again over nothing.
+
+**Two lists of aggregate names is one too many.** `count(DISTINCT region)`
+came back as five rows of nulls: the parser knew to call it `count_distinct`
+and the planner knew how to aggregate it, but the list that decides whether a
+query is grouped at all was a second copy, and `count_distinct` was not in it.
+So the query was answered as though it had asked for documents. There is one
+list now, in `ast`, and the planner reads it. A name missing from a list like
+that does not fail — it answers something else, which is worse.
+
+**`tools/sql_check.py`** is the suite. OpenSearch keeps SQL in a repository of
+its own with its own tests, none of which are in the corpus this repository
+runs, so this stands in for them: thirty questions across selecting,
+grouping, full text, expressions, the pipeline language, the response formats
+(jdbc, json, csv, raw, table), the three errors the plugin names, and
+`_explain`. Every one says what the answer must be.
+
+**`tools/gate_node.sh` and `tools/url_repository_fixture.py`.** The gates were
+being started by hand, and the numbers moved with what happened to be in the
+environment: the module corpus read 834, then 843, then 850, from the same
+binary, depending on whether the node had been told about `testattr`, the
+geoip databases, the phonetic rules, and where a URL repository may be read
+from. That is not a gate. `gate_node.sh` is now the one way to start it, and
+the URL fixture — three repositories and a static server over the shared
+directory, which OpenSearch's build sets up and its suite's header says so —
+is a script rather than something remembered.
+
+Gates: unit 109/109, phase 1 398/398, core corpus 1,100/1,100, module corpus
+850/895, and the eight SQL checks pass.

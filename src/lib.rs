@@ -18,6 +18,7 @@ pub mod query;
 pub mod search;
 pub mod security;
 pub mod snapshot;
+pub mod sql;
 pub mod source;
 pub mod store;
 pub mod tls;

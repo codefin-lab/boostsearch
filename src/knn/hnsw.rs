@@ -27,10 +27,12 @@ use super::Space;
 /// The defaults are measured rather than copied. Over fifty thousand vectors
 /// of sixty-four dimensions, against the exact answer:
 ///
+/// ```text
 ///     ef_construction  ef_search   build    query   recall
 ///                 100        100   18.6s   0.89ms    0.805
 ///                 200        200   30.8s   0.84ms    0.950
 ///                 512        256   54.3s   1.08ms    0.970
+/// ```
 ///
 /// A recall of 0.8 is not a default anybody should be given: one search in
 /// five missing a document it should have found is the kind of wrongness
