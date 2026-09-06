@@ -85,6 +85,7 @@ impl<'a> Settings<'a> {
     pub fn write(&self, changes: &Map<String, Value>) -> Result<Value, Failed> {
         if let Some(key) = changes.keys().find(|k| self.overrides.contains_key(*k)) {
             return Err(Failed {
+                objects: None,
                 status: 400,
                 message: format!("Unable to update \"{key}\" because it is overridden"),
             });
@@ -104,7 +105,7 @@ impl<'a> Settings<'a> {
             "updated_at": crate::console::now(),
         });
         if self.engine.put(&self.id(), &document).is_err() {
-            super::migrate::ensure(self.engine, self.mapping)?;
+            super::migrate::ensure_because(self.engine, self.mapping, "a setting found no index")?;
             self.engine.put(&self.id(), &document)?;
         }
         self.read()

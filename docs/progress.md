@@ -3346,3 +3346,73 @@ useless. It now carries the method, the path and the engine's own reason,
 which is how `uiStateJSON` was found in one run rather than several.
 
 Gates: unit 143/143, fmt and clippy clean.
+
+### 13.3b — The migrations that change the documents
+
+An object written by an older console is in a shape the current mapping
+refuses. This is the code that puts it right: the migration chain of each of
+the five types the mapping knows — `dashboard` (four versions), `visualization`
+(eleven), `index-pattern` (two), `search` (four), `config` (one) — ported
+step for step from the server being replaced, in `src/console/migrations/`.
+Seventeen unit tests, two of them the suite's own dashboard and visualization
+from Kibana 7.0 carried up to what a current console writes.
+
+When it runs is the whole of the contract, and the server being replaced is
+particular about it. On the index migration every document is run through
+its chain, a document that says nothing about its own version being taken as
+the oldest. On a create through the API, only when the caller says what
+version its object is at — one that says nothing is assumed current. On an
+import, always. So the copy that the index migration does is a scroll, a
+migration and a bulk, not a `_reindex`: the engine cannot run these.
+
+Done alongside, because the suite asked: `_find` built clause for clause as
+the server being replaced builds it (a search ending in `*` is a prefix
+search over the title too; the type and the namespace are filters, so a hit
+scores nothing; `namespaces=*` means the default namespace and only that, for
+a type that lives in one namespace at a time), a DQL `filter=` with the
+reference's own refusal text, export in dependency order with no trailing
+newline and a count before the fetch (ten thousand objects is a body worth
+not reading when the answer is no), import as one multipart file with the
+conflict, missing-reference and unsupported-type shapes, and the retries of
+`_resolve_import_errors`.
+
+Against `test/api_integration`: **102 of 166**, where the reference scores
+140. Every saved-object and management case passes but two `timelion-sheet`
+hooks the reference fails too. All 46 failures ours alone are routes of 13.4
+and 13.5 — `index_patterns` (16), `msearch` (6), the DQL telemetry,
+suggestions, stats, UI-metric and opt-in routes, the URL shortener, sample
+data — and one of 13.2 the suite is the first to ask about: `/api/status`
+answers `metrics: null`, and it wants the numbers. `tools/console_diff.py`:
+the shell our server serves is the shell the reference serves.
+
+What it learned:
+
+  - **A bulk write is one request.** `_bulk_create` was one create per object,
+    each waiting for its refresh — a second apiece at the default interval.
+    The suite creates ten thousand and one in one call, the hook timed out,
+    and the loop kept writing for the next two hours while later suites
+    loaded their fixtures — which it then adopted, one after another. It is a
+    single `_bulk?refresh=wait_for` now: 10,001 objects in 1.8 seconds. The
+    import goes the same way.
+  - **The pin must come from a Dashboards whose engine is alive.** The
+    `migrationVersions` and `managementMeta` are probed by writing one object
+    of each type; against a reference whose engine had died the probe found
+    nothing, and the pin quietly recorded no versions at all. A fresh pin now
+    reads the index through the alias rather than by number, since a
+    reference the suite has run against has migrated more than once and
+    `.kibana_1` is a fixture it adopted.
+  - **The runner's diff is `+ expected - actual`.** A line with `-` is ours.
+    Read the other way round, the wildcard-namespace case looked like a
+    missing object when it was an extra one.
+  - **The order the bundles load in differs between two starts of the same
+    Dashboards.** The loader defines every bundle before resolving any, so
+    the order is not the contract, and `console_diff` compares the set.
+  - **A write never restructures the index.** A concrete `.kibana` on the
+    write path is written into as it stands; adopting it is the migrate
+    route's job. Two consoles putting the index right at once are serialised
+    in-process as well as by the engine's create.
+
+Setting: `BOOSTSEARCH_CONSOLE_DEBUG` says what the console did to its index
+and why, and each search it ran. Tools: `tools/osd_pin.py` reads through the
+alias.
+

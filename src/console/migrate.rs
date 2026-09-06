@@ -24,6 +24,7 @@
 use serde_json::{Value, json};
 
 use super::engine::{Engine, Failed};
+use super::migrations;
 
 /// The alias every console reads and writes through.
 pub const ALIAS: &str = ".kibana";
@@ -45,6 +46,27 @@ pub enum Found {
 /// Make the console's index if nothing has, and move it on if its shape has
 /// changed since whatever made it last.
 pub fn ensure(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
+    ensure_because(engine, mapping, "asked")
+}
+
+/// The same, saying who asked -- so that a log can tell a migration somebody
+/// requested from one a write set off on its own.
+pub fn ensure_because(engine: &Engine, mapping: &Value, why: &str) -> Result<Found, Failed> {
+    // One at a time within this process. Two consoles are settled by the
+    // engine, which lets only one of them create an index; two callers in
+    // one console are not, and the second would find the first had deleted
+    // the index it was about to adopt.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let found = ensure_held(engine, mapping);
+    match &found {
+        Ok(what) => eprintln!("  index ({why}): {what:?}"),
+        Err(e) => eprintln!("  index ({why}): refused, {}", e.message),
+    }
+    found
+}
+
+fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     // An index actually named `.kibana` is something that wrote to the
     // console's index without going through a console: a restore, a fixture
     // loaded for a test, a hand. It is moved out of the way and the alias put
@@ -53,7 +75,7 @@ pub fn ensure(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     // exist.
     if concrete_index(engine)? {
         let next = next_free(engine)?;
-        make(engine, &next, mapping)?;
+        make_after(engine, &next, mapping, Some(ALIAS))?;
         let documents = match copy(engine, ALIAS, &next) {
             Ok(documents) => documents,
             Err(e) => {
@@ -61,7 +83,16 @@ pub fn ensure(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
                 return Err(e);
             }
         };
-        engine.call("DELETE", &format!("/{ALIAS}"), None)?;
+        // by now another console may have adopted it first, in which case
+        // the name is an alias and there is nothing left to delete -- and
+        // the index this one made is one nothing points at, so it goes
+        let deleted = engine.call("DELETE", &format!("/{ALIAS}"), None);
+        if deleted.is_err() && !concrete_index(engine)? {
+            let _ = engine.call("DELETE", &format!("/{next}"), None);
+            let on = behind_alias(engine)?;
+            return Ok(Found::Ready(on.last().cloned().unwrap_or_default()));
+        }
+        deleted?;
         point_alias(engine, &[], &next)?;
         return Ok(Found::Adopted { from: ALIAS.to_string(), to: next, documents });
     }
@@ -79,7 +110,7 @@ pub fn ensure(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     // behind it at all -- either way the answer is the same: a new index with
     // the shape it should have, everything in it, and the alias on it alone
     let next = next_free(engine)?;
-    make(engine, &next, mapping)?;
+    make_after(engine, &next, mapping, Some(&current))?;
     let documents = match copy(engine, &current, &next) {
         Ok(documents) => documents,
         // a half-made index left behind would be taken for the next free one
@@ -96,9 +127,14 @@ pub fn ensure(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
 }
 
 /// Whether something has made an index under the alias's own name.
+///
+/// `GET /.kibana` answers for an alias too, under the name of the index it
+/// points at -- so the answer is only a concrete index if it comes back under
+/// the alias's own name. An alias and an index cannot share a name, so there
+/// is no third case.
 fn concrete_index(engine: &Engine) -> Result<bool, Failed> {
     let found = engine.call("GET", &format!("/{ALIAS}"), None)?;
-    Ok(found.get(ALIAS).is_some())
+    Ok(found.get(ALIAS).is_some_and(|v| v.get("settings").is_some()))
 }
 
 /// The first `.kibana_N` nothing has taken.
@@ -151,6 +187,38 @@ fn same_shape(engine: &Engine, index: &str, mapping: &Value) -> Result<bool, Fai
 }
 
 fn make(engine: &Engine, index: &str, mapping: &Value) -> Result<(), Failed> {
+    make_after(engine, index, mapping, None)
+}
+
+/// Make an index, carrying over any type the index it follows knew about and
+/// this console does not.
+///
+/// A plugin this console does not answer for may have written objects of its
+/// own type -- `timelion-sheet` is in the suite's fixtures -- and a strict
+/// mapping without that type would refuse to copy them, which is losing
+/// somebody's data to tidy a mapping. So they are carried as `dynamic: false`:
+/// stored whole, searched on nothing, exactly as the server being replaced
+/// carries them.
+fn make_after(
+    engine: &Engine,
+    index: &str,
+    mapping: &Value,
+    after: Option<&str>,
+) -> Result<(), Failed> {
+    let mut mapping = mapping.clone();
+    if let Some(previous) = after
+        && let Ok(found) = engine.call("GET", &format!("/{previous}/_mapping"), None)
+        && let Some(theirs) =
+            found.pointer(&format!("/{previous}/mappings/properties")).and_then(|v| v.as_object())
+        && let Some(ours) = mapping.pointer_mut("/properties").and_then(|v| v.as_object_mut())
+    {
+        for (kind, spec) in theirs {
+            let is_object = spec.get("properties").is_some();
+            if !ours.contains_key(kind) && is_object {
+                ours.insert(kind.clone(), json!({"dynamic": false, "properties": {}}));
+            }
+        }
+    }
     let made = engine.call(
         "PUT",
         &format!("/{index}"),
@@ -163,33 +231,96 @@ fn make(engine: &Engine, index: &str, mapping: &Value) -> Result<(), Failed> {
     // us was going to, and which one does not matter
     match made.pointer("/error/type").and_then(|v| v.as_str()) {
         None | Some("resource_already_exists_exception") => Ok(()),
-        Some(other) => Err(Failed { status: 500, message: format!("{index}: {other}") }),
+        Some(other) => {
+            Err(Failed { objects: None, status: 500, message: format!("{index}: {other}") })
+        }
     }
 }
 
-/// Everything in one index, in the next one.
+/// Everything in one index, in the next one, brought up to date on the way.
+///
+/// Not a reindex: each document is read, run through its type's migrations,
+/// and written to the new index in batches. A document that is not a saved
+/// object at all -- its id does not agree with its type -- is copied as it
+/// stands and said so, which is what the server being replaced does; deleting
+/// it would be deciding for somebody that it does not matter.
 fn copy(engine: &Engine, from: &str, to: &str) -> Result<u64, Failed> {
-    let found = engine.call(
+    let mut written = 0u64;
+    let mut page = engine.call(
         "POST",
-        "/_reindex?refresh=true&wait_for_completion=true",
-        Some(&json!({"source": {"index": from}, "dest": {"index": to}})),
+        &format!("/{from}/_search?scroll=5m"),
+        Some(&json!({"size": 500, "query": {"match_all": {}}, "sort": ["_doc"]})),
     )?;
-    if let Some(failures) = found.get("failures").and_then(|v| v.as_array())
-        && !failures.is_empty()
-    {
-        let first = failures[0]
-            .pointer("/cause/reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("no reason given");
-        return Err(Failed {
-            status: 500,
-            message: format!(
-                "{} of the objects could not be copied from {from} to {to}: {first}",
-                failures.len()
-            ),
-        });
+    let mut scroll = page.get("_scroll_id").and_then(|v| v.as_str()).map(String::from);
+    loop {
+        let hits: Vec<Value> =
+            page.pointer("/hits/hits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if hits.is_empty() {
+            break;
+        }
+        let mut lines = String::new();
+        for hit in &hits {
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+            let Some(source) = hit.get("_source") else { continue };
+            let (id, source) = match migrations::is_saved_object(id, source) {
+                true => {
+                    let mut doc = migrations::from_raw(id, source);
+                    // no record of what it has been through is a record of
+                    // nothing, and everything runs
+                    if doc.get("migrationVersion").is_none() {
+                        doc["migrationVersion"] = json!({});
+                    }
+                    let doc = migrations::migrate(doc).map_err(|e| Failed {
+                        objects: None,
+                        status: 422,
+                        message: e,
+                    })?;
+                    migrations::to_raw(&doc)
+                }
+                false => {
+                    eprintln!(
+                        "  {id}: not a saved object -- its id does not agree with its type -- \
+                         copied as it stands"
+                    );
+                    (id.to_string(), source.clone())
+                }
+            };
+            lines.push_str(&json!({"index": {"_index": to, "_id": id}}).to_string());
+            lines.push('\n');
+            lines.push_str(&source.to_string());
+            lines.push('\n');
+            written += 1;
+        }
+        let answer = engine.bulk(&lines)?;
+        if answer.get("errors").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let first = answer
+                .pointer("/items/0/index/error/reason")
+                .or_else(|| {
+                    answer.get("items").and_then(|v| v.as_array()).and_then(|items| {
+                        items.iter().find_map(|i| i.pointer("/index/error/reason"))
+                    })
+                })
+                .and_then(|v| v.as_str())
+                .unwrap_or("no reason given");
+            return Err(Failed {
+                objects: None,
+                status: 500,
+                message: format!("the objects could not be written to {to}: {first}"),
+            });
+        }
+        let Some(held) = scroll.clone() else { break };
+        page = engine.call(
+            "POST",
+            "/_search/scroll",
+            Some(&json!({"scroll": "5m", "scroll_id": held})),
+        )?;
+        scroll = page.get("_scroll_id").and_then(|v| v.as_str()).map(String::from);
     }
-    Ok(found.get("created").and_then(|v| v.as_u64()).unwrap_or(0))
+    if let Some(held) = scroll {
+        let _ = engine.call("DELETE", &format!("/_search/scroll?scroll_id={held}"), None);
+    }
+    engine.call("POST", &format!("/{to}/_refresh"), None)?;
+    Ok(written)
 }
 
 /// Point the alias at an index, taking it off the one it was on -- in one

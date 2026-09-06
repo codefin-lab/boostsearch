@@ -14,8 +14,10 @@
 
 pub mod assets;
 pub mod engine;
+pub mod filter;
 pub mod management;
 pub mod migrate;
+pub mod migrations;
 pub mod pinned;
 pub mod saved;
 pub mod settings;
@@ -51,6 +53,9 @@ pub struct Console {
     /// settings an operator fixed when this server was started, which no
     /// reader may change
     pub overrides: BTreeMap<String, Value>,
+    /// whether the status page answers without a sign-in -- this server's own
+    /// choice, the way `status.allowAnonymous` is the Node server's
+    pub anonymous_status: bool,
     /// the shape the console's index should have, taken out of the pin once
     /// so that everything that may have to put it back has it
     pub mapping: Value,
@@ -101,7 +106,19 @@ impl Console {
         let plugin_dirs = plugin_dirs(&home);
         let uuid = uuid_of();
         let mapping = pinned.saved_object_index.get("mappings").cloned().unwrap_or_default();
-        Ok(Console { home, pinned, base_path, overrides, mapping, uuid, plugin_dirs })
+        let anonymous_status = std::env::var("BOOSTSEARCH_CONSOLE_ANONYMOUS_STATUS")
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        Ok(Console {
+            home,
+            pinned,
+            base_path,
+            overrides,
+            anonymous_status,
+            mapping,
+            uuid,
+            plugin_dirs,
+        })
     }
 }
 

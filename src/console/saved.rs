@@ -50,7 +50,8 @@ impl<'a> Saved<'a> {
     /// console cannot work in -- so writes say the target must be an alias,
     /// and this is what happens when one is refused for that reason.
     fn make_it_right(&self) -> Result<(), Failed> {
-        super::migrate::ensure(self.engine, self.mapping).map(|_| ())
+        super::migrate::ensure_because(self.engine, self.mapping, "a write found no index")
+            .map(|_| ())
     }
 
     /// One object, as the API hands it back.
@@ -86,6 +87,160 @@ impl<'a> Saved<'a> {
 
     /// Write a new object.
     pub fn create(&self, writing: Writing) -> Result<Value, Failed> {
+        let Prepared { kind, id, document, source, overwrite } = self.prepare(writing)?;
+        // `create` where the caller did not ask to overwrite, so that two
+        // people making the same dashboard is a conflict rather than one of
+        // them quietly winning
+        let operation = match overwrite {
+            true => "_doc",
+            false => "_create",
+        };
+        // `require_alias` so that a write can never be the thing that makes
+        // the console's index: an index made that way is a plain one under the
+        // alias's own name, and nothing can put an alias over it afterwards
+        let path = format!("/{INDEX}/{operation}/{document}?refresh=wait_for&require_alias=true");
+        let mut found = self.engine.call("PUT", &path, Some(&Value::Object(source.clone())))?;
+        match refused_for_the_index(&found) {
+            // nothing is there at all: a write makes the index, as the
+            // server being replaced does, so a console in front of an empty
+            // cluster does not refuse its first dashboard
+            Refusal::NoIndex => {
+                eprintln!("  a write of {document} found no index");
+                self.make_it_right()?;
+                found = self.engine.call("PUT", &path, Some(&Value::Object(source.clone())))?;
+            }
+            // an index of the alias's own name is there: somebody is loading
+            // it -- a restore, a fixture -- and a write is not the moment to
+            // take it over. The write goes into it as it stands; adopting it
+            // is the migration's job, when it is asked.
+            Refusal::NotAnAlias => {
+                let plain = format!("/{INDEX}/{operation}/{document}?refresh=wait_for");
+                found = self.engine.call("PUT", &plain, Some(&Value::Object(source.clone())))?;
+            }
+            Refusal::None => {}
+        }
+        written(&found, &Value::Object(source), &kind, &id)
+    }
+
+    /// Several new objects in one write.
+    ///
+    /// One request to the engine rather than one per object, and one wait
+    /// for the refresh rather than one per object: a refresh is a second at
+    /// the default interval, and the server being replaced is asked for ten
+    /// thousand objects at a time by its own suite. Each object is answered
+    /// for on its own, so the caller learns which of them were refused.
+    pub fn bulk_create(
+        &self,
+        writings: Vec<Writing>,
+    ) -> Result<Vec<Result<Value, Failed>>, Failed> {
+        let prepared: Vec<Result<Prepared, Failed>> =
+            writings.into_iter().map(|w| self.prepare(w)).collect();
+        let mut out: Vec<Option<Result<Value, Failed>>> = prepared
+            .iter()
+            .map(|p| match p {
+                Ok(_) => None,
+                Err(e) => Some(Err(e.clone())),
+            })
+            .collect();
+        let pending: Vec<usize> = (0..prepared.len()).filter(|i| out[*i].is_none()).collect();
+        if pending.is_empty() {
+            return Ok(out.into_iter().map(|o| o.unwrap_or_else(|| Ok(Value::Null))).collect());
+        }
+        let good = |i: &usize| match &prepared[*i] {
+            Ok(p) => p,
+            Err(_) => unreachable!("pending are the prepared ones"),
+        };
+        let lines = |which: &[usize]| -> String {
+            let mut lines = String::new();
+            for i in which {
+                let p = good(i);
+                let action = if p.overwrite { "index" } else { "create" };
+                lines.push_str(&json!({action: {"_index": INDEX, "_id": p.document}}).to_string());
+                lines.push('\n');
+                lines.push_str(&Value::Object(p.source.clone()).to_string());
+                lines.push('\n');
+            }
+            lines
+        };
+        let first =
+            self.engine.bulk_with("refresh=wait_for&require_alias=true", &lines(&pending))?;
+        let items = |answer: &Value| -> Vec<Value> {
+            answer.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+        };
+        // the ones the index itself refused are written again once it is
+        // right -- made when there was none, or as it stands when it is a
+        // plain index under the alias's name
+        let mut again: Vec<usize> = Vec::new();
+        let mut make = false;
+        for (n, item) in items(&first).iter().enumerate() {
+            let Some(i) = pending.get(n) else { break };
+            let one = item.as_object().and_then(|o| o.values().next()).cloned().unwrap_or_default();
+            match refused_for_the_index(&one) {
+                Refusal::NoIndex => {
+                    make = true;
+                    again.push(*i);
+                }
+                Refusal::NotAnAlias => again.push(*i),
+                Refusal::None => {
+                    let p = good(i);
+                    out[*i] = Some(written(&one, &Value::Object(p.source.clone()), &p.kind, &p.id));
+                }
+            }
+        }
+        if !again.is_empty() {
+            if make {
+                eprintln!("  a write of {} objects found no index", again.len());
+                self.make_it_right()?;
+            }
+            let second = self.engine.bulk_with("refresh=wait_for", &lines(&again))?;
+            for (n, item) in items(&second).iter().enumerate() {
+                let Some(i) = again.get(n) else { break };
+                let one =
+                    item.as_object().and_then(|o| o.values().next()).cloned().unwrap_or_default();
+                let p = good(i);
+                out[*i] = Some(written(&one, &Value::Object(p.source.clone()), &p.kind, &p.id));
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|o| {
+                o.unwrap_or_else(|| {
+                    Err(Failed::of(502, "the engine did not answer for the object"))
+                })
+            })
+            .collect())
+    }
+
+    /// What a new object is written as: its document and its source, the
+    /// object migrated first when the caller said what shape it is in.
+    fn prepare(&self, writing: Writing) -> Result<Prepared, Failed> {
+        // a caller that says what its document has been through is handing
+        // over an older shape and asking for it to be brought up to date; one
+        // that says nothing is assumed to be current, which is what the
+        // server being replaced assumes too
+        let writing = match &writing.migration_version {
+            Some(version) if version.is_object() => {
+                let doc = json!({
+                    "id": writing.id.clone().unwrap_or_default(),
+                    "type": writing.kind,
+                    "attributes": writing.attributes,
+                    "references": writing.references,
+                    "migrationVersion": version,
+                });
+                let migrated = super::migrations::migrate(doc).map_err(|m| Failed {
+                    objects: None,
+                    status: 422,
+                    message: m,
+                })?;
+                Writing {
+                    attributes: migrated.get("attributes").cloned().unwrap_or_else(|| json!({})),
+                    references: migrated.get("references").cloned().unwrap_or_else(|| json!([])),
+                    migration_version: migrated.get("migrationVersion").cloned(),
+                    ..writing
+                }
+            }
+            _ => writing,
+        };
         let id = writing.id.clone().unwrap_or_else(random_id);
         let document = document_id(&writing.kind, &id);
         let migration = writing
@@ -101,38 +256,7 @@ impl<'a> Saved<'a> {
             source.insert("migrationVersion".into(), migration);
         }
         source.insert("updated_at".into(), json!(super::now()));
-        // `create` where the caller did not ask to overwrite, so that two
-        // people making the same dashboard is a conflict rather than one of
-        // them quietly winning
-        let operation = match writing.overwrite {
-            true => "_doc",
-            false => "_create",
-        };
-        // `require_alias` so that a write can never be the thing that makes
-        // the console's index: an index made that way is a plain one under the
-        // alias's own name, and nothing can put an alias over it afterwards
-        let path = format!("/{INDEX}/{operation}/{document}?refresh=wait_for&require_alias=true");
-        let mut found = self.engine.call("PUT", &path, Some(&Value::Object(source.clone())))?;
-        if refused_for_the_index(&found) {
-            self.make_it_right()?;
-            found = self.engine.call("PUT", &path, Some(&Value::Object(source.clone())))?;
-        }
-        if let Some(kind) = found.pointer("/error/type").and_then(|v| v.as_str()) {
-            let reason = found
-                .pointer("/error/reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("the object could not be written");
-            // the engine's own words twice over, which is what the server
-            // being replaced says: once as the message and once as the cause,
-            // and the reason already begins with the document's name
-            return Err(Failed {
-                status: if kind == "version_conflict_engine_exception" { 409 } else { 400 },
-                message: format!("{reason}: {kind}: [{kind}] Reason: {reason}"),
-            });
-        }
-        let mut answer = shape_source(&Value::Object(source), &writing.kind, &id);
-        answer["version"] = json!(version_of(&found));
-        Ok(reorder(answer))
+        Ok(Prepared { kind: writing.kind, id, document, source, overwrite: writing.overwrite })
     }
 
     /// Change an object that is already there.
@@ -191,8 +315,25 @@ impl<'a> Saved<'a> {
 /// The type is part of it so that a dashboard and a search may both be called
 /// `sales` without being the same thing.
 pub fn document_id(kind: &str, id: &str) -> String {
-    let id = format!("{kind}:{id}");
-    id.replace('%', "%25").replace('/', "%2F").replace('#', "%23").replace('?', "%3F")
+    encoded(&format!("{kind}:{id}"))
+}
+
+/// A document id as a URL path segment.
+///
+/// An id is whatever somebody called the object -- a space, a slash, a
+/// question mark are all things a name may hold -- and a URL holds none of
+/// them as they are.
+pub fn encoded(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// A hit, as the API describes an object.
@@ -207,7 +348,8 @@ fn shape_source(source: &Value, kind: &str, id: &str) -> Value {
     let mut out = Map::new();
     out.insert("id".into(), json!(id));
     out.insert("type".into(), json!(kind));
-    out.insert("namespaces".into(), json!(["default"]));
+    let namespace = source.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    out.insert("namespaces".into(), json!([namespace]));
     if let Some(at) = source.get("updated_at") {
         out.insert("updated_at".into(), at.clone());
     }
@@ -235,21 +377,64 @@ pub fn version_of(found: &Value) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("[{seq},{term}]"))
 }
 
-/// Whether a write was refused because the console's index is not where it
-/// should be, rather than because of anything the caller did.
-fn refused_for_the_index(found: &Value) -> bool {
-    matches!(
-        found.pointer("/error/type").and_then(|v| v.as_str()),
-        Some("index_not_found_exception" | "invalid_alias_name_exception")
-    ) || found
-        .pointer("/error/reason")
-        .and_then(|v| v.as_str())
-        .is_some_and(|r| r.contains("does not point to an alias"))
+/// A new object as it goes to the engine.
+struct Prepared {
+    kind: String,
+    id: String,
+    document: String,
+    source: Map<String, Value>,
+    overwrite: bool,
+}
+
+/// What the caller gets for a write the engine answered: the object as it
+/// now stands, or the engine's refusal in the words the server being
+/// replaced uses -- once as the message and once as the cause, the reason
+/// already beginning with the document's name.
+fn written(found: &Value, source: &Value, kind: &str, id: &str) -> Result<Value, Failed> {
+    if let Some(what) = found.pointer("/error/type").and_then(|v| v.as_str()) {
+        let reason = found
+            .pointer("/error/reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the object could not be written");
+        return Err(Failed {
+            objects: None,
+            status: if what == "version_conflict_engine_exception" { 409 } else { 400 },
+            message: format!("{reason}: {what}: [{what}] Reason: {reason}"),
+        });
+    }
+    let mut answer = shape_source(source, kind, id);
+    answer["version"] = json!(version_of(found));
+    Ok(reorder(answer))
+}
+
+/// Why a write was refused, where the reason is the console's index rather
+/// than anything the caller did.
+enum Refusal {
+    None,
+    /// there is no index under the alias's name at all
+    NoIndex,
+    /// there is one, but it is a plain index rather than an alias
+    NotAnAlias,
+}
+
+fn refused_for_the_index(found: &Value) -> Refusal {
+    let kind = found.pointer("/error/type").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = found.pointer("/error/reason").and_then(|v| v.as_str()).unwrap_or("");
+    if kind == "invalid_alias_name_exception"
+        || reason.contains("does not point to an alias")
+        || reason.contains("is not an alias")
+    {
+        Refusal::NotAnAlias
+    } else if kind == "index_not_found_exception" {
+        Refusal::NoIndex
+    } else {
+        Refusal::None
+    }
 }
 
 /// An object that is not there, in the words the front end shows.
 pub fn missing(kind: &str, id: &str) -> Failed {
-    Failed { status: 404, message: format!("Saved object [{kind}/{id}] not found") }
+    Failed { objects: None, status: 404, message: format!("Saved object [{kind}/{id}] not found") }
 }
 
 fn reason(status: u16) -> &'static str {
@@ -263,7 +448,7 @@ fn reason(status: u16) -> &'static str {
 }
 
 /// A name for an object nobody named.
-fn random_id() -> String {
+pub fn random_id() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -290,6 +475,9 @@ impl Default for Looking {
             sort_order: None,
             has_reference: None,
             default_search_operator: "OR".into(),
+            namespaces: Vec::new(),
+            filter: None,
+            filter_query: None,
         }
     }
 }
@@ -302,6 +490,12 @@ impl Saved<'_> {
     /// time somebody opens it.
     pub fn find(&self, looking: &Looking) -> Result<Value, Failed> {
         let body = self.query_for(looking);
+        if std::env::var("BOOSTSEARCH_CONSOLE_DEBUG").is_ok() {
+            eprintln!(
+                "  find {:?} ns={:?} size={}",
+                looking.types, looking.namespaces, looking.per_page
+            );
+        }
         let found = self.engine.call("POST", &format!("/{INDEX}/_search"), Some(&body))?;
         if let Some(reason) = found.pointer("/error/reason").and_then(|v| v.as_str()) {
             // an index that is not there yet holds nothing, which is the
@@ -311,7 +505,7 @@ impl Saved<'_> {
             {
                 return Ok(empty(looking));
             }
-            return Err(Failed { status: 400, message: reason.to_string() });
+            return Err(Failed { objects: None, status: 400, message: reason.to_string() });
         }
         let hits: Vec<Value> =
             found.pointer("/hits/hits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -321,7 +515,12 @@ impl Saved<'_> {
             .filter_map(|hit| {
                 let source = hit.get("_source")?;
                 let kind = source.get("type")?.as_str()?;
-                let id = hit.get("_id")?.as_str()?.strip_prefix(&format!("{kind}:"))?;
+                let raw = hit.get("_id")?.as_str()?;
+                let prefix = match source.get("namespace").and_then(|v| v.as_str()) {
+                    Some(ns) => format!("{ns}:{kind}:"),
+                    None => format!("{kind}:"),
+                };
+                let id = raw.strip_prefix(&prefix)?;
                 let mut one = shape(hit, kind, id);
                 // a caller that named the fields it wants is drawing a list
                 // and does not need the rest of every object
@@ -348,16 +547,66 @@ impl Saved<'_> {
     }
 
     /// The search a request stands for.
+    ///
+    /// This is the query the server being replaced builds, clause for clause
+    /// (`search_dsl/query_params.ts`), because the front end relies on its
+    /// exact behaviour in places a paraphrase would not reach: a search ending
+    /// in `*` is a prefix search over the title as well as a query-string
+    /// search, which is what lets `my-vis*` find `my-visualization` when the
+    /// hyphen would otherwise be read as NOT.
     fn query_for(&self, looking: &Looking) -> Value {
-        let mut must: Vec<Value> = Vec::new();
-        if !looking.types.is_empty() {
-            must.push(json!({"terms": {"type": looking.types}}));
+        // one clause per type, each saying which namespaces it may be in. The
+        // type and the namespace are filters: they decide what is looked at
+        // and say nothing about what is better, so they score nothing.
+        let namespaces: Vec<String> = match looking.namespaces.is_empty() {
+            true => vec!["default".to_string()],
+            false => looking.namespaces.clone(),
+        };
+        let per_type: Vec<Value> = looking
+            .types
+            .iter()
+            .map(|kind| {
+                // `*` stands for every namespace, and for a type that lives in
+                // one namespace at a time -- which every type here does --
+                // that resolves to the default one and nothing else. The
+                // server being replaced answers the same, and its suite says
+                // so in as many words: "from the default namespace".
+                let mut should: Vec<Value> = Vec::new();
+                let named: Vec<&String> =
+                    namespaces.iter().filter(|n| *n != "default" && *n != "*").collect();
+                if !named.is_empty() {
+                    should.push(json!({"terms": {"namespace": named}}));
+                }
+                if namespaces.iter().any(|n| n == "default" || n == "*") {
+                    should
+                        .push(json!({"bool": {"must_not": [{"exists": {"field": "namespace"}}]}}));
+                }
+                json!({"bool": {
+                    "must": [{"term": {"type": kind}}],
+                    "should": should,
+                    "minimum_should_match": 1,
+                    "must_not": [{"exists": {"field": "namespaces"}}],
+                }})
+            })
+            .collect();
+        let mut inner = json!({"should": per_type, "minimum_should_match": 1});
+        if let Some(reference) = &looking.has_reference {
+            inner["must"] = json!([{"nested": {
+                "path": "references",
+                "query": {"bool": {"must": [
+                    {"term": {"references.id": reference.get("id")}},
+                    {"term": {"references.type": reference.get("type")}},
+                ]}},
+            }}]);
         }
+        let mut filters = vec![json!({"bool": inner})];
+        if let Some(extra) = &looking.filter_query {
+            filters.push(extra.clone());
+        }
+        let mut bool_query = json!({"filter": filters});
         if let Some(text) = &looking.search {
-            // a search names the fields it searches as `title^3` and the like,
-            // and where it names none it searches the attributes of the types
-            // it asked about
             let fields: Vec<String> = match looking.search_fields.is_empty() {
+                true => vec!["*".to_string()],
                 false => looking
                     .search_fields
                     .iter()
@@ -369,28 +618,49 @@ impl Saved<'_> {
                         looking.types.iter().map(move |kind| format!("{kind}.{name}{boost}"))
                     })
                     .collect(),
-                true => vec!["*".to_string()],
             };
-            must.push(json!({"simple_query_string": {
-                "query": text,
-                "fields": fields,
-                "default_operator": looking.default_search_operator,
-            }}));
-        }
-        if let Some(reference) = &looking.has_reference {
-            must.push(json!({"nested": {
-                "path": "references",
-                "query": {"bool": {"must": [
-                    {"term": {"references.type": reference.get("type")}},
-                    {"term": {"references.id": reference.get("id")}},
-                ]}},
-            }}));
+            let mut simple = json!({"simple_query_string": {"query": text, "fields": fields}});
+            if looking.search_fields.is_empty() {
+                simple["simple_query_string"]["lenient"] = json!(true);
+            }
+            simple["simple_query_string"]["default_operator"] =
+                json!(looking.default_search_operator);
+            if text.trim().ends_with('*') {
+                // a prefix search as well, on the title, so that a hyphen in
+                // what was typed is a hyphen and not a NOT
+                let prefix = text.trim().trim_end_matches('*');
+                let mut should = vec![simple];
+                let title_fields: Vec<String> = match looking.search_fields.is_empty() {
+                    true => looking.types.iter().map(|k| format!("{k}.title")).collect(),
+                    false => looking
+                        .search_fields
+                        .iter()
+                        .filter(|f| *f != "*")
+                        .flat_map(|f| {
+                            looking
+                                .types
+                                .iter()
+                                .map(move |k| format!("{k}.{}", f.split('^').next().unwrap_or(f)))
+                        })
+                        .collect(),
+                };
+                for field in title_fields {
+                    should.push(json!({"match_phrase_prefix": {field: {"query": prefix}}}));
+                }
+                bool_query["should"] = json!(should);
+                bool_query["minimum_should_match"] = json!(1);
+            } else {
+                bool_query["must"] = json!([simple]);
+            }
         }
         let mut body = json!({
-            "query": {"bool": {"must": must}},
+            "query": {"bool": bool_query},
             "size": looking.per_page,
             "from": looking.page.saturating_sub(1) * looking.per_page,
             "track_total_hits": true,
+            // the version the front end sends back with a change is where the
+            // document stood, and a hit does not carry that unless asked
+            "seq_no_primary_term": true,
         });
         if let Some(field) = &looking.sort_field {
             // a sort is on a field of the type asked for, because the same
@@ -457,6 +727,12 @@ pub struct Looking {
     pub sort_order: Option<String>,
     pub has_reference: Option<Value>,
     pub default_search_operator: String,
+    /// which namespaces to look in: none for the default one, `*` for all
+    pub namespaces: Vec<String>,
+    /// a filter as the caller wrote it, in the query language the front end
+    /// speaks, and the search it was read into
+    pub filter: Option<String>,
+    pub filter_query: Option<Value>,
 }
 
 #[cfg(test)]
@@ -474,6 +750,8 @@ mod tests {
     fn an_id_that_would_be_a_path_of_its_own_is_not_one() {
         assert_eq!(document_id("index-pattern", "a/b"), "index-pattern:a%2Fb");
         assert!(!document_id("x", "a?b#c").contains(['?', '#']));
+        // a name with a space in it is a name somebody may give a dashboard
+        assert_eq!(document_id("dashboard", "does not exist"), "dashboard:does%20not%20exist");
     }
 
     #[test]
