@@ -139,6 +139,9 @@ impl IdxState {
             let fields = self.mapping.vector_fields.len();
             if !held.is_empty() && held.len() >= documents.min(documents * fields) {
                 *self.vectors.write() = held;
+                // the graph is not written down -- building it costs less
+                // than keeping it right on disk would -- so it is built here
+                self.vectors.write().maintain(&self.mapping.vector_fields);
                 return;
             }
         }
@@ -165,18 +168,23 @@ impl IdxState {
             }
         }
         *self.vectors.write() = held;
-        if let Some(path) = self.vector_path() {
-            self.vectors.write().save(&path);
-        }
+        self.save_vectors();
     }
 
-    /// Write the vectors down, as they stand.
+    /// Write the vectors down, and build the graphs that are wanted over
+    /// them.
+    ///
+    /// Both happen where an index is made durable rather than during a
+    /// search: a search that had to build a graph would hold every other one
+    /// out while it did.
     pub fn save_vectors(&self) {
         if self.mapping.vector_fields.is_empty() {
             return;
         }
+        let mut held = self.vectors.write();
+        held.maintain(&self.mapping.vector_fields);
         if let Some(path) = self.vector_path() {
-            self.vectors.write().save(&path);
+            held.save(&path);
         }
     }
 }

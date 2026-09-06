@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+pub mod hnsw;
 pub mod space;
 pub mod store;
 
@@ -27,6 +28,8 @@ pub struct Field {
     pub path: String,
     pub dimension: usize,
     pub space: Space,
+    /// how hard the graph over this field works, if it has one
+    pub parameters: hnsw::Parameters,
 }
 
 /// Every `knn_vector` field a mapping declares, by path.
@@ -61,6 +64,21 @@ fn walk(properties: Option<&Value>, prefix: &str, out: &mut HashMap<String, Fiel
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("l2"),
                         ),
+                        // `method.parameters` is where OpenSearch puts these,
+                        // and a field that says nothing gets the defaults
+                        parameters: hnsw::Parameters {
+                            m: number(spec, "m", hnsw::Parameters::default().m),
+                            ef_construction: number(
+                                spec,
+                                "ef_construction",
+                                hnsw::Parameters::default().ef_construction,
+                            ),
+                            ef_search: number(
+                                spec,
+                                "ef_search",
+                                hnsw::Parameters::default().ef_search,
+                            ),
+                        },
                     },
                 );
             }
@@ -68,6 +86,17 @@ fn walk(properties: Option<&Value>, prefix: &str, out: &mut HashMap<String, Fiel
             _ => walk(spec.get("properties"), &path, out),
         }
     }
+}
+
+/// One of the numbers a `method` may carry, wherever it was written.
+fn number(spec: &Value, name: &str, fallback: usize) -> usize {
+    spec.pointer(&format!("/method/parameters/{name}"))
+        .or_else(|| spec.pointer(&format!("/method/{name}")))
+        .or_else(|| spec.get(name))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(fallback)
 }
 
 /// Read a vector out of a document, wherever in it the field sits.

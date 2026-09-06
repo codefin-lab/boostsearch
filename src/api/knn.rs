@@ -11,6 +11,7 @@ pub async fn stats(
     let me = crate::cluster::identity();
     let mut vectors = 0usize;
     let mut indices = 0usize;
+    let mut graphed = 0usize;
     for name in store.names() {
         let Some(st) = store.get(&name) else { continue };
         let g = st.read();
@@ -18,7 +19,11 @@ pub async fn stats(
             continue;
         }
         indices += 1;
-        vectors += g.vectors.read().len();
+        let held = g.vectors.read();
+        vectors += held.len();
+        // a field with a graph over it is searched approximately; one without
+        // is compared against everything, which is exact
+        graphed += g.mapping.vector_fields.keys().filter(|p| held.graphed(p)).count();
     }
     respond(
         &p,
@@ -53,6 +58,7 @@ pub async fn stats(
                     "indexing_from_model_degraded": false,
                     "vector_count": vectors,
                     "vector_indices": indices,
+                    "vector_fields_with_graph": graphed,
                 }
             }
         }),

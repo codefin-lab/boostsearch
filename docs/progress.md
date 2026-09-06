@@ -2817,3 +2817,64 @@ next piece of this phase, and until it exists the honest description is
 
 Gates: unit 78/78, phase 1 398/398, core corpus 1,100/1,100, module corpus
 850/895 unchanged.
+
+### 11.1 — The graph
+
+An exact search compares against every vector: always right, and linear. This
+is the other way. Every vector is a node in a graph whose edges join it to a
+few of its neighbours, in layers -- the bottom layer holds everything, each
+layer above holds a fraction of the one below -- and a search crosses the
+collection in a few steps up top, then refines downwards. Written here, as the
+request signing was, because deletion, persistence and pre-filtered search all
+had to work our way.
+
+**What it buys**, measured at sixty-four dimensions, k=10, against the exact
+answer computed separately:
+
+| vectors | graph | exact | recall |
+|---:|---:|---:|---:|
+| 1,000 | 0.61ms | 1.07ms | 1.000 |
+| 10,000 | 0.86ms | 8.82ms | 0.993 |
+| 50,000 | 0.94ms | 40.32ms | 0.937 |
+
+Forty-three times faster at fifty thousand, and the graph's own time barely
+moves with the size -- which is the point of it.
+
+**The defaults are measured, not copied.** At fifty thousand vectors:
+
+    ef_construction  ef_search   build    query   recall
+                100        100   18.6s   0.89ms    0.805
+                200        200   30.8s   0.84ms    0.950
+                512        256   54.3s   1.08ms    0.970
+
+A recall of 0.8 is not a default anybody should be given: one search in five
+missing a document it should have found is the kind of wrongness nobody
+notices until it matters. 200 buys 0.95 for the same query time and half again
+the build, and a mapping that wants OpenSearch's own 512 can ask for it
+through `method.parameters` and pay for it.
+
+**Where the graph is not used, and why.** Below a thousand vectors, comparing
+everything is exact *and* faster -- walking a graph costs bookkeeping that
+only pays back once there is enough to skip. And when a filter keeps less than
+a tenth of a field, the graph would spend its walk stepping past documents it
+is not allowed to return, so everything the filter keeps is compared instead.
+Both are the same judgement OpenSearch makes.
+
+**Deletes are tombstones.** A removed node stays in the graph as part of the
+road and is never an answer; when more than half of a graph is tombstones it
+is thrown away and built again, which costs less than keeping it correct in
+place would. The graph itself is never written to disk -- the vectors are, and
+building the graph from them is cheaper than keeping a serialised graph honest
+across a crash.
+
+**A false alarm worth recording.** The first measurement said 48ms a query and
+sent me looking for the copy per distance computation. There was one, and
+removing it changed nothing, because the 48ms was the *benchmark* computing
+its own ground truth inside the timing loop. The real numbers were 0.96ms
+against 0.57ms. The lesson is the ordinary one -- measure the thing you think
+you are measuring -- and the copy is gone anyway, since a search compares
+against thousands of vectors and a copy apiece is what would make a graph
+slower than reading everything.
+
+Gates: unit 83/83, phase 1 398/398, core corpus 1,100/1,100, module corpus
+850/895 unchanged, and the eight vector checks still pass.
