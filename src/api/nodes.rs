@@ -429,6 +429,7 @@ fn plugins() -> Value {
         "analysis-stempel",
         "analysis-ukrainian",
         "ingest-attachment",
+        "opensearch-index-management",
         "opensearch-security",
         "repository-azure",
         "repository-gcs",

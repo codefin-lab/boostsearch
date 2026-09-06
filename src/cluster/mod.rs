@@ -94,6 +94,19 @@ pub fn has_manager() -> bool {
     runtime().map(|rt| rt.has_manager()).unwrap_or(true)
 }
 
+/// Whether this node is the one the cluster looks to.
+///
+/// Work that must happen once for the whole cluster -- moving indices along
+/// under a policy, say -- asks this first. A node running on its own is its
+/// own manager and says yes.
+pub fn is_cluster_manager() -> bool {
+    let state = current_state();
+    match (&state.cluster_manager, runtime()) {
+        (Some(manager), Some(_)) => *manager == identity().id,
+        _ => true,
+    }
+}
+
 /// The last committed cluster state, or a state of this node alone while
 /// the coordinator has not started (tools, tests).
 thread_local! {

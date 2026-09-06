@@ -13,6 +13,7 @@ mod cluster;
 mod hdr;
 mod http_compat;
 mod ingest;
+mod ism;
 mod painless;
 mod query;
 mod search;
@@ -405,6 +406,20 @@ fn app(store: Store) -> Router {
         // stops at 2 MB by default, which is smaller than any bulk helper's
         // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
         // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
+        .route(
+            "/_plugins/_ism/policies",
+            get(api::ism::get_policy),
+        )
+        .route(
+            "/_plugins/_ism/policies/{id}",
+            put(api::ism::put_policy).get(api::ism::get_policy).delete(api::ism::delete_policy),
+        )
+        .route("/_plugins/_ism/add/{index}", post(api::ism::add_policy))
+        .route("/_plugins/_ism/remove/{index}", post(api::ism::remove_policy))
+        .route("/_plugins/_ism/change_policy/{index}", post(api::ism::change_policy))
+        .route("/_plugins/_ism/retry/{index}", post(api::ism::retry_policy))
+        .route("/_plugins/_ism/explain", get(api::ism::explain))
+        .route("/_plugins/_ism/explain/{index}", get(api::ism::explain))
         .route("/_plugins/_security/authinfo", get(security::api::authinfo))
         .route("/_plugins/_security/health", get(security::api::health))
         .route("/_plugins/_security/api/permissionsinfo", get(security::api::permissions_info))
@@ -477,6 +492,24 @@ async fn main() -> anyhow::Result<()> {
     // first request is answered
     api::recover(&store);
     security::audit::attach_store(&store);
+    // Index management: every so often, each index under a policy is looked
+    // at and moved along. It runs on the cluster manager only -- two nodes
+    // both deleting the same index on the same tick is not twice as helpful.
+    {
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                let wait = ism::job_interval_ms(&store);
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                if cluster::is_cluster_manager() {
+                    let store = store.clone();
+                    // a tick reads and writes indices, which is work for a
+                    // blocking thread rather than for the runtime
+                    let _ = tokio::task::spawn_blocking(move || ism::engine::tick(&store)).await;
+                }
+            }
+        });
+    }
     // the transport: other nodes reach this one here
     let transport = cluster::tcp::TcpTransport::new(&identity);
     transport.register();

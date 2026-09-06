@@ -2677,3 +2677,76 @@ them, and it tests the part that can be got wrong.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 850/895 unchanged.
+
+## Phase 10 — Index management
+
+A policy is a set of states. An index sits in one, does what that state says,
+and moves on when a transition's condition is met. It is what turns "delete
+the logs after thirty days" from something a person has to remember into
+something the cluster does.
+
+**Where it lives.** Policies and what each index is doing under one are
+documents in `.opendistro-ism-config`, which is where OpenSearch keeps them.
+That is not a detail: a policy that manages an index over a month has to
+outlive a restart, and a cluster that has been running that long has to be
+able to say what it has been doing. Everything else this engine keeps at
+cluster level -- pipelines, templates, scripts -- lives in memory; this could
+not.
+
+**What a state can do.** `rollover`, `delete`, `read_only`, `read_write`,
+`replica_count`, `index_priority`, `force_merge`, `close`, `open`, `snapshot`,
+`alias`. Each is the same thing a person would do through the ordinary API,
+done for them on a schedule -- a rollover under a policy goes through the same
+code the endpoint does, so an index rolled by a schedule is rolled the way one
+rolled by hand is. That meant pulling the middle of `_rollover` out into a
+function both call, rather than writing it twice and having the two drift.
+`allocation`, `notification` and `shrink` are about where shards sit, telling
+somebody, and moving into fewer shards; on one node with one shard each of
+them is already true, and each says so rather than failing.
+
+**What a transition can wait for.** `min_index_age`, `min_state_age`,
+`min_doc_count`, `min_size`, `min_rollover_age`. A transition with no
+conditions at all is taken as soon as the state's actions are done, which is
+how a policy says "then this".
+
+**A tick is deliberately small.** One action per tick, remembered by its
+position in the state -- two actions of the same kind in one state are two
+different steps -- and only when they are all done are the transitions looked
+at. An action that fails is retried on the next tick rather than skipped, and
+an index whose three retries run out is left where it is with the reason
+written down, which is what `explain` shows and what `retry` clears. The tick
+runs on the cluster manager alone: two nodes both deleting the same index on
+the same tick is not twice as helpful.
+
+**A policy can claim indices that do not exist yet.** `ism_template` names
+index patterns, and an index made afterwards that matches one is managed
+without anybody attaching it; where two match, the one that says it is more
+important wins. Writing that is where the one real bug of this phase was: the
+scan gave up the moment it met a policy with no template, rather than passing
+over it, so a template only ever worked if it happened to be the first policy
+in the index.
+
+The endpoints: `PUT`, `GET` and `DELETE _plugins/_ism/policies/{id}`,
+`GET _plugins/_ism/policies`, and `add`, `remove`, `change_policy`, `retry`
+and `explain` over an index or a pattern of them.
+
+OpenSearch keeps index management in a plugin with its own repository and its
+own suite, which is not in the corpus this repository runs.
+`tools/ism_check.py` stands in for it, and watches the thing actually happen
+rather than asking whether the endpoints answer:
+
+    ok     policies can be written, read and deleted
+    ok     an index moves through its states
+    ok     a policy rolls an index over
+    ok     a policy claims the indices it names
+    ok     a policy can be changed and removed
+    ok     a failed action is retried
+
+The second of those writes a policy that says "read-only once there are three
+documents, gone a second later", puts an index under it, writes four
+documents, and waits: the index turns read-only and then deletes itself. A
+restart in the middle changes nothing -- checked separately, the policy and
+the attachment are both still there afterwards.
+
+Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
+850/895 unchanged.

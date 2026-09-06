@@ -36,6 +36,7 @@ pub use rank_eval::*;
 mod indices;
 pub use indices::*;
 mod ingest;
+pub mod ism;
 pub use ingest::*;
 mod mapping;
 pub use mapping::*;
