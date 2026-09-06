@@ -78,3 +78,21 @@ badly on purpose.
 | `BOOSTSEARCH_CLUSTER_DEBUG`, `BOOSTSEARCH_AUTH_DEBUG` | say out loud what the coordinator and the authenticator are deciding. |
 | `BOOSTSEARCH_SERIAL_BULK` | run a bulk one line at a time, so a crash names the line. |
 | `BOOSTSEARCH_NO_BLOCK_RANGE`, `BOOSTSEARCH_NO_BLOCK_SORT`, `BOOSTSEARCH_NO_KIND_NARROW` | turn off three optimisations, one at a time, to find out whether one of them is what made an answer wrong. |
+
+## The console
+
+The console is a second program — `boostsearch-console` — because the one it
+replaces is one too: an engine and the console in front of it are deployed
+apart as often as together, and a console that has to run beside its engine is
+a worse console.
+
+| | |
+|---|---|
+| `BOOSTSEARCH_CONSOLE_ADDR` | where to listen. Default `127.0.0.1:5601`, which is where OpenSearch Dashboards listens. |
+| `BOOSTSEARCH_CONSOLE_PATH` | an OpenSearch Dashboards distribution: the built front end this serves. Pointed at rather than carried, the way the geoip databases are — it is the OpenSearch project's to publish and it is a gigabyte. In their container it is `/usr/share/opensearch-dashboards`. |
+| `BOOSTSEARCH_CONSOLE_BASE_PATH` | the path everything is served under, for a console behind a proxy that gives it one. Empty by default. |
+| `BOOSTSEARCH_ENGINE` | the engine behind it. |
+
+The distribution's version decides which pinned contract is read from
+`console/`. A distribution with no pin beside it is refused at startup and says
+so, rather than serving a page that names files which are not there.

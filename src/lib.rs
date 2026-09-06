@@ -8,6 +8,7 @@ pub mod analysis;
 pub mod api;
 pub mod blockstats;
 pub mod cluster;
+pub mod console;
 pub mod hdr;
 pub mod http_compat;
 pub mod ingest;

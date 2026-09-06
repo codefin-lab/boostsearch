@@ -3155,3 +3155,66 @@ message when the repository is not there.
 
 Nothing of Phase 13 is written yet. This is the gate it will be measured by,
 and it is measured itself.
+
+## 13.1 — The shell
+
+The console's front end is a React application the OpenSearch project
+publishes. This serves it, and answers the three things it needs before it can
+run at all — none of which says so when it is wrong. The application simply
+fails in the browser, with a message about the server.
+
+**The contract is an HTML attribute.** `<osd-injected-metadata data="…">` in
+the page carries the version, the base path, which plugins exist, what every
+one of 104 settings defaults to, and the branding. `<osd-csp data="…">` carries
+whether the policy is strict. `/bootstrap.js` carries the public path of every
+bundle and the order they load in. Nothing about any of it is written down,
+and the order is not derivable: it comes from a dependency sort the manifests
+do not give back, and a plugin's browser configuration lives in its compiled
+server code.
+
+So it is pinned rather than guessed. `tools/osd_pin.py` reads it out of a
+running Dashboards and writes `console/osd-3.1.0.json`; moving to a newer one
+is running that again and reading the diff. A contract nobody wrote down should
+at least be one somebody has to change on purpose, and the plan said so before
+any of this was written.
+
+**What is derived rather than pinned** is where the files are. A URL names a
+plugin as `usageCollection` and the directory is `usage_collection` — except
+for the fourteen plugins added to a distribution, which are named the first
+way. Half the bundles 404'd on the first run for exactly that. Guessing at the
+conversion works until a plugin is named in a way the guess does not cover, so
+the manifests are read instead: each one says which id it is, and it is
+standing in its own directory while it says so.
+
+**`tools/console_diff.py` is the check that matters.** It puts our shell beside
+the reference's and compares every leaf of the metadata, the public paths, the
+bundle list and its order, and then fetches every file either page names. The
+only fields it forgives are the base path, which is this server's own, and the
+settings a user has changed, which are live state and 13.2's.
+
+It reports: *the shell our server serves is the shell the reference serves.*
+67 bundles, 63 plugins, 104 setting defaults, no difference.
+
+**And the application boots on it.** Driven in a browser: all 68 bundles, both
+fonts, the stylesheet and the translations answered 200, the loading screen
+drew, and the first request it made that we do not answer was
+`POST /api/core/capabilities` — which is 13.2, exactly where this task ends.
+The one error in the console is the inline script the page carries on purpose:
+a browser that runs it says the policy is not enforced, and that is how the
+front end finds out which kind it is running in.
+
+A base path reaches everything: the page's own URLs, the boot script's public
+paths, the translations URL and the branding folder, and the redirect at the
+root that sends a reader under it. It changes those four fields of the metadata
+and nothing else, which is checked rather than asserted.
+
+**What it costs so far**, which is the shell alone and not the finished phase:
+
+| | this | the Node server |
+|---|---:|---:|
+| ready to serve | **0.10s** | about thirty seconds |
+| resident, after serving every bundle | **50.8 MiB** | 368 MiB |
+
+Gates: unit 133/133, and `tools/dashboards_check.py`'s shell section passes
+against our server. The other five sections do not, and should not: they are
+13.2 to 13.4 and are not written.
