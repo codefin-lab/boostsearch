@@ -229,6 +229,8 @@ impl<'a> Saved<'a> {
                 });
                 let migrated = super::migrations::migrate(doc).map_err(|m| Failed {
                     objects: None,
+                    error: None,
+                    attributes: None,
                     status: 422,
                     message: m,
                 })?;
@@ -398,6 +400,8 @@ fn written(found: &Value, source: &Value, kind: &str, id: &str) -> Result<Value,
             .unwrap_or("the object could not be written");
         return Err(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: if what == "version_conflict_engine_exception" { 409 } else { 400 },
             message: format!("{reason}: {what}: [{what}] Reason: {reason}"),
         });
@@ -434,7 +438,13 @@ fn refused_for_the_index(found: &Value) -> Refusal {
 
 /// An object that is not there, in the words the front end shows.
 pub fn missing(kind: &str, id: &str) -> Failed {
-    Failed { objects: None, status: 404, message: format!("Saved object [{kind}/{id}] not found") }
+    Failed {
+        objects: None,
+        error: None,
+        attributes: None,
+        status: 404,
+        message: format!("Saved object [{kind}/{id}] not found"),
+    }
 }
 
 fn reason(status: u16) -> &'static str {
@@ -505,7 +515,13 @@ impl Saved<'_> {
             {
                 return Ok(empty(looking));
             }
-            return Err(Failed { objects: None, status: 400, message: reason.to_string() });
+            return Err(Failed {
+                objects: None,
+                error: None,
+                attributes: None,
+                status: 400,
+                message: reason.to_string(),
+            });
         }
         let hits: Vec<Value> =
             found.pointer("/hits/hits").and_then(|v| v.as_array()).cloned().unwrap_or_default();

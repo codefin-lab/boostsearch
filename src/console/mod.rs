@@ -14,14 +14,18 @@
 
 pub mod assets;
 pub mod engine;
+pub mod fields;
 pub mod filter;
 pub mod management;
+pub mod metrics;
 pub mod migrate;
 pub mod migrations;
 pub mod pinned;
 pub mod saved;
+pub mod search;
 pub mod settings;
 pub mod shell;
+pub mod urls;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

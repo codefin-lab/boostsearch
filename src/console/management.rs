@@ -166,6 +166,8 @@ pub fn export(
     if !types.is_empty() && !objects.is_empty() {
         return Err(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: "Can't specify both \"types\" and \"objects\" properties when exporting"
                 .into(),
@@ -174,6 +176,8 @@ pub fn export(
     if let Some(bad) = types.iter().find(|t| !management.allowed.contains(t)) {
         return Err(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: format!("Trying to export non-exportable type(s): {bad}"),
         });
@@ -195,6 +199,8 @@ pub fn export(
     if !bad.is_empty() {
         return Err(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: format!(
                 "Trying to export object(s) with non-exportable types: {}",
@@ -240,6 +246,8 @@ pub fn export(
         if total as usize > IMPORT_LIMIT {
             return Err(Failed {
                 objects: None,
+                error: None,
+                attributes: None,
                 status: 400,
                 message: format!("Can't export more than {IMPORT_LIMIT} objects"),
             });
@@ -401,6 +409,8 @@ pub fn import(
     if objects.len() > IMPORT_LIMIT {
         return Err(Failed {
             objects: None,
+            error: None,
+            attributes: None,
             status: 400,
             message: format!("Can't import more than {IMPORT_LIMIT} objects"),
         });

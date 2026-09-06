@@ -231,9 +231,13 @@ fn make_after(
     // us was going to, and which one does not matter
     match made.pointer("/error/type").and_then(|v| v.as_str()) {
         None | Some("resource_already_exists_exception") => Ok(()),
-        Some(other) => {
-            Err(Failed { objects: None, status: 500, message: format!("{index}: {other}") })
-        }
+        Some(other) => Err(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!("{index}: {other}"),
+        }),
     }
 }
 
@@ -272,6 +276,8 @@ fn copy(engine: &Engine, from: &str, to: &str) -> Result<u64, Failed> {
                     }
                     let doc = migrations::migrate(doc).map_err(|e| Failed {
                         objects: None,
+                        error: None,
+                        attributes: None,
                         status: 422,
                         message: e,
                     })?;
@@ -304,6 +310,8 @@ fn copy(engine: &Engine, from: &str, to: &str) -> Result<u64, Failed> {
                 .unwrap_or("no reason given");
             return Err(Failed {
                 objects: None,
+                error: None,
+                attributes: None,
                 status: 500,
                 message: format!("the objects could not be written to {to}: {first}"),
             });

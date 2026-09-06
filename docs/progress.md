@@ -3416,3 +3416,40 @@ Setting: `BOOSTSEARCH_CONSOLE_DEBUG` says what the console did to its index
 and why, and each search it ran. Tools: `tools/osd_pin.py` reads through the
 alias.
 
+### 13.4 — What the pages ask for
+
+The routes a page calls once it is drawn. `src/console/fields.rs`: the
+fields behind an index pattern — `_field_caps` per index and per type
+folded into one entry per field, with the page's type names (`string` for
+`keyword`, `number` for `long`, `conflict` where two indices disagree and
+which indices they are), multi-fields and nested fields marked as such, the
+meta fields the page asked for given an entry whether or not the engine has
+one; and `_fields_for_time_pattern`, where `[logs-]YYYY.MM.DD` is read as a
+moment format, the indices that parse under it put newest first and the
+last `look_back` of them asked about. `src/console/search.rs`: `_msearch`
+with `ignore_unavailable` on every header and the shard timeout on every
+body, the `opensearch` search strategy with its defaults on the query
+string, and the value suggestions of the filter editor — a terms
+aggregation with the typed prefix escaped, through the nested path when the
+index pattern says the field has one — each with `hits.total` made a number
+again. `src/console/urls.rs`: short URLs, the address kept as a `url` object
+under its MD5 and `/goto/{id}` a redirect to it (or the application, where
+state lives in session storage). The Dev Tools proxy: the request carried
+through as typed, `pretty` added, the answer as given. And the last of 13.2:
+`/api/status` says `metrics` now — requests counted as they pass, the
+resident set in place of a heap, the load and the memory asked of the
+operating system.
+
+Against `test/api_integration`: **130 of 166**, where the reference scores
+140. The 18 failures ours alone are all 13.5 — compression, the cookie, the
+sample data, the DQL telemetry, `stats`, `ui_metric`, telemetry opt-in.
+`tools/dashboards_check.py`: six of six. `tools/console_diff.py`: the shell
+our server serves is the shell the reference serves.
+
+What is taken as given rather than read: the shard timeout (thirty seconds,
+the server being replaced's default for `opensearch.shardTimeout`), the
+suggestion route's timeout and `terminate_after` (one second, a hundred
+thousand), and `courier:maxConcurrentShardRequests` at its default of none.
+An operator who set those in the Node server's configuration has nowhere to
+set them here yet.
+

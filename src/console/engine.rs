@@ -23,6 +23,14 @@ pub struct Engine {
     auth: Option<String>,
 }
 
+/// An answer as the engine gave it.
+pub struct Answer {
+    pub status: u16,
+    pub content_type: String,
+    pub warning: Option<String>,
+    pub body: Vec<u8>,
+}
+
 /// What went wrong, in a form a handler can answer with.
 #[derive(Debug, Clone)]
 pub struct Failed {
@@ -30,16 +38,39 @@ pub struct Failed {
     pub message: String,
     /// the objects a refusal is about, where it is about particular ones
     pub objects: Option<Vec<Value>>,
+    /// the engine's own error, where the front end wants it beside the
+    /// message
+    pub error: Option<Box<Value>>,
+    /// the attributes whole, where a route has its own shape for them
+    pub attributes: Option<Box<Value>>,
 }
 
 impl Failed {
     pub fn of(status: u16, message: impl Into<String>) -> Failed {
-        Failed { status, message: message.into(), objects: None }
+        Failed { status, message: message.into(), objects: None, error: None, attributes: None }
+    }
+
+    /// A refusal that carries the engine's own error with it.
+    pub fn with_error(mut self, error: Value) -> Failed {
+        self.error = Some(Box::new(error));
+        self
+    }
+
+    /// A refusal whose attributes are these, whole.
+    pub fn with_attributes(mut self, attributes: Value) -> Failed {
+        self.attributes = Some(Box::new(attributes));
+        self
     }
 
     /// A refusal that names the objects it is about.
     pub fn with_objects(message: impl Into<String>, objects: Vec<Value>) -> Failed {
-        Failed { status: 400, message: message.into(), objects: Some(objects) }
+        Failed {
+            status: 400,
+            message: message.into(),
+            objects: Some(objects),
+            error: None,
+            attributes: None,
+        }
     }
 }
 
@@ -105,6 +136,65 @@ impl Engine {
             200..=299 | 404 | 409 => Ok(found),
             other => Err(Failed::of(other, refusal(&found, method, path))),
         }
+    }
+
+    /// A request carried through as it is, and the answer as it came:
+    /// status, content type and bytes. For the Dev Tools proxy, whose
+    /// caller wants the engine's own words, and for the searches whose body
+    /// is not one JSON document.
+    pub fn raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+    ) -> Result<Answer, Failed> {
+        let url = format!("{}{path}", self.url);
+        let with = |request: ureq::RequestBuilder<ureq::typestate::WithBody>| {
+            let request = request.header("content-type", content_type);
+            match &self.auth {
+                Some(auth) => request.header("authorization", auth),
+                None => request,
+            }
+        };
+        let without = |request: ureq::RequestBuilder<ureq::typestate::WithoutBody>| match &self.auth
+        {
+            Some(auth) => request.header("authorization", auth),
+            None => request,
+        };
+        // a GET with a body is how a search is written in the Dev Tools, and
+        // the engine takes it; the client has to be told to send one
+        let sent = match (method, body.is_empty()) {
+            ("GET", true) => without(self.agent.get(&url)).call(),
+            ("GET", false) => with(self.agent.get(&url).force_send_body()).send(body),
+            ("HEAD", _) => without(self.agent.head(&url)).call(),
+            ("DELETE", true) => without(self.agent.delete(&url)).call(),
+            ("DELETE", false) => with(self.agent.delete(&url).force_send_body()).send(body),
+            ("PUT", _) => with(self.agent.put(&url)).send(body),
+            ("POST", _) => with(self.agent.post(&url)).send(body),
+            (other, _) => return Err(Failed::of(400, format!("no such method [{other}]"))),
+        };
+        let mut answer = sent.map_err(|e| Failed::of(502, format!("{e}")))?;
+        let status = answer.status().as_u16();
+        let content_type = answer
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let warning =
+            answer.headers().get("warning").and_then(|v| v.to_str().ok()).map(String::from);
+        let body =
+            answer.body_mut().with_config().limit(512 * 1024 * 1024).read_to_vec().map_err(
+                |e| Failed::of(502, format!("the engine's answer could not be read: {e}")),
+            )?;
+        Ok(Answer { status, content_type, warning, body })
+    }
+
+    /// Where the engine is, without the credentials: what the Dev Tools
+    /// page shows as the address it is talking to.
+    pub fn host(&self) -> &str {
+        &self.url
     }
 
     /// One saved object, or nothing where there is none.
