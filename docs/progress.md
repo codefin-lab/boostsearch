@@ -3079,3 +3079,79 @@ money is somebody's.
 
 It has not been run. That is the one thing here that is waiting on a decision
 rather than on work.
+
+## 13.0 — The gate before the work
+
+Phase 13 replaces the Node server the OpenSearch Dashboards front end talks
+to. Before writing a line of it: what says whether the replacement answers the
+same way, and what does that thing score against the server being replaced?
+
+**The suite is theirs.** `test/api_integration` in the OpenSearch Dashboards
+repository is 166 cases over saved objects, index patterns, settings, status,
+stats, telemetry and the rest, and `osd_test_config.ts` reads
+`TEST_OPENSEARCH_DASHBOARDS_URL` — so it takes a server that is already
+running, which is what makes it possible to point at ours. Same arrangement as
+`yaml_runner.py` and OpenSearch's YAML tests: the spec is theirs, the
+implementation under test is ours.
+
+**Run against the real Node server it scores 140 of 166**, with 2 pending. So
+166 was never the target. Finding that out after writing the server would have
+meant chasing twenty-six failures that were never going to be ours.
+
+Getting there took two corrections, both worth writing down because both look
+like our problem and are not:
+
+  - **76 of 166 at first, and the reason was one header.** The suite's
+    supertest sends no `osd-xsrf`, because the config it normally runs under
+    starts the server with `--server.xsrf.disableProtection=true`. Every POST
+    without it is a 400. That single setting is the difference between 76 and
+    140 — and a replacement measured under the wrong one would have looked
+    catastrophically broken while being fine.
+  - **`--server.maxPayloadBytes=1759977`** is not a default either: one case
+    sends a body just under it expecting 200 and another just over expecting
+    413, so a server with any other limit fails both ways.
+
+`tools/dashboards_reference.sh` starts the pair with those settings and says
+in its own comments which ones matter and why.
+
+**The twenty-four that fail every time**, over three runs: six in saved-object
+management (the `relationships` route asks for a nested query against a
+`references` field the released server's own `.kibana` mapping does not
+declare as nested), five in `stats`, seven across telemetry, two in workspace
+CRUD, and single cases in compression, UI metric, index patterns and sample
+data. Two more come and go — both sample-data-with-dates, both timing. The
+branch the suite lives on has drifted from the release it is being run
+against, and a couple of the cases were broken by OpenSearch 3.x removing
+types rather than by anything Dashboards did.
+
+`tools/dashboards_baseline.json` records all of it, and
+`tools/dashboards_gate.py` reports our failures **relative to that** — how our
+server compares with the real one, not with a perfect score nothing reaches.
+It also names any case we pass that the reference fails, because that is
+either better or a case not measuring what it thinks.
+
+**And the suite has a large hole.** Every `/api` route the server registers,
+against every route the suite calls: it never touches the shell the browser
+boots from, `uiSettings` in either direction, `/api/core/capabilities`, the
+Dev Tools proxy, or half the saved-object management routes. A replacement
+could pass all 166 cases and not serve a single page.
+
+So `tools/dashboards_check.py` is the other half — six areas, every
+expectation measured against Dashboards 3.1.0 rather than read out of a
+document, which matters most for the metadata the front end boots from: it is
+a contract between two halves of one program that nobody wrote down. It covers
+the served page and its content-security-policy, the boot script, the
+translations, the root's redirect, reading and writing and clearing a setting,
+the capabilities object, status, `_allowed_types`, `relationships`, the
+management fetch, the console's engine config and its proxy, and the fields
+behind an index pattern. All six pass against the reference; the two that
+depend on `relationships` are marked as ones the reference cannot answer
+either, with the reason, rather than deleted.
+
+What this cost: the Dashboards repository is 1.8GB cloned and `yarn osd
+bootstrap` takes six minutes on Node 20.20.2, which the repo pins and the
+machine did not have by default. Both are in `tools/dashboards_gate.py`'s
+message when the repository is not there.
+
+Nothing of Phase 13 is written yet. This is the gate it will be measured by,
+and it is measured itself.
