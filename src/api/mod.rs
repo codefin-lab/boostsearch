@@ -38,6 +38,7 @@ pub use indices::*;
 mod ingest;
 pub mod ism;
 pub mod knn;
+pub mod sql;
 pub use ingest::*;
 mod mapping;
 pub use mapping::*;

@@ -1,14 +1,20 @@
 # Memory — orion-test
 
-> Generated: 2026-09-05 14:50:54  
-> Total memories: **86**  
-> Breakdown: instruction: 3, fact: 2, decision: 17, goal: 2, commitment: 1, preference: 10, context: 11, event: 8, learning: 21, artifact: 11
+> Generated: 2026-09-06 14:47:26  
+> Total memories: **96**  
+> Breakdown: instruction: 4, fact: 3, decision: 20, goal: 2, commitment: 1, preference: 10, context: 12, event: 10, learning: 23, artifact: 11
 
 ---
 
 ## Instructions
 
 *Standing rules, constraints, and guidelines to always follow.*
+
+### User instruction: adjust Slay UI layouts to match ...
+
+> User instruction: adjust Slay UI layouts to match what was explored on Plane Cloud for every feature Slay already has ('ปรับ UI Layout ต่างๆให้เหมือนกับที่ Explore มาทุก Feature ที่เห็น'). Features that do not exist yet go to roadmap, not layout work.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-05T20:52:52*
 
 ### User rule: always use the latest stable version of...
 
@@ -40,6 +46,12 @@
 
 *Confidence: 0.9 | Status: active | Created: 2026-09-04T09:53:07*
 
+### Layout comparison result 2026-09-06: Commercial 3....
+
+> Layout comparison result 2026-09-06: Commercial 3.1.4 vs CE 1.4.2 differ only in work item detail; Plane Cloud (Business trial) additionally has the app rail, activity tabs, worklogs, and Cloud-only features (Releases, Milestones + project Overview, Customers, Dashboards, Updates, Wiki/AI apps). Docs: docs/research/ui/COMMERCIAL-VS-CE.md, docs/research/plane-cloud/2026-09-06/ (explored by another agent). Cloud-only features recorded as roadmap item 5.7.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T20:52:52*
+
 ### Plane has an official desktop app (Electron 41, v2...
 
 > Plane has an official desktop app (Electron 41, v2.0.0 on macOS/Linux, Windows lags on v1.6.1) downloadable from plane.so/download; it is closed-source (not in the makeplane/plane repo) and connects to self-hosted instances. Mobile app source is at github.com/makeplane/plane-mobile. Slate desktop app would need to be built separately (Electron/Tauri wrapper). Noted 2026-09-04.
@@ -64,6 +76,12 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:41:58*
 
+### Slay app shell: enabled CE's hidden app rail (AppR...
+
+> Slay app shell: enabled CE's hidden app rail (AppRailVisibilityProvider isEnabled) to mirror Plane Cloud; dock item and sidebar titled 'Work'; neutral ProjectsOutline icon instead of Plane brand glyph. Wiki/AI rail items to be added only when those apps exist. Commit ed77a8ef.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T20:52:51*
+
 ### Slay logo mark decision (2026-09-05): Mark chose t...
 
 > Slay logo mark decision (2026-09-05): Mark chose the 'gap' flat mark (top panel separated from the lower ribbon by a 28px mask stroke). logo-mark-black/white.svg+png are now this variant; knockout and twotone removed from gen_icon.py.
@@ -76,23 +94,17 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-02T18:55:00*
 
+### Slay work item detail now uses Plane Commercial/Cl...
+
+> Slay work item detail now uses Plane Commercial/Cloud v3 layout built in Slay (apps/web/slay/components/work-item/detail-v3): full page = main column + right grouped Properties sidebar (Details / Project structure / Delivery) with created/updated footer; peek = single column with inline Properties. Hooked into issue-detail/root.tsx and peek-overview/view.tsx. Commits 5b0da903, 52bff2d3. User decision: build in Slay rather than wait for upstream ('ทำข้อ 2 เลย').
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T20:52:51*
+
 ### Slate roadmap decided 2026-09-04: Phase 1 = Compan...
 
 > Slate roadmap decided 2026-09-04: Phase 1 = Company/Project Management, combining Jira + Notion + ClickUp features on top of the Plane fork. Phase 2 = Communication layer (Slack/Teams-like chat). Chat is deferred; do not design Phase 1 around it.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T09:00:38*
-
-### mill-tower architecture implication: the visual wo...
-
-> mill-tower architecture implication: the visual workflow builder is the primary authoring surface, so DAGs must be generated from a mill-tower workflow model (stored in mill-tower DB) rather than hand-written in dags/. Legacy scheduler jobs (Task Scheduler / SQL Agent / crontab) enter the system through importers that map to the same workflow model.
-
-*Confidence: 0.9 | Status: active | Created: 2026-09-02T17:35:40*
-
-### Decision 2026-09-05: Mark chose Tauri (v2) over El...
-
-> Decision 2026-09-05: Mark chose Tauri (v2) over Electron for the Slay desktop shell, goals: small binary, fast start, low RAM; wants Slay's selling points over Plane defined and continued optimisation. Electron shell in apps/desktop stays as reference until the Tauri shell reaches tab parity (multiwebview needs Tauri's 'unstable' feature).
-
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:14:40*
 
 ### Codefin cover artwork is now REDRAWN, not the Goog...
 
@@ -100,17 +112,29 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:17:25*
 
+### Decision 2026-09-05: Mark chose Tauri (v2) over El...
+
+> Decision 2026-09-05: Mark chose Tauri (v2) over Electron for the Slay desktop shell, goals: small binary, fast start, low RAM; wants Slay's selling points over Plane defined and continued optimisation. Electron shell in apps/desktop stays as reference until the Tauri shell reaches tab parity (multiwebview needs Tauri's 'unstable' feature).
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:14:40*
+
+### Slay activity block replaced by SlayActivityTabs (...
+
+> Slay activity block replaced by SlayActivityTabs (underline tabs All / Activity / Comments / Worklogs / Transition + Log work + sort), styled after CE Intake header tabs; used on work item detail and intake detail. Worklogs UI (Log work popover, list, Tracked time row) built over existing Slay time tracking API; is_time_tracking_enabled typed on IProject; Project settings > Features > Time tracking page added (route slay-time-tracking). Commits 52bff2d3, ea57542b.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T20:52:51*
+
 ### Mark chose GCP (project codefin-lab) over AWS for ...
 
 > Mark chose GCP (project codefin-lab) over AWS for provisioning the mill-tower Windows demo host via Terraform, 2026-09-03.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-02T17:58:11*
 
-### Orion AI memory layer will run fully on-prem: Moor...
+### mill-tower architecture implication: the visual wo...
 
-> Orion AI memory layer will run fully on-prem: Moorcheh server in Docker, Ollama on the host with nomic-embed-text for embeddings and qwen2.5:14b for LLM. Cloud backend is not allowed.
+> mill-tower architecture implication: the visual workflow builder is the primary authoring surface, so DAGs must be generated from a mill-tower workflow model (stored in mill-tower DB) rather than hand-written in dags/. Legacy scheduler jobs (Task Scheduler / SQL Agent / crontab) enter the system through importers that map to the same workflow model.
 
-*Confidence: 0.8 | Status: active | Created: 2026-09-02T11:27:25*
+*Confidence: 0.9 | Status: active | Created: 2026-09-02T17:35:40*
 
 ### mill-tower scaffold decided 2026-09-03: monorepo w...
 
@@ -118,17 +142,23 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-02T17:25:13*
 
-### Codefin proposal type scale widened: size h1 20 / ...
+### Orion AI memory layer will run fully on-prem: Moor...
 
-> Codefin proposal type scale widened: size h1 20 / h2 13 / h3 11.5 / body 10 (was 18/16/12). At 18 vs 16 with the same font, weight and colour, h1 and h2 were separated only by h1 being ALL CAPS - the hierarchy did not read. Also added: table.keep_rows_whole (w:cantSplit on every row - a row cut in half by a page break reads as a mistake; check the tallest row first, DAOL max is ~4in so nothing is stranded) and page.keep_intro_with_list + intro_keep_max_chars 90 (a SHORT line introducing a list or table gets keepNext; the length limit matters because keepNext moves the whole paragraph and would drag body prose along).
+> Orion AI memory layer will run fully on-prem: Moorcheh server in Docker, Ollama on the host with nomic-embed-text for embeddings and qwen2.5:14b for LLM. Cloud backend is not allowed.
 
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:20:37*
+*Confidence: 0.8 | Status: active | Created: 2026-09-02T11:27:25*
 
 ### Slay icon v5 FINAL structure (2026-09-05): Mark re...
 
 > Slay icon v5 FINAL structure (2026-09-05): Mark rejected the tuck-under redesign ('worse, original shape was right; keep structure, only fix the black eating in'). gen_icon.py: top panel notched by explicit circular fold arc (FOLD_A 422,434 -> FOLD_B 423,501, r44.7), twist+lower share the same arc, lower panel's upper-left edge (BEND 304,583) ends at FOLD_B so the gap wedge stops at the arc end, reference-strength shadow band (op0.5 w80 blur28, base #6b7886) so the twist reads as passing under the panel. IoU 0.981, err 4.1/255.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:18:43*
+
+### Codefin proposal type scale widened: size h1 20 / ...
+
+> Codefin proposal type scale widened: size h1 20 / h2 13 / h3 11.5 / body 10 (was 18/16/12). At 18 vs 16 with the same font, weight and colour, h1 and h2 were separated only by h1 being ALL CAPS - the hierarchy did not read. Also added: table.keep_rows_whole (w:cantSplit on every row - a row cut in half by a page break reads as a mistake; check the tallest row first, DAOL max is ~4in so nothing is stranded) and page.keep_intro_with_list + intro_keep_max_chars 90 (a SHORT line introducing a list or table gets keepNext; the length limit matters because keepNext moves the whole paragraph and would drag body prose along).
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:20:37*
 
 ### mill-tower web graph uses @dagrejs/dagre (rankdir ...
 
@@ -220,17 +250,17 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-02T19:53:36*
 
-### Slay icon v3.2 (2026-09-05): Mark still saw the tw...
-
-> Slay icon v3.2 (2026-09-05): Mark still saw the twist shadow as 'black eating the ribbon' even after it matched the reference numerically, so the default in gen_icon.py is now deliberately softer than the AI reference: band_op 0.28 (w70 blur26), base twist start #939ca6, shadow band stops at the fold arc (no longer runs along the bottom edge, which had doubled the darkness at the fold), plus a 2.5px light rim around the fold. Reference-exact values kept as a comment (band_op 0.5, tw0 #6b7886). Preference: Mark values a clean soft look over pixel-exact match once shapes are right.
-
-*Confidence: 0.9 | Status: active | Created: 2026-09-04T21:08:02*
-
 ### Slay icon v5.7 (2026-09-05): Mark kept seeing a 'b...
 
 > Slay icon v5.7 (2026-09-05): Mark kept seeing a 'black edge' where the twist meets the top panel; it was the shadow itself (edge value 68 vs panel 185, same as reference). Softened on purpose: band_op 0.3 blur 30 offset (9,12), twist base start #9aa3ac -> edge ~124 gray. Mark prefers soft, low-contrast shading over reference-exact darkness.
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-04T21:37:40*
+
+### Slay icon v3.2 (2026-09-05): Mark still saw the tw...
+
+> Slay icon v3.2 (2026-09-05): Mark still saw the twist shadow as 'black eating the ribbon' even after it matched the reference numerically, so the default in gen_icon.py is now deliberately softer than the AI reference: band_op 0.28 (w70 blur26), base twist start #939ca6, shadow band stops at the fold arc (no longer runs along the bottom edge, which had doubled the darkness at the fold), plus a 2.5px light rim around the fold. Reference-exact values kept as a comment (band_op 0.5, tw0 #6b7886). Preference: Mark values a clean soft look over pixel-exact match once shapes are right.
+
+*Confidence: 0.9 | Status: active | Created: 2026-09-04T21:08:02*
 
 ### User (Mark) expects every DAG, not only workflows,...
 
@@ -281,6 +311,12 @@
 > mill-tower product positioning (told to customer 2026-09-03): Centralized Job Scheduling & Orchestration Platform built on Apache Airflow, developed as a product. Consolidates jobs from Windows Task Scheduler, SQL Agent jobs, and Linux crontab under one management plane. Has a Drag & Drop Workflow builder to create and control jobs without writing Airflow DAGs directly, plus Monitoring, Logs, Retry, Alerting, and Dependency Management.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-02T17:35:39*
+
+### Dev data on Slay project SLY (workspace slay): Cyc...
+
+> Dev data on Slay project SLY (workspace slay): Cycles/Modules/Intake/Time tracking enabled 2026-09-06; cycle 'Sprint 01 · Q4 prep', intake SLY-8 'Export invoices as PDF', 45m worklog on SLY-5. Throwaway dev accounts only, never Mark's real account.
+
+*Confidence: 0.9 | Status: active | Created: 2026-09-05T20:52:53*
 
 ### mill-tower: every generated job DAG has 5 operator...
 
@@ -354,17 +390,17 @@
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-03T01:23:19*
 
+### 2026-09-05: Slay work committed on new git branch ...
+
+> 2026-09-05: Slay work committed on new git branch 'slay' (branched from preview=upstream da1a7ab): bae10b0b brand assets + tabbed Electron shell + docker build fixes; ac84f597 whole-word 'Plane'->'Slay' in i18n (20 locales), UI strings, titles/meta, API templates & strings (X-Plane-* webhook headers kept). Keep 'preview' branch clean for upstream merges. MEMORY.md is in .git/info/exclude.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-05T08:08:23*
+
 ### BoostSearch Phase 6 complete through 6.12 (2026-09...
 
 > BoostSearch Phase 6 complete through 6.12 (2026-09-03): cluster chaos harness tools/cluster_chaos.py (chaos/rolling/soak modes, telling a lost write from a copy that is behind), tools/rolling_upgrade.py (two builds, node by node), and the OpenSearch corpus run against three nodes (core 1412/1427, module 813/895; diffs 92/92, 28/29, 520/522). Ten data-loss bugs fixed, the last being a stale primary poisoning the in-sync set and version-vs-term divergence between copies.
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-03T11:28:50*
-
-### Slay web rebrand DONE (2026-09-05): stack at http:...
-
-> Slay web rebrand DONE (2026-09-05): stack at http://localhost now runs locally built images makeplane/plane-{frontend,admin,space}:slay (APP_RELEASE=slay in deployments/cli/community/.env; backend/live/proxy :slay are retags of stable). Slay logo lockup shows on web sign-in and god-mode; favicon served = Slay. Build fixes committed to working tree: pnpm-workspace.yaml excludes apps/desktop; .dockerignore ignores apps/desktop/; apps/space/Dockerfile.space installs from full workspace with --no-frozen-lockfile because pnpm 11.10 falsely reports a phantom @makeplane/propel@0.2.0 lockfile entry under fetch/frozen (web/admin prune builds are fine). Propel lockup TSX uses a tight viewBox so it fills the 95x20 header box. Rebuild cmd: /tmp/build-fe2.sh pattern = docker build -f apps/<app>/Dockerfile.<app> -t makeplane/plane-<img>:slay . then docker compose -p slay up -d web admin space. Text strings ('Plane') in UI/titles not changed yet.
-
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:39:09*
 
 ### Plane Commercial v3.1.4 running locally since 2026...
 
@@ -372,11 +408,23 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T19:57:08*
 
+### Slay web rebrand DONE (2026-09-05): stack at http:...
+
+> Slay web rebrand DONE (2026-09-05): stack at http://localhost now runs locally built images makeplane/plane-{frontend,admin,space}:slay (APP_RELEASE=slay in deployments/cli/community/.env; backend/live/proxy :slay are retags of stable). Slay logo lockup shows on web sign-in and god-mode; favicon served = Slay. Build fixes committed to working tree: pnpm-workspace.yaml excludes apps/desktop; .dockerignore ignores apps/desktop/; apps/space/Dockerfile.space installs from full workspace with --no-frozen-lockfile because pnpm 11.10 falsely reports a phantom @makeplane/propel@0.2.0 lockfile entry under fetch/frozen (web/admin prune builds are fine). Propel lockup TSX uses a tight viewBox so it fills the 95x20 header box. Rebuild cmd: /tmp/build-fe2.sh pattern = docker build -f apps/<app>/Dockerfile.<app> -t makeplane/plane-<img>:slay . then docker compose -p slay up -d web admin space. Text strings ('Plane') in UI/titles not changed yet.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T22:39:09*
+
 ### 2026-09-04: Mark decided to study Plane Commercial...
 
 > 2026-09-04: Mark decided to study Plane Commercial Edition first before customising the Community fork. Community stack (compose project 'slate') was stopped (data kept) to free port 80. prime-cli v2.2.0 placed at ~/.local/bin/prime-cli; it installs to /opt/plane, needs sudo and an interactive TUI, so Mark must run 'sudo ~/.local/bin/prime-cli setup --domain localhost' himself (auto-mode cannot). Restart Community with: cd ~/Labs/slate/deployments/cli/community && docker compose -p slate start (after stopping Commercial with prime-cli stop, both want port 80).
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T09:39:34*
+
+### BoostSearch Phase 7.3 done (2026-09-05): tools/ben...
+
+> BoostSearch Phase 7.3 done (2026-09-05): tools/bench_matrix.py widened from 12 to 18 dimensions (index/update/delete/scroll docs-per-s, queries-per-s at 8 clients, memory, store on disk, worst p99, plus the ten query p50s) and now exits non-zero naming what was lost. The old file had been pasted over itself so every run measured twice. First run: 16 of 18 ahead; the two behind are scroll throughput (71k vs 144k docs/s -- our scroll re-runs the search from a further offset, which is quadratic) and store size on disk (61.4MiB vs 27.8MiB). Both are Phase 7.4's to close. Cloud-hardware run is the part of 7.3 still owed.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T07:59:11*
 
 ### 2026-09-05: Repo directory renamed ~/Labs/slate ->...
 
@@ -390,17 +438,17 @@
 
 *Knowledge acquired from experience, corrections, and insights.*
 
-### Slay icon v5.2 (2026-09-05): Mark said the edge hi...
-
-> Slay icon v5.2 (2026-09-05): Mark said the edge highlights looked like a thick white border. Rim strokes reduced: top-panel rim 1.2px @0.55, lower-panel rim 1.4px @0.7, crease 2.2px with 0.85->0 fade (reference rims are ~1px, subtle). Exports refreshed: svg, 1024 png, icns, ico.
-
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:28:43*
-
 ### Slay icon v5.4 (2026-09-05): rim highlights were c...
 
 > Slay icon v5.4 (2026-09-05): rim highlights were centered on the panel edge so half spilled outside as a gray outline (Mark spotted it). Fix: 2px stroke clipped by the panel's own path (clipPath topClip/lowClip) = 1px visible inside the edge, opacity 0.5.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:34:05*
+
+### Slay icon v5.2 (2026-09-05): Mark said the edge hi...
+
+> Slay icon v5.2 (2026-09-05): Mark said the edge highlights looked like a thick white border. Rim strokes reduced: top-panel rim 1.2px @0.55, lower-panel rim 1.4px @0.7, crease 2.2px with 0.85->0 fade (reference rims are ~1px, subtle). Exports refreshed: svg, 1024 png, icns, ico.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:28:43*
 
 ### Slay icon v5.1 (2026-09-05): fold gap restored per...
 
@@ -414,17 +462,17 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:02:44*
 
-### Slay icon v4 (2026-09-05): Mark rejected the notch...
-
-> Slay icon v4 (2026-09-05): Mark rejected the notch-style fold 3 times ('black eating the ribbon') and said the twist must tuck UNDER the top panel. gen_icon.py now: top panel = full polygon [TL, TIP_TR, FOLD_V(377,473) r18, BL_TOP]; twist and lower ribbon extend to FOLD_V beneath it; lower panel's upper-left edge runs straight from TIP_BL via BEND(262,603) into FOLD_V (APEX=FOLD_V) so no twist edge is exposed to the gap wedge. This deliberately deviates from the AI reference (IoU 0.95). Lesson: check the zoomed render of the fold before sending; Mark's crops point at the fold corner.
-
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:15:20*
-
 ### Slay icon v5.6 (2026-09-05): dark hairline along t...
 
 > Slay icon v5.6 (2026-09-05): dark hairline along the top panel's right edge was an anti-aliasing seam (twist and panel edges coincide, black drop shadow beneath showed through). Fix: twist path gets stroke=same gradient width 2.5 so it extends ~1px under the panel; shadow band also offset translate(5,6.5) into the twist so the edge isn't its darkest point.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:36:21*
+
+### Slay icon v4 (2026-09-05): Mark rejected the notch...
+
+> Slay icon v4 (2026-09-05): Mark rejected the notch-style fold 3 times ('black eating the ribbon') and said the twist must tuck UNDER the top panel. gen_icon.py now: top panel = full polygon [TL, TIP_TR, FOLD_V(377,473) r18, BL_TOP]; twist and lower ribbon extend to FOLD_V beneath it; lower panel's upper-left edge runs straight from TIP_BL via BEND(262,603) into FOLD_V (APEX=FOLD_V) so no twist edge is exposed to the gap wedge. This deliberately deviates from the AI reference (IoU 0.95). Lesson: check the zoomed render of the fold before sending; Mark's crops point at the fold corner.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:15:20*
 
 ### Lesson (2026-09-03): a ResizeObserver-driven SVG w...
 
@@ -444,23 +492,11 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T20:59:41*
 
-### Lesson: when a compose service is renamed/removed,...
-
-> Lesson: when a compose service is renamed/removed, old containers become orphans that compose commands cannot address and they keep holding ports; remove them with docker rm -f <container>. Also stop postgres before removing its volume.
-
-*Confidence: 0.9 | Status: active | Created: 2026-09-02T18:55:00*
-
 ### Lesson: on Mark's Mac the shadcn CLI hangs and mss...
 
 > Lesson: on Mark's Mac the shadcn CLI hangs and mssql-tools image mcr.microsoft.com/mssql-tools18/mssql-tools does not exist; use the mssql/server image itself for sqlcmd. Airflow provider versions must not be pinned when installing under the Airflow constraints file.
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-02T17:46:55*
-
-### docgen house pattern for a section on ONE landscap...
-
-> docgen house pattern for a section on ONE landscape page: wrap it with <!-- landscape --> ... <!-- portrait --> markers around the heading, chart and notes together, and keep gantt.landscape false (that option gives the chart its own landscape page and strands the heading on the previous one). Charts are rendered at the proportions of the page they go on - gantt.landscape_width_in 10.4 and landscape_height_per_task_in 0.32 vs height_per_task_in 0.40 for portrait - because a chart drawn for a portrait column is too tall for a landscape page once the heading and notes take their share of the 6.57in body height.
-
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T20:46:01*
 
 ### docgen supports per-tag line height: theme.yaml to...
 
@@ -468,17 +504,23 @@
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:51:51*
 
-### mill-tower realtime (2026-09-03): /api/events SSE ...
+### Lesson: when a compose service is renamed/removed,...
 
-> mill-tower realtime (2026-09-03): /api/events SSE from one shared watcher (events.py) polling Airflow every 2s with batched requests; web useLiveUpdates hook updates TanStack cache + toasts. Lesson: per-tab pollers hitting Airflow v2 API exhausted the api-server SQLAlchemy pool (TimeoutError) and hung it; fixed by shared watcher, /dags/~/dagRuns batch endpoint, and POOL_SIZE 20 / MAX_OVERFLOW 30. Also stale uvicorn processes kept running after pkill -f 'uvicorn mill_tower'; use pkill -9 -f uvicorn.
+> Lesson: when a compose service is renamed/removed, old containers become orphans that compose commands cannot address and they keep holding ports; remove them with docker rm -f <container>. Also stop postgres before removing its volume.
 
-*Confidence: 0.95 | Status: active | Created: 2026-09-02T19:53:35*
+*Confidence: 0.9 | Status: active | Created: 2026-09-02T18:55:00*
 
-### docgen: theme.yaml space.h1_before_on_new_page (de...
+### docgen house pattern for a section on ONE landscap...
 
-> docgen: theme.yaml space.h1_before_on_new_page (default 0) overrides Heading1 space-before when the heading starts a page - the 20pt in the style is right mid-page but wrong at the top, where it stacks on the top margin and pushes section-opening pages visibly lower than pages opening with a table. Two measurement gotchas found while tuning: (1) LibreOffice/Word SUPPRESS space-before after a hard page break, so the setting only visibly affects headings that reach a new page via a section break rather than w:pageBreakBefore - which is why 0 gives a uniform result and any positive value does not; (2) pdftotext -bbox measures GLYPHS, so a table page reads 5pt lower than a heading page purely because of table.cell_margin_twips - the table border is actually level.
+> docgen house pattern for a section on ONE landscape page: wrap it with <!-- landscape --> ... <!-- portrait --> markers around the heading, chart and notes together, and keep gantt.landscape false (that option gives the chart its own landscape page and strands the heading on the previous one). Charts are rendered at the proportions of the page they go on - gantt.landscape_width_in 10.4 and landscape_height_per_task_in 0.32 vs height_per_task_in 0.40 for portrait - because a chart drawn for a portrait column is too tall for a landscape page once the heading and notes take their share of the 6.57in body height.
 
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:46:43*
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T20:46:01*
+
+### MEMANTO on-prem backend = docker container moorche...
+
+> MEMANTO on-prem backend = docker container moorcheh-onprem-server on localhost:8080; it was OOM-killed (137) together with the Slay stack and another Python app.py (vaulet-app/padservice/review) grabbed port 8080, which made the CLI report UNAUTHORIZED. Fix: kill the port squatter, docker start moorcheh-onprem-server, check memanto status.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-05T20:52:53*
 
 ### Lesson: WinRMOperator in airflow-providers-microso...
 
@@ -486,23 +528,41 @@
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-02T18:39:23*
 
+### docgen: theme.yaml space.h1_before_on_new_page (de...
+
+> docgen: theme.yaml space.h1_before_on_new_page (default 0) overrides Heading1 space-before when the heading starts a page - the 20pt in the style is right mid-page but wrong at the top, where it stacks on the top margin and pushes section-opening pages visibly lower than pages opening with a table. Two measurement gotchas found while tuning: (1) LibreOffice/Word SUPPRESS space-before after a hard page break, so the setting only visibly affects headings that reach a new page via a section break rather than w:pageBreakBefore - which is why 0 gives a uniform result and any positive value does not; (2) pdftotext -bbox measures GLYPHS, so a table page reads 5pt lower than a heading page purely because of table.cell_margin_twips - the table border is actually level.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T21:46:43*
+
+### mill-tower realtime (2026-09-03): /api/events SSE ...
+
+> mill-tower realtime (2026-09-03): /api/events SSE from one shared watcher (events.py) polling Airflow every 2s with batched requests; web useLiveUpdates hook updates TanStack cache + toasts. Lesson: per-tab pollers hitting Airflow v2 API exhausted the api-server SQLAlchemy pool (TimeoutError) and hung it; fixed by shared watcher, /dags/~/dagRuns batch endpoint, and POOL_SIZE 20 / MAX_OVERFLOW 30. Also stale uvicorn processes kept running after pkill -f 'uvicorn mill_tower'; use pkill -9 -f uvicorn.
+
+*Confidence: 0.95 | Status: active | Created: 2026-09-02T19:53:35*
+
 ### docgen cover artwork redraw - three geometry traps...
 
 > docgen cover artwork redraw - three geometry traps, all hit and fixed: (1) line extents must be the CONTIGUOUS run of ink along the line, not ink near the infinite line, and Hough fragments must be clustered onto one line first - deduplicating fragments by (angle, offset) leaves lines broken off short; (2) shared corners must be placed at the least-squares INTERSECTION of the lines meeting there - averaging the endpoints pulls an endpoint up to 3.75pt off its own line so the stroke overshoots the corner; join tolerance 0.03 - at 0.02 a five-way junction in image2 left one line unjoined; (3) a stroke lying on the canvas edge loses half its width to clipping, so render with a small margin and run only FREE endpoints out past the edge - extending a shared corner makes each line overshoot the other. House weight: 0.35pt, colour #BFC3C7, 1200 dpi.
 
 *Confidence: 1.0 | Status: active | Created: 2026-09-04T21:37:16*
 
-### docgen supports table banner rows: a table row who...
+### Pre-commit lint (oxlint --deny-warnings) fails on ...
 
-> docgen supports table banner rows: a table row whose ONLY non-empty cell holds a **bold** label is merged (w:gridSpan) into a full-width shaded group heading. Requiring bold is deliberate - inferring banners from "only one cell has text" would swallow real data rows with an empty number cell. Implementation gotcha: set gridSpan AFTER capturing the raw w:tc elements, because python-docx row.cells repeats a merged cell once per spanned column, so deleting "cells after the first" through that view deletes the first cell again.
+> Pre-commit lint (oxlint --deny-warnings) fails on untouched upstream warnings when a Slay hook line is added to an upstream file (e.g. issue-detail/root.tsx no-shadow, cycles sidebar-details no-unneeded-ternary). Convention: add a file-level '/* oxlint-disable <rule> -- upstream code; Slay ... */' comment rather than rewriting upstream code.
 
-*Confidence: 1.0 | Status: active | Created: 2026-09-04T09:10:16*
+*Confidence: 0.9 | Status: active | Created: 2026-09-05T20:52:53*
 
 ### Lessons (2026-09-03): Airflow 3 creates DAGs pause...
 
 > Lessons (2026-09-03): Airflow 3 creates DAGs paused by default -> set is_paused_upon_creation=False for generated workflow DAGs. Windows Server 2022 ships PowerShell 5.1: no ConvertTo-Json -AsArray. WinRM -EncodedCommand limit ~8k chars: upload long scripts in 2000-char base64 chunks then run with -File. sp_start_job is async: poll sysjobactivity/sysjobhistory to make dependencies real.
 
 *Confidence: 0.95 | Status: active | Created: 2026-09-02T19:23:03*
+
+### docgen supports table banner rows: a table row who...
+
+> docgen supports table banner rows: a table row whose ONLY non-empty cell holds a **bold** label is merged (w:gridSpan) into a full-width shaded group heading. Requiring bold is deliberate - inferring banners from "only one cell has text" would swallow real data rows with an empty number cell. Implementation gotcha: set gridSpan AFTER capturing the raw w:tc elements, because python-docx row.cells repeats a merged cell once per spanned column, so deleting "cells after the first" through that view deletes the first cell again.
+
+*Confidence: 1.0 | Status: active | Created: 2026-09-04T09:10:16*
 
 ### Plane desktop app (v2.0.0) refuses Community Editi...
 

@@ -414,6 +414,7 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
         ("opensearch-index-management", "OpenSearch Index Management Plugin"),
         ("opensearch-knn", "OpenSearch k-NN plugin"),
         ("opensearch-security", "Provide access control related features for OpenSearch"),
+        ("opensearch-sql", "OpenSearch SQL"),
         ("repository-azure", "The Azure Repository plugin adds support for Azure storage \
                              repositories"),
         ("repository-gcs", "The GCS repository plugin adds Google Cloud Storage support for \

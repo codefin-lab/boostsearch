@@ -20,6 +20,7 @@ mod query;
 mod search;
 mod security;
 mod snapshot;
+mod sql;
 mod source;
 mod store;
 mod tls;
@@ -420,6 +421,12 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_ism/change_policy/{index}", post(api::ism::change_policy))
         .route("/_plugins/_ism/retry/{index}", post(api::ism::retry_policy))
         .route("/_plugins/_ism/explain", get(api::ism::explain))
+        .route("/_plugins/_sql", post(api::sql::sql))
+        .route("/_plugins/_sql/_explain", post(api::sql::explain_sql))
+        .route("/_plugins/_sql/stats", get(api::sql::stats).post(api::sql::stats))
+        .route("/_plugins/_ppl", post(api::sql::pipeline))
+        .route("/_plugins/_ppl/_explain", post(api::sql::explain_ppl))
+        .route("/_plugins/_ppl/stats", get(api::sql::stats).post(api::sql::stats))
         .route("/_plugins/_knn/stats", get(api::knn::stats))
         .route("/_plugins/_knn/{node}/stats", get(api::knn::stats))
         .route("/_plugins/_knn/warmup", get(api::knn::warmup))

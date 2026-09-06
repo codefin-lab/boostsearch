@@ -682,8 +682,10 @@ impl Store {
 /// repeat themselves, so the window matters more than the level does.
 /// Measured over 200,000 log documents, force-merged:
 ///
+/// ```text
 ///     16KiB   zstd 3   30.35 MiB      64KiB   zstd 9   27.64 MiB
 ///     64KiB   zstd 3   28.60 MiB     256KiB   zstd 9   26.99 MiB
+/// ```
 ///
 /// `default` takes the 64KiB window, which is where Lucene's own most
 /// compressed setting lands, and where a document can still be read back

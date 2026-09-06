@@ -432,6 +432,7 @@ fn plugins() -> Value {
         "opensearch-index-management",
         "opensearch-knn",
         "opensearch-security",
+        "opensearch-sql",
         "repository-azure",
         "repository-gcs",
         "repository-s3",
