@@ -27,7 +27,7 @@
   "vars": {
     "apmConfig": null
   },
-  "anonymousStatusPage": true,
+  "anonymousStatusPage": false,
   "branding": {
     "assetFolderUrl": "/ui/default_branding",
     "logo": {},
@@ -59,6 +59,34 @@
           "batchingIntervalInS": 60
         }
       }
+    },
+    {
+      "id": "opensearchDashboardsLegacy",
+      "plugin": {
+        "id": "opensearchDashboardsLegacy",
+        "configPath": "opensearch_dashboards_legacy",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "defaultAppId": "home"
+      }
+    },
+    {
+      "id": "urlForwarding",
+      "plugin": {
+        "id": "urlForwarding",
+        "configPath": "url_forwarding",
+        "requiredPlugins": [
+          "opensearchDashboardsLegacy"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
     },
     {
       "id": "mapsLegacy",
@@ -102,34 +130,6 @@
           "dark": "dark_map"
         }
       }
-    },
-    {
-      "id": "opensearchDashboardsLegacy",
-      "plugin": {
-        "id": "opensearchDashboardsLegacy",
-        "configPath": "opensearch_dashboards_legacy",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "defaultAppId": "home"
-      }
-    },
-    {
-      "id": "urlForwarding",
-      "plugin": {
-        "id": "urlForwarding",
-        "configPath": "url_forwarding",
-        "requiredPlugins": [
-          "opensearchDashboardsLegacy"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
     },
     {
       "id": "visDefaultEditor",
@@ -177,6 +177,20 @@
       "config": {}
     },
     {
+      "id": "opensearchDashboardsReact",
+      "plugin": {
+        "id": "opensearchDashboardsReact",
+        "configPath": "opensearch_dashboards_react",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
       "id": "opensearchUiShared",
       "plugin": {
         "id": "opensearchUiShared",
@@ -198,20 +212,6 @@
         "requiredPlugins": [],
         "optionalPlugins": [],
         "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "opensearchDashboardsReact",
-      "plugin": {
-        "id": "opensearchDashboardsReact",
-        "configPath": "opensearch_dashboards_react",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils"
-        ],
         "requiredEnginePlugins": {}
       },
       "config": {}
@@ -301,16 +301,6 @@
         "requiredEnginePlugins": {}
       },
       "config": {
-        "search": {
-          "aggs": {
-            "shardDelay": {
-              "enabled": true
-            }
-          },
-          "usageTelemetry": {
-            "enabled": false
-          }
-        },
         "enhancements": {
           "supportedAppNames": [
             "discover"
@@ -322,6 +312,16 @@
           },
           "valueSuggestions": {
             "enabled": true
+          }
+        },
+        "search": {
+          "aggs": {
+            "shardDelay": {
+              "enabled": false
+            }
+          },
+          "usageTelemetry": {
+            "enabled": false
           }
         },
         "savedQueriesNewUI": {
@@ -483,6 +483,30 @@
       "config": {}
     },
     {
+      "id": "visTypeTable",
+      "plugin": {
+        "id": "visTypeTable",
+        "configPath": "vis_type_table",
+        "requiredPlugins": [
+          "expressions",
+          "visualizations",
+          "data"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "opensearchDashboardsReact",
+          "share",
+          "charts",
+          "visDefaultEditor"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
       "id": "visTypeVega",
       "plugin": {
         "id": "visTypeVega",
@@ -513,81 +537,6 @@
       }
     },
     {
-      "id": "visTypeTimeline",
-      "plugin": {
-        "id": "visTypeTimeline",
-        "configPath": "vis_type_timeline",
-        "requiredPlugins": [
-          "visualizations",
-          "data",
-          "expressions"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
-      "id": "visTypeTable",
-      "plugin": {
-        "id": "visTypeTable",
-        "configPath": "vis_type_table",
-        "requiredPlugins": [
-          "expressions",
-          "visualizations",
-          "data"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact",
-          "share",
-          "charts",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
-      "id": "visBuilder",
-      "plugin": {
-        "id": "visBuilder",
-        "configPath": "vis_builder",
-        "requiredPlugins": [
-          "dashboard",
-          "data",
-          "embeddable",
-          "expressions",
-          "navigation",
-          "savedObjects",
-          "visualizations",
-          "uiActions"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "charts",
-          "opensearchDashboardsReact",
-          "opensearchDashboardsUtils",
-          "visDefaultEditor",
-          "visTypeVislib"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
       "id": "visTypeMarkdown",
       "plugin": {
         "id": "visTypeMarkdown",
@@ -602,6 +551,28 @@
           "charts",
           "visualizations",
           "expressions",
+          "visDefaultEditor"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "visTypeTimeline",
+      "plugin": {
+        "id": "visTypeTimeline",
+        "configPath": "vis_type_timeline",
+        "requiredPlugins": [
+          "visualizations",
+          "data",
+          "expressions"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "opensearchDashboardsReact",
           "visDefaultEditor"
         ],
         "requiredEnginePlugins": {}
@@ -633,6 +604,35 @@
       },
       "config": {
         "pluginAugmentationEnabled": true
+      }
+    },
+    {
+      "id": "visBuilder",
+      "plugin": {
+        "id": "visBuilder",
+        "configPath": "vis_builder",
+        "requiredPlugins": [
+          "dashboard",
+          "data",
+          "embeddable",
+          "expressions",
+          "navigation",
+          "savedObjects",
+          "visualizations",
+          "uiActions"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "charts",
+          "opensearchDashboardsReact",
+          "opensearchDashboardsUtils",
+          "visDefaultEditor",
+          "visTypeVislib"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
       }
     },
     {
@@ -879,29 +879,6 @@
       }
     },
     {
-      "id": "searchRelevanceDashboards",
-      "plugin": {
-        "id": "searchRelevanceDashboards",
-        "configPath": "search_relevance_dashboards",
-        "requiredPlugins": [
-          "navigation",
-          "opensearchDashboardsReact"
-        ],
-        "optionalPlugins": [
-          "dataSourceManagement",
-          "contentManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "metrics": {
-          "metricInterval": 60000,
-          "windowSize": 3
-        }
-      }
-    },
-    {
       "id": "securityAnalyticsDashboards",
       "plugin": {
         "id": "securityAnalyticsDashboards",
@@ -926,6 +903,29 @@
       }
     },
     {
+      "id": "searchRelevanceDashboards",
+      "plugin": {
+        "id": "searchRelevanceDashboards",
+        "configPath": "search_relevance_dashboards",
+        "requiredPlugins": [
+          "navigation",
+          "opensearchDashboardsReact"
+        ],
+        "optionalPlugins": [
+          "dataSourceManagement",
+          "contentManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "metrics": {
+          "metricInterval": 60000,
+          "windowSize": 3
+        }
+      }
+    },
+    {
       "id": "reportsDashboards",
       "plugin": {
         "id": "reportsDashboards",
@@ -947,24 +947,27 @@
       "config": {}
     },
     {
-      "id": "flowFrameworkDashboards",
+      "id": "indexManagementDashboards",
       "plugin": {
-        "id": "flowFrameworkDashboards",
+        "id": "indexManagementDashboards",
         "configPath": [
-          "flowFrameworkDashboards"
+          "opensearch_index_management"
         ],
         "requiredPlugins": [
           "navigation",
+          "opensearchDashboardsReact",
           "opensearchDashboardsUtils"
         ],
         "optionalPlugins": [
-          "dataSourceManagement",
-          "contentManagement"
+          "managementOverview",
+          "dataSourceManagement"
         ],
         "requiredBundles": [],
         "requiredEnginePlugins": {}
       },
-      "config": {}
+      "config": {
+        "enabled": true
+      }
     },
     {
       "id": "mlCommonsDashboards",
@@ -1016,6 +1019,26 @@
         "opensearchVectorTileStyleUrl": "https://tiles.maps.opensearch.org/v3/manifest.json",
         "opensearchVectorTileGlyphsUrl": "https://tiles.maps.opensearch.org/fonts/{fontstack}/{range}.pbf"
       }
+    },
+    {
+      "id": "flowFrameworkDashboards",
+      "plugin": {
+        "id": "flowFrameworkDashboards",
+        "configPath": [
+          "flowFrameworkDashboards"
+        ],
+        "requiredPlugins": [
+          "navigation",
+          "opensearchDashboardsUtils"
+        ],
+        "optionalPlugins": [
+          "dataSourceManagement",
+          "contentManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
     },
     {
       "id": "assistantDashboards",
@@ -1136,27 +1159,40 @@
       }
     },
     {
-      "id": "indexManagementDashboards",
+      "id": "queryInsightsDashboards",
       "plugin": {
-        "id": "indexManagementDashboards",
-        "configPath": [
-          "opensearch_index_management"
+        "id": "queryInsightsDashboards",
+        "configPath": "query_insights_dashboards",
+        "requiredPlugins": [
+          "navigation"
         ],
+        "optionalPlugins": [
+          "dataSourceManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "notificationsDashboards",
+      "plugin": {
+        "id": "notificationsDashboards",
+        "configPath": "notifications_dashboards",
         "requiredPlugins": [
           "navigation",
-          "opensearchDashboardsReact",
+          "data",
           "opensearchDashboardsUtils"
         ],
         "optionalPlugins": [
+          "share",
           "managementOverview",
           "dataSourceManagement"
         ],
         "requiredBundles": [],
         "requiredEnginePlugins": {}
       },
-      "config": {
-        "enabled": true
-      }
+      "config": {}
     },
     {
       "id": "devTools",
@@ -1211,42 +1247,6 @@
       }
     },
     {
-      "id": "queryInsightsDashboards",
-      "plugin": {
-        "id": "queryInsightsDashboards",
-        "configPath": "query_insights_dashboards",
-        "requiredPlugins": [
-          "navigation"
-        ],
-        "optionalPlugins": [
-          "dataSourceManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "notificationsDashboards",
-      "plugin": {
-        "id": "notificationsDashboards",
-        "configPath": "notifications_dashboards",
-        "requiredPlugins": [
-          "navigation",
-          "data",
-          "opensearchDashboardsUtils"
-        ],
-        "optionalPlugins": [
-          "share",
-          "managementOverview",
-          "dataSourceManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
       "id": "advancedSettings",
       "plugin": {
         "id": "advancedSettings",
@@ -1289,20 +1289,6 @@
       "config": {}
     },
     {
-      "id": "bfetch",
-      "plugin": {
-        "id": "bfetch",
-        "configPath": "bfetch",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
       "id": "charts",
       "plugin": {
         "id": "charts",
@@ -1315,103 +1301,6 @@
         "requiredEnginePlugins": {}
       },
       "config": {}
-    },
-    {
-      "id": "visTypeVislib",
-      "plugin": {
-        "id": "visTypeVislib",
-        "configPath": "vis_type_vislib",
-        "requiredPlugins": [
-          "charts",
-          "data",
-          "expressions",
-          "visualizations",
-          "opensearchDashboardsLegacy",
-          "visTypeVega"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "visDefaultEditor",
-          "visAugmenter"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
-      "id": "visTypeTagcloud",
-      "plugin": {
-        "id": "visTypeTagcloud",
-        "configPath": "vis_type_tagcloud",
-        "requiredPlugins": [
-          "data",
-          "expressions",
-          "visualizations",
-          "charts"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
-      "id": "visTypeTimeseries",
-      "plugin": {
-        "id": "visTypeTimeseries",
-        "configPath": "vis_type_timeseries",
-        "requiredPlugins": [
-          "charts",
-          "data",
-          "expressions",
-          "visualizations"
-        ],
-        "optionalPlugins": [
-          "usageCollection",
-          "dataSourceManagement"
-        ],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true,
-        "chartResolution": 150,
-        "minimumBucketSize": 10
-      }
-    },
-    {
-      "id": "visTypeMetric",
-      "plugin": {
-        "id": "visTypeMetric",
-        "configPath": "vis_type_metric",
-        "requiredPlugins": [
-          "data",
-          "visualizations",
-          "charts",
-          "expressions"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
     },
     {
       "id": "observabilityDashboards",
@@ -1473,6 +1362,103 @@
       "config": {}
     },
     {
+      "id": "visTypeVislib",
+      "plugin": {
+        "id": "visTypeVislib",
+        "configPath": "vis_type_vislib",
+        "requiredPlugins": [
+          "charts",
+          "data",
+          "expressions",
+          "visualizations",
+          "opensearchDashboardsLegacy",
+          "visTypeVega"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "visDefaultEditor",
+          "visAugmenter"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "visTypeTimeseries",
+      "plugin": {
+        "id": "visTypeTimeseries",
+        "configPath": "vis_type_timeseries",
+        "requiredPlugins": [
+          "charts",
+          "data",
+          "expressions",
+          "visualizations"
+        ],
+        "optionalPlugins": [
+          "usageCollection",
+          "dataSourceManagement"
+        ],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "opensearchDashboardsReact"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true,
+        "chartResolution": 150,
+        "minimumBucketSize": 10
+      }
+    },
+    {
+      "id": "visTypeTagcloud",
+      "plugin": {
+        "id": "visTypeTagcloud",
+        "configPath": "vis_type_tagcloud",
+        "requiredPlugins": [
+          "data",
+          "expressions",
+          "visualizations",
+          "charts"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "opensearchDashboardsReact",
+          "visDefaultEditor"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "visTypeMetric",
+      "plugin": {
+        "id": "visTypeMetric",
+        "configPath": "vis_type_metric",
+        "requiredPlugins": [
+          "data",
+          "visualizations",
+          "charts",
+          "expressions"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "visDefaultEditor"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
       "id": "discover",
       "plugin": {
         "id": "discover",
@@ -1529,6 +1515,20 @@
           "opensearchDashboardsReact",
           "home",
           "contentManagement"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "bfetch",
+      "plugin": {
+        "id": "bfetch",
+        "configPath": "bfetch",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsUtils"
         ],
         "requiredEnginePlugins": {}
       },
@@ -2770,15 +2770,6 @@
         "timeline"
       ]
     },
-    "visbuilder:enableVega": {
-      "name": "Enable vega transformation in visbuilder",
-      "value": false,
-      "description": "Allow visbuilder to render visualizations via vega.",
-      "requiresPageReload": true,
-      "category": [
-        "visbuilder"
-      ]
-    },
     "visualization:enablePluginAugmentation": {
       "name": "Enable plugin augmentation",
       "value": true,
@@ -2793,6 +2784,15 @@
       "description": "Associating more than 10 plugin resources per visualization can lead to performance issues and increase the cost of running clusters.",
       "category": [
         "visualization"
+      ]
+    },
+    "visbuilder:enableVega": {
+      "name": "Enable vega transformation in visbuilder",
+      "value": false,
+      "description": "Allow visbuilder to render visualizations via vega.",
+      "requiresPageReload": true,
+      "category": [
+        "visbuilder"
       ]
     },
     "visualization:regionmap:showWarnings": {
@@ -2837,29 +2837,6 @@
       "category": [
         "visualization"
       ]
-    },
-    "visualization:dimmingOpacity": {
-      "name": "Dimming opacity",
-      "value": 0.5,
-      "type": "number",
-      "description": "The opacity of the chart items that are dimmed when highlighting another element of the chart. The lower this number, the more the highlighted element will stand out. This must be a number between 0 and 1.",
-      "category": [
-        "visualization"
-      ]
-    },
-    "visualization:heatmap:maxBuckets": {
-      "name": "Heatmap maximum buckets",
-      "value": 50,
-      "type": "number",
-      "description": "The maximum number of buckets a single datasource can return. A higher number might have negative impact on browser rendering performance",
-      "category": [
-        "visualization"
-      ]
-    },
-    "metrics:max_buckets": {
-      "name": "Maximum buckets",
-      "value": 2000,
-      "description": "The maximum number of buckets a single datasource can return"
     },
     "observability:traceAnalyticsSpanIndices": {
       "name": "Trace analytics span indices",
@@ -2912,6 +2889,29 @@
       "value": true,
       "description": "Show the Observability overview page cards",
       "scope": "global"
+    },
+    "visualization:dimmingOpacity": {
+      "name": "Dimming opacity",
+      "value": 0.5,
+      "type": "number",
+      "description": "The opacity of the chart items that are dimmed when highlighting another element of the chart. The lower this number, the more the highlighted element will stand out. This must be a number between 0 and 1.",
+      "category": [
+        "visualization"
+      ]
+    },
+    "visualization:heatmap:maxBuckets": {
+      "name": "Heatmap maximum buckets",
+      "value": 50,
+      "type": "number",
+      "description": "The maximum number of buckets a single datasource can return. A higher number might have negative impact on browser rendering performance",
+      "category": [
+        "visualization"
+      ]
+    },
+    "metrics:max_buckets": {
+      "name": "Maximum buckets",
+      "value": 2000,
+      "description": "The maximum number of buckets a single datasource can return"
     },
     "defaultColumns": {
       "name": "Default columns",
@@ -3019,6 +3019,8 @@
     "osd-ui-shared-deps": "/8487/bundles/osd-ui-shared-deps/",
     "usageCollection": "/8487/bundles/plugin/usageCollection/",
     "opensearchDashboardsUtils": "/8487/bundles/plugin/opensearchDashboardsUtils/",
+    "opensearchDashboardsLegacy": "/8487/bundles/plugin/opensearchDashboardsLegacy/",
+    "urlForwarding": "/8487/bundles/plugin/urlForwarding/",
     "mapsLegacy": "/8487/bundles/plugin/mapsLegacy/",
     "opensearchDashboardsReact": "/8487/bundles/plugin/opensearchDashboardsReact/",
     "charts": "/8487/bundles/plugin/charts/",
@@ -3026,8 +3028,6 @@
     "data": "/8487/bundles/plugin/data/",
     "inspector": "/8487/bundles/plugin/inspector/",
     "dataSource": "/8487/bundles/plugin/dataSource/",
-    "opensearchDashboardsLegacy": "/8487/bundles/plugin/opensearchDashboardsLegacy/",
-    "urlForwarding": "/8487/bundles/plugin/urlForwarding/",
     "uiActions": "/8487/bundles/plugin/uiActions/",
     "share": "/8487/bundles/plugin/share/",
     "opensearchUiShared": "/8487/bundles/plugin/opensearchUiShared/",
@@ -3044,12 +3044,12 @@
     "discover": "/8487/bundles/plugin/discover/",
     "visAugmenter": "/8487/bundles/plugin/visAugmenter/",
     "savedObjectsManagement": "/8487/bundles/plugin/savedObjectsManagement/",
-    "visTypeVega": "/8487/bundles/plugin/visTypeVega/",
-    "visTypeTimeline": "/8487/bundles/plugin/visTypeTimeline/",
     "visTypeTable": "/8487/bundles/plugin/visTypeTable/",
+    "visTypeVega": "/8487/bundles/plugin/visTypeVega/",
+    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
+    "visTypeTimeline": "/8487/bundles/plugin/visTypeTimeline/",
     "visBuilder": "/8487/bundles/plugin/visBuilder/",
     "visTypeVislib": "/8487/bundles/plugin/visTypeVislib/",
-    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
     "tileMap": "/8487/bundles/plugin/tileMap/",
     "regionMap": "/8487/bundles/plugin/regionMap/",
     "inputControlVis": "/8487/bundles/plugin/inputControlVis/",
@@ -3059,28 +3059,28 @@
     "managementOverview": "/8487/bundles/plugin/managementOverview/",
     "management": "/8487/bundles/plugin/management/",
     "indexPatternManagement": "/8487/bundles/plugin/indexPatternManagement/",
-    "searchRelevanceDashboards": "/8487/bundles/plugin/searchRelevanceDashboards/",
     "securityAnalyticsDashboards": "/8487/bundles/plugin/securityAnalyticsDashboards/",
+    "searchRelevanceDashboards": "/8487/bundles/plugin/searchRelevanceDashboards/",
     "reportsDashboards": "/8487/bundles/plugin/reportsDashboards/",
-    "flowFrameworkDashboards": "/8487/bundles/plugin/flowFrameworkDashboards/",
+    "indexManagementDashboards": "/8487/bundles/plugin/indexManagementDashboards/",
     "mlCommonsDashboards": "/8487/bundles/plugin/mlCommonsDashboards/",
     "customImportMapDashboards": "/8487/bundles/plugin/customImportMapDashboards/",
+    "flowFrameworkDashboards": "/8487/bundles/plugin/flowFrameworkDashboards/",
     "assistantDashboards": "/8487/bundles/plugin/assistantDashboards/",
     "alertingDashboards": "/8487/bundles/plugin/alertingDashboards/",
     "anomalyDetectionDashboards": "/8487/bundles/plugin/anomalyDetectionDashboards/",
-    "indexManagementDashboards": "/8487/bundles/plugin/indexManagementDashboards/",
-    "devTools": "/8487/bundles/plugin/devTools/",
-    "console": "/8487/bundles/plugin/console/",
     "queryInsightsDashboards": "/8487/bundles/plugin/queryInsightsDashboards/",
     "notificationsDashboards": "/8487/bundles/plugin/notificationsDashboards/",
+    "devTools": "/8487/bundles/plugin/devTools/",
+    "console": "/8487/bundles/plugin/console/",
     "advancedSettings": "/8487/bundles/plugin/advancedSettings/",
     "dataExplorer": "/8487/bundles/plugin/dataExplorer/",
-    "bfetch": "/8487/bundles/plugin/bfetch/",
-    "visTypeTagcloud": "/8487/bundles/plugin/visTypeTagcloud/",
-    "visTypeTimeseries": "/8487/bundles/plugin/visTypeTimeseries/",
-    "visTypeMetric": "/8487/bundles/plugin/visTypeMetric/",
     "observabilityDashboards": "/8487/bundles/plugin/observabilityDashboards/",
-    "queryWorkbenchDashboards": "/8487/bundles/plugin/queryWorkbenchDashboards/"
+    "queryWorkbenchDashboards": "/8487/bundles/plugin/queryWorkbenchDashboards/",
+    "visTypeTimeseries": "/8487/bundles/plugin/visTypeTimeseries/",
+    "visTypeTagcloud": "/8487/bundles/plugin/visTypeTagcloud/",
+    "visTypeMetric": "/8487/bundles/plugin/visTypeMetric/",
+    "bfetch": "/8487/bundles/plugin/bfetch/"
   },
   "bundles": [
     "/8487/bundles/osd-ui-shared-deps/osd-ui-shared-deps.@elastic.js",
@@ -3088,6 +3088,8 @@
     "/8487/bundles/core/core.entry.js",
     "/8487/bundles/plugin/usageCollection/usageCollection.plugin.js",
     "/8487/bundles/plugin/opensearchDashboardsUtils/opensearchDashboardsUtils.plugin.js",
+    "/8487/bundles/plugin/opensearchDashboardsLegacy/opensearchDashboardsLegacy.plugin.js",
+    "/8487/bundles/plugin/urlForwarding/urlForwarding.plugin.js",
     "/8487/bundles/plugin/mapsLegacy/mapsLegacy.plugin.js",
     "/8487/bundles/plugin/opensearchDashboardsReact/opensearchDashboardsReact.plugin.js",
     "/8487/bundles/plugin/charts/charts.plugin.js",
@@ -3095,8 +3097,6 @@
     "/8487/bundles/plugin/data/data.plugin.js",
     "/8487/bundles/plugin/inspector/inspector.plugin.js",
     "/8487/bundles/plugin/dataSource/dataSource.plugin.js",
-    "/8487/bundles/plugin/opensearchDashboardsLegacy/opensearchDashboardsLegacy.plugin.js",
-    "/8487/bundles/plugin/urlForwarding/urlForwarding.plugin.js",
     "/8487/bundles/plugin/uiActions/uiActions.plugin.js",
     "/8487/bundles/plugin/share/share.plugin.js",
     "/8487/bundles/plugin/opensearchUiShared/opensearchUiShared.plugin.js",
@@ -3113,12 +3113,12 @@
     "/8487/bundles/plugin/discover/discover.plugin.js",
     "/8487/bundles/plugin/visAugmenter/visAugmenter.plugin.js",
     "/8487/bundles/plugin/savedObjectsManagement/savedObjectsManagement.plugin.js",
-    "/8487/bundles/plugin/visTypeVega/visTypeVega.plugin.js",
-    "/8487/bundles/plugin/visTypeTimeline/visTypeTimeline.plugin.js",
     "/8487/bundles/plugin/visTypeTable/visTypeTable.plugin.js",
+    "/8487/bundles/plugin/visTypeVega/visTypeVega.plugin.js",
+    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
+    "/8487/bundles/plugin/visTypeTimeline/visTypeTimeline.plugin.js",
     "/8487/bundles/plugin/visBuilder/visBuilder.plugin.js",
     "/8487/bundles/plugin/visTypeVislib/visTypeVislib.plugin.js",
-    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
     "/8487/bundles/plugin/tileMap/tileMap.plugin.js",
     "/8487/bundles/plugin/regionMap/regionMap.plugin.js",
     "/8487/bundles/plugin/inputControlVis/inputControlVis.plugin.js",
@@ -3128,28 +3128,28 @@
     "/8487/bundles/plugin/managementOverview/managementOverview.plugin.js",
     "/8487/bundles/plugin/management/management.plugin.js",
     "/8487/bundles/plugin/indexPatternManagement/indexPatternManagement.plugin.js",
-    "/8487/bundles/plugin/searchRelevanceDashboards/searchRelevanceDashboards.plugin.js",
     "/8487/bundles/plugin/securityAnalyticsDashboards/securityAnalyticsDashboards.plugin.js",
+    "/8487/bundles/plugin/searchRelevanceDashboards/searchRelevanceDashboards.plugin.js",
     "/8487/bundles/plugin/reportsDashboards/reportsDashboards.plugin.js",
-    "/8487/bundles/plugin/flowFrameworkDashboards/flowFrameworkDashboards.plugin.js",
+    "/8487/bundles/plugin/indexManagementDashboards/indexManagementDashboards.plugin.js",
     "/8487/bundles/plugin/mlCommonsDashboards/mlCommonsDashboards.plugin.js",
     "/8487/bundles/plugin/customImportMapDashboards/customImportMapDashboards.plugin.js",
+    "/8487/bundles/plugin/flowFrameworkDashboards/flowFrameworkDashboards.plugin.js",
     "/8487/bundles/plugin/assistantDashboards/assistantDashboards.plugin.js",
     "/8487/bundles/plugin/alertingDashboards/alertingDashboards.plugin.js",
     "/8487/bundles/plugin/anomalyDetectionDashboards/anomalyDetectionDashboards.plugin.js",
-    "/8487/bundles/plugin/indexManagementDashboards/indexManagementDashboards.plugin.js",
-    "/8487/bundles/plugin/devTools/devTools.plugin.js",
-    "/8487/bundles/plugin/console/console.plugin.js",
     "/8487/bundles/plugin/queryInsightsDashboards/queryInsightsDashboards.plugin.js",
     "/8487/bundles/plugin/notificationsDashboards/notificationsDashboards.plugin.js",
+    "/8487/bundles/plugin/devTools/devTools.plugin.js",
+    "/8487/bundles/plugin/console/console.plugin.js",
     "/8487/bundles/plugin/advancedSettings/advancedSettings.plugin.js",
     "/8487/bundles/plugin/dataExplorer/dataExplorer.plugin.js",
-    "/8487/bundles/plugin/bfetch/bfetch.plugin.js",
-    "/8487/bundles/plugin/visTypeTagcloud/visTypeTagcloud.plugin.js",
-    "/8487/bundles/plugin/visTypeTimeseries/visTypeTimeseries.plugin.js",
-    "/8487/bundles/plugin/visTypeMetric/visTypeMetric.plugin.js",
     "/8487/bundles/plugin/observabilityDashboards/observabilityDashboards.plugin.js",
-    "/8487/bundles/plugin/queryWorkbenchDashboards/queryWorkbenchDashboards.plugin.js"
+    "/8487/bundles/plugin/queryWorkbenchDashboards/queryWorkbenchDashboards.plugin.js",
+    "/8487/bundles/plugin/visTypeTimeseries/visTypeTimeseries.plugin.js",
+    "/8487/bundles/plugin/visTypeTagcloud/visTypeTagcloud.plugin.js",
+    "/8487/bundles/plugin/visTypeMetric/visTypeMetric.plugin.js",
+    "/8487/bundles/plugin/bfetch/bfetch.plugin.js"
   ],
   "styleSheets": [
     "/8487/bundles/osd-ui-shared-deps/osd-ui-shared-deps.css"
@@ -3187,14 +3187,14 @@
       "showWriteControls": true,
       "saveQuery": true
     },
-    "visualization-visbuilder": {
-      "show": true,
-      "saveQuery": true
-    },
     "visAugmenter": {
       "show": false,
       "delete": true,
       "save": true,
+      "saveQuery": true
+    },
+    "visualization-visbuilder": {
+      "show": true,
       "saveQuery": true
     },
     "visualize": {
@@ -3239,6 +3239,889 @@
       "delete": true,
       "edit": true,
       "read": true
+    }
+  },
+  "savedObjectIndex": {
+    "mappings": {
+      "dynamic": "strict",
+      "_meta": {
+        "migrationMappingPropertyHashes": {
+          "augment-vis": "88f930f6b43c089a12bfc276c359d1eb",
+          "application_usage_daily": "43b8830d5d0df85a6823d290885fc9fd",
+          "visualization": "f819cf6636b75c9e76ba733a0c6ef355",
+          "observability-search": "638ae3ab28e5faf2e02f00dd8091abaf",
+          "references": "7997cf5a56cc02bdc9c93361bde732b0",
+          "integration-template": "9033ba0b281fe1c88c3c56d8fd9d089d",
+          "type": "2f4316de49999235636386fe51dc06c1",
+          "sample-data-telemetry": "7d3cfeb915303c9641c59681967ffeb4",
+          "search": "43012c7ebc4cb57054e0a490e4b43023",
+          "originId": "2f4316de49999235636386fe51dc06c1",
+          "application_usage_totals": "3d1b76c39bfb2cc8296b024d73854724",
+          "updated_at": "00da57df13e94e9d98437d13ace4bfe0",
+          "dql-telemetry": "d12a98a6f19a2d273696597547e064ee",
+          "search-telemetry": "3d1b76c39bfb2cc8296b024d73854724",
+          "integration-instance": "17ab914d1f92a5b03bbb194651c23b1c",
+          "observability-panel": "df07b1a361c32daf4e6842c1d5521dbe",
+          "visualization-visbuilder": "7a6fadcdaaf97b2b8b65d290fd8a3ba7",
+          "map": "32fcfaba6c580bf048359fcb48ad5301",
+          "dashboard": "40554caf09725935e2c02e02563a2d07",
+          "query": "531cf50c8e0b1c9f610e263f878d124c",
+          "ui-metric": "0d409297dc5ebe1e3a1da691c6ee32e3",
+          "application_usage_transactional": "3d1b76c39bfb2cc8296b024d73854724",
+          "observability-visualization": "638ae3ab28e5faf2e02f00dd8091abaf",
+          "url": "c7f66a0df8b1b52f17c28c4adb111105",
+          "migrationVersion": "4a1746014a75ade3a714e1db5763276f",
+          "index-pattern": "45915a1ad866812242df474eb0479052",
+          "namespace": "2f4316de49999235636386fe51dc06c1",
+          "observability-notebook": "638ae3ab28e5faf2e02f00dd8091abaf",
+          "config": "c63748b75f39d0c54de12d12c1ccbc20",
+          "tsvb-validation-telemetry": "3a37ef6c8700ae6fc97d5c7da00e9215",
+          "namespaces": "2f4316de49999235636386fe51dc06c1",
+          "homepage": "a8d79cfe4f79546aa5bbee73facc51dc"
+        }
+      },
+      "properties": {
+        "application_usage_daily": {
+          "dynamic": "false",
+          "properties": {
+            "timestamp": {
+              "type": "date"
+            }
+          }
+        },
+        "application_usage_totals": {
+          "type": "object",
+          "dynamic": "false"
+        },
+        "application_usage_transactional": {
+          "type": "object",
+          "dynamic": "false"
+        },
+        "augment-vis": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "originPlugin": {
+              "type": "text"
+            },
+            "pluginResource": {
+              "properties": {
+                "id": {
+                  "type": "text"
+                },
+                "type": {
+                  "type": "text"
+                }
+              }
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            },
+            "visLayerExpressionFn": {
+              "properties": {
+                "args": {
+                  "type": "object",
+                  "dynamic": "true"
+                },
+                "name": {
+                  "type": "text"
+                },
+                "type": {
+                  "type": "text"
+                }
+              }
+            },
+            "visName": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            }
+          }
+        },
+        "config": {
+          "dynamic": "false",
+          "properties": {
+            "buildNum": {
+              "type": "keyword"
+            }
+          }
+        },
+        "dashboard": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "hits": {
+              "type": "integer",
+              "index": false,
+              "doc_values": false
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "optionsJSON": {
+              "type": "text",
+              "index": false
+            },
+            "panelsJSON": {
+              "type": "text",
+              "index": false
+            },
+            "refreshInterval": {
+              "properties": {
+                "display": {
+                  "type": "keyword",
+                  "index": false,
+                  "doc_values": false
+                },
+                "pause": {
+                  "type": "boolean",
+                  "doc_values": false,
+                  "index": false
+                },
+                "section": {
+                  "type": "integer",
+                  "index": false,
+                  "doc_values": false
+                },
+                "value": {
+                  "type": "integer",
+                  "index": false,
+                  "doc_values": false
+                }
+              }
+            },
+            "timeFrom": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "timeRestore": {
+              "type": "boolean",
+              "doc_values": false,
+              "index": false
+            },
+            "timeTo": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "dql-telemetry": {
+          "properties": {
+            "optInCount": {
+              "type": "long"
+            },
+            "optOutCount": {
+              "type": "long"
+            }
+          }
+        },
+        "homepage": {
+          "properties": {
+            "heroes": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "sections": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "index-pattern": {
+          "dynamic": "false",
+          "properties": {
+            "title": {
+              "type": "text"
+            },
+            "type": {
+              "type": "keyword"
+            }
+          }
+        },
+        "integration-instance": {
+          "dynamic": "false",
+          "properties": {
+            "assets": {
+              "type": "nested"
+            },
+            "creationDate": {
+              "type": "date"
+            },
+            "dataSource": {
+              "type": "text"
+            },
+            "name": {
+              "type": "text"
+            },
+            "templateName": {
+              "type": "text"
+            }
+          }
+        },
+        "integration-template": {
+          "dynamic": "false",
+          "properties": {
+            "assets": {
+              "type": "nested"
+            },
+            "author": {
+              "type": "text"
+            },
+            "components": {
+              "type": "nested"
+            },
+            "description": {
+              "type": "text"
+            },
+            "displayName": {
+              "type": "text"
+            },
+            "labels": {
+              "type": "text"
+            },
+            "license": {
+              "type": "text"
+            },
+            "name": {
+              "type": "text"
+            },
+            "sampleData": {
+              "type": "nested"
+            },
+            "sourceUrl": {
+              "type": "text"
+            },
+            "statics": {
+              "type": "nested"
+            },
+            "type": {
+              "type": "text"
+            },
+            "version": {
+              "type": "text"
+            }
+          }
+        },
+        "map": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "layerList": {
+              "type": "text",
+              "index": false
+            },
+            "mapState": {
+              "type": "text",
+              "index": false
+            },
+            "title": {
+              "type": "text"
+            },
+            "uiState": {
+              "type": "text",
+              "index": false
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "migrationVersion": {
+          "dynamic": "true",
+          "properties": {
+            "config": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "dashboard": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "index-pattern": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "integration-template": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "observability-panel": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "search": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            },
+            "visualization": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 256
+                }
+              }
+            }
+          }
+        },
+        "namespace": {
+          "type": "keyword"
+        },
+        "namespaces": {
+          "type": "keyword"
+        },
+        "observability-notebook": {
+          "dynamic": "false",
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "observability-panel": {
+          "dynamic": "false",
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "title": {
+              "type": "text"
+            }
+          }
+        },
+        "observability-search": {
+          "dynamic": "false",
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "observability-visualization": {
+          "dynamic": "false",
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "originId": {
+          "type": "keyword"
+        },
+        "query": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "filters": {
+              "type": "object",
+              "enabled": false
+            },
+            "isTemplate": {
+              "type": "boolean"
+            },
+            "query": {
+              "properties": {
+                "dataset": {
+                  "properties": {
+                    "dataSource": {
+                      "properties": {
+                        "id": {
+                          "type": "text"
+                        },
+                        "meta": {
+                          "properties": {
+                            "name": {
+                              "type": "text"
+                            },
+                            "sessionId": {
+                              "type": "text"
+                            }
+                          }
+                        },
+                        "title": {
+                          "type": "text"
+                        },
+                        "type": {
+                          "type": "text"
+                        }
+                      }
+                    },
+                    "id": {
+                      "type": "text"
+                    },
+                    "language": {
+                      "type": "text"
+                    },
+                    "timeFieldName": {
+                      "type": "text"
+                    },
+                    "title": {
+                      "type": "text"
+                    },
+                    "type": {
+                      "type": "text"
+                    }
+                  }
+                },
+                "language": {
+                  "type": "keyword"
+                },
+                "query": {
+                  "type": "keyword",
+                  "index": false
+                }
+              }
+            },
+            "timefilter": {
+              "type": "object",
+              "enabled": false
+            },
+            "title": {
+              "type": "text"
+            }
+          }
+        },
+        "references": {
+          "type": "nested",
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "type": {
+              "type": "keyword"
+            }
+          }
+        },
+        "sample-data-telemetry": {
+          "properties": {
+            "installCount": {
+              "type": "long"
+            },
+            "unInstallCount": {
+              "type": "long"
+            }
+          }
+        },
+        "search": {
+          "properties": {
+            "columns": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "description": {
+              "type": "text"
+            },
+            "hits": {
+              "type": "integer",
+              "index": false,
+              "doc_values": false
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "sort": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "title": {
+              "type": "text"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        },
+        "search-telemetry": {
+          "type": "object",
+          "dynamic": "false"
+        },
+        "tsvb-validation-telemetry": {
+          "properties": {
+            "failedRequests": {
+              "type": "long"
+            }
+          }
+        },
+        "type": {
+          "type": "keyword"
+        },
+        "ui-metric": {
+          "properties": {
+            "count": {
+              "type": "integer"
+            }
+          }
+        },
+        "updated_at": {
+          "type": "date"
+        },
+        "url": {
+          "properties": {
+            "accessCount": {
+              "type": "long"
+            },
+            "accessDate": {
+              "type": "date"
+            },
+            "createDate": {
+              "type": "date"
+            },
+            "url": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword",
+                  "ignore_above": 2048
+                }
+              }
+            }
+          }
+        },
+        "visualization": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "savedSearchRefName": {
+              "type": "keyword",
+              "index": false,
+              "doc_values": false
+            },
+            "title": {
+              "type": "text"
+            },
+            "uiStateJSON": {
+              "type": "text",
+              "index": false
+            },
+            "version": {
+              "type": "integer"
+            },
+            "visState": {
+              "type": "text",
+              "index": false
+            }
+          }
+        },
+        "visualization-visbuilder": {
+          "properties": {
+            "description": {
+              "type": "text"
+            },
+            "kibanaSavedObjectMeta": {
+              "properties": {
+                "searchSourceJSON": {
+                  "type": "text",
+                  "index": false
+                }
+              }
+            },
+            "styleState": {
+              "type": "text",
+              "index": false
+            },
+            "title": {
+              "type": "text"
+            },
+            "uiState": {
+              "type": "text",
+              "index": false
+            },
+            "version": {
+              "type": "integer"
+            },
+            "visualizationState": {
+              "type": "text",
+              "index": false
+            }
+          }
+        }
+      }
+    },
+    "settings": {
+      "number_of_shards": 1,
+      "auto_expand_replicas": "0-1"
+    }
+  },
+  "allowedTypes": [
+    "config",
+    "url",
+    "index-pattern",
+    "query",
+    "homepage",
+    "dashboard",
+    "visualization",
+    "augment-vis",
+    "visualization-visbuilder",
+    "map",
+    "observability-panel",
+    "integration-instance",
+    "integration-template",
+    "observability-visualization",
+    "observability-search",
+    "observability-notebook",
+    "search"
+  ],
+  "migrationVersions": {
+    "config": {
+      "config": "7.9.0"
+    },
+    "index-pattern": {
+      "index-pattern": "7.6.0"
+    },
+    "dashboard": {
+      "dashboard": "7.9.3"
+    },
+    "visualization": {
+      "visualization": "7.10.0"
+    },
+    "observability-panel": {
+      "observability-panel": "3.0.2"
+    },
+    "integration-template": {
+      "integration-template": "3.0.0"
+    },
+    "search": {
+      "search": "7.9.3"
+    }
+  },
+  "managementMeta": {
+    "config": {
+      "icon": "gear",
+      "inAppUrl": {
+        "path": "/app/management/opensearch-dashboards/settings",
+        "uiCapabilitiesPath": "advancedSettings.show"
+      },
+      "namespaceType": "single"
+    },
+    "url": {
+      "icon": "link",
+      "namespaceType": "single"
+    },
+    "index-pattern": {
+      "icon": "indexPatternApp",
+      "editUrl": "/management/opensearch-dashboards/indexPatterns/patterns/{id}",
+      "inAppUrl": {
+        "path": "/app/management/opensearch-dashboards/indexPatterns/patterns/{id}",
+        "uiCapabilitiesPath": "management.opensearchDashboards.indexPatterns"
+      },
+      "namespaceType": "single"
+    },
+    "query": {
+      "icon": "search",
+      "inAppUrl": {
+        "path": "/app/discover#/?_a=(savedQuery:'{id}')",
+        "uiCapabilitiesPath": "discover.show"
+      },
+      "namespaceType": "single"
+    },
+    "homepage": {
+      "icon": "home",
+      "editUrl": "/management/opensearch-dashboards/objects/savedHomepage/{id}",
+      "inAppUrl": {
+        "path": "/app/home",
+        "uiCapabilitiesPath": "home.show"
+      },
+      "namespaceType": "single"
+    },
+    "dashboard": {
+      "icon": "dashboardApp",
+      "editUrl": "/management/opensearch-dashboards/objects/savedDashboards/{id}",
+      "inAppUrl": {
+        "path": "/app/dashboards#/view/{id}",
+        "uiCapabilitiesPath": "dashboard.show"
+      },
+      "namespaceType": "single"
+    },
+    "visualization": {
+      "icon": "visualizeApp",
+      "editUrl": "/management/opensearch-dashboards/objects/savedVisualizations/{id}",
+      "inAppUrl": {
+        "path": "/app/visualize#/edit/{id}",
+        "uiCapabilitiesPath": "visualize.show"
+      },
+      "namespaceType": "single"
+    },
+    "augment-vis": {
+      "editUrl": "/management/opensearch-dashboards/objects/savedAugmentVis/{id}",
+      "namespaceType": "single"
+    },
+    "visualization-visbuilder": {
+      "editUrl": "/management/opensearch-dashboards/objects/savedVisBuilder/{id}",
+      "inAppUrl": {
+        "path": "/app/vis-builder/edit/{id}",
+        "uiCapabilitiesPath": "visualization-visbuilder.show"
+      },
+      "namespaceType": "single"
+    },
+    "map": {
+      "editUrl": "/management/opensearch-dashboards/objects/map/{id}",
+      "inAppUrl": {
+        "path": "/app/maps-dashboards#/{id}",
+        "uiCapabilitiesPath": "map.show"
+      },
+      "namespaceType": "agnostic"
+    },
+    "observability-panel": {
+      "inAppUrl": {
+        "path": "/app/observability-dashboards#/{id}",
+        "uiCapabilitiesPath": "advancedSettings.show"
+      },
+      "namespaceType": "single"
+    },
+    "integration-instance": {
+      "inAppUrl": {
+        "path": "/app/integrations#/installed/{id}",
+        "uiCapabilitiesPath": "advancedSettings.show"
+      },
+      "namespaceType": "single"
+    },
+    "integration-template": {
+      "inAppUrl": {
+        "path": "/app/integrations#/available/undefined",
+        "uiCapabilitiesPath": "advancedSettings.show"
+      },
+      "namespaceType": "single"
+    },
+    "observability-visualization": {
+      "icon": "visQueryPPL",
+      "inAppUrl": {
+        "path": "/app/observability-logs#/explorer/observability-visualization:{id}",
+        "uiCapabilitiesPath": "observability.show"
+      },
+      "namespaceType": "single"
+    },
+    "observability-search": {
+      "inAppUrl": {
+        "path": "/app/observability-logs#/explorer/observability-search:{id}",
+        "uiCapabilitiesPath": "observability.show"
+      },
+      "namespaceType": "single"
+    },
+    "observability-notebook": {
+      "icon": "notebookApp",
+      "inAppUrl": {
+        "path": "/app/observability-notebooks#/{id}?view=view_both",
+        "uiCapabilitiesPath": "observability.show"
+      },
+      "namespaceType": "single"
+    },
+    "search": {
+      "icon": "discoverApp",
+      "editUrl": "/management/opensearch-dashboards/objects/savedSearches/{id}",
+      "inAppUrl": {
+        "path": "/app/discover#/view/{id}",
+        "uiCapabilitiesPath": "discover.show"
+      },
+      "namespaceType": "single"
     }
   }
 }

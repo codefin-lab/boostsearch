@@ -3274,3 +3274,75 @@ solution cards. The requests it makes that we do not answer are
 Resident while serving: 6.1 MiB with the bundles handed out and not held.
 
 Gates: unit 138/138, fmt and clippy clean.
+
+### 13.3 — Saved objects
+
+An index pattern, a visualization, a dashboard: a document in the console's
+own index with an id of `{type}:{id}`, its attributes under a property named
+after its type, and a list of the other objects it points at. That last part
+is what makes a dashboard portable — it names the visualizations it shows by
+*reference* rather than by id, so an export can carry a dashboard and
+everything it draws and an import somewhere else can renumber all of it and
+still have it draw.
+
+Done: the store, the index migration, the whole API (get, create, update,
+delete, the three bulk routes, find with search, paging, sorting, field
+selection and `has_reference`), export and import including
+`_resolve_import_errors`, and the management routes the Saved Objects page
+calls — `_allowed_types`, `_find` with the per-type icon and edit URL,
+`relationships` in both directions, `scroll/counts` and `scroll/export`.
+
+Checked end to end: a dashboard pointing at a chart pointing at an index
+pattern, exported with everything it draws, all three deleted, imported back,
+and still pointing at each other.
+
+**The index migration.** `.kibana` is an alias and `.kibana_1` is what it
+points at. Making the next index, copying into it and moving the alias in one
+step is the whole of it — a reader is looking at the old index or the new one,
+never at neither and never at both. Two consoles starting at once is settled
+by the create: the engine lets exactly one of them make `.kibana_2`.
+
+Three things it learned the hard way:
+
+  - **A write may never be the thing that makes the console's index.** A write
+    through an alias that is not there has the engine make a plain index under
+    the alias's own name — the one arrangement a console cannot work in, since
+    nothing can put an alias over it afterwards. Every write says
+    `require_alias=true` now, and a write refused for that reason puts the
+    index right and tries again.
+  - **Something else may have made one anyway.** A restore, or a fixture
+    loaded for a test, writes `.kibana` directly. So a concrete index of that
+    name is adopted: copied into the next free `.kibana_N`, deleted, and the
+    alias put over where it went. Nothing is lost, which is checked.
+  - **Two indices under one alias is a state a console can reach and cannot
+    write through.** The first version of this removed the alias only from the
+    index it had read, and left it on both. Now it comes off all of them.
+
+**And a thing the plan did not name.** The index migration is the smaller
+half. The other half is that an object written by an *older* console is in a
+shape the current mapping refuses — a dashboard from before 7.3 carries
+`uiStateJSON`, and the copy fails with exactly that word. Putting it right
+means running that type's own migration chain over the document, and those are
+code rather than data: eight hundred lines for `visualization` alone, eleven
+versions of it. Unlike everything else in this contract they cannot be pinned
+from a running Dashboards.
+
+So it is now 13.3b in the plan, ten days, and the phase is forty-three rather
+than thirty-three. Until it is written a console reads and writes its own
+objects correctly and refuses an old one loudly, naming the field it could not
+carry. That refusal is why the suite's own fixtures — documents from
+Kibana 7.0 — do not load, and it is why the number below is what it is.
+
+Against `test/api_integration`: 25 of 166, where the reference scores 140.
+Almost all of the difference is fixtures that will not load until 13.3b, plus
+`index_patterns` and the search routes, which are 13.4. `tools/dashboards_check.py`
+passes four of six areas, including `relationships` — which the released
+Node server cannot answer at all, its own `.kibana` mapping not declaring
+`references` as nested.
+
+**A message that says nothing is worse than no message.** The migration's
+first failure came back as "the engine refused the request", which is true and
+useless. It now carries the method, the path and the engine's own reason,
+which is how `uiStateJSON` was found in one run rather than several.
+
+Gates: unit 143/143, fmt and clippy clean.

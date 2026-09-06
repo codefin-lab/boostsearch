@@ -249,6 +249,7 @@ mod tests {
             pinned,
             base_path: base_path.to_string(),
             overrides: Default::default(),
+            mapping: Default::default(),
             uuid: "test".into(),
             plugin_dirs: Default::default(),
         }

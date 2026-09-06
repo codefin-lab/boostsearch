@@ -24,6 +24,8 @@ pub struct Settings<'a> {
     version: &'a str,
     build_number: u64,
     overrides: &'a BTreeMap<String, Value>,
+    /// the shape the index should have, for putting it back
+    mapping: &'a Value,
 }
 
 impl<'a> Settings<'a> {
@@ -32,8 +34,9 @@ impl<'a> Settings<'a> {
         version: &'a str,
         build_number: u64,
         overrides: &'a BTreeMap<String, Value>,
+        mapping: &'a Value,
     ) -> Settings<'a> {
-        Settings { engine, version, build_number, overrides }
+        Settings { engine, version, build_number, overrides, mapping }
     }
 
     /// The document the settings live in: one per version, because a setting
@@ -86,22 +89,24 @@ impl<'a> Settings<'a> {
                 message: format!("Unable to update \"{key}\" because it is overridden"),
             });
         }
-        self.engine.ensure_index()?;
         let mut config = self.stored()?;
         config.insert("buildNum".into(), json!(self.build_number));
         for (key, value) in changes {
             config.insert(key.clone(), value.clone());
         }
-        self.engine.put(
-            &self.id(),
-            &json!({
+        // the same rule as every other write: a write may not be the thing
+        // that makes the console's index
+        let document = json!({
                 "config": config,
                 "type": "config",
                 "references": [],
                 "migrationVersion": {"config": "7.9.0"},
-                "updated_at": crate::console::now(),
-            }),
-        )?;
+            "updated_at": crate::console::now(),
+        });
+        if self.engine.put(&self.id(), &document).is_err() {
+            super::migrate::ensure(self.engine, self.mapping)?;
+            self.engine.put(&self.id(), &document)?;
+        }
         self.read()
     }
 
