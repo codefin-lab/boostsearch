@@ -243,7 +243,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
     // field cut into ngrams is found by the ngrams of `1234`
     let is_text = matches!(
         ctx.mapping.type_of(&field),
-        Some("text" | "match_only_text" | "search_as_you_type")
+        Some("text" | "match_only_text" | "search_as_you_type" | "annotated_text")
     );
     // non-string match on a numeric/keyword field falls back to an exact term
     if (view == View::Raw || !matches!(val, Value::String(_))) && !is_text {
@@ -750,12 +750,15 @@ pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     if edges.is_empty() {
         return Ok(Box::new(EmptyQuery));
     }
+    // A word and its synonyms are stacked in one place, and each of them is a
+    // clause of its own here rather than the place being one: `minimum_should_match`
+    // over `the fast lazy fox brown` counts six, not five, because `quick`
+    // stands beside `fast` and a document holding it holds one of the six.
+    // That is what makes the difference between `high_freq: 5` and
+    // `high_freq: 6` on the same query mean anything.
     let mut places: Vec<(usize, Vec<String>)> = Vec::new();
     for e in &edges {
-        match places.iter_mut().find(|(p, _)| *p == e.from) {
-            Some((_, words)) => words.push(e.text.clone()),
-            None => places.push((e.from, vec![e.text.clone()])),
-        }
+        places.push((e.from, vec![e.text.clone()]));
     }
     places.sort_by_key(|(p, _)| *p);
     let searcher = ctx.index.reader()?.searcher();
@@ -837,14 +840,20 @@ pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let low = operator("low_freq_operator");
     let high = operator("high_freq_operator");
     Ok(match (rare.is_empty(), common.is_empty()) {
-        // with no rare words at all, the common ones are the whole query,
-        // and the rare words' minimum is the one that applies to them
+        // With no rare words at all, the common ones are the whole query --
+        // and a query of nothing but common words asked for with `should` and
+        // no minimum would walk most of the index to rank documents that are
+        // all much the same. So every one of them is wanted instead. That is
+        // what Lucene's own common-terms query does, and it is why
+        // `the fast huge fox` finds the one document holding all four rather
+        // than the two holding most of them.
         (true, _) => {
-            let key = match opts.get("minimum_should_match") {
-                Some(Value::Object(o)) if o.get("high_freq").is_some() => "high_freq",
-                _ => "low_freq",
+            let min = msm_of("high_freq", common.len());
+            let occur = match (min, high) {
+                (0, Occur::Should) => Occur::Must,
+                _ => high,
             };
-            clauses_of(common, high, key)
+            clauses_of(common, occur, "high_freq")
         }
         (_, true) => clauses_of(rare, low, "low_freq"),
         _ => {

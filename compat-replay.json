@@ -1,0 +1,645 @@
+{
+ "same": 165,
+ "differ": 18,
+ "failed": 0,
+ "rows": [
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "query": {
+     "regexp": {
+      "tag": "a|b"
+     }
+    },
+    "size": 3,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -3,6 +3,5 @@\n",
+    "   \"1\",",
+    "-  \"2\",",
+    "   \"3\"",
+    "  ],",
+    "- \"total\": 3",
+    "+ \"total\": 2",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "query": {
+     "rank_feature": {
+      "field": "price"
+     }
+    },
+    "size": 3,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "status": [
+    400,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,4 +1,8 @@\n",
+    " {",
+    "- \"ids\": [],",
+    "- \"total\": null",
+    "+ \"ids\": [",
+    "+  \"1\",",
+    "+  \"2\",",
+    "+  \"3\"",
+    "+ ],",
+    "+ \"total\": 3",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "query": {
+     "wrapper": {
+      "query": "eyJ0ZXJtIjp7InRhZyI6ImEifX0="
+     }
+    },
+    "size": 3,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "status": [
+    200,
+    400
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,7 +1,4 @@\n",
+    " {",
+    "- \"ids\": [",
+    "-  \"1\",",
+    "-  \"3\"",
+    "- ],",
+    "- \"total\": 2",
+    "+ \"ids\": [],",
+    "+ \"total\": null",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "query": {
+     "percolate": {
+      "field": "query",
+      "document": {
+       "title": "quick"
+      }
+     }
+    },
+    "size": 3,
+    "sort": [
+     {
+      "n": "asc"
+     }
+    ]
+   },
+   "status": [
+    400,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -2,3 +2,3 @@\n",
+    "  \"ids\": [],",
+    "- \"total\": null",
+    "+ \"total\": 0",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "date_range": {
+       "field": "when",
+       "ranges": [
+        {
+         "to": "2025-01-01"
+        },
+        {
+         "from": "2025-01-01"
+        }
+       ]
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -7,3 +7,3 @@\n",
+    "      \"key\": \"*-2025-01-01T00:00:00.000Z\",",
+    "-     \"to\": 1735689600000.0,",
+    "+     \"to\": 1735689600000,",
+    "      \"to_as_string\": \"2025-01-01T00:00:00.000Z\"",
+    "@@ -12,3 +12,3 @@\n",
+    "      \"doc_count\": 2,",
+    "-     \"from\": 1735689600000.0,",
+    "+     \"from\": 1735689600000,",
+    "      \"from_as_string\": \"2025-01-01T00:00:00.000Z\","
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "sampler": {
+       "shard_size": 2
+      }
+     }
+    }
+   },
+   "status": [
+    500,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,4 +1,9 @@\n",
+    " {",
+    "+ \"aggregations\": {",
+    "+  \"probe\": {",
+    "+   \"doc_count\": 2",
+    "+  }",
+    "+ },",
+    "  \"ids\": [],",
+    "- \"total\": null",
+    "+ \"total\": 3",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "diversified_sampler": {
+       "field": "tag",
+       "shard_size": 2
+      }
+     }
+    }
+   },
+   "status": [
+    500,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,4 +1,9 @@\n",
+    " {",
+    "+ \"aggregations\": {",
+    "+  \"probe\": {",
+    "+   \"doc_count\": 2",
+    "+  }",
+    "+ },",
+    "  \"ids\": [],",
+    "- \"total\": null",
+    "+ \"total\": 3",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "significant_terms": {
+       "field": "tag"
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -3,3 +3,3 @@\n",
+    "   \"probe\": {",
+    "-   \"bg_count\": 7,",
+    "+   \"bg_count\": 3,",
+    "    \"buckets\": [],"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "auto_date_histogram": {
+       "field": "when",
+       "buckets": 2
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -5,8 +5,18 @@\n",
+    "     {",
+    "-     \"doc_count\": 3,",
+    "+     \"doc_count\": 1,",
+    "      \"key\": 1704067200000,",
+    "      \"key_as_string\": \"2024-01-01T00:00:00.000Z\"",
+    "+    },",
+    "+    {",
+    "+     \"doc_count\": 1,",
+    "+     \"key\": 1735689600000,",
+    "+     \"key_as_string\": \"2025-01-01T00:00:00.000Z\"",
+    "+    },",
+    "+    {",
+    "+     \"doc_count\": 1,",
+    "+     \"key\": 1767225600000,",
+    "+     \"key_as_string\": \"2026-01-01T00:00:00.000Z\"",
+    "     }",
+    "    ],",
+    "-   \"interval\": \"5y\"",
+    "+   \"interval\": \"1y\"",
+    "   }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "probe": {
+      "geohash_grid": {
+       "field": "loc",
+       "precision": 3
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -6,3 +6,3 @@\n",
+    "      \"doc_count\": 1,",
+    "-     \"key\": \"w4r\"",
+    "+     \"key\": \"gcp\"",
+    "     },",
+    "@@ -14,3 +14,3 @@\n",
+    "      \"doc_count\": 1,",
+    "-     \"key\": \"gcp\"",
+    "+     \"key\": \"w4r\"",
+    "     }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "size": 0,
+    "aggs": {
+     "per": {
+      "date_histogram": {
+       "field": "when",
+       "calendar_interval": "year"
+      },
+      "aggs": {
+       "total": {
+        "sum": {
+         "field": "price"
+        }
+       }
+      }
+     },
+     "sum_total": {
+      "sum_bucket": {
+       "buckets_path": "per>total"
+      }
+     },
+     "max_total": {
+      "max_bucket": {
+       "buckets_path": "per>total"
+      }
+     },
+     "avg_total": {
+      "avg_bucket": {
+       "buckets_path": "per>total"
+      }
+     },
+     "stats_total": {
+      "stats_bucket": {
+       "buckets_path": "per>total"
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -7,3 +7,3 @@\n",
+    "    \"keys\": [",
+    "-    \"2025-01-01T00:00:00.000Z\"",
+    "+    \"1735689600000\"",
+    "    ],"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "suggest": {
+     "s": {
+      "text": "quik",
+      "term": {
+       "field": "title"
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,3 +1,7 @@\n",
+    " {",
+    "- \"ids\": [],",
+    "+ \"ids\": [",
+    "+  \"1\",",
+    "+  \"2\",",
+    "+  \"3\"",
+    "+ ],",
+    "  \"suggest\": {",
+    "@@ -9,4 +13,4 @@\n",
+    "      {",
+    "-      \"freq\": 2,",
+    "-      \"score\": 0.75,",
+    "+      \"freq\": 1,",
+    "+      \"score\": 0.9,",
+    "       \"text\": \"quick\"",
+    "@@ -18,3 +22,3 @@\n",
+    "  },",
+    "- \"total\": 0",
+    "+ \"total\": 3",
+    " }"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_search",
+   "body": {
+    "query": {
+     "match_all": {}
+    },
+    "aggs": {
+     "t": {
+      "terms": {
+       "field": "tag",
+       "order": {
+        "p": "desc"
+       }
+      },
+      "aggs": {
+       "p": {
+        "avg": {
+         "field": "price"
+        }
+       }
+      }
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -19,3 +19,2 @@\n",
+    "    ],",
+    "-   \"doc_count_error_upper_bound\": 0,",
+    "    \"sum_other_doc_count\": 0"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/compat/_mapping",
+   "body": null,
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -12,2 +12,10 @@\n",
+    "     \"loc\": {",
+    "+     \"properties\": {",
+    "+      \"lat\": {",
+    "+       \"type\": \"float\"",
+    "+      },",
+    "+      \"lon\": {",
+    "+       \"type\": \"float\"",
+    "+      }",
+    "+     },",
+    "      \"type\": \"geo_point\"",
+    "@@ -35,2 +43,10 @@\n",
+    "     \"span\": {",
+    "+     \"properties\": {",
+    "+      \"gte\": {",
+    "+       \"type\": \"date\"",
+    "+      },",
+    "+      \"lte\": {",
+    "+       \"type\": \"date\"",
+    "+      }",
+    "+     },",
+    "      \"type\": \"date_range\""
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/compat/_settings",
+   "body": null,
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -16,3 +16,3 @@\n",
+    "     },",
+    "-    \"creation_date\": \"1788696754967\",",
+    "+    \"creation_date\": \"1788696755026\",",
+    "     \"number_of_replicas\": \"0\","
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_field_caps?fields=*",
+   "body": null,
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -79,2 +79,16 @@\n",
+    "   },",
+    "+  \"loc.lat\": {",
+    "+   \"float\": {",
+    "+    \"aggregatable\": true,",
+    "+    \"searchable\": true,",
+    "+    \"type\": \"float\"",
+    "+   }",
+    "+  },",
+    "+  \"loc.lon\": {",
+    "+   \"float\": {",
+    "+    \"aggregatable\": true,",
+    "+    \"searchable\": true,",
+    "+    \"type\": \"float\"",
+    "+   }",
+    "+  },",
+    "   \"n\": {",
+    "@@ -128,2 +142,16 @@\n",
+    "   },",
+    "+  \"span.gte\": {",
+    "+   \"date\": {",
+    "+    \"aggregatable\": true,",
+    "+    \"searchable\": true,",
+    "+    \"type\": \"date\"",
+    "+   }",
+    "+  },",
+    "+  \"span.lte\": {",
+    "+   \"date\": {",
+    "+    \"aggregatable\": true,",
+    "+    \"searchable\": true,",
+    "+    \"type\": \"date\"",
+    "+   }",
+    "+  },",
+    "   \"tag\": {"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_delete_by_query",
+   "body": {
+    "query": {
+     "term": {
+      "tag": "zzz"
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,3 +1,4 @@\n",
+    " {",
+    "- \"batches\": 0,",
+    "+ \"batches\": 1,",
+    "+ \"created\": 0,",
+    "  \"deleted\": 0,",
+    "@@ -13,2 +14,3 @@\n",
+    "  \"total\": 0,",
+    "+ \"updated\": 0,",
+    "  \"version_conflicts\": 0"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/compat/_update_by_query",
+   "body": {
+    "query": {
+     "term": {
+      "tag": "zzz"
+     }
+    }
+   },
+   "status": [
+    200,
+    200
+   ],
+   "diff": [
+    "--- opensearch\n",
+    "+++ boostsearch\n",
+    "@@ -1,3 +1,4 @@\n",
+    " {",
+    "- \"batches\": 0,",
+    "+ \"batches\": 1,",
+    "+ \"created\": 0,",
+    "  \"deleted\": 0,"
+   ]
+  }
+ ]
+}

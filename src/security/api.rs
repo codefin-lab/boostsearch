@@ -243,9 +243,7 @@ fn put_entry(
         "internalusers" => {
             let mut u = InternalUser::from_json(body);
             if let Some(p) = body.get("password").and_then(|p| p.as_str()) {
-                if let Err(r) = validate_password(name, p) {
-                    return Err(r);
-                }
+                validate_password(name, p)?;
                 u.hash = hash_password(p);
             } else if u.hash.is_empty() {
                 // an existing user keeps their hash when neither is given
@@ -272,10 +270,10 @@ fn put_entry(
         "roles" => {
             let r = Role::from_json(body);
             for ip in &r.index_permissions {
-                if let Some(dls) = &ip.dls {
-                    if serde_json::from_str::<Value>(dls).is_err() {
-                        return Err(bad_request(format!("Invalid DLS query: {dls}")));
-                    }
+                if let Some(dls) = &ip.dls
+                    && serde_json::from_str::<Value>(dls).is_err()
+                {
+                    return Err(bad_request(format!("Invalid DLS query: {dls}")));
                 }
             }
             cfg.roles.insert(name.to_string(), r);

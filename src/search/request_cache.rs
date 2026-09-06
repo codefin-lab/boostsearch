@@ -121,9 +121,7 @@ pub fn cacheable(store: &Store, targets: &[String], body: &Value, p: &crate::api
     // `pre_filter_shard_size` asks which shards could be skipped, and the
     // answer says how many were: a remembered one would report the skipping
     // that a previous request did rather than this one
-    if p.contains_key("pre_filter_shard_size")
-        || body.get("pre_filter_shard_size").is_some()
-    {
+    if p.contains_key("pre_filter_shard_size") || body.get("pre_filter_shard_size").is_some() {
         return false;
     }
     if p.get("request_cache").map(|v| v == "false").unwrap_or(false) {
@@ -158,7 +156,13 @@ pub fn cacheable(store: &Store, targets: &[String], body: &Value, p: &crate::api
 /// The generation numbers are what make an entry go stale: every write and
 /// every refresh moves the index's number on, so an answer from before it can
 /// never be found again.
-pub fn key(store: &Store, expr: &str, targets: &[String], body: &Value, p: &crate::api::Params) -> String {
+pub fn key(
+    store: &Store,
+    expr: &str,
+    targets: &[String],
+    body: &Value,
+    p: &crate::api::Params,
+) -> String {
     let mut parts = vec![format!("{expr}\u{1}")];
     for name in targets {
         let generation = store.get(name).map(|st| st.read().generation()).unwrap_or(0);

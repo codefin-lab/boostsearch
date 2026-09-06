@@ -2,50 +2,50 @@
 
 [![ci](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml)
 
-An OpenSearch-compatible search server written in Rust, on top of
+A drop-in replacement for OpenSearch, written in Rust, on top of
 [BoostCore](https://github.com/codefin-lab/boostcore) (a fork of tantivy).
 
-It speaks the OpenSearch REST API — the same requests, the same JSON back — and
-is checked against OpenSearch's own conformance suite rather than against a
-description of it.
-
-## The dictionaries
-
-Japanese, Korean and Chinese are read with a dictionary rather than split on
-spaces, and those dictionaries are built into the binary the way OpenSearch's
-kuromoji, nori and smartcn plugins carry theirs. They are most of what the
-binary weighs -- 170 MB with them, 20 MB without:
-
-```bash
-cargo build --release --no-default-features
-```
-
-A build without them answers everything else the same way; the three analyzers
-that need them find no words.
+It speaks the OpenSearch REST API — the same requests, the same JSON back, the
+same words in its errors — and is checked against OpenSearch's own conformance
+suite and against a running OpenSearch, rather than against a description of
+either.
 
 ## Where it stands
 
-Run against the YAML tests in OpenSearch's `rest-api-spec`, all 409 files --
-on every push, in both storage modes, on GitHub's runners rather than only
-here:
+Everything below is produced by a script in `tools/`, so it can be checked
+rather than believed.
+
+| | | how |
+|---|---|---|
+| OpenSearch's core suite | **1,100 of 1,100** not skipped (75 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
+| its module and plugin suites | **880 of 890**, 4 skipped | `tools/module_gate.py` |
+| the same answer as OpenSearch 3.1.0 | **165 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
+| REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
+| the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
+
+The ten sections that do not pass are named, with the reason, in
+`docs/progress.md`; five more are set aside as tests of the test framework
+rather than of a server, and `tools/module_gate.py` prints those and why on
+every run.
+
+## What it does
 
 | | |
 |---|---|
-| sections passed | **1,427 of 1,427** (100%) |
-| skipped | 77 (features the suite itself marks as not applicable) |
+| **Search** | every query the suite names, aggregations, sorting, highlighting, collapse, nested and parent-join, point-in-time, search templates, `rank_eval`, suggesters, profiling |
+| **Writing** | documents, bulk, update, `_update_by_query`, `_delete_by_query`, `_reindex` including from another cluster over HTTP |
+| **Analysis** | the built-in analyzers token for token, ICU, Japanese, Korean and Chinese by dictionary, phonetic and phone-number filters, Thai segmentation |
+| **Scripting** | Painless — lexer, parser and evaluator — in every context the suite uses, plus Lucene expressions and Mustache |
+| **Ingest** | the thirty processors the corpus names, grok and dissect, geoip, user-agent, attachment extraction, and search pipelines |
+| **Cluster** | consensus, allocation, replication, peer recovery, cross-node search; checked in a seeded simulation and against real nodes with real partitions |
+| **Security** | TLS, users and roles, API keys, document- and field-level security inside the query rather than in front of it, SAML, OIDC, LDAP, the audit log |
+| **Snapshots** | filesystem, URL, S3, Google Cloud Storage and Azure repositories |
+| **Index management** | ISM policies, transitions, rollover, snapshot management |
+| **Vector search** | six distance spaces, exact and HNSW, filtered search, the k-NN API |
+| **SQL and PPL** | both languages, in jdbc, json, csv, raw and table shapes |
 
-Measured against OpenSearch 3.1.0 in the same Docker VM, same corpus (200k
-http-log documents), same query mix, five runs a side, median:
-
-| | BoostSearch | OpenSearch 3.1.0 | |
-|---|---:|---:|---|
-| index docs/s | **102,366** | 72,704 | 1.41x |
-| memory (MB) | **257** | 1,112 | 4.3x |
-| qps (c=1) | **526** | 381 | 1.38x |
-| p50 (c=1) | **1.84 ms** | 2.46 ms | 1.34x |
-| qps (c=8) | **1,871** | 1,622 | 1.15x |
-
-See `docs/opensearch-comparison.md` for how that was measured.
+`_cat/plugins` lists what it answers for, because a client asking whether it
+may use `icu_tokenizer` deserves a true answer.
 
 ## Running it
 
@@ -54,13 +54,62 @@ cargo build --release
 ./target/release/boostsearch
 ```
 
-It listens on `127.0.0.1:9200`. Two environment variables matter:
+It listens on `127.0.0.1:9200`. In Docker:
+
+```bash
+docker build -t boostsearch .
+docker run -p 9200:9200 -v boostsearch-data:/var/lib/boostsearch boostsearch
+```
+
+The settings that matter most:
 
 | | |
 |---|---|
 | `BOOSTSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
-| `BOOSTSEARCH_DATA` | a directory to keep indices in, mmapped and surviving a restart; unset keeps everything in RAM |
-| `BOOSTSEARCH_PATH_REPO` | where snapshot repositories may live (default `<data>/repo`) |
+| `BOOSTSEARCH_DATA` | where indices live, mmapped and surviving a restart; unset keeps everything in RAM |
+| `BOOSTSEARCH_CONFIG` | where `boostsearch.yml` and the plugins' data directories live |
+| `BOOSTSEARCH_PATH_REPO` | where filesystem snapshot repositories may live (default `<data>/repo`) |
+
+Everything else is a setting in `config/boostsearch.yml`, spelled the way
+OpenSearch spells it, and readable from the environment as
+`BOOSTSEARCH_` + the dotted name upper-cased. `docs/settings.md` lists them.
+
+## The dictionaries
+
+Japanese, Korean and Chinese are read with a dictionary rather than split on
+spaces, and those dictionaries are built into the binary the way OpenSearch's
+kuromoji, nori and smartcn plugins carry theirs. They are most of what the
+binary weighs — 188 MB with them, 20 MB without:
+
+```bash
+cargo build --release --no-default-features
+```
+
+A build without them answers everything else the same way; the three analyzers
+that need them find no words.
+
+Three more sets of data are **not** vendored, because they are somebody else's
+to redistribute: the MaxMind GeoLite2 databases (`docs/geoip.md`), the
+Beider-Morse rule files for the phonetic filter (`docs/phonetic.md`), and the
+Polish and Ukrainian stemmers' dictionaries. Without them those filters say so
+rather than guessing.
+
+## Replacing an OpenSearch you already run
+
+`docs/upgrading.md` is the procedure. In short:
+
+```bash
+# what your cluster actually uses, and whether this answers all of it
+python3 tools/compat_audit.py inventory --cluster $OPENSEARCH --engine $BOOSTSEARCH
+
+# the same requests to both, compared answer by answer
+python3 tools/compat_audit.py corpus
+python3 tools/compat_audit.py replay --requests compat-corpus.ndjson \
+    --a $OPENSEARCH --b $BOOSTSEARCH --scores
+```
+
+The first says whether anything your indices use is unanswered. The second
+asks both engines the same 183 requests and diffs the JSON.
 
 ## Running the conformance suite
 
@@ -70,79 +119,47 @@ The suite is OpenSearch's own, so it has to be fetched:
 git clone --depth 1 https://github.com/opensearch-project/OpenSearch study/OpenSearch
 ```
 
-Then, with the server running:
+Then start the node the suites expect and run them:
 
 ```bash
-BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &
-python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json
+tools/gate_node.sh &
+python3 tools/yaml_runner.py --url http://127.0.0.1:9213 --manifest tools/phase3_manifest.json
 ```
 
-`BOOSTSEARCH_NODE_ATTRS` stands in for the `node.attr.testattr=test` the suite's
-own cluster is started with. A full run takes about ten seconds.
+`tools/gate_node.sh` is the one way to start it: the suites read back a node
+attribute, the geoip databases, the phonetic rules, where a URL repository may
+be read from and which clusters a reindex may read from, and a node started
+without those fails sections that have nothing wrong with them.
+
+The module suites need a second node with no ingest role, because one of them
+is written against a cluster that has none — `tools/module_gate.py` runs both
+passes and adds them up.
 
 ## What it is not
 
-Checked by running it, not by reading it:
-
-- **Not a cluster.** One node, one process. Shards are modelled so routing and
-  reporting match OpenSearch, but there is no replication, no failover and no
-  discovery. `number_of_replicas` is accepted and does nothing.
-- **No authentication and no TLS.** It listens on `127.0.0.1` unless told
-  otherwise, and it should stay somewhere only trusted callers can reach.
-- **Snapshots copy documents, not segments.** An `fs` repository holds each
-  index's mapping, settings and documents as they were written, so a restore
-  re-indexes rather than reopening someone else's files -- slower to restore,
-  and indifferent to which version of the engine wrote it. Verified by losing
-  the whole data directory and getting the index back from the repository
-  alone. Repositories of any other type are registered and answered for, and
-  hold nothing. A location is a name under `BOOSTSEARCH_PATH_REPO` (by default
-  `<data>/repo`); one that tries to climb out of it is refused.
-- **Durability is per index, not per cluster.** A write is recorded in a
-  translog and fsynced before it is answered, so `kill -9` loses nothing that
-  was acknowledged — verified, including a bulk of 5,000 that had never been
-  refreshed. What that does not buy you is a second copy: one disk, one node.
-  `index.translog.durability: async` trades the guarantee for latency, as it
-  does in OpenSearch. In RAM mode (`BOOSTSEARCH_DATA` unset) nothing is
-  written down at all, by design.
-- **Some endpoints are not there**: `_update_by_query`, `_delete_by_query`,
-  point-in-time, stored scripts, `_reindex`, `_sql`. They answer 501 rather
-  than pretending. There is no scripting language.
-
-What it costs, measured on this laptop:
-
-| | |
-|---|---|
-| write, no refresh, in RAM | 0.34 ms |
-| write, no refresh, on disk | 2.5 ms — the translog fsync it is answered for |
-| the same with `translog.durability: async` | 1.2 ms |
-| write with `refresh=true`, on disk | 83 ms — a refresh here is a commit, and a commit is an fsync |
-| write with `refresh=true`, in RAM | 1.3 ms |
-| bulk indexing, on disk | 62,000 docs/s (81,000 with no translog to write) |
-| snapshot of 200k documents | 0.3 s, 69 MB |
-| restoring them | 2.6 s |
-| search | 0.7 ms |
-| resident memory per index being written | ~5 MB, given back 30 s after the last write, though the allocator keeps the pages |
-| request body ceiling | 100 MB (`BOOSTSEARCH_MAX_CONTENT_MB`) |
-
-The conformance suite passes in both storage modes; a restart keeps documents,
-mappings, sort values and aggregations; 24 concurrent clients writing,
-deleting, refreshing and searching for 40 seconds produced no 5xx and no
-panic; malformed, deeply nested and hostile requests are answered with 4xx
-rather than a dropped connection.
+- **Not an OpenSearch product**, and not endorsed by the OpenSearch project. It
+  implements the same HTTP API and says so.
+- **Not the console.** OpenSearch Dashboards' Node server is Phase 13 and is
+  not written yet; the browser application it serves is left alone.
+- **Not tested at every scale.** The cluster is checked in simulation across
+  ten thousand seeds and on real nodes with real partitions, and the bench
+  matrix is measured on a developer machine. Numbers from hardware a release
+  would be cut on are not in yet, and `docs/progress.md` says so.
 
 ## How it is built
 
-- one tantivy — BoostCore — index per index, documents stored whole in one JSON
-  field, in two views: tokenized for `match`, untouched for `term`
-- aggregations BoostCore can parse run inside it; the rest are "peeled" off the
+- one BoostCore index per index, documents stored whole and written into views:
+  tokenized for `match`, untouched for `term`, and a third for `fielddata`
+- aggregations BoostCore can parse run inside it; the rest are peeled off the
   request and computed a bucket at a time through the ordinary query path
 - dates are numbers, the way OpenSearch stores them: milliseconds for a `date`,
   nanoseconds for a `date_nanos`
-- shards are modelled, not distributed: routing hashes the way
-  `Murmur3HashFunction` does, so a document lands on the shard OpenSearch would
-  put it on
+- routing hashes the way `Murmur3HashFunction` does, so a document lands on the
+  shard OpenSearch would put it on
 
-`docs/` carries the working notes, including what is left and why.
+`docs/adr/` records the decisions that were hard to reverse and why. `docs/progress.md`
+is the working ledger: every task, what it took, and what was got wrong on the
+way.
 
 ## Licence
 
@@ -154,20 +171,8 @@ Dual licensed under either of
 at your option. Unless you say otherwise, any contribution you send in is
 licensed the same way, with no further conditions.
 
-BoostCore, the engine underneath, is MIT, as the tantivy it forked is.
-
-This is not an OpenSearch product and is not endorsed by the OpenSearch
-project; it implements the same HTTP API, and says so.
-
-## BoostCore
-
-The engine is a dependency, pinned to a commit of
-[codefin-lab/boostcore](https://github.com/codefin-lab/boostcore).
-`docs/boostcore.md` says what the fork changes and how to work on both at once.
-
-## What else is in here
-
-The Snowball stemmers for Catalan, Basque, Irish, Lithuanian, Estonian and
+BoostCore, the engine underneath, is MIT, as the tantivy it forked is. The
+Snowball stemmers for Catalan, Basque, Irish, Lithuanian, Estonian and
 Armenian, and the original Porter algorithm, are generated from the Snowball
-project's own definitions by its compiler, and are used under the BSD
-3-clause licence in `LICENSE-SNOWBALL`.
+project's own definitions by its compiler and used under the BSD 3-clause
+licence in `LICENSE-SNOWBALL`.

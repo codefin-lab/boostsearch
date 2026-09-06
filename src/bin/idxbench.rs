@@ -60,7 +60,8 @@ fn main() -> anyhow::Result<()> {
         t_serialize += t.elapsed();
 
         let t = Instant::now();
-        let d = boostsearch::store::make_doc(&g.fields, &g.mapping, &id, doc.clone(), &raw, i as u64);
+        let d =
+            boostsearch::store::make_doc(&g.fields, &g.mapping, &id, doc.clone(), &raw, i as u64);
         t_makedoc += t.elapsed();
 
         let t = Instant::now();

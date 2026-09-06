@@ -18,7 +18,9 @@ pub fn url_of(repo: &Value) -> Option<String> {
     if repo.get("type").and_then(|t| t.as_str()) != Some("url") {
         return None;
     }
-    repo.pointer("/settings/url").and_then(|v| v.as_str()).map(|s| s.trim_end_matches('/').to_string())
+    repo.pointer("/settings/url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_end_matches('/').to_string())
 }
 
 /// Whether a URL is one this cluster is willing to read.

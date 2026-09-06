@@ -323,11 +323,7 @@ pub(crate) fn json_mapping_type(v: &Value) -> &'static str {
             // a new field is a date only when it reads as one of the formats
             // the dynamic mapping tries, not because some parser can make
             // sense of it
-            if crate::store::looks_like_dynamic_date(s) {
-                "date"
-            } else {
-                "string"
-            }
+            if crate::store::looks_like_dynamic_date(s) { "date" } else { "string" }
         }
         Value::Array(a) => a.first().map(json_mapping_type).unwrap_or("string"),
         Value::Null => "string",

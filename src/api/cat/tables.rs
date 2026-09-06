@@ -50,7 +50,9 @@ pub async fn cat_segments(
     let at = |r: &Vec<(&str, String)>, k: &str| {
         r.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()).unwrap_or_default()
     };
-    rows.sort_by(|a, b| at(a, "index").cmp(&at(b, "index")).then(at(a, "segment").cmp(&at(b, "segment"))));
+    rows.sort_by(|a, b| {
+        at(a, "index").cmp(&at(b, "index")).then(at(a, "segment").cmp(&at(b, "segment")))
+    });
     let rows = cat_only_default(
         rows,
         &[
@@ -128,18 +130,15 @@ pub async fn cat_indices(
     let clustered = published.nodes.len() > 1;
     let me = crate::cluster::identity().id.clone();
     let primary_here = |n: &str| {
-        published
-            .routing
-            .shards_of(n)
-            .any(|c| {
-                c.primary
-                    && c.node.as_ref() == Some(&me)
-                    && matches!(
-                        c.state,
-                        crate::cluster::state::ShardState::Started
-                            | crate::cluster::state::ShardState::Relocating
-                    )
-            })
+        published.routing.shards_of(n).any(|c| {
+            c.primary
+                && c.node.as_ref() == Some(&me)
+                && matches!(
+                    c.state,
+                    crate::cluster::state::ShardState::Started
+                        | crate::cluster::state::ShardState::Relocating
+                )
+        })
     };
     let held_somewhere = |n: &str| {
         published.routing.shards_of(n).any(|c| {
@@ -406,8 +405,11 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
         ("analysis-stempel", "The Stempel (Polish) analysis plugin"),
         ("analysis-ukrainian", "The Ukrainian analysis plugin"),
         ("ingest-user-agent", "Ingest processor that parses user agent strings"),
-        ("ingest-geoip", "Ingest processor that adds information about the geographical \
-                          location of ip addresses"),
+        (
+            "ingest-geoip",
+            "Ingest processor that adds information about the geographical \
+                          location of ip addresses",
+        ),
         ("lang-painless", "An easy, safe and fast scripting language for OpenSearch"),
         ("lang-expression", "Lucene expressions integration for OpenSearch"),
         ("lang-mustache", "Mustache scripting integration for OpenSearch"),
@@ -415,10 +417,16 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
         ("opensearch-knn", "OpenSearch k-NN plugin"),
         ("opensearch-security", "Provide access control related features for OpenSearch"),
         ("opensearch-sql", "OpenSearch SQL"),
-        ("repository-azure", "The Azure Repository plugin adds support for Azure storage \
-                             repositories"),
-        ("repository-gcs", "The GCS repository plugin adds Google Cloud Storage support for \
-                           repositories"),
+        (
+            "repository-azure",
+            "The Azure Repository plugin adds support for Azure storage \
+                             repositories",
+        ),
+        (
+            "repository-gcs",
+            "The GCS repository plugin adds Google Cloud Storage support for \
+                           repositories",
+        ),
         ("repository-s3", "The S3 repository plugin adds S3 repositories"),
     ];
     let rows: Vec<Vec<(&str, String)>> = built_in

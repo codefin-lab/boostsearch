@@ -174,10 +174,8 @@ fn check(spec: &Spec, _which: &str) -> Result<(), PipelineError> {
                 )));
             }
         }
-        "collapse" => {
-            if spec.config.get("field").is_none() {
-                return Err(missing("field"));
-            }
+        "collapse" if spec.config.get("field").is_none() => {
+            return Err(missing("field"));
         }
         _ => {}
     }

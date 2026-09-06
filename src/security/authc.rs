@@ -314,9 +314,13 @@ fn ldap_settings(c: &Value) -> LdapSettings {
     }
 }
 
-fn jwt_common(
-    c: &Value,
-) -> (String, Option<String>, Option<String>, Vec<String>, Vec<String>, Option<String>, u64) {
+/// The settings every JWT-shaped authenticator shares: where the token is
+/// carried, which claim names the subject, which name the roles and which
+/// audiences are required, and how much clock skew is forgiven.
+type JwtCommon =
+    (String, Option<String>, Option<String>, Vec<String>, Vec<String>, Option<String>, u64);
+
+fn jwt_common(c: &Value) -> JwtCommon {
     (
         text(c.get("jwt_header")).unwrap_or_else(|| "Authorization".into()),
         text(c.get("jwt_url_parameter")).filter(|s| !s.is_empty()),
@@ -613,10 +617,10 @@ fn jwt_validation(
 impl JwtSettings {
     fn token(&self, p: &Presented<'_>) -> Option<String> {
         let mut token = p.header(&self.header);
-        if let Some(param) = &self.url_parameter {
-            if token.is_none() {
-                token = p.param(param);
-            }
+        if let Some(param) = &self.url_parameter
+            && token.is_none()
+        {
+            token = p.param(param);
         }
         let token = token?;
         let t = bearer_token(&token);
@@ -660,10 +664,10 @@ impl JwtSettings {
 impl OpenIdSettings {
     fn token(&self, p: &Presented<'_>) -> Option<String> {
         let mut token = p.header(&self.header);
-        if let Some(param) = &self.url_parameter {
-            if token.is_none() {
-                token = p.param(param);
-            }
+        if let Some(param) = &self.url_parameter
+            && token.is_none()
+        {
+            token = p.param(param);
         }
         let t = bearer_token(&token?);
         if t.is_empty() { None } else { Some(t) }
@@ -889,10 +893,10 @@ fn dn_attribute(dn: &str, attribute: &str) -> Vec<String> {
     let mut out = Vec::new();
     for rdn in dn.split(',') {
         for part in rdn.split('+') {
-            if let Some((k, v)) = part.split_once('=') {
-                if k.trim().eq_ignore_ascii_case(attribute) {
-                    out.push(v.trim().to_string());
-                }
+            if let Some((k, v)) = part.split_once('=')
+                && k.trim().eq_ignore_ascii_case(attribute)
+            {
+                out.push(v.trim().to_string());
             }
         }
     }
@@ -1015,11 +1019,8 @@ impl LdapSettings {
         }
         let (conn, mut ldap) = ldap3::LdapConnAsync::with_settings(settings, &url).await.ok()?;
         ldap3::drive!(conn);
-        match (&self.bind_dn, &self.password) {
-            (Some(dn), Some(pw)) => {
-                ldap.simple_bind(dn, pw).await.ok()?.success().ok()?;
-            }
-            _ => {}
+        if let (Some(dn), Some(pw)) = (&self.bind_dn, &self.password) {
+            ldap.simple_bind(dn, pw).await.ok()?.success().ok()?;
         }
         Some(ldap)
     }
@@ -1138,16 +1139,15 @@ impl LdapSettings {
             let filter = fill(&self.rolesearch, &user_dn, name, &two);
             if let Ok(res) =
                 ldap.search(&self.rolebase, ldap3::Scope::Subtree, &filter, vec!["*"]).await
+                && let Ok((rs, _)) = res.success()
             {
-                if let Ok((rs, _)) = res.success() {
-                    for r in rs {
-                        let e = ldap3::SearchEntry::construct(r);
-                        if !role_dns.contains(&e.dn) {
-                            role_dns.push(e.dn.clone());
-                        }
-                        if let Some(n) = self.role_name_of(&e) {
-                            out.push(n);
-                        }
+                for r in rs {
+                    let e = ldap3::SearchEntry::construct(r);
+                    if !role_dns.contains(&e.dn) {
+                        role_dns.push(e.dn.clone());
+                    }
+                    if let Some(n) = self.role_name_of(&e) {
+                        out.push(n);
                     }
                 }
             }
@@ -1163,18 +1163,12 @@ impl LdapSettings {
                     // a DN from the user's entry: its name is read from the entry
                     if let Ok(res) =
                         ldap.search(dn, ldap3::Scope::Base, "(objectClass=*)", vec!["*"]).await
+                        && let Ok((rs, _)) = res.success()
+                        && let Some(e) = rs.into_iter().next().map(ldap3::SearchEntry::construct)
+                        && let Some(n) = self.role_name_of(&e)
+                        && !out.contains(&n)
                     {
-                        if let Ok((rs, _)) = res.success() {
-                            if let Some(e) =
-                                rs.into_iter().next().map(ldap3::SearchEntry::construct)
-                            {
-                                if let Some(n) = self.role_name_of(&e) {
-                                    if !out.contains(&n) {
-                                        out.push(n);
-                                    }
-                                }
-                            }
-                        }
+                        out.push(n);
                     }
                 } else if self.rolename.eq_ignore_ascii_case("dn") && !out.contains(dn) {
                     out.push(dn.clone());
@@ -1183,29 +1177,26 @@ impl LdapSettings {
                     && depth < self.max_nested_depth
                     && !self.rolebase.is_empty()
                 {
-                    let filter = if self.nested_role_filter.is_empty() {
-                        fill(&self.rolesearch, dn, name, "")
-                    } else {
-                        fill(&self.rolesearch, dn, name, "")
-                    };
+                    // the same search either way: `nested_role_filter` names
+                    // the DNs whose roles are not followed, and it is applied
+                    // to what comes back rather than to what is asked for
+                    let filter = fill(&self.rolesearch, dn, name, "");
                     if let Ok(res) =
                         ldap.search(&self.rolebase, ldap3::Scope::Subtree, &filter, vec!["*"]).await
+                        && let Ok((rs, _)) = res.success()
                     {
-                        if let Ok((rs, _)) = res.success() {
-                            for r in rs {
-                                let e = ldap3::SearchEntry::construct(r);
-                                if self.nested_role_filter.iter().any(|p| pattern_matches(p, &e.dn))
+                        for r in rs {
+                            let e = ldap3::SearchEntry::construct(r);
+                            if self.nested_role_filter.iter().any(|p| pattern_matches(p, &e.dn)) {
+                                continue;
+                            }
+                            if seen.insert(e.dn.clone()) {
+                                if let Some(n) = self.role_name_of(&e)
+                                    && !out.contains(&n)
                                 {
-                                    continue;
+                                    out.push(n);
                                 }
-                                if seen.insert(e.dn.clone()) {
-                                    if let Some(n) = self.role_name_of(&e) {
-                                        if !out.contains(&n) {
-                                            out.push(n);
-                                        }
-                                    }
-                                    next.push(e.dn.clone());
-                                }
+                                next.push(e.dn.clone());
                             }
                         }
                     }

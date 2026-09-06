@@ -176,19 +176,15 @@ impl TcpTransport {
         // reader
         let me = self.clone();
         let reader = async move {
-            loop {
-                match read_frame(&mut rd).await {
-                    Ok(env) => {
-                        // a partition made real: a frame from a cut peer is lost
-                        // on the wire, and the connection stays as it would
-                        if me.is_cut(&env.from) {
-                            continue;
-                        }
-                        if let Some(h) = me.handler.read().clone() {
-                            h.handle(env);
-                        }
-                    }
-                    Err(_) => break,
+            // a frame that cannot be read is the end of the connection
+            while let Ok(env) = read_frame(&mut rd).await {
+                // a partition made real: a frame from a cut peer is lost on
+                // the wire, and the connection stays as it would
+                if me.is_cut(&env.from) {
+                    continue;
+                }
+                if let Some(h) = me.handler.read().clone() {
+                    h.handle(env);
                 }
             }
         };
@@ -342,12 +338,12 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // everyone dials everyone else at the same moment
         let mut dials = Vec::new();
-        for i in 0..3 {
-            for j in 0..3 {
+        for (i, t) in ts.iter().enumerate() {
+            for (j, port) in ports.iter().enumerate() {
                 if i != j {
-                    let t = ts[i].clone();
+                    let (t, port) = (t.clone(), *port);
                     dials.push(tokio::spawn(async move {
-                        t.connect(&format!("127.0.0.1:{}", ports[j])).await.unwrap()
+                        t.connect(&format!("127.0.0.1:{port}")).await.unwrap()
                     }));
                 }
             }

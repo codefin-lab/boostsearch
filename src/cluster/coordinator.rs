@@ -659,10 +659,9 @@ impl Coordinator {
         if let Some(h) = body
             .get("held")
             .and_then(|h| serde_json::from_value::<Vec<(String, String, String)>>(h.clone()).ok())
+            && let Some(n) = body.get("node").and_then(|n| n.get("id")).and_then(|i| i.as_str())
         {
-            if let Some(n) = body.get("node").and_then(|n| n.get("id")).and_then(|i| i.as_str()) {
-                self.held.insert(NodeId(n.to_string()), h);
-            }
+            self.held.insert(NodeId(n.to_string()), h);
         }
         let Some(node) =
             body.get("node").and_then(|n| serde_json::from_value::<DiscoveryNode>(n.clone()).ok())
@@ -1147,10 +1146,10 @@ impl Coordinator {
         // every copy here learns the allocation id the manager gave it
         if let Some(src) = self.metadata.clone() {
             for c in self.committed.routing.on_node(&me) {
-                if let Some(a) = &c.allocation_id {
-                    if c.state != super::state::ShardState::Unassigned {
-                        src.note_allocation(&c.index, a);
-                    }
+                if let Some(a) = &c.allocation_id
+                    && c.state != super::state::ShardState::Unassigned
+                {
+                    src.note_allocation(&c.index, a);
                 }
             }
         }
@@ -1286,10 +1285,8 @@ impl Coordinator {
             // an index the manager still publishes and this node still holds
             // a copy of keeps its local index
             let holds_other = self.hosted.values().any(|(i, _)| *i == index);
-            if !holds_other {
-                if let Some(h) = &self.host {
-                    h.remove_shard(&index, shard);
-                }
+            if !holds_other && let Some(h) = &self.host {
+                h.remove_shard(&index, shard);
             }
         }
         out
@@ -1344,7 +1341,7 @@ impl Coordinator {
         } else {
             non_retired_current.len()
         };
-        let odd = |n: usize| if n % 2 == 0 { n.saturating_sub(1) } else { n };
+        let odd = |n: usize| if n.is_multiple_of(2) { n.saturating_sub(1) } else { n };
         let target = odd(live.len()).max(min_enforced);
         let live_in = current.iter().filter(|id| live.contains(id)).cloned();
         let live_out = live.iter().filter(|id| !current.contains(id)).cloned();
@@ -1489,18 +1486,17 @@ impl NodeLogic for Coordinator {
         match input {
             Input::Start => {
                 // what was on disk survives a restart
-                if let Some(bytes) = durable.entries.get(D_COMMITTED) {
-                    if let Ok(s) = serde_json::from_slice::<ClusterState>(bytes) {
-                        self.committed = s;
-                    }
+                if let Some(bytes) = durable.entries.get(D_COMMITTED)
+                    && let Ok(s) = serde_json::from_slice::<ClusterState>(bytes)
+                {
+                    self.committed = s;
                 }
                 self.accepted = self.committed.clone();
-                if let Some(bytes) = durable.entries.get(D_ACCEPTED) {
-                    if let Ok(s) = serde_json::from_slice::<ClusterState>(bytes) {
-                        if fresher(s.term, s.version, self.accepted.term, self.accepted.version) {
-                            self.accepted = s;
-                        }
-                    }
+                if let Some(bytes) = durable.entries.get(D_ACCEPTED)
+                    && let Ok(s) = serde_json::from_slice::<ClusterState>(bytes)
+                    && fresher(s.term, s.version, self.accepted.term, self.accepted.version)
+                {
+                    self.accepted = s;
                 }
                 if let Some(bytes) = durable.entries.get(D_TERM) {
                     self.current_term = String::from_utf8_lossy(bytes).trim().parse().unwrap_or(0);
@@ -1844,23 +1840,23 @@ impl Coordinator {
                 out
             }
             (JOIN, Kind::Response) => {
-                if let Ok(s) = serde_json::from_slice::<ClusterState>(&e.body) {
-                    if s.term == self.current_term {
-                        self.apply_committed(s, durable);
-                        let was = self.mode.clone();
-                        self.mode = Mode::Follower(from.clone());
-                        self.leader_hint = Some(from);
-                        let mut out = self.apply_shards();
-                        if was == Mode::Candidate {
-                            self.leader_misses = 0;
-                            self.leader_check_outstanding = None;
-                            out.push(Output::Timer {
-                                id: T_LEADER_CHECK,
-                                after: self.timings.leader_check_interval,
-                            });
-                        }
-                        return out;
+                if let Ok(s) = serde_json::from_slice::<ClusterState>(&e.body)
+                    && s.term == self.current_term
+                {
+                    self.apply_committed(s, durable);
+                    let was = self.mode.clone();
+                    self.mode = Mode::Follower(from.clone());
+                    self.leader_hint = Some(from);
+                    let mut out = self.apply_shards();
+                    if was == Mode::Candidate {
+                        self.leader_misses = 0;
+                        self.leader_check_outstanding = None;
+                        out.push(Output::Timer {
+                            id: T_LEADER_CHECK,
+                            after: self.timings.leader_check_interval,
+                        });
                     }
+                    return out;
                 }
                 vec![]
             }
@@ -2001,10 +1997,10 @@ impl Coordinator {
                 out
             }
             (FOLLOWER_CHECK, Kind::Response) => {
-                if let Some(n) = self.pending_checks.remove(&e.request_id) {
-                    if let Some(h) = self.followers.get_mut(&n) {
-                        h.misses = 0;
-                    }
+                if let Some(n) = self.pending_checks.remove(&e.request_id)
+                    && let Some(h) = self.followers.get_mut(&n)
+                {
+                    h.misses = 0;
                 }
                 vec![]
             }
@@ -2043,10 +2039,10 @@ impl Coordinator {
                 if let Some(t) = term_in(&e.body) {
                     out.extend(self.saw_term(t, durable));
                 }
-                if let Mode::Follower(l) = self.mode.clone() {
-                    if l == from {
-                        out.extend(self.become_candidate());
-                    }
+                if let Mode::Follower(l) = self.mode.clone()
+                    && l == from
+                {
+                    out.extend(self.become_candidate());
                 }
                 out
             }
@@ -2323,13 +2319,13 @@ mod tests {
         // two nodes that committed the same term and version committed the same state
         let mut by_key: BTreeMap<(u64, u64), BTreeSet<Vec<u8>>> = BTreeMap::new();
         for id in ids {
-            if let Some(d) = sim.durable(id) {
-                if let Some(bytes) = d.entries.get(D_COMMITTED) {
-                    let s: ClusterState = serde_json::from_slice(bytes).unwrap();
-                    // version 0 is the empty state every node starts from, not a commit
-                    if s.version > 0 {
-                        by_key.entry((s.term, s.version)).or_default().insert(bytes.clone());
-                    }
+            if let Some(d) = sim.durable(id)
+                && let Some(bytes) = d.entries.get(D_COMMITTED)
+            {
+                let s: ClusterState = serde_json::from_slice(bytes).unwrap();
+                // version 0 is the empty state every node starts from, not a commit
+                if s.version > 0 {
+                    by_key.entry((s.term, s.version)).or_default().insert(bytes.clone());
                 }
             }
         }
@@ -2405,7 +2401,7 @@ mod tests {
         let old = committed_of(&sim, &ids[0]).unwrap();
         let leader = old.cluster_manager.clone().unwrap();
         let others: Vec<NodeId> = ids.iter().filter(|i| **i != leader).cloned().collect();
-        sim.partition(&[leader.clone()], &others);
+        sim.partition(std::slice::from_ref(&leader), &others);
         sim.run_until(70_000);
         // the majority elected a manager of its own
         let new = committed_of(&sim, &others[0]).unwrap();
@@ -2504,7 +2500,7 @@ mod tests {
         sim.crash(&leader);
         sim.run_until(50_000);
         assert_settled(&sim, &ids);
-        let s = committed_of(&sim, &ids.iter().find(|i| **i != leader).unwrap()).unwrap();
+        let s = committed_of(&sim, ids.iter().find(|i| **i != leader).unwrap()).unwrap();
         assert_ne!(s.cluster_manager, Some(leader));
         check_invariants(&sim, &ids);
     }
@@ -2747,10 +2743,12 @@ mod tests {
         sim.run_until(20_000);
         assert_settled(&sim, &ids);
         let s = committed_of(&sim, &ids[0]).unwrap();
-        let leader = s.cluster_manager.clone().unwrap();
-        // the index was made on a; a may or may not be the manager
+        // the index was made on a, which may or may not be the manager: the
+        // node holding the shard goes down either way, and the point of the
+        // test is that the index survives it
+        assert!(s.cluster_manager.is_some(), "a manager was settled on");
         let holder = NodeId("a".into());
-        let victim = if leader == holder { holder.clone() } else { holder.clone() };
+        let victim = holder.clone();
         assert_eq!(s.routing.primary("keep", 0).unwrap().node, Some(holder.clone()));
         sim.crash(&victim);
         sim.run_until(60_000);

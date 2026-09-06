@@ -2934,3 +2934,148 @@ is a script rather than something remembered.
 
 Gates: unit 109/109, phase 1 398/398, core corpus 1,100/1,100, module corpus
 850/895, and the eight SQL checks pass.
+
+## Closing what was left of 1 to 12
+
+The phases were closed one at a time and each left something. This is that
+list, worked through: the module corpus, the release work of 7.5, and the
+cloud run of 7.3.
+
+### The module corpus, 850 to 880 of 890
+
+**Reindex from a remote cluster** was validated and then refused — ten
+sections' worth of a feature that had a complete error message and no body.
+It reads the other cluster the way any client does: a search, then scrolls,
+then the scroll closed so the other cluster is not left holding a context.
+It deadlocked the first time, and the reason is worth keeping: waiting on a
+socket inside a request handler holds a worker of the runtime, and the socket
+in this case was this node's own. The read happens off the runtime now.
+
+**A pipeline named by a reindex or an update_by_query** was accepted and never
+run. A document a walk writes is written the way any document is, so it goes
+through the same pipelines, and a processor that drops it drops it from the
+walk. Two sections, and a thing anybody would have assumed worked.
+
+**`{"garbage": "not a query"}` was an unknown query and is now a malformed
+one.** What follows a query's name is that query's options, and when it is not,
+the complaint comes before the name is looked up — telling the caller the name
+is unknown sends them looking in the wrong place.
+
+**A char is not a one-letter String.** `(char)'a'` produced a `String`, so
+`ctx.x = (char)'a'` quietly stored one where OpenSearch refuses the write:
+there is no JSON for a char, so a document field cannot hold one. Painless has
+a `Char` now, and the ingest document's existing check on what a field may hold
+does the rest.
+
+**Japanese.** `関西国際空港` is one word in the dictionary and four in a search
+box, and kuromoji offers both. Lindera holds the compound as an entry of its
+own and its Decompose mode would not break it — the penalty that should have
+applies only to a run its edge reports as kanji-only, and this one is not
+reported that way. So the pieces are looked for directly: the shortest
+sequence of dictionary entries spelling the same characters, which is a
+shortest path over the positions between characters. With `kuromoji_stemmer`,
+`kuromoji_completion` and the romaji behind it — `寿司` is `susi` under the
+system Japanese schools teach and `sushi` under the one everybody else uses,
+and both are typed, so both are offered.
+
+**Korean.** The part-of-speech filter was dropping nothing, and the reason is
+the one the code's own comment had predicted: `가` read on its own is a verb,
+and `뿌리가 깊은 나무` reads the same `가` as the particle it is. A dictionary
+that says what each word is says it while it is reading the text, so what it
+said now travels with the token instead of being asked for again. `nori_number`
+reads `십만이천오백` — four tokens to the dictionary, one number to a reader —
+as 102500, which needs the run of numeral tokens put back together first.
+
+**Chinese** punctuation is one token whichever mark it was, so a phrase query
+knows a sentence ended without caring how; the analyzer's stop words drop it,
+which is exactly why the tokenizer has to keep it.
+
+**ICU.** `unicode_set_filter` says which characters a normalizer may touch, so
+a corpus about `ß` can be normalized without losing the letter it is about.
+`icu_collation` folds to the strength asked for — and the doc comment says
+what that is and is not: a folding answers "are these the same word at this
+strength", which is what the filter is used for, and not "which of these comes
+first in this language", which no folding of the letters can answer for a
+language that puts `ä` after `z`.
+
+**`annotated_text` was not a type at all.** It is a text field whose
+`[shown](value)` is markup rather than text: the markup comes off before the
+text is cut, and each annotation stands where its span begins — beside the
+first word rather than after the last, so a phrase running through the span is
+still a phrase. The `annotated` highlighter gives the markup back with
+`_hit_term` on what matched.
+
+**A common-terms query of nothing but common words** was answering two
+documents where OpenSearch answers one. Asked for with `should` and no
+minimum, such a query would walk most of the index to rank documents that are
+all much the same, so Lucene wants every word instead — and a word and its
+synonyms are separate clauses, which is what makes `high_freq: 5` and
+`high_freq: 6` on the same query mean different things.
+
+**Five files are set aside, with the reason written down.** Three are fixtures
+for testing the test framework and assert a `_type` OpenSearch 3.x does not
+return; one aggregates with `shard_delay`, which exists only to make a shard
+slow inside a test; one is not YAML until Gradle fills in a property.
+OpenSearch 3.1.0 fails all five — measured against the reference at 9201
+rather than assumed. `tools/module_gate.py` prints them and why on every run,
+so setting one aside stays an argument somebody can have.
+
+What is left is six sections: the Polish and Ukrainian stemmers, which need
+dictionaries that are somebody else's to redistribute (the Ukrainian one is a
+`.jar.sha1` in OpenSearch's own tree and nothing more), and the section
+asserting that its plugin is the only one installed.
+
+### 7.5 — What this is, how it is packaged, and how to move onto it
+
+**The README described the engine as it stood at Phase 2**: no cluster, no
+security, no scripting, no `_reindex`, no `_sql`. All of those exist. A README
+that misdescribes what is built is worse than none, because somebody reads it
+and believes it. Every number in it now comes from a script in `tools/`, and
+the ones that are not perfect say which and why.
+
+`docs/settings.md` lists every setting the binary reads. `docs/upgrading.md`
+is two procedures, because two different things are called an upgrade: putting
+this where an OpenSearch cluster is now, and moving a BoostSearch cluster
+between its own versions.
+
+The Dockerfile was a bench image — root, no volume, no healthcheck, and a
+rebuild of every dependency on every source change. It is a release image now,
+built and run and answering green before it was committed.
+`.github/workflows/release.yml` builds from a tag and nothing else, runs the
+gates again on that tag, and leaves a draft rather than a published release.
+
+**CI had failed twenty runs in a row.** Every one of them on `cargo fmt
+--check`, on code that had never been formatted — and nobody noticed, because
+the badge is at the top of a README nobody had reason to doubt. A gate that
+does not pass is not a gate.
+
+**And the lint gate could not have passed either.** `cargo clippy -- -D
+warnings` reported 212 errors and 122 warnings. Most of them turned out to
+have one cause: `main.rs` declared every module a second time instead of using
+the library, so the whole source tree was compiled twice and everything the
+server did not itself reach was reported as dead. The binary uses the library
+now, which halves the build and took the count from 122 to 35. The rest were
+worked through one at a time. Four were `if` statements with identical
+branches, and all four were vestigial rather than wrong — but one of them,
+`nested_role_filter` in the LDAP authenticator, took reading to be sure of,
+because a filter that is never applied and a filter applied somewhere else
+look the same from the outside.
+
+**And the gate hung on a bug of its own.** `module_gate.py` captures each
+pass's output, and the URL fixture forks a server that outlives the process
+that forked it — inheriting the pipe, which then never closed, so the gate
+waited forever on a run that had already finished. The child lets go of the
+inherited stdio before it starts serving now. A harness that hangs is worse
+than one that fails, because a failure says something.
+
+### 7.3 — The cloud run
+
+`tools/cloud_bench.sh` starts one instance, runs both engines on it in
+containers, brings the numbers back and gives the instance back, terminating
+it on the way out including when the run fails. Run without `BENCH_GO=1` it
+says what it would do and how much it would cost and stops, because the
+instance type and the region are choices about what the number means and the
+money is somebody's.
+
+It has not been run. That is the one thing here that is waiting on a decision
+rather than on work.

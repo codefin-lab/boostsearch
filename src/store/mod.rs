@@ -136,15 +136,12 @@ pub fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     // no field norms: an id is looked up, never scored, and a norm is a byte
     // per document per field that nothing reads
-    let id_options = TextOptions::default()
-        .set_stored()
-        .set_fast(None)
-        .set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("raw")
-                .set_fieldnorms(false)
-                .set_index_option(IndexRecordOption::Basic),
-        );
+    let id_options = TextOptions::default().set_stored().set_fast(None).set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("raw")
+            .set_fieldnorms(false)
+            .set_index_option(IndexRecordOption::Basic),
+    );
     let id = sb.add_text_field("_id", id_options);
     let source = sb.add_text_field("_source", STORED);
     let dynamic = sb.add_json_field(
@@ -486,6 +483,10 @@ impl IdxState {
     }
 }
 
+/// What a pipeline has done: how many documents went through it, how many
+/// failed, and how long it took in nanoseconds.
+pub type IngestTally = (u64, u64, u64);
+
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
@@ -533,7 +534,7 @@ pub struct Store {
     pipelines: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
     /// how often each ingest pipeline ran, failed, and how long it took, in
     /// nanoseconds; the empty name is the total
-    pub ingest_stats: Arc<RwLock<HashMap<String, (u64, u64, u64)>>>,
+    pub ingest_stats: Arc<RwLock<HashMap<String, IngestTally>>>,
     /// the indices deleted since the node came up: name, uuid and when
     pub graveyard: Arc<RwLock<Vec<Value>>>,
     /// whether any ingest pipeline exists at all: while none does, no write

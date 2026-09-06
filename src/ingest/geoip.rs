@@ -213,7 +213,10 @@ impl Db {
                             if let (Some(country), Some(code)) =
                                 (found.country.iso_code, region.and_then(|r| r.iso_code))
                             {
-                                out.insert("region_iso_code".into(), json!(format!("{country}-{code}")));
+                                out.insert(
+                                    "region_iso_code".into(),
+                                    json!(format!("{country}-{code}")),
+                                );
                             }
                         }
                         "region_name" => {
@@ -280,4 +283,3 @@ impl Db {
         }
     }
 }
-

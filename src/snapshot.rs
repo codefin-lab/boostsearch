@@ -107,7 +107,7 @@ impl Source {
     }
 }
 
-use std::io::{BufRead, BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use boostcore::TantivyDocument;

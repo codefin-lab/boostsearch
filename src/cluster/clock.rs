@@ -25,7 +25,10 @@ pub struct SystemClock {
 }
 
 impl SystemClock {
-    pub fn new() -> Arc<dyn Clock> {
+    /// The clock a running node uses, as something to share: a `Clock` is
+    /// held by everything that needs to know the time, so it is handed out
+    /// behind the trait rather than as itself.
+    pub fn shared() -> Arc<dyn Clock> {
         Arc::new(SystemClock { started: std::time::Instant::now() })
     }
 }

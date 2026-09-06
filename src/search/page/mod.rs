@@ -60,8 +60,8 @@ pub(crate) fn write_page(
         .unwrap_or_default();
     // a sort answers with no score unless the request asked for one to be
     // kept: `track_scores` says the documents were scored as well as ordered
-    let keep_score = sort_keys.is_empty()
-        || body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
+    let keep_score =
+        sort_keys.is_empty() || body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
     all_hits
         .into_iter()
         .map(|h| {

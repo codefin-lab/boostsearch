@@ -6,25 +6,11 @@
 // see the note in lib.rs
 #![allow(clippy::result_large_err)]
 
-mod analysis;
-mod api;
-mod blockstats;
-mod cluster;
-mod hdr;
-mod http_compat;
-mod ingest;
-mod ism;
-mod knn;
-mod painless;
-mod query;
-mod search;
-mod security;
-mod snapshot;
-mod sql;
-mod source;
-mod store;
-mod tls;
-mod tz;
+// The server is the library's only caller. Declaring the modules here as well
+// would compile every one of them a second time -- once as the library and
+// once inside this binary -- which doubles the build and reports as dead
+// everything the server does not itself reach.
+use boostsearch::{api, cluster, http_compat, ism, security, store, tls};
 
 use axum::Router;
 
@@ -44,11 +30,8 @@ async fn root() -> impl IntoResponse {
     // way a client that pins a node by name expects
     let me = cluster::identity();
     let state = cluster::current_state();
-    let uuid = if state.cluster_uuid.is_empty() {
-        "_na_".to_string()
-    } else {
-        state.cluster_uuid.clone()
-    };
+    let uuid =
+        if state.cluster_uuid.is_empty() { "_na_".to_string() } else { state.cluster_uuid.clone() };
     axum::Json(json!({
         "name": me.name,
         "cluster_name": me.cluster_name,
@@ -408,10 +391,7 @@ fn app(store: Store) -> Router {
         // stops at 2 MB by default, which is smaller than any bulk helper's
         // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
         // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
-        .route(
-            "/_plugins/_ism/policies",
-            get(api::ism::get_policy),
-        )
+        .route("/_plugins/_ism/policies", get(api::ism::get_policy))
         .route(
             "/_plugins/_ism/policies/{id}",
             put(api::ism::put_policy).get(api::ism::get_policy).delete(api::ism::delete_policy),
@@ -591,8 +571,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
             http_compat::LenientListener(listener),
-            app(store.clone())
-                .into_make_service_with_connect_info::<http_compat::Peer>(),
+            app(store.clone()).into_make_service_with_connect_info::<http_compat::Peer>(),
         )
         .with_graceful_shutdown(shutdown_signal(store))
         .await?;
@@ -620,17 +599,12 @@ async fn shutdown_signal(store: Store) {
     eprintln!("boostsearch: stopping");
     if let Some(rt) = cluster::runtime() {
         let me = rt.local();
-        if let Some(m) = rt.state().cluster_manager.clone() {
-            if m != me {
-                let _ = rt
-                    .call(
-                        &m,
-                        cluster::coordinator::LEAVE,
-                        vec![],
-                        std::time::Duration::from_secs(2),
-                    )
-                    .await;
-            }
+        if let Some(m) = rt.state().cluster_manager.clone()
+            && m != me
+        {
+            let _ = rt
+                .call(&m, cluster::coordinator::LEAVE, vec![], std::time::Duration::from_secs(2))
+                .await;
         }
         // the primaries here are what a write needs, so the node waits for the
         // manager to put them somewhere else before it stops answering: a

@@ -72,13 +72,11 @@ impl Parser {
             Token::Quoted(n) => n,
             other => return Err(format!("expected an index but found [{}]", other.text())),
         };
-        // `FROM index alias` and `FROM index AS alias`: the alias is noted and
-        // ignored, since there is one table to be confused about
-        if self.took("AS") {
-            self.next();
-        } else if matches!(self.peek(), Token::Name(_))
-            && !self.starts_a_clause()
-        {
+        // `FROM index alias` and `FROM index AS alias`: the alias is read past
+        // and dropped, there being one table to be confused about
+        let aliased =
+            self.took("AS") || (matches!(self.peek(), Token::Name(_)) && !self.starts_a_clause());
+        if aliased {
             self.next();
         }
         let filter = self.took("WHERE").then(|| self.condition()).transpose()?;
@@ -144,15 +142,11 @@ impl Parser {
 
     fn column(&mut self) -> Answer<Column> {
         let expr = self.expr()?;
-        let alias = if self.took("AS") {
-            Some(self.next().text())
-        } else if matches!(self.peek(), Token::Name(_) | Token::Quoted(_))
-            && !self.peek().is("FROM")
-        {
-            Some(self.next().text())
-        } else {
-            None
-        };
+        // `x AS n` and `x n` both name the column `n`
+        let named = self.took("AS")
+            || (matches!(self.peek(), Token::Name(_) | Token::Quoted(_))
+                && !self.peek().is("FROM"));
+        let alias = named.then(|| self.next().text());
         Ok(Column { expr, alias })
     }
 
@@ -203,8 +197,15 @@ impl Parser {
         if let Token::Name(name) = self.peek()
             && matches!(
                 name.to_lowercase().as_str(),
-                "match" | "match_phrase" | "matchquery" | "match_query" | "multi_match"
-                    | "query_string" | "simple_query_string" | "wildcard_query" | "regexp_query"
+                "match"
+                    | "match_phrase"
+                    | "matchquery"
+                    | "match_query"
+                    | "multi_match"
+                    | "query_string"
+                    | "simple_query_string"
+                    | "wildcard_query"
+                    | "regexp_query"
             )
             && self.peek_at(1).is("(")
         {
@@ -257,7 +258,9 @@ impl Parser {
             return Err("expected BETWEEN, IN or LIKE after NOT".to_string());
         }
         let op = match self.peek() {
-            Token::Symbol(s) if matches!(s.as_str(), "=" | "<" | ">" | "<>" | "!=" | ">=" | "<=") => {
+            Token::Symbol(s)
+                if matches!(s.as_str(), "=" | "<" | ">" | "<>" | "!=" | ">=" | "<=") =>
+            {
                 self.at += 1;
                 s
             }
@@ -359,8 +362,7 @@ impl Parser {
             self.expect("THEN")?;
             whens.push((when, self.expr()?));
         }
-        let otherwise =
-            self.took("ELSE").then(|| self.expr()).transpose()?.map(Box::new);
+        let otherwise = self.took("ELSE").then(|| self.expr()).transpose()?.map(Box::new);
         self.expect("END")?;
         Ok(Expr::Case { whens, otherwise })
     }

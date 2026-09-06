@@ -74,7 +74,7 @@ fn missing_named_pipeline(
         if spec.kind == "pipeline"
             && let Some(name) = spec.config.get("name").and_then(|v| v.as_str())
             && !name.contains("{{")
-            && store.pipelines("ingest").get(name).is_none()
+            && !store.pipelines("ingest").contains_key(name)
             && !spec
                 .config
                 .get("ignore_missing_pipeline")
@@ -374,7 +374,7 @@ pub(crate) fn ingest_for_write(
     asked: Option<&str>,
     routing: Option<String>,
 ) -> std::result::Result<Option<crate::ingest::IngestDoc>, crate::ingest::IngestError> {
-    use crate::ingest::{IngestDoc, run_pipeline, stored_pipeline};
+    use crate::ingest::IngestDoc;
     let names = pipelines_for_write(store, index, asked);
     if names.is_empty() {
         return Ok(Some({
@@ -388,6 +388,15 @@ pub(crate) fn ingest_for_write(
     run_named_pipelines(store, names, doc)
 }
 
+/// Whether any node in the cluster carries the ingest role.
+pub(crate) fn any_ingest_node() -> bool {
+    let mine = &crate::cluster::identity().roles;
+    if mine.iter().any(|r| r == "ingest") {
+        return true;
+    }
+    crate::cluster::current_state().nodes.values().any(|n| n.roles.iter().any(|r| r == "ingest"))
+}
+
 /// Run pipelines by name over a document, counting each run.
 pub(crate) fn run_named_pipelines(
     store: &Store,
@@ -395,6 +404,17 @@ pub(crate) fn run_named_pipelines(
     mut doc: crate::ingest::IngestDoc,
 ) -> std::result::Result<Option<crate::ingest::IngestDoc>, crate::ingest::IngestError> {
     use crate::ingest::{run_pipeline, stored_pipeline};
+    // running a pipeline is the ingest role's work, and a cluster with no node
+    // in that role has nowhere to send the document. The pipeline APIs still
+    // answer -- one may be written, read and simulated on a node that will
+    // never run it -- but a write that needs one cannot be carried out, and
+    // that is true before it matters whether the pipeline exists.
+    if !names.is_empty() && !any_ingest_node() {
+        return Err(crate::ingest::IngestError::illegal(
+            "There are no ingest nodes in this cluster, unable to forward request to an \
+             ingest node.",
+        ));
+    }
     for name in names {
         let pipeline = match stored_pipeline(store, &name) {
             Some(Ok(p)) => p,

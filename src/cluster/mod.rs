@@ -11,6 +11,11 @@ pub mod clock;
 pub mod coordinator;
 pub mod forward;
 pub mod metadata;
+// The reference model the simulation is checked against: what a correct
+// cluster would have done, run beside what this one does. Nothing outside its
+// own tests uses it, and gating it says so rather than leaving a module the
+// compiler reports as dead in every build.
+#[cfg(test)]
 pub mod model;
 pub mod node;
 pub mod replication;
@@ -21,9 +26,9 @@ pub mod state;
 pub mod tcp;
 pub mod transport;
 
-pub use clock::{Clock, ManualClock, SystemClock};
+pub use clock::{Clock, SystemClock};
 pub use node::NodeIdentity;
-pub use transport::{Envelope, Handler, Kind, NodeId, SendError, Transport};
+pub use transport::NodeId;
 
 use std::sync::{Arc, OnceLock};
 
@@ -42,7 +47,7 @@ pub fn identity() -> &'static NodeIdentity {
 
 /// The cluster's clock: the system's, unless the simulation set one.
 pub fn clock() -> Arc<dyn Clock> {
-    CLOCK.get_or_init(SystemClock::new).clone()
+    CLOCK.get_or_init(SystemClock::shared).clone()
 }
 
 static CLOCK: OnceLock<Arc<dyn Clock>> = OnceLock::new();
@@ -107,8 +112,9 @@ pub fn is_cluster_manager() -> bool {
     }
 }
 
-/// The last committed cluster state, or a state of this node alone while
-/// the coordinator has not started (tools, tests).
+// What a test or a tool put in front of the real cluster state for the length
+// of one thread, so a caller can be told what state to reason about without a
+// coordinator running.
 thread_local! {
     static OVERRIDE: std::cell::RefCell<Option<state::ClusterState>> = const { std::cell::RefCell::new(None) };
 }

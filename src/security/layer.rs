@@ -104,9 +104,7 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         .get::<axum::extract::ConnectInfo<crate::http_compat::Peer>>()
         .map(|c| c.0.0)
         .or_else(|| {
-            req.extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0)
+            req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0)
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
@@ -182,7 +180,9 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         return run_as(caller, req, next).await;
     };
     let named = indices_of(&path);
-    let mut resolved: Vec<String> = Vec::new();
+    // every index the request turns out to touch, which the audit log records
+    // and which is only known once the request has been classified
+    let mut resolved: Vec<String>;
     // the guard must be gone before the handler is awaited
     let refusal = {
         let cfg = sec.config.read();

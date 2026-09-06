@@ -171,7 +171,7 @@ pub(crate) fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str,
         if kind == "moving_fn" {
             let window = spec.get("window").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             let shift = spec.get("shift").and_then(|v| v.as_i64()).unwrap_or(0);
-            let all: Vec<Option<f64>> = buckets.iter().map(|b| read(b)).collect();
+            let all: Vec<Option<f64>> = buckets.iter().map(&read).collect();
             for (i, b) in buckets.iter_mut().enumerate() {
                 // the window ends just before this bucket, moved by the shift
                 let end = (i as i64 + shift).max(0) as usize;
@@ -448,9 +448,7 @@ fn value_at_path(bucket: &Value, path: &str) -> Option<f64> {
             node = match buckets {
                 Value::Array(list) => list.iter().find(|b| {
                     b.get("key")
-                        .map(|k| {
-                            k.as_str().map(|s| s == key).unwrap_or_else(|| k.to_string() == key)
-                        })
+                        .map(|k| k.as_str().map(|s| s == key).unwrap_or_else(|| k == key))
                         .unwrap_or(false)
                 })?,
                 Value::Object(named) => named.get(key)?,

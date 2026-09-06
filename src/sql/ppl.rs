@@ -50,10 +50,9 @@ pub fn parse(source: &str) -> Result<Select, String> {
                     .map(|column| match &column.expr {
                         // a name `eval` gave to something is that something
                         Expr::Field(name) => match evaluated.iter().find(|(n, _)| n == name) {
-                            Some((_, expr)) => Column {
-                                expr: expr.clone(),
-                                alias: Some(name.clone()),
-                            },
+                            Some((_, expr)) => {
+                                Column { expr: expr.clone(), alias: Some(name.clone()) }
+                            }
                             None => column,
                         },
                         _ => column,

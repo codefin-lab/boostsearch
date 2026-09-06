@@ -50,9 +50,7 @@ fn advance(store: &Store, index: &str, body: &Value) -> Option<Value> {
         return None;
     }
     // an index that has gone is no longer anything's business
-    if store.get(index).is_none() {
-        return None;
-    }
+    store.get(index)?;
     let policy = managed.get("policy")?;
     let state_name =
         managed.pointer("/state/name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -116,19 +114,18 @@ fn advance(store: &Store, index: &str, body: &Value) -> Option<Value> {
         object.insert("action".into(), Value::Null);
         object.insert("retry_count".into(), json!(0));
         object.insert("last_updated_time".into(), json!(now));
-        object.insert(
-            "info".into(),
-            json!({"message": format!("Transitioning to {to}")}),
-        );
+        object.insert("info".into(), json!({"message": format!("Transitioning to {to}")}));
         return Some(json!({"managed_index": managed}));
     }
     None
 }
 
 fn named_state<'a>(policy: &'a Value, name: &str) -> Option<&'a Value> {
-    policy.get("states")?.as_array()?.iter().find(|s| {
-        s.get("name").and_then(|v| v.as_str()) == Some(name)
-    })
+    policy
+        .get("states")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("name").and_then(|v| v.as_str()) == Some(name))
 }
 
 /// Whether a transition's conditions are all met.
@@ -201,7 +198,8 @@ pub fn duration_ms(value: &Value) -> Option<i64> {
         return Some(n);
     }
     let text = value.as_str()?.trim();
-    let (number, unit) = text.split_at(text.find(|c: char| c.is_alphabetic()).unwrap_or(text.len()));
+    let (number, unit) =
+        text.split_at(text.find(|c: char| c.is_alphabetic()).unwrap_or(text.len()));
     let number: i64 = number.trim().parse().ok()?;
     Some(match unit.trim() {
         "d" => number * 86_400_000,
@@ -219,7 +217,8 @@ pub fn bytes(value: &Value) -> Option<i64> {
         return Some(n);
     }
     let text = value.as_str()?.trim().to_ascii_lowercase();
-    let (number, unit) = text.split_at(text.find(|c: char| c.is_alphabetic()).unwrap_or(text.len()));
+    let (number, unit) =
+        text.split_at(text.find(|c: char| c.is_alphabetic()).unwrap_or(text.len()));
     let number: f64 = number.trim().parse().ok()?;
     let scale = match unit.trim() {
         "b" | "" => 1.0,

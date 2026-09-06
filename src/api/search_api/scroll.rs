@@ -218,11 +218,8 @@ pub async fn scroll(
             // a scroll that began counting from the beginning carries on that
             // way: a cursor taken up halfway would be read against an order
             // the caller chose, not the one the scroll was opened in
-            let after = state
-                .after
-                .is_some()
-                .then(|| crate::api::search_api::last_sort_of(&env))
-                .flatten();
+            let after =
+                state.after.is_some().then(|| crate::api::search_api::last_sort_of(&env)).flatten();
             store.advance_scroll(&id, n, after);
             if state.implicit_sort {
                 crate::api::search_api::strip_sort(&mut env);

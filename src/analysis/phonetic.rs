@@ -109,9 +109,8 @@ fn encode_inner(how: &How, word: &str) -> Option<String> {
             if languages.is_empty() {
                 bm.encode(word)
             } else {
-                let set = LanguageSet::from(
-                    languages.iter().map(|l| l.as_str()).collect::<Vec<&str>>(),
-                );
+                let set =
+                    LanguageSet::from(languages.iter().map(|l| l.as_str()).collect::<Vec<&str>>());
                 bm.encode_with_languages(word, &set)
             }
         }

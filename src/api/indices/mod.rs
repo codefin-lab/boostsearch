@@ -88,14 +88,18 @@ pub async fn create_index(
                 return err(
                     StatusCode::BAD_REQUEST,
                     "mapper_parsing_exception",
-                    format!("Failed to parse mapping: [dimension] is a required parameter for field [{path}]"),
+                    format!(
+                        "Failed to parse mapping: [dimension] is a required parameter for field [{path}]"
+                    ),
                 );
             }
             Some(0) => {
                 return err(
                     StatusCode::BAD_REQUEST,
                     "mapper_parsing_exception",
-                    format!("Failed to parse mapping: [dimension] must be greater than 0 for field [{path}]"),
+                    format!(
+                        "Failed to parse mapping: [dimension] must be greater than 0 for field [{path}]"
+                    ),
                 );
             }
             Some(_) => {}

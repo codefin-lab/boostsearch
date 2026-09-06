@@ -365,12 +365,12 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                 ));
             }
             for key in ["fields", "exclude_fields"] {
-                if let Some(list) = c.strings_opt(key)? {
-                    if list.iter().any(|f| f.trim().is_empty() || f == "null") {
-                        return Err(
-                            c.wrong(key, format!("[{key}] field name cannot be null nor empty"))
-                        );
-                    }
+                if let Some(list) = c.strings_opt(key)?
+                    && list.iter().any(|f| f.trim().is_empty() || f == "null")
+                {
+                    return Err(
+                        c.wrong(key, format!("[{key}] field name cannot be null nor empty"))
+                    );
                 }
             }
         }
@@ -483,7 +483,7 @@ fn string_at(
 pub(crate) fn run(
     store: &Store,
     spec: &ProcessorSpec,
-    mut doc: IngestDoc,
+    doc: IngestDoc,
     steps: &mut Vec<StepResult>,
     depth: &mut Vec<String>,
 ) -> Result<Option<IngestDoc>, IngestError> {
@@ -501,7 +501,7 @@ fn run_inner(
     spec: &ProcessorSpec,
     c: &Cfg,
     ignore_missing: bool,
-    mut doc: IngestDoc,
+    doc: IngestDoc,
     steps: &mut Vec<StepResult>,
     depth: &mut Vec<String>,
 ) -> Result<Option<IngestDoc>, IngestError> {
@@ -767,7 +767,7 @@ fn run_body(
             let desc = c.str_opt("order")?.as_deref() == Some("desc");
             match doc.get(&field) {
                 Some(Value::Array(mut a)) => {
-                    a.sort_by(|x, y| compare_json(x, y));
+                    a.sort_by(compare_json);
                     if desc {
                         a.reverse();
                     }
@@ -1364,10 +1364,7 @@ fn run_body(
             // how much of a file is read. A field may carry the number for
             // one document, which is how a large file is read further than
             // the pipeline's own ceiling
-            let mut limit = c
-                .get("indexed_chars")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(100_000);
+            let mut limit = c.get("indexed_chars").and_then(|v| v.as_i64()).unwrap_or(100_000);
             if let Some(from) = c.str_opt("indexed_chars_field")?
                 && let Some(n) = doc.get(&from).and_then(|v| v.as_i64())
             {
@@ -1378,12 +1375,9 @@ fn run_body(
                 return Ok(Some(doc));
             };
             use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded.trim())
-                .map_err(|_| {
-                    IngestError::illegal(format!(
-                        "field [{field}] is not a valid base64 value"
-                    ))
+            let bytes =
+                base64::engine::general_purpose::STANDARD.decode(encoded.trim()).map_err(|_| {
+                    IngestError::illegal(format!("field [{field}] is not a valid base64 value"))
                 })?;
             let found = super::attachment::extract(&bytes, limit);
             let written = super::attachment::fields(&found, &found.content, properties.as_deref());
@@ -1433,8 +1427,7 @@ fn run_body(
                 // every address keeps its place, so that the answers line up
                 // with the addresses they came from; one nothing is known
                 // about is a null in that place
-                let all: Vec<Value> =
-                    found.into_iter().map(|f| f.unwrap_or(Value::Null)).collect();
+                let all: Vec<Value> = found.into_iter().map(|f| f.unwrap_or(Value::Null)).collect();
                 doc.set(&target, Value::Array(all)).map_err(IngestError::illegal)?;
             }
         }
@@ -1525,13 +1518,14 @@ fn convert(v: &Value, kind: &str) -> Result<Value, IngestError> {
             match text.trim().to_lowercase().as_str() {
                 "true" => json!(true),
                 "false" => json!(false),
+                // `auto` tries an integer, then a long, then a double, then
+                // gives up and keeps the text. The first two are one thing in
+                // JSON -- there is a number and that is all -- so the width a
+                // Java implementation would pick is not a difference that can
+                // be written down here.
                 t => {
                     if let Ok(n) = t.parse::<i64>() {
-                        if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
-                            json!(n)
-                        } else {
-                            json!(n)
-                        }
+                        json!(n)
                     } else if let Ok(f) = t.parse::<f64>() {
                         json!(f)
                     } else {
@@ -2003,7 +1997,12 @@ fn has_foreign_value(v: &crate::painless::Value) -> bool {
 fn foreign_within(v: &crate::painless::Value, seen: &mut Vec<usize>) -> bool {
     use crate::painless::Value as V;
     match v {
-        V::Regex(_) | V::Lambda(_) | V::Native(_) | V::Builder(_) | V::Error(_) => true,
+        // a char is a Painless type with no JSON of its own: writing one into
+        // a document would have to guess whether it meant a string or a
+        // number, so OpenSearch refuses it and so does this
+        V::Regex(_) | V::Lambda(_) | V::Native(_) | V::Builder(_) | V::Error(_) | V::Char(_) => {
+            true
+        }
         V::List(l) => {
             let addr = std::rc::Rc::as_ptr(l) as *const () as usize;
             if seen.contains(&addr) {

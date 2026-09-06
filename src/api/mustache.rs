@@ -104,6 +104,32 @@ fn section<'a>(text: &'a str, name: &str) -> (&'a str, &'a str) {
     }
 }
 
+/// Whether a template can be rendered at all, without rendering it.
+///
+/// A pipeline holding a template that cannot be rendered is refused when it
+/// is written rather than at the first document, so the mistake is reported
+/// to whoever made it. The one thing that can be wrong without any values to
+/// render against is a function section: `{{#join}}{{/join}}` names no field
+/// to join, and `{{#join}}a b{{/join}}` names two.
+pub fn check(template: &str) -> Result<(), String> {
+    for name in ["join", "toJson", "url"] {
+        let opening = format!("{{{{#{name}}}}}");
+        let closing = format!("{{{{/{name}}}}}");
+        let mut rest = template;
+        while let Some(at) = rest.find(&opening) {
+            let after = &rest[at + opening.len()..];
+            let Some(end) = after.find(&closing) else { break };
+            if name != "url" && after[..end].split_whitespace().count() != 1 {
+                return Err(format!(
+                    "Mustache function [{name}] must contain one and only one identifier"
+                ));
+            }
+            rest = &after[end + closing.len()..];
+        }
+    }
+    Ok(())
+}
+
 /// A section, with what stands in it.
 fn filled(name: &str, body: &str, scope: &[Value]) -> String {
     // the three functions a search template may name
@@ -374,10 +400,11 @@ pub async fn put_script(
     // a script stored for a context is compiled first, so that a fault is
     // reported now rather than at the first search
     let lang = script.get("lang").and_then(|v| v.as_str()).unwrap_or("painless");
-    if lang == "painless" && p.get("context").is_some() {
-        if let Err(e) = crate::painless::contexts::Compiled::of(&script, &|_| None) {
-            return crate::api::compile_failure(e);
-        }
+    if lang == "painless"
+        && p.contains_key("context")
+        && let Err(e) = crate::painless::contexts::Compiled::of(&script, &|_| None)
+    {
+        return crate::api::compile_failure(e);
     }
     store.remember_script(&id, script);
     respond(&p, json!({"acknowledged": true}))

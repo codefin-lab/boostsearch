@@ -54,13 +54,9 @@ pub enum Read {
 }
 
 pub fn plan(select: &Select) -> Result<Planned, String> {
-    let grouped = !select.group_by.is_empty()
-        || select.columns.iter().any(|c| c.expr.is_aggregate());
-    if grouped {
-        plan_grouped(select)
-    } else {
-        plan_rows(select)
-    }
+    let grouped =
+        !select.group_by.is_empty() || select.columns.iter().any(|c| c.expr.is_aggregate());
+    if grouped { plan_grouped(select) } else { plan_rows(select) }
 }
 
 /// A query that asks for documents.
@@ -102,9 +98,7 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
     if !select.order_by.is_empty() {
         let mut sort = Vec::new();
         for (expr, ascending) in &select.order_by {
-            let field = expr
-                .field()
-                .ok_or_else(|| format!("cannot sort by [{}]", expr.name()))?;
+            let field = expr.field().ok_or_else(|| format!("cannot sort by [{}]", expr.name()))?;
             sort.push(json!({field: {"order": if *ascending { "asc" } else { "desc" }}}));
         }
         body["sort"] = Value::Array(sort);
@@ -154,10 +148,9 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
         columns.push(column.name());
         match &column.expr {
             Expr::Field(field) => {
-                let at = keys
-                    .iter()
-                    .position(|k| k == field)
-                    .ok_or_else(|| format!("[{field}] is not grouped by and is not an aggregate"))?;
+                let at = keys.iter().position(|k| k == field).ok_or_else(|| {
+                    format!("[{field}] is not grouped by and is not an aggregate")
+                })?;
                 reads.push(Read::Key(at));
             }
             Expr::Call { name, args } if is_aggregate_name(name) => {
@@ -184,7 +177,12 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
                 }
                 reads.push(Read::Expr(other.clone()));
             }
-            other => return Err(format!("[{}] is not grouped by and is not an aggregate", other.name())),
+            other => {
+                return Err(format!(
+                    "[{}] is not grouped by and is not an aggregate",
+                    other.name()
+                ));
+            }
         }
     }
 
@@ -216,7 +214,9 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
                 // `ORDER BY m` where `m` was the alias of a column
                 select.columns.iter().position(|c| c.name() == name)
             })
-            .ok_or_else(|| format!("cannot sort by [{name}], which is not a column of the answer"))?;
+            .ok_or_else(|| {
+                format!("cannot sort by [{name}], which is not a column of the answer")
+            })?;
         order_rows.push((at, *ascending));
     }
     Ok(Planned {

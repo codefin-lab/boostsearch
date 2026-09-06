@@ -118,7 +118,7 @@ pub async fn nodes_stats(
         .get(1)
         .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
-    let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
+    let _zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
     /// What the segments of an index cost, every part of it, which a client
     /// reads into a struct that asks for all of them.
     fn segment_stats() -> Value {
@@ -515,10 +515,7 @@ pub fn node_attrs() -> Vec<(String, String)> {
 
 /// `/_nodes/{*rest}` -- the node information, or one of the two reports that
 /// live under the same prefix and are told apart by their last part.
-pub async fn nodes_info_scoped(
-    Path(rest): Path<String>,
-    Query(p): Query<Params>,
-) -> Response {
+pub async fn nodes_info_scoped(Path(rest): Path<String>, Query(p): Query<Params>) -> Response {
     if rest.split('/').next_back() == Some("usage") {
         return nodes_usage(Query(p)).await;
     }
