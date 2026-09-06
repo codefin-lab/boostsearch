@@ -316,6 +316,10 @@ impl Step {
 /// as a synonym may, spans two.
 pub type Token = (String, usize, usize, usize, usize);
 
+/// Whether a token is kept, as a script decides it. The second argument is
+/// how many tokens the text held, for a script that asks.
+type TokenJudge = Box<dyn Fn(&Token, Option<usize>) -> bool>;
+
 /// A named analysis chain.
 #[derive(Clone, Debug)]
 pub struct Chain {
@@ -471,7 +475,7 @@ impl CharFilter {
                 Err(_) => text.to_string(),
             },
             CharFilter::IcuNormalize(set) => match set {
-                Some(set) => unicode_set::within(text, set, |c| icu_normalize(c)),
+                Some(set) => unicode_set::within(text, set, icu_normalize),
                 None => icu_normalize(text),
             },
         }
@@ -969,7 +973,7 @@ fn path_hierarchy(text: &str, delimiter: char, replacement: char) -> Vec<Token> 
 /// Steps BoostCore has no filter for, or where OpenSearch's order differs.
 /// A script over one token at a time, answering whether it holds: the
 /// token is `token`, with its term, position, offsets and the rest.
-fn token_judge(script: &str) -> Option<Box<dyn Fn(&Token, Option<usize>) -> bool>> {
+fn token_judge(script: &str) -> Option<TokenJudge> {
     let compiled = crate::painless::Script::compile(script).ok()?;
     Some(Box::new(move |tok: &Token, previous: Option<usize>| -> bool {
         use crate::painless::Value as V;
@@ -1477,7 +1481,7 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
             .into_iter()
             .map(|(t, p, a, b, l)| {
                 let written = match set {
-                    Some(set) => unicode_set::within(&t, set, |c| icu_normalize(c)),
+                    Some(set) => unicode_set::within(&t, set, icu_normalize),
                     None => icu_normalize(&t),
                 };
                 (written, p, a, b, l)
@@ -1530,7 +1534,7 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
             .into_iter()
             .map(|(t, p, a, b, l)| {
                 let written = match set {
-                    Some(set) => unicode_set::within(&t, set, |c| icu_fold(c)),
+                    Some(set) => unicode_set::within(&t, set, icu_fold),
                     None => icu_fold(&t),
                 };
                 (written, p, a, b, l)
@@ -1572,7 +1576,7 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
                     // place: a search for either finds the document
                     Some(code) if *replace => out.push((code, p, a, b, l)),
                     Some(code) => {
-                        out.push((code, p, a, b, l.clone()));
+                        out.push((code, p, a, b, l));
                         out.push((t, p, a, b, l));
                     }
                     // an encoder that has nothing to say about a word leaves

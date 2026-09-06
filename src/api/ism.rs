@@ -131,9 +131,7 @@ pub async fn add_policy(
     };
     each_index(&store, index, &p, |store, name| {
         if crate::ism::managed(store, name).is_some() {
-            return Err(format!(
-                "This index already has a policy, use the update policy API to update index policies"
-            ));
+            return Err("This index already has a policy, use the update policy API to update index policies".to_string());
         }
         crate::ism::attach(store, name, policy)
     })

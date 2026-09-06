@@ -159,13 +159,9 @@ pub struct Filters {
 }
 
 impl Filters {
-    fn is_empty(&self) -> bool {
-        self.include.is_empty() && self.exclude.is_empty() && self.require.is_empty()
-    }
-
     /// The node's value for an attribute: the built-in `_name`, `_id`,
     /// `_ip`, `_host` and `_publish_ip`, or `node.attr.*`.
-    fn node_value<'a>(node: &'a DiscoveryNode, attr: &str) -> Option<String> {
+    fn node_value(node: &DiscoveryNode, attr: &str) -> Option<String> {
         match attr {
             "_name" => Some(node.name.clone()),
             "_id" => Some(node.id.as_str().to_string()),
@@ -231,10 +227,10 @@ pub fn setting<'a>(settings: &'a Value, key: &str) -> Option<&'a Value> {
         // the longest key first, so `a.b.c` beats `a` + `b.c`
         for n in (1..=parts.len()).rev() {
             let head = parts[..n].join(".");
-            if let Some(next) = o.get(&head) {
-                if let Some(found) = walk(next, &parts[n..]) {
-                    return Some(found);
-                }
+            if let Some(next) = o.get(&head)
+                && let Some(found) = walk(next, &parts[n..])
+            {
+                return Some(found);
             }
         }
         None
@@ -634,15 +630,16 @@ pub fn can_allocate(
             format!("node does not match cluster setting [cluster.routing.allocation.{kind}] filters [{}]", filters_text(f)),
         ));
     }
-    if filter_ok {
-        if let Some((kind, f)) = is.filters.check(node) {
-            filter_ok = false;
-            out.push(verdict(
-                "filter",
-                Decision::No,
-                format!("node does not match index setting [index.routing.allocation.{kind}] filters [{}]", filters_text(f)),
-            ));
-        }
+    if filter_ok && let Some((kind, f)) = is.filters.check(node) {
+        filter_ok = false;
+        out.push(verdict(
+            "filter",
+            Decision::No,
+            format!(
+                "node does not match index setting [index.routing.allocation.{kind}] filters [{}]",
+                filters_text(f)
+            ),
+        ));
     }
     if filter_ok {
         out.push(verdict("filter", Decision::Yes, "node passes include/exclude/require filters"));
@@ -774,17 +771,17 @@ fn throttling_verdict(
             .count() as u64,
         None => 0,
     };
-    if let Some(src) = &source {
-        if outgoing >= out_limit {
-            return verdict(
-                "throttling",
-                Decision::Throttle,
-                format!(
-                    "reached the limit of outgoing shard recoveries [{outgoing}] on the node [{}] which holds the primary, cluster setting [cluster.routing.allocation.node_concurrent_outgoing_recoveries={out_limit}] (can also be set via [cluster.routing.allocation.node_concurrent_recoveries])",
-                    src.as_str()
-                ),
-            );
-        }
+    if let Some(src) = &source
+        && outgoing >= out_limit
+    {
+        return verdict(
+            "throttling",
+            Decision::Throttle,
+            format!(
+                "reached the limit of outgoing shard recoveries [{outgoing}] on the node [{}] which holds the primary, cluster setting [cluster.routing.allocation.node_concurrent_outgoing_recoveries={out_limit}] (can also be set via [cluster.routing.allocation.node_concurrent_recoveries])",
+                src.as_str()
+            ),
+        );
     }
     verdict(
         "throttling",
@@ -916,7 +913,7 @@ fn awareness_verdict(
                     == Some(mine)
             })
             .count();
-        let max_per_value = (total + n_values - 1) / n_values;
+        let max_per_value = total.div_ceil(n_values);
         if same + 1 > max_per_value {
             let listed: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
             let forced_text = match forced {
@@ -1093,11 +1090,16 @@ pub fn can_remain(
         filter_ok = false;
         out.push(verdict("filter", Decision::No, format!("node does not match cluster setting [cluster.routing.allocation.{kind}] filters [{}]", filters_text(f))));
     }
-    if filter_ok {
-        if let Some((kind, f)) = is.filters.check(node) {
-            filter_ok = false;
-            out.push(verdict("filter", Decision::No, format!("node does not match index setting [index.routing.allocation.{kind}] filters [{}]", filters_text(f))));
-        }
+    if filter_ok && let Some((kind, f)) = is.filters.check(node) {
+        filter_ok = false;
+        out.push(verdict(
+            "filter",
+            Decision::No,
+            format!(
+                "node does not match index setting [index.routing.allocation.{kind}] filters [{}]",
+                filters_text(f)
+            ),
+        ));
     }
     if filter_ok {
         out.push(verdict("filter", Decision::Yes, "node passes include/exclude/require filters"));
@@ -1336,10 +1338,8 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 // the node comes back the copy has to be filled again. The
                 // primary's own copy keeps its place in the set, since it is
                 // the one holding what everybody else is missing.
-                if !was_primary {
-                    if let Some(a) = &c.allocation_id {
-                        changes.retired.push((name.clone(), *shard, a.clone()));
-                    }
+                if !was_primary && let Some(a) = &c.allocation_id {
+                    changes.retired.push((name.clone(), *shard, a.clone()));
                 }
                 c.state = ShardState::Unassigned;
                 c.node = None;
@@ -1476,14 +1476,14 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 }
             }
             // a replica whose node left waits for it to come back
-            if let Some(u) = &copy.unassigned {
-                if u.delayed {
-                    let ready_at = u.at_millis + is.delayed_timeout;
-                    if ctx.now < ready_at {
-                        changes.next_delay_at =
-                            Some(changes.next_delay_at.map_or(ready_at, |d| d.min(ready_at)));
-                        continue;
-                    }
+            if let Some(u) = &copy.unassigned
+                && u.delayed
+            {
+                let ready_at = u.at_millis + is.delayed_timeout;
+                if ctx.now < ready_at {
+                    changes.next_delay_at =
+                        Some(changes.next_delay_at.map_or(ready_at, |d| d.min(ready_at)));
+                    continue;
                 }
             }
             let mut best: Option<(&DiscoveryNode, Decision)> = None;
@@ -1620,10 +1620,10 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 if model.node.is_none() {
                     c.allocation_id = None;
                 }
-                if was != model.node {
-                    if let Some(n) = model.node.clone() {
-                        changes.assigned.push((name.clone(), shard, c.primary, n));
-                    }
+                if was != model.node
+                    && let Some(n) = model.node.clone()
+                {
+                    changes.assigned.push((name.clone(), shard, c.primary, n));
                 }
             }
             // a shard with fewer copies than the first one gains them
@@ -1769,11 +1769,11 @@ pub fn shard_stale(
 pub fn retry_failed(table: &mut RoutingTable) -> usize {
     let mut n = 0;
     for c in table.indices.values_mut().flat_map(|s| s.values_mut()).flatten() {
-        if let Some(u) = c.unassigned.as_mut() {
-            if u.failed_allocations > 0 {
-                u.failed_allocations = 0;
-                n += 1;
-            }
+        if let Some(u) = c.unassigned.as_mut()
+            && u.failed_allocations > 0
+        {
+            u.failed_allocations = 0;
+            n += 1;
         }
     }
     n
@@ -2193,10 +2193,10 @@ pub fn explain(
             if let Some(n) = node {
                 out["current_node"] = node_json(n, rank_of(&n.id));
             }
-            if copy.state == ShardState::Relocating {
-                if let Some(t) = copy.relocating_node.as_ref().and_then(|r| ctx.nodes.get(r)) {
-                    out["current_node"]["relocating_to"] = json!({"id": t.id.as_str(), "name": t.name, "transport_address": t.transport_address});
-                }
+            if copy.state == ShardState::Relocating
+                && let Some(t) = copy.relocating_node.as_ref().and_then(|r| ctx.nodes.get(r))
+            {
+                out["current_node"]["relocating_to"] = json!({"id": t.id.as_str(), "name": t.name, "transport_address": t.transport_address});
             }
             if copy.state == ShardState::Started {
                 let remain = node.map(|n| can_remain(ctx, table, copy, n)).unwrap_or_default();

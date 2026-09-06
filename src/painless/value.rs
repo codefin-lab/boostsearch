@@ -18,6 +18,11 @@ use super::ast::Stmt;
 pub type MapRef = Rc<RefCell<Vec<(Value, Value)>>>;
 pub type ListRef = Rc<RefCell<Vec<Value>>>;
 
+/// A list or map that holds itself, which no JSON can be written for. There
+/// is nothing else to say about it, which is why it carries nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelfReferencing;
+
 #[derive(Clone)]
 pub enum Value {
     Null,
@@ -107,20 +112,20 @@ impl Value {
 
     /// As JSON, or `Err` where a list or map holds itself, which no JSON
     /// can say.
-    pub fn try_json(&self) -> Result<Json, ()> {
+    pub fn try_json(&self) -> Result<Json, SelfReferencing> {
         let mut seen = Vec::new();
         self.json_within(&mut seen)
     }
 
-    fn json_within(&self, seen: &mut Vec<usize>) -> Result<Json, ()> {
+    fn json_within(&self, seen: &mut Vec<usize>) -> Result<Json, SelfReferencing> {
         Ok(match self {
             Value::List(l) => {
                 let addr = Rc::as_ptr(l) as *const () as usize;
                 if seen.contains(&addr) {
-                    return Err(());
+                    return Err(SelfReferencing);
                 }
                 seen.push(addr);
-                let out: Result<Vec<Json>, ()> =
+                let out: Result<Vec<Json>, SelfReferencing> =
                     l.borrow().iter().map(|v| v.json_within(seen)).collect();
                 seen.pop();
                 Json::Array(out?)
@@ -128,7 +133,7 @@ impl Value {
             Value::Map(m) => {
                 let addr = Rc::as_ptr(m) as *const () as usize;
                 if seen.contains(&addr) {
-                    return Err(());
+                    return Err(SelfReferencing);
                 }
                 seen.push(addr);
                 let mut o = serde_json::Map::new();

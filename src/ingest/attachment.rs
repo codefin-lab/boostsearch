@@ -248,10 +248,11 @@ fn docx_text(bytes: &[u8]) -> Option<String> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) => match local_name(e.name().as_ref()) {
-                "t" => in_text = true,
-                _ => {}
-            },
+            Ok(quick_xml::events::Event::Start(e)) => {
+                if local_name(e.name().as_ref()) == "t" {
+                    in_text = true
+                }
+            }
             Ok(quick_xml::events::Event::End(e)) => match local_name(e.name().as_ref()) {
                 "t" => in_text = false,
                 // a paragraph is a line, and a line break is one too
@@ -455,7 +456,7 @@ fn doc_text(bytes: &[u8]) -> Option<String> {
             out.extend(run.iter().map(|b| cp1252(*b)));
         } else {
             let run = word.get(start..end)?;
-            for pair in run.chunks_exact(2) {
+            for pair in run.as_chunks::<2>().0 {
                 if let Some(c) = char::from_u32(u16::from_le_bytes([pair[0], pair[1]]) as u32) {
                     out.push(c);
                 }

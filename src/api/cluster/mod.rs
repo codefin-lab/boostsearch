@@ -127,7 +127,7 @@ pub async fn cluster_health(
     // so the first look is also the last.)
     let waits = ["wait_for_status", "wait_for_nodes", "wait_for_active_shards", "wait_for_events"]
         .iter()
-        .any(|k| p.get(*k).is_some());
+        .any(|k| p.contains_key(*k));
     let clustered = crate::cluster::runtime().map(|rt| rt.state().nodes.len() > 1).unwrap_or(false);
     if waits && clustered {
         let ms = p
@@ -293,12 +293,12 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
     }
     // a replica the store's settings ask for and no node can hold
     for name in &names {
-        if !live.routing.indices.contains_key(name) {
-            if let Some(st) = store.get(name) {
-                let g = st.read();
-                let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1) as usize;
-                live_counts.unassigned += replicas * shards_of(name);
-            }
+        if !live.routing.indices.contains_key(name)
+            && let Some(st) = store.get(name)
+        {
+            let g = st.read();
+            let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1) as usize;
+            live_counts.unassigned += replicas * shards_of(name);
         }
     }
     // a health request naming an index that is not there waits for it and

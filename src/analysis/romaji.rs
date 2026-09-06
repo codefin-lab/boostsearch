@@ -149,12 +149,6 @@ fn as_hiragana(text: &str) -> String {
         .collect()
 }
 
-/// The `ー` after a katakana word is a length mark, not a sound of its own,
-/// and a word written with one is the same word written without it. Four
-/// characters is where Lucene draws the line, on the grounds that a shorter
-/// word is more likely to be a whole word than a lengthened one.
-pub const KATAKANA_MINIMUM: usize = 4;
-
 /// A reading, written in the Latin alphabet.
 ///
 /// Anything the table does not know is left as it stands: a reading that came

@@ -268,7 +268,7 @@ pub(crate) fn run_scripted_terms_agg(
         let mapping = st.read().mapping.clone();
         let expanded = crate::store::expand_for_indexing(source, &mapping);
         let mut keys: Vec<Value> = Vec::new();
-        let mut run_with = |runner: crate::painless::contexts::Runner| -> Result<crate::painless::Value, Response> {
+        let run_with = |runner: crate::painless::contexts::Runner| -> Result<crate::painless::Value, Response> {
             let mut runner = runner;
             runner.run(&compiled.script).map_err(|e| crate::search::search_script_failure(e, index))
         };

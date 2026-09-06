@@ -76,9 +76,7 @@ pub fn of(word: &str) -> Option<String> {
     let mut after_point = false;
     for c in word.chars() {
         if c == '.' || c == '．' {
-            if digits.is_none() {
-                return None;
-            }
+            digits?;
             after_point = true;
             continue;
         }

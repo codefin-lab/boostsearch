@@ -56,23 +56,6 @@ fn segmenter(language: Language) -> &'static Segmenter {
     })
 }
 
-/// The Japanese reader that breaks compounds apart.
-///
-/// `関西国際空港` is one word in the dictionary and four in a search box, and
-/// the penalties below are the ones Lucene's kuromoji uses to decide when a
-/// long word is better read as its parts: a kanji run longer than two
-/// characters is charged for each character past that, and anything else for
-/// each character past seven.
-#[cfg(feature = "cjk")]
-fn decomposer() -> &'static Segmenter {
-    static CELL: OnceLock<Segmenter> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let dictionary = load_embedded_dictionary(DictionaryKind::IPADIC)
-            .expect("the dictionary is built into this binary");
-        Segmenter::new(Mode::Decompose(lindera::mode::Penalty::default()), dictionary, None)
-    })
-}
-
 /// The words a text holds, as the dictionary for that language reads them.
 ///
 /// Built without the dictionaries, there is nothing to read them with, and

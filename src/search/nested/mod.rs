@@ -236,12 +236,12 @@ pub(crate) fn objects_agg(
                 .filter(|(_, list)| list.len() as u64 >= min.max(1))
                 .map(|(key, list)| {
                     let mut b = json!({"key": key, "doc_count": list.len()});
-                    if dated {
-                        if let Ok(at) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+                    if dated
+                        && let Ok(at) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
                             key as i128 * 1_000_000,
-                        ) {
-                            b["key_as_string"] = json!(crate::search::aggs::iso_millis(at));
-                        }
+                        )
+                    {
+                        b["key_as_string"] = json!(crate::search::aggs::iso_millis(at));
                     }
                     if let Some(Value::Object(inner)) =
                         subs.as_ref().map(|_| objects_agg(store, targets, &list, path, &subs))
@@ -360,8 +360,6 @@ pub(crate) fn scope_sorts_to(node: &mut Value, path: &str) {
         _ => {}
     }
 }
-
-/// A value as the number it stands for: a date is its instant.
 
 /// Which bucket a number falls in, for a histogram written over objects.
 ///

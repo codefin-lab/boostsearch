@@ -27,10 +27,11 @@ pub async fn explain_ppl(Query(p): Query<Params>, body: String) -> Response {
     explain(&p, &body, true)
 }
 
-fn query_of(body: &str, piped: bool) -> Result<String, Response> {
+fn query_of(body: &str) -> Result<String, Response> {
     let parsed: Value = parse_body(body).unwrap_or(json!({}));
-    let key = if piped { "query" } else { "query" };
-    parsed.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).ok_or_else(|| {
+    // both languages name it the same way, which is what lets one handler
+    // answer for both
+    parsed.get("query").and_then(|v| v.as_str()).map(|s| s.to_string()).ok_or_else(|| {
         failed(StatusCode::BAD_REQUEST, "IllegalArgumentException", "[query] is missing")
     })
 }
@@ -44,7 +45,7 @@ fn planned_of(text: &str, piped: bool) -> Result<plan::Planned, Response> {
 }
 
 fn explain(p: &Params, body: &str, piped: bool) -> Response {
-    let text = match query_of(body, piped) {
+    let text = match query_of(body) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -69,7 +70,7 @@ fn explain(p: &Params, body: &str, piped: bool) -> Response {
 }
 
 fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
-    let text = match query_of(body, piped) {
+    let text = match query_of(body) {
         Ok(t) => t,
         Err(r) => return r,
     };

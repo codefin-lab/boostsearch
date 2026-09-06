@@ -400,10 +400,11 @@ pub async fn put_script(
     // a script stored for a context is compiled first, so that a fault is
     // reported now rather than at the first search
     let lang = script.get("lang").and_then(|v| v.as_str()).unwrap_or("painless");
-    if lang == "painless" && p.get("context").is_some() {
-        if let Err(e) = crate::painless::contexts::Compiled::of(&script, &|_| None) {
-            return crate::api::compile_failure(e);
-        }
+    if lang == "painless"
+        && p.contains_key("context")
+        && let Err(e) = crate::painless::contexts::Compiled::of(&script, &|_| None)
+    {
+        return crate::api::compile_failure(e);
     }
     store.remember_script(&id, script);
     respond(&p, json!({"acknowledged": true}))

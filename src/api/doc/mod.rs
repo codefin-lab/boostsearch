@@ -393,7 +393,7 @@ pub async fn index_doc(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if p.get("pipeline").is_none()
+    if !p.contains_key("pipeline")
         && let Some(r) = refuse_unless_alias(&store, &index, &p)
     {
         return r;
@@ -407,7 +407,7 @@ pub async fn index_doc_auto(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    if p.get("pipeline").is_none()
+    if !p.contains_key("pipeline")
         && let Some(r) = refuse_unless_alias(&store, &index, &p)
     {
         return r;

@@ -74,7 +74,7 @@ fn missing_named_pipeline(
         if spec.kind == "pipeline"
             && let Some(name) = spec.config.get("name").and_then(|v| v.as_str())
             && !name.contains("{{")
-            && store.pipelines("ingest").get(name).is_none()
+            && !store.pipelines("ingest").contains_key(name)
             && !spec
                 .config
                 .get("ignore_missing_pipeline")
@@ -374,7 +374,7 @@ pub(crate) fn ingest_for_write(
     asked: Option<&str>,
     routing: Option<String>,
 ) -> std::result::Result<Option<crate::ingest::IngestDoc>, crate::ingest::IngestError> {
-    use crate::ingest::{IngestDoc, run_pipeline, stored_pipeline};
+    use crate::ingest::IngestDoc;
     let names = pipelines_for_write(store, index, asked);
     if names.is_empty() {
         return Ok(Some({

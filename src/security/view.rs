@@ -269,19 +269,19 @@ impl View {
                             .keys()
                             .find(|f| !["boost", "_name", "ignore_unmapped"].contains(&f.as_str()))
                             .cloned();
-                        if let Some(f) = field {
-                            if self.unqueryable(&f) {
-                                return json!({"match_none": {}});
-                            }
+                        if let Some(f) = field
+                            && self.unqueryable(&f)
+                        {
+                            return json!({"match_none": {}});
                         }
                     }
                     return v.clone();
                 }
                 if FIELD_KEY.contains(&k.as_str()) {
-                    if let Some(f) = inner.get("field").and_then(|f| f.as_str()) {
-                        if self.unqueryable(f) {
-                            return json!({"match_none": {}});
-                        }
+                    if let Some(f) = inner.get("field").and_then(|f| f.as_str())
+                        && self.unqueryable(f)
+                    {
+                        return json!({"match_none": {}});
                     }
                     return v.clone();
                 }
@@ -291,10 +291,9 @@ impl View {
                     if k == "query_string" || k == "simple_query_string" {
                         if let Some(text) =
                             spec.get("query").and_then(|q| q.as_str()).map(|t| t.to_string())
+                            && k == "query_string"
                         {
-                            if k == "query_string" {
-                                spec["query"] = json!(self.rewrite_query_text(&text));
-                            }
+                            spec["query"] = json!(self.rewrite_query_text(&text));
                         }
                         // with no field named, the whole mapping is searched:
                         // here, the part of it the caller may see
@@ -321,10 +320,10 @@ impl View {
                         });
                         emptied = before > 0 && fields.is_empty();
                     }
-                    if let Some(df) = spec.get("default_field").and_then(|d| d.as_str()) {
-                        if self.unqueryable(df) {
-                            emptied = true;
-                        }
+                    if let Some(df) = spec.get("default_field").and_then(|d| d.as_str())
+                        && self.unqueryable(df)
+                    {
+                        emptied = true;
                     }
                     if emptied {
                         return json!({"match_none": {}});
@@ -507,9 +506,9 @@ impl View {
                 c.then_with(|| key_of(a).cmp(&key_of(b)))
             });
         }
-        let total: u64 = buckets.iter().map(|b| count_of(b)).sum();
+        let total: u64 = buckets.iter().map(&count_of).sum();
         buckets.truncate(size);
-        let kept: u64 = buckets.iter().map(|b| count_of(b)).sum();
+        let kept: u64 = buckets.iter().map(count_of).sum();
         let other = node.get("sum_other_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
         node["sum_other_doc_count"] = json!(other + total - kept);
         if node.get("doc_count_error_upper_bound").is_none() {

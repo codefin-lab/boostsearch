@@ -780,7 +780,7 @@ pub fn java_set_order(names: HashSet<String>) -> Vec<String> {
             ((spread as usize) & (n - 1), i, s)
         })
         .collect();
-    keyed.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    keyed.sort_by_key(|a| (a.0, a.1));
     keyed.into_iter().map(|(_, _, s)| s).collect()
 }
 
@@ -1100,10 +1100,11 @@ impl Security {
         };
         let key = credential_digest(name, password, remote);
         let generation = self.generation.load(std::sync::atomic::Ordering::Acquire);
-        if let Some(hit) = self.auth_cache.lock().get(&key) {
-            if hit.generation == generation && hit.at.elapsed() < self.cache_ttl {
-                return Ok(hit.caller.clone());
-            }
+        if let Some(hit) = self.auth_cache.lock().get(&key)
+            && hit.generation == generation
+            && hit.at.elapsed() < self.cache_ttl
+        {
+            return Ok(hit.caller.clone());
         }
         let Some(user) = cfg.authenticate(name, password) else { return Err(AuthFailure::Failed) };
         let roles = cfg.map_roles(name, &user.backend_roles, &user.security_roles, remote);
@@ -1151,21 +1152,22 @@ impl Security {
             return Ok(Caller::unrestricted());
         }
         // an admin certificate is the admin, before any domain is asked
-        if let Some(dn) = &presented.peer_dn {
-            if self.admin_dns.iter().any(|a| *a == normalize_dn(dn)) {
-                let mut c = Caller::unrestricted();
-                c.name = dn.clone();
-                c.admin_cert = true;
-                c.remote_address = presented.remote.clone();
-                return Ok(c);
-            }
+        if let Some(dn) = &presented.peer_dn
+            && self.admin_dns.iter().any(|a| *a == normalize_dn(dn))
+        {
+            let mut c = Caller::unrestricted();
+            c.name = dn.clone();
+            c.admin_cert = true;
+            c.remote_address = presented.remote.clone();
+            return Ok(c);
         }
         let key = presented_digest(presented);
         let generation = self.generation.load(std::sync::atomic::Ordering::Acquire);
-        if let Some(hit) = self.auth_cache.lock().get(&key) {
-            if hit.generation == generation && hit.at.elapsed() < self.cache_ttl {
-                return Ok(hit.caller.clone());
-            }
+        if let Some(hit) = self.auth_cache.lock().get(&key)
+            && hit.generation == generation
+            && hit.at.elapsed() < self.cache_ttl
+        {
+            return Ok(hit.caller.clone());
         }
         let chain = self.chain.read().clone();
         // a snapshot of the configuration: the chain awaits on LDAP and the
@@ -1401,14 +1403,14 @@ pub fn narrow_term_vectors(store: &crate::store::Store, index: &str, fields: &mu
     for name in names {
         if view.hidden(&name) {
             o.remove(&name);
-        } else if view.masked(&name) {
-            if let Some(Value::Object(terms)) = o.get_mut(&name).and_then(|f| f.get_mut("terms")) {
-                let raw: Vec<(String, Value)> =
-                    terms.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                terms.clear();
-                for (k, v) in raw {
-                    terms.insert(view.mask_text(&k), v);
-                }
+        } else if view.masked(&name)
+            && let Some(Value::Object(terms)) = o.get_mut(&name).and_then(|f| f.get_mut("terms"))
+        {
+            let raw: Vec<(String, Value)> =
+                terms.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            terms.clear();
+            for (k, v) in raw {
+                terms.insert(view.mask_text(&k), v);
             }
         }
     }

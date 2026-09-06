@@ -76,7 +76,7 @@ pub async fn post_voting_config_exclusions(
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "timeout_exception",
-                &format!(
+                format!(
                     "timed out waiting for voting config exclusions [{}] to take effect",
                     list.join(", ")
                 ),
@@ -95,37 +95,41 @@ pub async fn delete_voting_config_exclusions(
     let timeout = p.get("timeout").and_then(|t| parse_time_ms(t)).unwrap_or(30_000);
     let excluded = store.voting_exclusions();
     let started = std::time::Instant::now();
-    while wait {
-        let live = crate::cluster::current_state();
-        let still: Vec<String> = excluded
-            .iter()
-            .filter(|e| {
-                live.nodes.contains_key(&crate::cluster::NodeId(
-                    e["node_id"].as_str().unwrap_or("").to_string(),
-                ))
-            })
-            .map(|e| {
-                format!(
-                    "{{{}}}{{{}}}",
-                    e["node_name"].as_str().unwrap_or(""),
-                    e["node_id"].as_str().unwrap_or("")
-                )
-            })
-            .collect();
-        if still.is_empty() {
-            break;
+    // `wait` does not change: it says whether to wait at all, and the loop
+    // ends when the nodes have gone or the timeout is up
+    if wait {
+        loop {
+            let live = crate::cluster::current_state();
+            let still: Vec<String> = excluded
+                .iter()
+                .filter(|e| {
+                    live.nodes.contains_key(&crate::cluster::NodeId(
+                        e["node_id"].as_str().unwrap_or("").to_string(),
+                    ))
+                })
+                .map(|e| {
+                    format!(
+                        "{{{}}}{{{}}}",
+                        e["node_name"].as_str().unwrap_or(""),
+                        e["node_id"].as_str().unwrap_or("")
+                    )
+                })
+                .collect();
+            if still.is_empty() {
+                break;
+            }
+            if started.elapsed().as_millis() as u64 >= timeout {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "timeout_exception",
+                    format!(
+                        "timed out waiting for removal of nodes; if nodes should not be removed, set waitForRemoval to false. [{}]",
+                        still.join(", ")
+                    ),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        if started.elapsed().as_millis() as u64 >= timeout {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "timeout_exception",
-                &format!(
-                    "timed out waiting for removal of nodes; if nodes should not be removed, set waitForRemoval to false. [{}]",
-                    still.join(", ")
-                ),
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     store.clear_voting_exclusions();
     (StatusCode::OK, axum::Json(json!({}))).into_response()

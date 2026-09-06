@@ -179,10 +179,10 @@ impl Node {
             return Some(self);
         }
         for c in &self.children {
-            if let Child::Element(e) = c {
-                if let Some(f) = e.by_id(id) {
-                    return Some(f);
-                }
+            if let Child::Element(e) = c
+                && let Some(f) = e.by_id(id)
+            {
+                return Some(f);
             }
         }
         None
@@ -250,10 +250,11 @@ fn write_c14n(
     // the prefixes this element visibly uses: its own, and its attributes'
     let mut used: Vec<String> = vec![node.prefix.clone().unwrap_or_default()];
     for (p, _, _) in &node.attrs {
-        if let Some(p) = p {
-            if p != "xml" && !used.contains(p) {
-                used.push(p.clone());
-            }
+        if let Some(p) = p
+            && p != "xml"
+            && !used.contains(p)
+        {
+            used.push(p.clone());
         }
     }
     for p in inclusive {
@@ -329,8 +330,8 @@ fn write_c14n(
 
 /// The namespaces in force at a node found under `root`, by walking down
 /// to it: what the source document's ancestors declared.
-fn scope_at<'a>(
-    root: &'a Node,
+fn scope_at(
+    root: &Node,
     target: &Node,
     scope: &mut BTreeMap<String, String>,
 ) -> Option<BTreeMap<String, String>> {
@@ -343,10 +344,10 @@ fn scope_at<'a>(
         return Some(scope.clone());
     }
     for c in &root.children {
-        if let Child::Element(e) = c {
-            if let Some(found) = scope_at(e, target, &mut here) {
-                return Some(found);
-            }
+        if let Child::Element(e) = c
+            && let Some(found) = scope_at(e, target, &mut here)
+        {
+            return Some(found);
         }
     }
     None
@@ -542,10 +543,10 @@ pub fn validate(
         return Err("status is not Success".into());
     }
     // destination, in-response-to, issuer
-    if let Some(dest) = root.attr("Destination") {
-        if dest != acs {
-            return Err(format!("The response was received at {acs} instead of {dest}"));
-        }
+    if let Some(dest) = root.attr("Destination")
+        && dest != acs
+    {
+        return Err(format!("The response was received at {acs} instead of {dest}"));
     }
     match (root.attr("InResponseTo"), request_id) {
         (Some(irt), Some(req)) if irt != req => {
@@ -555,20 +556,20 @@ pub fn validate(
         (None, Some(_)) => return Err("the response has no InResponseTo".into()),
         _ => {}
     }
-    if let Some(iss) = root.child("Issuer") {
-        if iss.text().trim() != idp_entity_id {
-            return Err("issuer is not the IdP".into());
-        }
+    if let Some(iss) = root.child("Issuer")
+        && iss.text().trim() != idp_entity_id
+    {
+        return Err("issuer is not the IdP".into());
     }
     let assertion = root.child("Assertion").ok_or_else(|| "no assertion".to_string())?;
     if assertion.child("EncryptedAssertion").is_some() || root.child("EncryptedAssertion").is_some()
     {
         return Err("encrypted assertions are not supported".into());
     }
-    if let Some(iss) = assertion.child("Issuer") {
-        if iss.text().trim() != idp_entity_id {
-            return Err("assertion issuer is not the IdP".into());
-        }
+    if let Some(iss) = assertion.child("Issuer")
+        && iss.text().trim() != idp_entity_id
+    {
+        return Err("assertion issuer is not the IdP".into());
     }
     // signatures: the response's, the assertion's, or both; at least one
     let mut any = false;
@@ -588,15 +589,15 @@ pub fn validate(
     }
     // conditions
     if let Some(cond) = assertion.child("Conditions") {
-        if let Some(nb) = cond.attr("NotBefore").and_then(parse_instant) {
-            if now < nb {
-                return Err("assertion is not yet valid".into());
-            }
+        if let Some(nb) = cond.attr("NotBefore").and_then(parse_instant)
+            && now < nb
+        {
+            return Err("assertion is not yet valid".into());
         }
-        if let Some(na) = cond.attr("NotOnOrAfter").and_then(parse_instant) {
-            if now >= na {
-                return Err("assertion has expired".into());
-            }
+        if let Some(na) = cond.attr("NotOnOrAfter").and_then(parse_instant)
+            && now >= na
+        {
+            return Err("assertion has expired".into());
         }
         let audiences: Vec<String> = cond
             .children_named("AudienceRestriction")
@@ -617,20 +618,20 @@ pub fn validate(
     let name_id_format = name_id_node.attr("Format").map(|s| s.to_string());
     for sc in subject.children_named("SubjectConfirmation") {
         if let Some(data) = sc.child("SubjectConfirmationData") {
-            if let Some(r) = data.attr("Recipient") {
-                if r != acs {
-                    return Err("subject confirmation recipient is not the ACS".into());
-                }
+            if let Some(r) = data.attr("Recipient")
+                && r != acs
+            {
+                return Err("subject confirmation recipient is not the ACS".into());
             }
-            if let Some(na) = data.attr("NotOnOrAfter").and_then(parse_instant) {
-                if now >= na {
-                    return Err("subject confirmation has expired".into());
-                }
+            if let Some(na) = data.attr("NotOnOrAfter").and_then(parse_instant)
+                && now >= na
+            {
+                return Err("subject confirmation has expired".into());
             }
-            if let (Some(irt), Some(req)) = (data.attr("InResponseTo"), request_id) {
-                if irt != req {
-                    return Err("subject confirmation InResponseTo does not match".into());
-                }
+            if let (Some(irt), Some(req)) = (data.attr("InResponseTo"), request_id)
+                && irt != req
+            {
+                return Err("subject confirmation InResponseTo does not match".into());
             }
         }
     }
@@ -717,14 +718,13 @@ impl SamlSettings {
             let path = std::path::PathBuf::from(&f);
             let path = if path.is_absolute() { path } else { crate::tls::config_dir().join(path) };
             std::fs::read_to_string(path).ok()?
-        } else if let Some(u) = text("idp.metadata_url") {
+        } else {
+            let u = text("idp.metadata_url")?;
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(10)))
                 .build()
                 .into();
             agent.get(&u).call().ok()?.body_mut().read_to_string().ok()?
-        } else {
-            return None;
         };
         let md = parse(&metadata_xml)?;
         let entity = md.attr("entityID").map(|s| s.to_string());

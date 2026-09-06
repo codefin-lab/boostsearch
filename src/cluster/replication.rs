@@ -311,10 +311,9 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                         c.state,
                         ShardState::Started | ShardState::Relocating | ShardState::Initializing
                     )
+                    && let Some(a) = &c.allocation_id
                 {
-                    if let Some(a) = &c.allocation_id {
-                        fine.push(a.clone());
-                    }
+                    fine.push(a.clone());
                 }
             }
             // ids that belong to a copy the routing still has: an id left in
@@ -812,9 +811,11 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
 /// One recovery per index at a time on a node: two copies of one index
 /// placed here together share the files, so the second waits for the
 /// first and finds them.
-static RECOVERING: std::sync::OnceLock<
-    parking_lot::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<Option<String>>>>>,
-> = std::sync::OnceLock::new();
+/// The recovery running for each shard, if one is: the lock somebody takes to
+/// be the one doing it, and the node it is seeding from once that is settled.
+type Recoveries = BTreeMap<String, Arc<tokio::sync::Mutex<Option<String>>>>;
+
+static RECOVERING: std::sync::OnceLock<parking_lot::Mutex<Recoveries>> = std::sync::OnceLock::new();
 
 fn recovery_lock(index: &str) -> Arc<tokio::sync::Mutex<Option<String>>> {
     let m = RECOVERING.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()));
@@ -978,18 +979,16 @@ pub async fn seed_by_scan(
         let store2 = store.clone();
         let name = index.to_string();
         let primary_here = super::runtime().map(|r| r.local()).as_ref() == Some(primary);
-        if !primary_here {
-            if let Some(meta) = meta {
-                let made = tokio::task::spawn_blocking(move || {
+        if !primary_here && let Some(meta) = meta {
+            let made = tokio::task::spawn_blocking(move || {
                     store2.drop_local(&name);
                     // files a half-finished recovery left behind: nothing holds
                     // them open once the store has let the index go, and the
                     // new copy cannot be opened on top of them
-                    if store2.get(&name).is_none() {
-                        if let Some(dir) = store2.index_dir(&name) {
+                    if store2.get(&name).is_none()
+                        && let Some(dir) = store2.index_dir(&name) {
                             let _ = std::fs::remove_dir_all(&dir);
                         }
-                    }
                     let mut settings = meta.settings.clone();
                     if let Some(idx) = settings.get_mut("index").and_then(|v| v.as_object_mut()) {
                         for k in ["creation_date", "provided_name", "version"] {
@@ -1021,14 +1020,13 @@ pub async fn seed_by_scan(
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("making a copy of [{index}] panicked: {e}")));
-                match made {
-                    Ok(()) => {}
-                    // an empty message means "it is still standing": the pages
-                    // that follow overwrite it rather than being skipped as
-                    // versions already held
-                    Err(e) if e.is_empty() => stubborn = true,
-                    Err(e) => return Err(e),
-                }
+            match made {
+                Ok(()) => {}
+                // an empty message means "it is still standing": the pages
+                // that follow overwrite it rather than being skipped as
+                // versions already held
+                Err(e) if e.is_empty() => stubborn = true,
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1113,92 +1111,6 @@ pub async fn catch_up_by_scan(
     })
     .await;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shards_are_patched_for_a_document_and_for_a_bulk() {
-        let mut acks = BTreeMap::new();
-        acks.insert(
-            "a".to_string(),
-            Ack {
-                total: 2,
-                successful: 2,
-                failed: 0,
-                failures: vec![],
-                manager_unreachable: false,
-            },
-        );
-        acks.insert(
-            "b".to_string(),
-            Ack {
-                total: 3,
-                successful: 2,
-                failed: 1,
-                failures: vec![json!({"_node": "x"})],
-                manager_unreachable: false,
-            },
-        );
-        let mut one = json!({"_index": "a", "_id": "1", "_shards": {"total": 2, "successful": 1, "failed": 0}});
-        patch_shards(&mut one, &acks);
-        assert_eq!(one["_shards"]["successful"], 2);
-        let mut bulk = json!({"items": [
-            {"index": {"_index": "a", "_shards": {"total": 2, "successful": 1, "failed": 0}}},
-            {"delete": {"_index": "b", "_shards": {"total": 3, "successful": 1, "failed": 0}}},
-            {"index": {"_index": "c", "_shards": {"total": 1, "successful": 1, "failed": 0}}},
-        ]});
-        patch_shards(&mut bulk, &acks);
-        assert_eq!(bulk["items"][0]["index"]["_shards"]["successful"], 2);
-        assert_eq!(bulk["items"][1]["delete"]["_shards"]["failed"], 1);
-        assert_eq!(bulk["items"][1]["delete"]["_shards"]["failures"][0]["_node"], "x");
-        assert_eq!(bulk["items"][2]["index"]["_shards"]["successful"], 1);
-    }
-
-    #[test]
-    fn targets_are_the_other_nodes_copies_and_initializing_ones_are_not_in_sync() {
-        use crate::cluster::state::{ShardRouting, ShardState};
-        let mut s = ClusterState::empty("c", "u");
-        let mk = |node: &str, primary: bool, state: ShardState| ShardRouting {
-            index: "i".into(),
-            shard: 0,
-            primary,
-            state,
-            node: Some(NodeId(node.into())),
-            relocating_node: None,
-            allocation_id: Some(node.into()),
-            unassigned: None,
-        };
-        s.routing.indices.entry("i".into()).or_default().insert(
-            0,
-            vec![
-                mk("p", true, ShardState::Started),
-                mk("r1", false, ShardState::Started),
-                mk("r2", false, ShardState::Initializing),
-                mk("r3", false, ShardState::Unassigned),
-            ],
-        );
-        let t = targets(&s, &NodeId("p".into()), "i", 0);
-        assert_eq!(t, vec![(NodeId("r1".into()), true), (NodeId("r2".into()), false)]);
-        // a copy is a copy of the index: any shard's write goes to every copy
-        assert_eq!(targets(&s, &NodeId("p".into()), "i", 1), t);
-    }
-
-    #[test]
-    fn the_global_checkpoint_is_what_every_in_sync_copy_has() {
-        let mut t = Tracker::default();
-        let (a, b) = (NodeId("a".into()), NodeId("b".into()));
-        assert_eq!(t.global_checkpoint("i", 10, &[]), 10);
-        t.acked("i", &a, 7);
-        t.acked("i", &b, 9);
-        t.acked("i", &a, 5);
-        assert_eq!(t.local_checkpoint("i", &a), Some(7));
-        assert_eq!(t.global_checkpoint("i", 10, &[a.clone(), b.clone()]), 7);
-        assert_eq!(t.global_checkpoint("i", 10, &[b.clone()]), 9);
-        assert_eq!(t.global_checkpoint("j", 3, &[a]), 0);
-    }
 }
 
 /// Why a copy write brought nothing back.
@@ -1292,4 +1204,90 @@ pub async fn resync(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shards_are_patched_for_a_document_and_for_a_bulk() {
+        let mut acks = BTreeMap::new();
+        acks.insert(
+            "a".to_string(),
+            Ack {
+                total: 2,
+                successful: 2,
+                failed: 0,
+                failures: vec![],
+                manager_unreachable: false,
+            },
+        );
+        acks.insert(
+            "b".to_string(),
+            Ack {
+                total: 3,
+                successful: 2,
+                failed: 1,
+                failures: vec![json!({"_node": "x"})],
+                manager_unreachable: false,
+            },
+        );
+        let mut one = json!({"_index": "a", "_id": "1", "_shards": {"total": 2, "successful": 1, "failed": 0}});
+        patch_shards(&mut one, &acks);
+        assert_eq!(one["_shards"]["successful"], 2);
+        let mut bulk = json!({"items": [
+            {"index": {"_index": "a", "_shards": {"total": 2, "successful": 1, "failed": 0}}},
+            {"delete": {"_index": "b", "_shards": {"total": 3, "successful": 1, "failed": 0}}},
+            {"index": {"_index": "c", "_shards": {"total": 1, "successful": 1, "failed": 0}}},
+        ]});
+        patch_shards(&mut bulk, &acks);
+        assert_eq!(bulk["items"][0]["index"]["_shards"]["successful"], 2);
+        assert_eq!(bulk["items"][1]["delete"]["_shards"]["failed"], 1);
+        assert_eq!(bulk["items"][1]["delete"]["_shards"]["failures"][0]["_node"], "x");
+        assert_eq!(bulk["items"][2]["index"]["_shards"]["successful"], 1);
+    }
+
+    #[test]
+    fn targets_are_the_other_nodes_copies_and_initializing_ones_are_not_in_sync() {
+        use crate::cluster::state::{ShardRouting, ShardState};
+        let mut s = ClusterState::empty("c", "u");
+        let mk = |node: &str, primary: bool, state: ShardState| ShardRouting {
+            index: "i".into(),
+            shard: 0,
+            primary,
+            state,
+            node: Some(NodeId(node.into())),
+            relocating_node: None,
+            allocation_id: Some(node.into()),
+            unassigned: None,
+        };
+        s.routing.indices.entry("i".into()).or_default().insert(
+            0,
+            vec![
+                mk("p", true, ShardState::Started),
+                mk("r1", false, ShardState::Started),
+                mk("r2", false, ShardState::Initializing),
+                mk("r3", false, ShardState::Unassigned),
+            ],
+        );
+        let t = targets(&s, &NodeId("p".into()), "i", 0);
+        assert_eq!(t, vec![(NodeId("r1".into()), true), (NodeId("r2".into()), false)]);
+        // a copy is a copy of the index: any shard's write goes to every copy
+        assert_eq!(targets(&s, &NodeId("p".into()), "i", 1), t);
+    }
+
+    #[test]
+    fn the_global_checkpoint_is_what_every_in_sync_copy_has() {
+        let mut t = Tracker::default();
+        let (a, b) = (NodeId("a".into()), NodeId("b".into()));
+        assert_eq!(t.global_checkpoint("i", 10, &[]), 10);
+        t.acked("i", &a, 7);
+        t.acked("i", &b, 9);
+        t.acked("i", &a, 5);
+        assert_eq!(t.local_checkpoint("i", &a), Some(7));
+        assert_eq!(t.global_checkpoint("i", 10, &[a.clone(), b.clone()]), 7);
+        assert_eq!(t.global_checkpoint("i", 10, std::slice::from_ref(&b)), 9);
+        assert_eq!(t.global_checkpoint("j", 3, &[a]), 0);
+    }
 }

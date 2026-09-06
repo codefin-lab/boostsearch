@@ -322,7 +322,7 @@ impl Hnsw {
     /// navigable rather than merely well-connected.
     fn choose<'v>(
         &self,
-        vector: &[f32],
+        _vector: &[f32],
         candidates: Vec<Candidate>,
         wanted: usize,
         vectors: &dyn Fn(u32) -> Option<&'v [f32]>,
@@ -480,7 +480,7 @@ mod tests {
         let vectors = scattered(400, 5);
         let graph = build(&vectors, Space::L2);
         let read = |i: u32| vectors.get(i as usize).map(|v: &Vec<f32>| v.as_slice());
-        let allowed = |i: u32| i % 5 == 0;
+        let allowed = |i: u32| i.is_multiple_of(5);
         let found = graph.nearest(&vectors[3], 10, Some(200), &read, Some(&allowed));
         assert_eq!(found.len(), 10, "a filter that keeps a fifth should still fill ten");
         assert!(found.iter().all(|(i, _)| allowed(*i)), "everything returned passes the filter");

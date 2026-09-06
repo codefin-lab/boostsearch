@@ -524,14 +524,11 @@ impl AuditLog {
     /// The configuration on disk laid over the plugin's default.
     fn load() -> AuditConfig {
         let mut base = embedded_default();
-        if let Ok(text) = std::fs::read_to_string(Self::file()) {
-            if let Ok(y) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
-                if let Some(cfg) =
-                    serde_json::to_value(y).ok().and_then(|v| v.get("config").cloned())
-                {
-                    crate::api::merge_into(&mut base, &cfg);
-                }
-            }
+        if let Ok(text) = std::fs::read_to_string(Self::file())
+            && let Ok(y) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+            && let Some(cfg) = serde_json::to_value(y).ok().and_then(|v| v.get("config").cloned())
+        {
+            crate::api::merge_into(&mut base, &cfg);
         }
         AuditConfig::from_json(&base)
     }
@@ -672,17 +669,18 @@ impl AuditLog {
         if !headers.is_empty() {
             m.insert("audit_rest_request_headers".into(), Value::Object(headers));
         }
-        if with_body && cfg.audit.log_request_body {
-            if let Some(b) = req.body.as_deref().filter(|b| !b.is_empty()) {
-                let sensitive =
-                    req.path.contains("/api/internalusers") || req.path.contains("/api/account");
-                let shown = if sensitive && b.contains("password") {
-                    "__SENSITIVE__".to_string()
-                } else {
-                    b.to_string()
-                };
-                m.insert("audit_request_body".into(), json!(shown));
-            }
+        if with_body
+            && cfg.audit.log_request_body
+            && let Some(b) = req.body.as_deref().filter(|b| !b.is_empty())
+        {
+            let sensitive =
+                req.path.contains("/api/internalusers") || req.path.contains("/api/account");
+            let shown = if sensitive && b.contains("password") {
+                "__SENSITIVE__".to_string()
+            } else {
+                b.to_string()
+            };
+            m.insert("audit_request_body".into(), json!(shown));
         }
     }
 
@@ -834,10 +832,10 @@ impl AuditLog {
         let _ = resolved;
         // an index the request names is reported as named, not as resolved
         self.add_transport(&cfg, &mut m, caller, action, &request_type, req, indices, &[]);
-        if let Some(b) = body.filter(|b| !b.is_empty()) {
-            if cfg.audit.log_request_body {
-                m.insert("audit_request_body".into(), json!(b));
-            }
+        if let Some(b) = body.filter(|b| !b.is_empty())
+            && cfg.audit.log_request_body
+        {
+            m.insert("audit_request_body".into(), json!(b));
         }
         self.send(m);
     }
@@ -872,6 +870,11 @@ impl AuditLog {
                     "audit_transport_headers".into(),
                     json!({
                         "_opendistro_security_remotecn": self.node.cluster_name,
+                        // every write reaches a shard as a bulk of one or
+                        // more, whatever it was called at the REST layer. A
+                        // per-path guess at the class stood here and was
+                        // removed: it was a guess, and this at least is what
+                        // the write is by the time an index event is raised.
                         "_opendistro_security_initial_action_class_header": "BulkShardRequest",
                         "_opendistro_security_origin_header": "REST",
                     }),
@@ -934,10 +937,10 @@ impl AuditLog {
         if cfg.audit.resolve_indices && !resolved.is_empty() {
             m.insert("audit_trace_resolved_indices".into(), json!(resolved));
         }
-        if let Some(id) = req.params.get("id") {
-            if action.starts_with("indices:data/") {
-                m.insert("audit_trace_doc_id".into(), json!(id));
-            }
+        if let Some(id) = req.params.get("id")
+            && action.starts_with("indices:data/")
+        {
+            m.insert("audit_trace_doc_id".into(), json!(id));
         }
         if cfg.audit.log_request_body {
             if action.starts_with("indices:data/write/index") {
@@ -1031,10 +1034,10 @@ impl AuditLog {
                         Value::Array(diff).to_string()
                     }),
                 );
-            } else if !cfg.compliance.write_metadata_only {
-                if let Some(a) = after {
-                    m.insert("audit_compliance_stored_fields_content".into(), json!(a.to_string()));
-                }
+            } else if !cfg.compliance.write_metadata_only
+                && let Some(a) = after
+            {
+                m.insert("audit_compliance_stored_fields_content".into(), json!(a.to_string()));
             }
         }
         m.insert("audit_request_effective_user".into(), json!(caller.name));
@@ -1149,19 +1152,15 @@ impl AuditLog {
         if !remote.is_empty() {
             m.insert("audit_request_remote_address".into(), json!(remote));
         }
-        if cfg.compliance.write_log_diffs {
-            if let (Some(b), Some(a)) = (before, after) {
-                let diff = json_diff(&hide_hashes(b), &hide_hashes(a));
-                m.insert("audit_compliance_diff_is_noop".into(), json!(diff.is_empty()));
-                m.insert(
-                    "audit_compliance_diff_content".into(),
-                    json!(if diff.is_empty() {
-                        String::new()
-                    } else {
-                        Value::Array(diff).to_string()
-                    }),
-                );
-            }
+        if cfg.compliance.write_log_diffs
+            && let (Some(b), Some(a)) = (before, after)
+        {
+            let diff = json_diff(&hide_hashes(b), &hide_hashes(a));
+            m.insert("audit_compliance_diff_is_noop".into(), json!(diff.is_empty()));
+            m.insert(
+                "audit_compliance_diff_content".into(),
+                json!(if diff.is_empty() { String::new() } else { Value::Array(diff).to_string() }),
+            );
         }
         m.insert("audit_trace_doc_id".into(), json!(kind));
         m.insert("audit_request_effective_user".into(), json!(caller.name));
@@ -1193,8 +1192,7 @@ fn hide_hashes(v: &Value) -> Value {
 
 /// The Java request class a REST call becomes, as the plugin names it in
 /// `audit_transport_request_type`.
-pub fn transport_request_type(action: &str, method: &str, path: &str) -> String {
-    let tail = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+pub fn transport_request_type(action: &str, method: &str, _path: &str) -> String {
     let name = match action {
         "cluster:monitor/health" => "ClusterHealthRequest",
         "cluster:monitor/state" => "ClusterStateRequest",
@@ -1205,13 +1203,9 @@ pub fn transport_request_type(action: &str, method: &str, path: &str) -> String 
         "cluster:monitor/task" => "ListTasksRequest",
         "cluster:admin/settings/get" => "ClusterGetSettingsRequest",
         "cluster:admin/settings/update" => "ClusterUpdateSettingsRequest",
-        "indices:data/read/search" => {
-            if tail == "_count" {
-                "SearchRequest"
-            } else {
-                "SearchRequest"
-            }
-        }
+        // a count is a search that returns only the number, and travels as
+        // the same request whichever path asked for it
+        "indices:data/read/search" => "SearchRequest",
         "indices:data/read/msearch" => "MultiSearchRequest",
         "indices:data/read/scroll" => "SearchScrollRequest",
         "indices:data/read/get" => "GetRequest",
@@ -1281,19 +1275,6 @@ pub fn transport_request_type(action: &str, method: &str, path: &str) -> String 
         }
     }
     format!("{s}Request")
-}
-
-fn initial_action_class(method: &str, path: &str) -> String {
-    if path.contains("/_bulk") {
-        return "BulkShardRequest".into();
-    }
-    if path.contains("/_doc") || path.contains("/_create") {
-        return if method == "DELETE" { "DeleteRequest".into() } else { "IndexRequest".into() };
-    }
-    if path.contains("/_update") {
-        return "UpdateRequest".into();
-    }
-    "IndexRequest".into()
 }
 
 /// A JSON patch from one document to the next: `add`, `replace`,

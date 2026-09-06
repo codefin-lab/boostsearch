@@ -138,7 +138,7 @@ pub async fn allocation_explain(
                     return err(
                         StatusCode::BAD_REQUEST,
                         "illegal_argument_exception",
-                        &format!("No shard was found for [{index}][{shard}]"),
+                        format!("No shard was found for [{index}][{shard}]"),
                     );
                 }
             }
@@ -437,8 +437,8 @@ pub(crate) fn cluster_state_value(
                 // the indices that were deleted, so that a node coming back
                 // with one of them knows it is gone
                 "index-graveyard": {"tombstones": graveyard},
-                "index_template": {"index_template": composable_templates(&store)},
-                "ingest": {"pipeline": ingest_pipelines(&store)},
+                "index_template": {"index_template": composable_templates(store)},
+                "ingest": {"pipeline": ingest_pipelines(store)},
             }),
         );
     }
@@ -557,12 +557,6 @@ pub(crate) fn cluster_state_value(
         );
     }
     Ok(Value::Object(out))
-}
-
-/// The legacy templates alone: a composable one lives under its own key.
-fn legacy_templates(store: &Store) -> Value {
-    let all = store.get_templates();
-    Value::Object(all.into_iter().filter(|(_, v)| v.get("__composable").is_none()).collect())
 }
 
 /// The composable templates, as the state lists them.

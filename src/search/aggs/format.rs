@@ -78,12 +78,11 @@ pub(crate) fn whole_metric_values(result: &mut Value, req: &Value) {
     for (name, def) in reqo {
         let Some(defo) = def.as_object() else { continue };
         let Some(node) = result.get_mut(name) else { continue };
-        if defo.contains_key("value_count") || defo.contains_key("cardinality") {
-            if let Some(v) = node.get("value").and_then(|v| v.as_f64())
-                && v.fract() == 0.0
-            {
-                node["value"] = json!(v as i64);
-            }
+        if (defo.contains_key("value_count") || defo.contains_key("cardinality"))
+            && let Some(v) = node.get("value").and_then(|v| v.as_f64())
+            && v.fract() == 0.0
+        {
+            node["value"] = json!(v as i64);
         }
         let Some(subs) = defo.get("aggs").or_else(|| defo.get("aggregations")) else { continue };
         match node.get_mut("buckets") {

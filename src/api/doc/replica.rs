@@ -37,10 +37,10 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
     if force {
     } else if op.term > st.applied_term {
         st.applied_term = op.term;
-    } else if let Some(have) = held_version(st, &op.id) {
-        if have >= op.version {
-            return false;
-        }
+    } else if let Some(have) = held_version(st, &op.id)
+        && have >= op.version
+    {
+        return false;
     }
     let existed = exists_doc(st, &op.id);
     if let Some(r) = &op.routing {

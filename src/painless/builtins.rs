@@ -272,7 +272,7 @@ pub fn get_index(t: &Value, i: &Value) -> Result<Value, String> {
                 .ok_or_else(|| format!("Index {idx} out of bounds for length {}", d.values.len()))
         }
         Value::Map(m) => Ok(map_get(m, i).unwrap_or(Value::Null)),
-        Value::Native(n) => match n.call("__index__", &[i.clone()]) {
+        Value::Native(n) => match n.call("__index__", std::slice::from_ref(i)) {
             Some(r) => r,
             None => n.get(&i.as_text()).ok_or_else(|| format!("unknown key [{}]", i.as_text())),
         },
@@ -584,7 +584,7 @@ fn iterator_step(
     })
 }
 
-fn arg<'a>(args: &'a [Value], i: usize) -> &'a Value {
+fn arg(args: &[Value], i: usize) -> &Value {
     args.get(i).unwrap_or(&Value::Null)
 }
 
@@ -743,9 +743,7 @@ fn string_method(s: &Rc<str>, name: &str, args: &[Value]) -> Result<Value, Strin
         "concat" => Value::str(&format!("{text}{}", arg(args, 0).as_text())),
         "toString" | "intern" => Value::str(text),
         "hashCode" => Value::Int(java_string_hash(text)),
-        "toCharArray" | "chars" => {
-            Value::list(text.chars().map(|c| Value::str(&c.to_string())).collect())
-        }
+        "toCharArray" => Value::list(text.chars().map(Value::Char).collect()),
         "matches" => {
             let re = regex::Regex::new(&format!("^(?:{})$", arg(args, 0).as_text()))
                 .map_err(|e| e.to_string())?;
@@ -758,12 +756,6 @@ fn string_method(s: &Rc<str>, name: &str, args: &[Value]) -> Result<Value, Strin
         "getBytes" => Value::list(text.bytes().map(|b| Value::Int(b as i64)).collect()),
         "utf8ToString" => Value::str(text),
         "repeat" => Value::str(&text.repeat(arg(args, 0).as_i64().unwrap_or(0).max(0) as usize)),
-        "codePointAt" => Value::Int(
-            text.chars()
-                .nth(arg(args, 0).as_i64().unwrap_or(0) as usize)
-                .map(|c| c as i64)
-                .unwrap_or(0),
-        ),
         "isBlank" => Value::Bool(text.trim().is_empty()),
         _ => return no(format!("unknown method [{name}] on String")),
     })
@@ -2740,8 +2732,6 @@ pub fn call_static(
         ("Character", "isWhitespace") => Value::Bool(
             arg(args, 0).as_text().chars().next().map(|c| c.is_whitespace()).unwrap_or(false),
         ),
-        ("Character", "toLowerCase") => Value::str(&arg(args, 0).as_text().to_lowercase()),
-        ("Character", "toUpperCase") => Value::str(&arg(args, 0).as_text().to_uppercase()),
         ("String", "join") => {
             let sep = arg(args, 0).as_text();
             let items: Vec<String> = match arg(args, 1) {
@@ -2935,7 +2925,7 @@ pub fn call_free(name: &str, args: &[Value]) -> Result<Value, String> {
                     _ => None,
                 }
             };
-            let (a, b) = (read(&arg(args, 0)), read(&arg(args, 1)));
+            let (a, b) = (read(arg(args, 0)), read(arg(args, 1)));
             let (Some(a), Some(b)) = (a, b) else {
                 return no(format!("[{name}] takes two arrays of numbers"));
             };

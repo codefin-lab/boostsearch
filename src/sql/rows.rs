@@ -164,7 +164,7 @@ fn walk(
     };
     for bucket in buckets {
         keys.push(bucket.get("key").cloned().unwrap_or(Value::Null));
-        if bucket.get(&format!("g{}", depth + 1)).is_some() {
+        if bucket.get(format!("g{}", depth + 1)).is_some() {
             walk(planned, bucket, depth + 1, keys, rows);
         } else {
             let count = bucket.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0);

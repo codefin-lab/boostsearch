@@ -213,6 +213,51 @@ impl NativeObject for Params {
     }
 }
 
+/// Where a loop can never end -- `while (true)` with no way out of its
+/// body -- which a script is refused for before it runs.
+fn endless_loop(stmts: &[ast::Stmt]) -> Option<usize> {
+    use ast::{Expr, Stmt};
+    fn escapes(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Break | Stmt::Return(..) | Stmt::Throw(..) => true,
+            Stmt::If { then, otherwise, .. } => {
+                escapes(then) || otherwise.as_ref().map(|o| escapes(o)).unwrap_or(false)
+            }
+            Stmt::Block(b) | Stmt::Try { body: b, .. } => escapes(b),
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. } => {
+                // a break in an inner loop leaves only that loop
+                body.iter().any(|s| matches!(s, Stmt::Return(..) | Stmt::Throw(..)))
+            }
+            _ => false,
+        })
+    }
+    for s in stmts {
+        let found = match s {
+            Stmt::While { cond: Expr::Bool(true), body } if !escapes(body) => Some(0),
+            Stmt::For { cond: None, body, .. } if !escapes(body) => Some(0),
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::Block(body) => endless_loop(body),
+            Stmt::If { then, otherwise, .. } => {
+                endless_loop(then).or_else(|| otherwise.as_ref().and_then(|o| endless_loop(o)))
+            }
+            Stmt::Try { body, catch_body, .. } => {
+                endless_loop(body).or_else(|| endless_loop(catch_body))
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,49 +337,4 @@ mod tests {
             "4"
         );
     }
-}
-
-/// Where a loop can never end -- `while (true)` with no way out of its
-/// body -- which a script is refused for before it runs.
-fn endless_loop(stmts: &[ast::Stmt]) -> Option<usize> {
-    use ast::{Expr, Stmt};
-    fn escapes(stmts: &[Stmt]) -> bool {
-        stmts.iter().any(|s| match s {
-            Stmt::Break | Stmt::Return(..) | Stmt::Throw(..) => true,
-            Stmt::If { then, otherwise, .. } => {
-                escapes(then) || otherwise.as_ref().map(|o| escapes(o)).unwrap_or(false)
-            }
-            Stmt::Block(b) | Stmt::Try { body: b, .. } => escapes(b),
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::ForEach { body, .. } => {
-                // a break in an inner loop leaves only that loop
-                body.iter().any(|s| matches!(s, Stmt::Return(..) | Stmt::Throw(..)))
-            }
-            _ => false,
-        })
-    }
-    for s in stmts {
-        let found = match s {
-            Stmt::While { cond: Expr::Bool(true), body } if !escapes(body) => Some(0),
-            Stmt::For { cond: None, body, .. } if !escapes(body) => Some(0),
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::ForEach { body, .. }
-            | Stmt::Block(body) => endless_loop(body),
-            Stmt::If { then, otherwise, .. } => {
-                endless_loop(then).or_else(|| otherwise.as_ref().and_then(|o| endless_loop(o)))
-            }
-            Stmt::Try { body, catch_body, .. } => {
-                endless_loop(body).or_else(|| endless_loop(catch_body))
-            }
-            _ => None,
-        };
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
 }

@@ -50,9 +50,7 @@ fn advance(store: &Store, index: &str, body: &Value) -> Option<Value> {
         return None;
     }
     // an index that has gone is no longer anything's business
-    if store.get(index).is_none() {
-        return None;
-    }
+    store.get(index)?;
     let policy = managed.get("policy")?;
     let state_name =
         managed.pointer("/state/name").and_then(|v| v.as_str()).unwrap_or_default().to_string();

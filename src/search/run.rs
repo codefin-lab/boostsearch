@@ -186,7 +186,7 @@ fn term_stats_for(
     searcher: &boostcore::Searcher,
     st: &IdxState,
     addr: DocAddress,
-) -> Box<dyn Fn(&str, &str, &str) -> f64> {
+) -> crate::painless::contexts::TermStats {
     use boostcore::schema::IndexRecordOption;
     let reader = searcher.segment_reader(addr.segment_ord).clone();
     let fields = st.fields;
@@ -545,14 +545,13 @@ pub fn run(
     // indices held on other nodes: a coordinator asks each node for its
     // share and merges; a node answering one, or a request told to stay
     // here, runs as it always did
-    if !p.contains_key("_native_only") && !p.contains_key("_local_only") {
-        if let Some(plan) =
+    if !p.contains_key("_native_only")
+        && !p.contains_key("_local_only")
+        && let Some(plan) =
             crate::cluster::search::plan(store, expr, p.get("preference").map(|s| s.as_str()))
-        {
-            if plan.spans_nodes() {
-                return crate::cluster::search::run_spanning(store, expr, body, p, plan);
-            }
-        }
+        && plan.spans_nodes()
+    {
+        return crate::cluster::search::run_spanning(store, expr, body, p, plan);
     }
     const BODY_KEYS: &[&str] = &[
         "derived",
@@ -1394,25 +1393,23 @@ pub fn run(
                 }
             }
         }
-        if let Some(view) = views.values().next() {
-            if sort_keys.iter().any(|k| view.masked(&k.field)) {
-                let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
-                page.sort_by(|a, b| {
-                    let sa = a.get("sort").and_then(|v| v.as_array());
-                    let sb = b.get("sort").and_then(|v| v.as_array());
-                    for (i, d) in desc.iter().enumerate() {
-                        let x =
-                            sa.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
-                        let y =
-                            sb.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
-                        let c = if *d { y.cmp(&x) } else { x.cmp(&y) };
-                        if c != std::cmp::Ordering::Equal {
-                            return c;
-                        }
+        if let Some(view) = views.values().next()
+            && sort_keys.iter().any(|k| view.masked(&k.field))
+        {
+            let desc: Vec<bool> = sort_keys.iter().map(|k| k.desc).collect();
+            page.sort_by(|a, b| {
+                let sa = a.get("sort").and_then(|v| v.as_array());
+                let sb = b.get("sort").and_then(|v| v.as_array());
+                for (i, d) in desc.iter().enumerate() {
+                    let x = sa.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                    let y = sb.and_then(|v| v.get(i)).map(|v| v.to_string()).unwrap_or_default();
+                    let c = if *d { y.cmp(&x) } else { x.cmp(&y) };
+                    if c != std::cmp::Ordering::Equal {
+                        return c;
                     }
-                    std::cmp::Ordering::Equal
-                });
-            }
+                }
+                std::cmp::Ordering::Equal
+            });
         }
     }
 
@@ -1657,13 +1654,12 @@ pub(crate) fn finish_search(
     // what makes a nested terms aggregation the expensive one.
     // masked keys hashed, hidden hits narrowed, inside every view
     let mut aggs = aggs;
-    if !views.is_empty() {
-        if let (Some(a), Some(req)) =
+    if !views.is_empty()
+        && let (Some(a), Some(req)) =
             (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
-        {
-            for view in views.values() {
-                view.post_aggs(req, a);
-            }
+    {
+        for view in views.values() {
+            view.post_aggs(req, a);
         }
     }
     check_max_buckets(store, &aggs)?;

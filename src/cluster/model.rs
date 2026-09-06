@@ -42,6 +42,11 @@ pub struct ModelDoc {
 
 pub type Docs = BTreeMap<String, BTreeMap<String, ModelDoc>>;
 
+/// Every write the cluster said yes to: which index and id, the value, and
+/// the sequence number and term it was accepted at. What the model checks is
+/// that none of these is ever lost.
+pub type Acked = Vec<(String, String, u64, u64, u64)>;
+
 /// A write accepted by a node as the primary: what the single-writer
 /// check reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +62,10 @@ struct PendingWrite {
     client: NodeId,
     client_rid: u64,
     index: String,
+    /// which document, recorded so a write in flight can be read while it is
+    /// still in flight -- nothing does yet, and a pending write that did not
+    /// say which document it was would not be one
+    #[allow(dead_code)]
     id: String,
     seq: u64,
     term: u64,
@@ -232,6 +241,9 @@ impl ClusterNode {
 
     // ---- the primary's side --------------------------------------------------
 
+    // a write is who asked, which request of theirs, what it says, and the
+    // two things every step needs -- the time and somewhere to record it
+    #[allow(clippy::too_many_arguments)]
     fn accept(
         &mut self,
         client: NodeId,
@@ -320,10 +332,11 @@ impl ClusterNode {
         for c in self.state().routing.shards_of(index) {
             let held = c.node.as_ref() == Some(&self.me)
                 || c.node.as_ref().map(|n| took.contains(n)).unwrap_or(false);
-            if held && c.state != ShardState::Unassigned {
-                if let Some(a) = &c.allocation_id {
-                    fine.push(a.clone());
-                }
+            if held
+                && c.state != ShardState::Unassigned
+                && let Some(a) = &c.allocation_id
+            {
+                fine.push(a.clone());
             }
         }
         let mut out = Vec::new();
@@ -335,10 +348,6 @@ impl ClusterNode {
             }
         }
         out
-    }
-
-    fn stale_reports(&mut self, index: &str, took: &BTreeSet<NodeId>) -> Vec<Output> {
-        self.stale_reports_tracked(index, took).0
     }
 
     /// The reports, and the request ids a write must wait for.
@@ -474,8 +483,8 @@ impl ClusterNode {
     fn coord_input(&mut self, input: Input) -> Vec<Output> {
         // a durable the coordinator does not write for this input
         let mut scratch = Durable::default();
-        let out = self.coord.handle(input, &NoClock, &mut scratch);
-        out
+
+        self.coord.handle(input, &NoClock, &mut scratch)
     }
 
     fn apply_copy(&mut self, index: &str, ops: &[Value], durable: &mut Durable) -> usize {
@@ -653,10 +662,11 @@ impl ClusterNode {
                         }
                     }
                 }
-                if let Some(p) = self.pending.get(&e.request_id) {
-                    if p.waiting.is_empty() && p.acked {
-                        self.pending.remove(&e.request_id);
-                    }
+                if let Some(p) = self.pending.get(&e.request_id)
+                    && p.waiting.is_empty()
+                    && p.acked
+                {
+                    self.pending.remove(&e.request_id);
                 }
                 out
             }
@@ -783,18 +793,18 @@ impl NodeLogic for ClusterNode {
     fn handle(&mut self, input: Input, clock: &dyn Clock, durable: &mut Durable) -> Vec<Output> {
         let mut out = match input {
             Input::Start => {
-                if let Some(bytes) = durable.entries.get("model_alloc") {
-                    if let Ok(a) = serde_json::from_slice::<BTreeMap<String, String>>(bytes) {
-                        *self.shared.alloc.lock() = a;
-                    }
+                if let Some(bytes) = durable.entries.get("model_alloc")
+                    && let Ok(a) = serde_json::from_slice::<BTreeMap<String, String>>(bytes)
+                {
+                    *self.shared.alloc.lock() = a;
                 }
-                if let Some(bytes) = durable.entries.get(D_DOCS) {
-                    if let Ok(d) = serde_json::from_slice::<Docs>(bytes) {
-                        *self.shared.docs.lock() = d;
-                        for (index, docs) in self.shared.docs.lock().iter() {
-                            let max = docs.values().map(|x| x.seq + 1).max().unwrap_or(0);
-                            self.seq_no.insert(index.clone(), max);
-                        }
+                if let Some(bytes) = durable.entries.get(D_DOCS)
+                    && let Ok(d) = serde_json::from_slice::<Docs>(bytes)
+                {
+                    *self.shared.docs.lock() = d;
+                    for (index, docs) in self.shared.docs.lock().iter() {
+                        let max = docs.values().map(|x| x.seq + 1).max().unwrap_or(0);
+                        self.seq_no.insert(index.clone(), max);
                     }
                 }
                 let mut out = self.coord.handle(Input::Start, clock, durable);
@@ -829,7 +839,7 @@ pub struct Client {
     pub start_delay: Millis,
     pub pending: BTreeMap<u64, (String, u64, Millis)>,
     rng: super::sim::Rng,
-    pub acked: Arc<parking_lot::Mutex<Vec<(String, String, u64, u64, u64)>>>,
+    pub acked: Arc<parking_lot::Mutex<Acked>>,
     pub refused: Arc<parking_lot::Mutex<u64>>,
 }
 
@@ -969,7 +979,7 @@ pub mod tests {
         pub nodes: Vec<NodeId>,
         pub client: NodeId,
         pub accepted: Arc<parking_lot::Mutex<Vec<Accepted>>>,
-        pub acked: Arc<parking_lot::Mutex<Vec<(String, String, u64, u64, u64)>>>,
+        pub acked: Arc<parking_lot::Mutex<Acked>>,
         pub refused: Arc<parking_lot::Mutex<u64>>,
         pub docs_of: BTreeMap<NodeId, Arc<parking_lot::Mutex<Docs>>>,
     }
@@ -1016,7 +1026,7 @@ pub mod tests {
             );
         }
         let client = NodeId("client".into());
-        let acked: Arc<parking_lot::Mutex<Vec<(String, String, u64, u64, u64)>>> = Arc::default();
+        let acked: Arc<parking_lot::Mutex<Acked>> = Arc::default();
         let refused: Arc<parking_lot::Mutex<u64>> = Arc::default();
         let cnodes = ids.clone();
         let index_s = index.to_string();
@@ -1218,7 +1228,7 @@ pub mod tests {
         map.insert("solo".to_string(), index_meta("solo", 0));
         let source = Arc::new(MapSource::new(map));
         let c = Coordinator::new(node("a"), "c", "u", vec!["a".into()], vec![]);
-        let mut cn = ClusterNode::new(c, source.clone(), Arc::default());
+        let cn = ClusterNode::new(c, source.clone(), Arc::default());
         let src = cn.coord.metadata.clone().unwrap();
         cn.shared.docs.lock().entry("solo".into()).or_default();
         src.note_allocation("solo", "aid-1");
@@ -1311,7 +1321,7 @@ pub mod tests {
         let primary = state.routing.primary("i", 0).unwrap().node.clone().unwrap();
         let others: Vec<NodeId> = lab.nodes.iter().filter(|n| **n != primary).cloned().collect();
         // the client can still reach everyone; the primary cannot reach the others
-        lab.sim.partition(&[primary.clone()], &others);
+        lab.sim.partition(std::slice::from_ref(&primary), &others);
         quiet(&mut lab, 40_000);
         lab.sim.heal();
         quiet(&mut lab, 100_000);
@@ -1343,7 +1353,7 @@ pub mod tests {
                 1 => {
                     let others: Vec<NodeId> =
                         lab.nodes.iter().filter(|n| **n != victim).cloned().collect();
-                    lab.sim.partition(&[victim.clone()], &others);
+                    lab.sim.partition(std::slice::from_ref(&victim), &others);
                     let heal_at = t + 3_000 + rng.range(0, 4_000);
                     events.push(format!("{t} isolate {victim} until {heal_at}"));
                     lab.sim.heal_at(heal_at);

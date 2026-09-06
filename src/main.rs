@@ -6,25 +6,11 @@
 // see the note in lib.rs
 #![allow(clippy::result_large_err)]
 
-mod analysis;
-mod api;
-mod blockstats;
-mod cluster;
-mod hdr;
-mod http_compat;
-mod ingest;
-mod ism;
-mod knn;
-mod painless;
-mod query;
-mod search;
-mod security;
-mod snapshot;
-mod source;
-mod sql;
-mod store;
-mod tls;
-mod tz;
+// The server is the library's only caller. Declaring the modules here as well
+// would compile every one of them a second time -- once as the library and
+// once inside this binary -- which doubles the build and reports as dead
+// everything the server does not itself reach.
+use boostsearch::{api, cluster, http_compat, ism, security, store, tls};
 
 use axum::Router;
 
@@ -613,17 +599,12 @@ async fn shutdown_signal(store: Store) {
     eprintln!("boostsearch: stopping");
     if let Some(rt) = cluster::runtime() {
         let me = rt.local();
-        if let Some(m) = rt.state().cluster_manager.clone() {
-            if m != me {
-                let _ = rt
-                    .call(
-                        &m,
-                        cluster::coordinator::LEAVE,
-                        vec![],
-                        std::time::Duration::from_secs(2),
-                    )
-                    .await;
-            }
+        if let Some(m) = rt.state().cluster_manager.clone()
+            && m != me
+        {
+            let _ = rt
+                .call(&m, cluster::coordinator::LEAVE, vec![], std::time::Duration::from_secs(2))
+                .await;
         }
         // the primaries here are what a write needs, so the node waits for the
         // manager to put them somewhere else before it stops answering: a

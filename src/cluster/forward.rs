@@ -122,8 +122,8 @@ pub fn classify(method: &Method, path: &str) -> Target {
             // work that leaves a task behind
             "_tasks" => Target::Manager,
             "_mget" | "_field_caps" | "_validate" | "_mtermvectors" | "_rank_eval" | "_render"
-            | "_pit" | "_stats" | "_segments" | "_recovery" | "_shard_stores" | "_mapping"
-            | "_settings" | "_open" | "_close" => Target::Manager,
+            | "_pit" | "_segments" | "_recovery" | "_shard_stores" | "_mapping" | "_settings"
+            | "_open" | "_close" => Target::Manager,
             "_refresh" | "_flush" | "_forcemerge" | "_cache" => Target::Broadcast(None),
             _ => Target::Local,
         };
@@ -170,7 +170,6 @@ fn classify_index(method: &Method, head: &str, rest: &str, is_write: bool) -> Ta
         | "_alias"
         | "_aliases"
         | "_block"
-        | "_stats"
         | "_segments"
         | "_recovery"
         | "_shard_stores"
@@ -285,7 +284,7 @@ async fn active_shards_ok(p: &str, timeout_ms: u64, indices: &[String]) -> Optio
             }
             None
         });
-        let Some((index, shard, have, need)) = short else { return None };
+        let (index, shard, have, need) = short?;
         if started.elapsed().as_millis() as u64 >= timeout_ms {
             let reason = format!(
                 "[{index}][{shard}] Not enough active copies to meet shard count of [{}] (have {have}, needed {need}). Timeout: [{}]",
@@ -344,9 +343,9 @@ fn parse_query(q: &str) -> std::collections::BTreeMap<String, String> {
 
 /// A time in the form the plugin prints it in messages: `1m`, `30s`, `500ms`.
 fn time_text(ms: u64) -> String {
-    if ms % 60_000 == 0 && ms > 0 {
+    if ms.is_multiple_of(60_000) && ms > 0 {
         format!("{}m", ms / 60_000)
-    } else if ms % 1_000 == 0 && ms > 0 {
+    } else if ms.is_multiple_of(1_000) && ms > 0 {
         format!("{}s", ms / 1_000)
     } else {
         format!("{ms}ms")
@@ -375,25 +374,22 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         let want_closed = closing.or(opening);
         let named = expr.clone();
         let r = broadcast(&rt, &store, expr.as_deref(), req, next).await;
-        if let (Some(closed), Some(e)) = (want_closed, named) {
-            if r.status().is_success() {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    let settled = super::with_state(|s| {
-                        let names = resolve(s, &store, &e);
-                        !names.is_empty()
-                            && names.iter().all(|n| {
-                                s.indices
-                                    .get(n)
-                                    .map(|m| (m.state == "close") == closed)
-                                    .unwrap_or(true)
-                            })
-                    });
-                    if settled || std::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let (Some(closed), Some(e)) = (want_closed, named)
+            && r.status().is_success()
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let settled = super::with_state(|s| {
+                    let names = resolve(s, &store, &e);
+                    !names.is_empty()
+                        && names.iter().all(|n| {
+                            s.indices.get(n).map(|m| (m.state == "close") == closed).unwrap_or(true)
+                        })
+                });
+                if settled || std::time::Instant::now() >= deadline {
+                    break;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
         return r;
@@ -443,13 +439,13 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         }
     });
     // a write waits for the copies it was told to wait for
-    if matches!(target, Target::Write(_)) {
-        if let Some(w) = query.get("wait_for_active_shards") {
-            let timeout =
-                query.get("timeout").and_then(|t| super::allocation::time_ms(t)).unwrap_or(60_000);
-            if let Some(r) = active_shards_ok(w, timeout, &write_indices).await {
-                return r;
-            }
+    if matches!(target, Target::Write(_))
+        && let Some(w) = query.get("wait_for_active_shards")
+    {
+        let timeout =
+            query.get("timeout").and_then(|t| super::allocation::time_ms(t)).unwrap_or(60_000);
+        if let Some(r) = active_shards_ok(w, timeout, &write_indices).await {
+            return r;
         }
     }
     let Some(to) = to else {
@@ -640,14 +636,14 @@ async fn wait_for_metadata(
             // what a listing counts
             let matches =
                 |n: &String| index == "*" || index == "_all" || crate::store::glob_match(&index, n);
-            let named = if index.contains('*') || index == "_all" {
+
+            if index.contains('*') || index == "_all" {
                 s.indices.keys().any(matches) || s.routing.indices.keys().any(matches)
             } else {
                 s.indices.contains_key(&index)
                     || s.indices.values().any(|m| m.aliases.get(&index).is_some())
                     || (!present && s.routing.indices.contains_key(&index))
-            };
-            named
+            }
         });
         if clustered { published } else { published || !store.resolve(&index).is_empty() }
     };
@@ -683,10 +679,10 @@ async fn broadcast(
         let mut copies: std::collections::BTreeMap<NodeId, usize> = Default::default();
         for n in &names {
             for c in s.routing.shards_of(n) {
-                if let Some(node) = &c.node {
-                    if matches!(c.state, ShardState::Started | ShardState::Relocating) {
-                        *copies.entry(node.clone()).or_default() += 1;
-                    }
+                if let Some(node) = &c.node
+                    && matches!(c.state, ShardState::Started | ShardState::Relocating)
+                {
+                    *copies.entry(node.clone()).or_default() += 1;
                 }
             }
         }
@@ -758,7 +754,7 @@ async fn broadcast(
     // counters -- what an index cost -- are added up over the nodes holding it
     let summing = path_is_stats;
     let mut summed: Option<Value> = None;
-    let mut fold = |copies: usize, r: Response| {
+    let fold = |copies: usize, r: Response| {
         let status = r.status();
         let body = r.into_body();
         (copies, status, body)
@@ -870,10 +866,11 @@ async fn broadcast(
         );
     };
     // the summed counters first, then the shard tallies the routing knows
-    if summing && status.is_success() {
-        if let Some(t) = summed.take() {
-            v = t;
-        }
+    if summing
+        && status.is_success()
+        && let Some(t) = summed.take()
+    {
+        v = t;
     }
     if status.is_success() && v.get("_shards").is_some() {
         if summing {
@@ -958,9 +955,9 @@ fn sort_cat_json(rows: &mut [Value], spec: Option<&str>) {
                             .find(|(k, _)| crate::api::cat::cat_column_matches(k, name))
                             .map(|(_, v)| v)
                     })
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        other => Some(other.to_string()),
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
                     })
                     .unwrap_or_default()
             };
@@ -1239,7 +1236,7 @@ async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Res
         return crate::api::err(
             StatusCode::SERVICE_UNAVAILABLE,
             "node_not_connected_exception",
-            &format!("[{}] Node not connected", to.as_str()),
+            format!("[{}] Node not connected", to.as_str()),
         );
     };
     if answer.kind == Kind::Error {
@@ -1258,12 +1255,10 @@ async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Res
         for h in hs {
             if let (Some(k), Some(val)) =
                 (h.get(0).and_then(|x| x.as_str()), h.get(1).and_then(|x| x.as_str()))
-            {
-                if let (Ok(name), Ok(value)) =
+                && let (Ok(name), Ok(value)) =
                     (header::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(val))
-                {
-                    r.headers_mut().append(name, value);
-                }
+            {
+                r.headers_mut().append(name, value);
             }
         }
     }
@@ -1334,48 +1329,6 @@ pub fn install(router: axum::Router) {
 
 #[allow(dead_code)]
 fn _unused(_: &dyn IntoResponse) {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requests_go_where_they_belong() {
-        let get = Method::GET;
-        let post = Method::POST;
-        let put = Method::PUT;
-        let del = Method::DELETE;
-        assert_eq!(classify(&get, "/"), Target::Local);
-        assert_eq!(classify(&get, "/_cluster/health"), Target::Local);
-        // a listing whose numbers only a holder can give goes to every node
-        assert_eq!(classify(&get, "/_cat/shards"), Target::Broadcast(None));
-        assert_eq!(classify(&get, "/_cat/indices"), Target::Broadcast(None));
-        assert_eq!(classify(&get, "/_cat/health"), Target::Local);
-        assert_eq!(classify(&put, "/_cluster/settings"), Target::Manager);
-        assert_eq!(classify(&put, "/logs"), Target::Manager);
-        assert_eq!(classify(&del, "/logs"), Target::Manager);
-        assert_eq!(classify(&put, "/logs/_mapping"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&get, "/logs/_settings"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&put, "/logs/_doc/1"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&post, "/logs/_update/1"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&del, "/logs/_doc/1"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&post, "/_bulk"), Target::Write(None));
-        assert_eq!(classify(&post, "/logs/_bulk"), Target::Write(Some("logs".into())));
-        assert_eq!(classify(&get, "/logs/_doc/1"), Target::Read("logs".into()));
-        assert_eq!(classify(&get, "/logs,metrics/_search"), Target::Local);
-        assert_eq!(classify(&post, "/logs/_search"), Target::Local);
-        assert_eq!(classify(&post, "/_search"), Target::Local);
-        assert_eq!(classify(&post, "/_count"), Target::Local);
-        // a refresh reaches every copy, not just the primary's node
-        assert_eq!(classify(&post, "/logs/_refresh"), Target::Broadcast(Some("logs".into())));
-        assert_eq!(classify(&post, "/_refresh"), Target::Broadcast(None));
-        assert_eq!(classify(&post, "/logs/_flush"), Target::Broadcast(Some("logs".into())));
-        assert_eq!(classify(&get, "/logs/_explain/1"), Target::Read("logs".into()));
-        assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
-        assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);
-        assert_eq!(classify(&get, "/_nodes/stats"), Target::Local);
-    }
-}
 
 /// Add one answer's counters into another: numbers add, objects merge, and
 /// anything else keeps what the first node said.
@@ -1448,4 +1401,46 @@ pub fn fetch_document(index: &str, id: &str) -> Option<Value> {
     let body = v.get("body").and_then(|b| b.as_str())?;
     let doc: Value = serde_json::from_str(body).ok()?;
     doc.get("_source").cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_go_where_they_belong() {
+        let get = Method::GET;
+        let post = Method::POST;
+        let put = Method::PUT;
+        let del = Method::DELETE;
+        assert_eq!(classify(&get, "/"), Target::Local);
+        assert_eq!(classify(&get, "/_cluster/health"), Target::Local);
+        // a listing whose numbers only a holder can give goes to every node
+        assert_eq!(classify(&get, "/_cat/shards"), Target::Broadcast(None));
+        assert_eq!(classify(&get, "/_cat/indices"), Target::Broadcast(None));
+        assert_eq!(classify(&get, "/_cat/health"), Target::Local);
+        assert_eq!(classify(&put, "/_cluster/settings"), Target::Manager);
+        assert_eq!(classify(&put, "/logs"), Target::Manager);
+        assert_eq!(classify(&del, "/logs"), Target::Manager);
+        assert_eq!(classify(&put, "/logs/_mapping"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&get, "/logs/_settings"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&put, "/logs/_doc/1"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&post, "/logs/_update/1"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&del, "/logs/_doc/1"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&post, "/_bulk"), Target::Write(None));
+        assert_eq!(classify(&post, "/logs/_bulk"), Target::Write(Some("logs".into())));
+        assert_eq!(classify(&get, "/logs/_doc/1"), Target::Read("logs".into()));
+        assert_eq!(classify(&get, "/logs,metrics/_search"), Target::Local);
+        assert_eq!(classify(&post, "/logs/_search"), Target::Local);
+        assert_eq!(classify(&post, "/_search"), Target::Local);
+        assert_eq!(classify(&post, "/_count"), Target::Local);
+        // a refresh reaches every copy, not just the primary's node
+        assert_eq!(classify(&post, "/logs/_refresh"), Target::Broadcast(Some("logs".into())));
+        assert_eq!(classify(&post, "/_refresh"), Target::Broadcast(None));
+        assert_eq!(classify(&post, "/logs/_flush"), Target::Broadcast(Some("logs".into())));
+        assert_eq!(classify(&get, "/logs/_explain/1"), Target::Read("logs".into()));
+        assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
+        assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);
+        assert_eq!(classify(&get, "/_nodes/stats"), Target::Local);
+    }
 }

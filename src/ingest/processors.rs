@@ -365,12 +365,12 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                 ));
             }
             for key in ["fields", "exclude_fields"] {
-                if let Some(list) = c.strings_opt(key)? {
-                    if list.iter().any(|f| f.trim().is_empty() || f == "null") {
-                        return Err(
-                            c.wrong(key, format!("[{key}] field name cannot be null nor empty"))
-                        );
-                    }
+                if let Some(list) = c.strings_opt(key)?
+                    && list.iter().any(|f| f.trim().is_empty() || f == "null")
+                {
+                    return Err(
+                        c.wrong(key, format!("[{key}] field name cannot be null nor empty"))
+                    );
                 }
             }
         }
@@ -483,7 +483,7 @@ fn string_at(
 pub(crate) fn run(
     store: &Store,
     spec: &ProcessorSpec,
-    mut doc: IngestDoc,
+    doc: IngestDoc,
     steps: &mut Vec<StepResult>,
     depth: &mut Vec<String>,
 ) -> Result<Option<IngestDoc>, IngestError> {
@@ -501,7 +501,7 @@ fn run_inner(
     spec: &ProcessorSpec,
     c: &Cfg,
     ignore_missing: bool,
-    mut doc: IngestDoc,
+    doc: IngestDoc,
     steps: &mut Vec<StepResult>,
     depth: &mut Vec<String>,
 ) -> Result<Option<IngestDoc>, IngestError> {
@@ -767,7 +767,7 @@ fn run_body(
             let desc = c.str_opt("order")?.as_deref() == Some("desc");
             match doc.get(&field) {
                 Some(Value::Array(mut a)) => {
-                    a.sort_by(|x, y| compare_json(x, y));
+                    a.sort_by(compare_json);
                     if desc {
                         a.reverse();
                     }
@@ -1518,13 +1518,14 @@ fn convert(v: &Value, kind: &str) -> Result<Value, IngestError> {
             match text.trim().to_lowercase().as_str() {
                 "true" => json!(true),
                 "false" => json!(false),
+                // `auto` tries an integer, then a long, then a double, then
+                // gives up and keeps the text. The first two are one thing in
+                // JSON -- there is a number and that is all -- so the width a
+                // Java implementation would pick is not a difference that can
+                // be written down here.
                 t => {
                     if let Ok(n) = t.parse::<i64>() {
-                        if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
-                            json!(n)
-                        } else {
-                            json!(n)
-                        }
+                        json!(n)
                     } else if let Ok(f) = t.parse::<f64>() {
                         json!(f)
                     } else {

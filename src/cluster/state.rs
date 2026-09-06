@@ -335,10 +335,10 @@ impl ClusterState {
     pub fn shard_counts(&self, indices: Option<&[String]>) -> ShardCounts {
         let mut c = ShardCounts::default();
         for r in self.routing.all() {
-            if let Some(only) = indices {
-                if !only.iter().any(|i| i == &r.index) {
-                    continue;
-                }
+            if let Some(only) = indices
+                && !only.iter().any(|i| i == &r.index)
+            {
+                continue;
             }
             match r.state {
                 ShardState::Started => {
@@ -370,10 +370,10 @@ impl ClusterState {
     pub fn health_status(&self, indices: Option<&[String]>) -> &'static str {
         let mut status = "green";
         for r in self.routing.all() {
-            if let Some(only) = indices {
-                if !only.iter().any(|i| i == &r.index) {
-                    continue;
-                }
+            if let Some(only) = indices
+                && !only.iter().any(|i| i == &r.index)
+            {
+                continue;
             }
             if r.state != ShardState::Started && r.state != ShardState::Relocating {
                 // the target of a move is being filled while the copy it comes

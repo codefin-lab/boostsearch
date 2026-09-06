@@ -9,7 +9,7 @@
 //! crash or a clock jump happens. The same seed makes the same run.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn a_partition_loses_messages_and_healing_brings_them_back() {
         let (mut sim, a, b) = pair(2);
-        sim.partition(&[a.clone()], &[b.clone()]);
+        sim.partition(std::slice::from_ref(&a), std::slice::from_ref(&b));
         sim.run_until(1000);
         assert!(sim.notes.iter().all(|(_, _, t)| !t.starts_with("pong")));
         let (_, dropped) = sim.stats();

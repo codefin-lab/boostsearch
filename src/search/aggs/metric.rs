@@ -373,7 +373,7 @@ pub(crate) fn run_scripted_value_metric(
     let spec = def.get(kind).cloned().unwrap_or(json!({}));
     let index = targets.first().cloned().unwrap_or_default();
     let script = spec.get("script").cloned().unwrap_or(json!({}));
-    let compiled = Compiled::of(&script, &|id| store.stored_script(id))
+    let _compiled = Compiled::of(&script, &|id| store.stored_script(id))
         .map_err(|e| crate::search::search_script_failure(e, &index))?;
     let missing = spec.get("missing").and_then(|v| v.as_f64());
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));

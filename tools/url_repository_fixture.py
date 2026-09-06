@@ -59,6 +59,13 @@ def serve():
             time.sleep(0.02)
         return
     os.setsid()
+    # the child outlives the process that forked it, and whatever was reading
+    # that process's output is still waiting on the pipe until every holder of
+    # it lets go -- so this one does, before it starts serving
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+
     class Quiet(http.server.SimpleHTTPRequestHandler):
         """A fixture that narrates every read drowns the suite's own output."""
 

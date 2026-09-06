@@ -114,7 +114,7 @@ fn setting(
 ) -> Result<String, String> {
     let Some(st) = store.get(index) else { return Err(missing(index)) };
     let mut g = st.write();
-    let settings = g.settings.as_object_mut().ok_or_else(|| "settings are not an object")?;
+    let settings = g.settings.as_object_mut().ok_or("settings are not an object")?;
     settings.insert(format!("index.{key}"), value);
     g.save_meta();
     Ok(format!("Successfully set {what} on [{index}]"))

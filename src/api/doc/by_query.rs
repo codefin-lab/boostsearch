@@ -628,7 +628,7 @@ pub async fn delete_by_query(
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
     // `?pipeline=` names one every rewritten document goes through
-    let through = p.get("pipeline").cloned();
+    let _through = p.get("pipeline").cloned();
     for seen in hits {
         let Some(st) = store.get(&seen.index) else { continue };
         let mut g = st.write();

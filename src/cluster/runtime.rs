@@ -55,23 +55,23 @@ struct Inbox {
 impl Handler for Inbox {
     fn handle(&self, envelope: Envelope) {
         // an answer someone on this node is waiting for goes to them, not to the logic
-        if envelope.kind != super::transport::Kind::Request {
-            if let Some(tx) = self.pending.lock().remove(&envelope.request_id) {
-                let _ = tx.send(envelope);
-                return;
-            }
+        if envelope.kind != super::transport::Kind::Request
+            && let Some(tx) = self.pending.lock().remove(&envelope.request_id)
+        {
+            let _ = tx.send(envelope);
+            return;
         }
         // a data-plane request runs on its own task and answers over the transport
-        if envelope.kind == super::transport::Kind::Request {
-            if let Some(h) = self.handlers.read().get(&envelope.action).cloned() {
-                let transport = self.transport.clone();
-                let to = envelope.from.clone();
-                tokio::spawn(async move {
-                    let answer = h(envelope).await;
-                    let _ = transport.send(&to, answer);
-                });
-                return;
-            }
+        if envelope.kind == super::transport::Kind::Request
+            && let Some(h) = self.handlers.read().get(&envelope.action).cloned()
+        {
+            let transport = self.transport.clone();
+            let to = envelope.from.clone();
+            tokio::spawn(async move {
+                let answer = h(envelope).await;
+                let _ = transport.send(&to, answer);
+            });
+            return;
         }
         let _ = self.inputs.send(Input::Message(envelope));
     }
@@ -209,10 +209,10 @@ impl Runtime {
                             }
                         }
                         Output::Send { to, envelope } => {
-                            if let Err(e) = transport.send(&to, envelope) {
-                                if trace {
-                                    eprintln!("cluster {me}: send to {to} failed: {e:?}");
-                                }
+                            if let Err(e) = transport.send(&to, envelope)
+                                && trace
+                            {
+                                eprintln!("cluster {me}: send to {to} failed: {e:?}");
                             }
                         }
                         Output::Timer { id, after } => {

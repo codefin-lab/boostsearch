@@ -11,6 +11,11 @@ use std::rc::Rc;
 
 use serde_json::Value as Json;
 
+/// How often a term appears and in how many documents, asked for by index,
+/// field and term. A score script asks this of the searcher running it, which
+/// is why it arrives as something to call rather than as numbers.
+pub type TermStats = Box<dyn Fn(&str, &str, &str) -> f64>;
+
 use super::eval::Context;
 use super::value::*;
 use super::{Params, Script, ScriptError};
@@ -82,7 +87,7 @@ pub fn run_on_doc_with(
     source: &Json,
     mapping: &Mapping,
     score: f64,
-    term_stats: Option<Box<dyn Fn(&str, &str, &str) -> f64>>,
+    term_stats: Option<TermStats>,
 ) -> Result<Value, ScriptError> {
     let compiled = Compiled::of(spec, &|_| None)?;
     let mut runner = Runner::new(&compiled.params).with_doc(source, mapping).with_score(score);
@@ -110,7 +115,7 @@ pub struct Runner {
     /// what `emit(…)` was given, in order
     pub emitted: Rc<RefCell<Vec<Value>>>,
     /// term statistics a score script may ask for, by field and term
-    pub term_stats: Option<Box<dyn Fn(&str, &str, &str) -> f64>>,
+    pub term_stats: Option<TermStats>,
     /// the id and sequence number a random score is seeded with
     pub seed: (String, u64),
 }
@@ -138,14 +143,10 @@ impl Runner {
     /// The parameters, with the document's source under `_source`, which is
     /// how a derived field's script reads the document.
     pub fn with_source_param(mut self, source: &Json) -> Runner {
-        let mut base = match &self.params {
-            Value::Native(_) => Value::Null,
-            other => other.clone(),
-        };
-        let _ = &mut base;
-        let mut pairs: Vec<(Value, Value)> = match Value::from_json(&Json::Null) {
-            _ => Vec::new(),
-        };
+        // whatever the parameters already hold, plus the source: a native
+        // params object is asked for its pairs, and anything else has none to
+        // carry over
+        let mut pairs: Vec<(Value, Value)> = Vec::new();
         if let Value::Native(n) = &self.params {
             // read the pairs back out of the params object
             if let Some(Value::Map(m)) = n.call("__all__", &[]).and_then(|r| r.ok()) {
@@ -490,9 +491,12 @@ pub fn ctx_extra_keys(ctx: &Value) -> Vec<String> {
 /// What the script left in `ctx`: the operation, the source, and the id
 /// and routing if it set them. `Err` where the source has come to hold
 /// itself, which cannot be written.
-pub fn read_ctx(
-    ctx: &Value,
-) -> Result<(String, Json, Option<String>, Option<String>), &'static str> {
+/// What an update script left in `ctx`: the operation to carry out, the
+/// document as it now stands, and the id and routing where the script named
+/// new ones.
+pub type Written = (String, Json, Option<String>, Option<String>);
+
+pub fn read_ctx(ctx: &Value) -> Result<Written, &'static str> {
     let Value::Map(m) = ctx else { return Ok(("index".into(), Json::Null, None, None)) };
     let op = map_get(m, &Value::str("op")).map(|v| v.as_text()).unwrap_or_else(|| "index".into());
     let source = match map_get(m, &Value::str("_source")) {

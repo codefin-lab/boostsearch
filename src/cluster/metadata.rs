@@ -136,12 +136,10 @@ pub fn with_terms(
                     .any(|(s, a)| *s == shard && Some(a.as_str()) == c.allocation_id.as_deref());
                 if matches!(c.state, ShardState::Started | ShardState::Relocating)
                     && (!from_nothing || c.primary || fresh)
+                    && let Some(a) = &c.allocation_id
+                    && !in_sync.contains(a)
                 {
-                    if let Some(a) = &c.allocation_id {
-                        if !in_sync.contains(a) {
-                            in_sync.push(a.clone());
-                        }
-                    }
+                    in_sync.push(a.clone());
                 }
             }
         }
@@ -158,12 +156,11 @@ pub fn with_terms(
         // the set never empties while something was in it: it is the cluster's
         // memory of which copy holds the data, and an empty set would let any
         // copy at all be handed the primary
-        if in_sync.is_empty() {
-            if let Some(before) = previous.get(&shard) {
-                if !before.is_empty() {
-                    in_sync = before.clone();
-                }
-            }
+        if in_sync.is_empty()
+            && let Some(before) = previous.get(&shard)
+            && !before.is_empty()
+        {
+            in_sync = before.clone();
         }
         m.in_sync_allocations.insert(shard, in_sync);
     }

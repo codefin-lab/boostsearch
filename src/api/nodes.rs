@@ -118,7 +118,7 @@ pub async fn nodes_stats(
         .get(1)
         .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
-    let zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
+    let _zero_time = json!({"total": 0, "time_in_millis": 0, "current": 0});
     /// What the segments of an index cost, every part of it, which a client
     /// reads into a struct that asks for all of them.
     fn segment_stats() -> Value {

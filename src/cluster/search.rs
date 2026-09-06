@@ -178,6 +178,11 @@ pub fn plan(store: &Store, expr: &str, preference: Option<&str>) -> Option<Plan>
 }
 
 /// A node's answer for its indices: the outcome, or why not.
+///
+/// An outcome is much larger than a reason, and boxing it would put an
+/// allocation in front of every answer to make the rare refusal cheaper --
+/// which is the wrong way round.
+#[allow(clippy::large_enum_variant)]
 enum Reply {
     Ok(Outcome),
     Failed(String),
@@ -538,13 +543,10 @@ pub fn run_spanning(
         None
     } else {
         let expr_l = plan.local.join(",");
-        Some((
-            rt.local(),
-            match crate::search::run(store, &expr_l, &ask_body, &ask_p) {
-                Ok(o) => Reply::Ok(o),
-                Err(r) => return Err(r),
-            },
-        ))
+        Some((rt.local(), {
+            let o = crate::search::run(store, &expr_l, &ask_body, &ask_p)?;
+            Reply::Ok(o)
+        }))
     };
     let mut replies: Vec<(NodeId, Reply)> = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
@@ -609,10 +611,10 @@ pub fn run_spanning(
                     suggest = o.suggest;
                 }
                 if let Some(n) = o.native {
-                    if let Some(bytes) = &n.agg_acc {
-                        if let Ok(acc) = postcard::from_bytes(bytes) {
-                            fruits.push(acc);
-                        }
+                    if let Some(bytes) = &n.agg_acc
+                        && let Ok(acc) = postcard::from_bytes(bytes)
+                    {
+                        fruits.push(acc);
                     }
                     if native.is_none()
                         || native.as_ref().map(|x| x.agg_req.is_none()).unwrap_or(false)
@@ -818,60 +820,6 @@ pub fn install(store: Store) {
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pages_merge_by_sort_then_score_then_order() {
-        let keys = sort_keys_of(&json!({"sort": [{"a": "desc"}, "_score"]}));
-        assert_eq!(keys[0].0, true);
-        let keys2 = sort_keys_of(&json!({"sort": [{"a": {"order": "desc"}}, "_score"]}));
-        assert_eq!(keys, keys2);
-        let a = (0usize, json!({"sort": [5, 1.0], "_seq": 1}));
-        let b = (1usize, json!({"sort": [7, 1.0], "_seq": 0}));
-        let c = (1usize, json!({"sort": [5, 1.0], "_seq": 0}));
-        let mut v = vec![a.clone(), b.clone(), c.clone()];
-        v.sort_by(|x, y| cmp_hits(x, y, &keys));
-        assert_eq!(v[0].1["sort"][0], 7);
-        // equal sort values: the node named first, then the write order
-        assert_eq!(v[1].0, 0);
-        assert_eq!(v[2].0, 1);
-        let keys = sort_keys_of(&json!({}));
-        let x = (0usize, json!({"_score": 1.5}));
-        let y = (0usize, json!({"_score": 2.5}));
-        let mut v = vec![x, y];
-        v.sort_by(|a, b| cmp_hits(a, b, &keys));
-        assert_eq!(v[0].1["_score"], 2.5);
-        // a missing sort value goes last whatever the direction
-        let keys = sort_keys_of(&json!({"sort": [{"n": {"order": "desc"}}]}));
-        let m = (0usize, json!({"sort": [null]}));
-        let n = (0usize, json!({"sort": [1]}));
-        let mut v = vec![m, n];
-        v.sort_by(|a, b| cmp_hits(a, b, &keys));
-        assert_eq!(v[0].1["sort"][0], 1);
-    }
-
-    #[test]
-    fn the_engines_own_aggregations_are_recognised() {
-        assert!(own_aggregations(&json!({"aggs": {"t": {"terms": {"field": "x"}}}})).is_empty());
-        assert_eq!(
-            own_aggregations(&json!({"aggs": {"f": {"filters": {"filters": {}}}}})),
-            vec!["f"]
-        );
-        assert_eq!(
-            own_aggregations(
-                &json!({"aggs": {"t": {"terms": {"field": "x"}, "aggs": {"m": {"missing": {"field": "y"}}}}}})
-            ),
-            vec!["m"]
-        );
-        assert_eq!(
-            own_aggregations(&json!({"collapse": {"field": "x"}})),
-            vec!["collapse/rescore/slice"]
-        );
-    }
-}
-
 /// The indices a terms lookup in this body reads its terms from.
 fn lookup_indices(body: &Value) -> Vec<String> {
     fn walk(v: &Value, out: &mut Vec<String>) {
@@ -879,10 +827,10 @@ fn lookup_indices(body: &Value) -> Vec<String> {
             Value::Object(o) => {
                 if let Some(Value::Object(terms)) = o.get("terms") {
                     for def in terms.values() {
-                        if let Some(i) = def.get("index").and_then(|i| i.as_str()) {
-                            if !out.iter().any(|x| x == i) {
-                                out.push(i.to_string());
-                            }
+                        if let Some(i) = def.get("index").and_then(|i| i.as_str())
+                            && !out.iter().any(|x| x == i)
+                        {
+                            out.push(i.to_string());
                         }
                     }
                 }
@@ -940,9 +888,9 @@ fn reduce_over_holders(
         let mut p2 = p.clone();
         p2.insert("_local_only".into(), "1".into());
         if node == me {
-            match crate::search::run(store, &expr, body, &p2) {
-                Ok(o) => parts.push(o),
-                Err(e) => return Err(e),
+            {
+                let o = crate::search::run(store, &expr, body, &p2)?;
+                parts.push(o)
             }
         } else {
             let (_, reply) = tokio::task::block_in_place(|| {
@@ -1047,5 +995,59 @@ fn merge_agg_json(a: &mut Value, b: &Value) {
             });
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_merge_by_sort_then_score_then_order() {
+        let keys = sort_keys_of(&json!({"sort": [{"a": "desc"}, "_score"]}));
+        assert!(keys[0].0);
+        let keys2 = sort_keys_of(&json!({"sort": [{"a": {"order": "desc"}}, "_score"]}));
+        assert_eq!(keys, keys2);
+        let a = (0usize, json!({"sort": [5, 1.0], "_seq": 1}));
+        let b = (1usize, json!({"sort": [7, 1.0], "_seq": 0}));
+        let c = (1usize, json!({"sort": [5, 1.0], "_seq": 0}));
+        let mut v = [a.clone(), b.clone(), c.clone()];
+        v.sort_by(|x, y| cmp_hits(x, y, &keys));
+        assert_eq!(v[0].1["sort"][0], 7);
+        // equal sort values: the node named first, then the write order
+        assert_eq!(v[1].0, 0);
+        assert_eq!(v[2].0, 1);
+        let keys = sort_keys_of(&json!({}));
+        let x = (0usize, json!({"_score": 1.5}));
+        let y = (0usize, json!({"_score": 2.5}));
+        let mut v = [x, y];
+        v.sort_by(|a, b| cmp_hits(a, b, &keys));
+        assert_eq!(v[0].1["_score"], 2.5);
+        // a missing sort value goes last whatever the direction
+        let keys = sort_keys_of(&json!({"sort": [{"n": {"order": "desc"}}]}));
+        let m = (0usize, json!({"sort": [null]}));
+        let n = (0usize, json!({"sort": [1]}));
+        let mut v = [m, n];
+        v.sort_by(|a, b| cmp_hits(a, b, &keys));
+        assert_eq!(v[0].1["sort"][0], 1);
+    }
+
+    #[test]
+    fn the_engines_own_aggregations_are_recognised() {
+        assert!(own_aggregations(&json!({"aggs": {"t": {"terms": {"field": "x"}}}})).is_empty());
+        assert_eq!(
+            own_aggregations(&json!({"aggs": {"f": {"filters": {"filters": {}}}}})),
+            vec!["f"]
+        );
+        assert_eq!(
+            own_aggregations(
+                &json!({"aggs": {"t": {"terms": {"field": "x"}, "aggs": {"m": {"missing": {"field": "y"}}}}}})
+            ),
+            vec!["m"]
+        );
+        assert_eq!(
+            own_aggregations(&json!({"collapse": {"field": "x"}})),
+            vec!["collapse/rescore/slice"]
+        );
     }
 }
