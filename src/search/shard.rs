@@ -127,6 +127,7 @@ pub(crate) fn search_one_shard(
         observed_kinds: &g.observed_kinds,
         kinds_complete: g.kinds_complete,
         stats: &g.stats,
+            vectors: &g.vectors,
     };
     let q: Box<dyn boostcore::query::Query> = match &query_json {
         Some(qj) => match crate::query::build(&ctx, qj) {

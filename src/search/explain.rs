@@ -28,6 +28,7 @@ pub(crate) fn explain_document(g: &IdxState, query: &Value, id: &str) -> Option<
         observed_kinds: &g.observed_kinds,
         kinds_complete: g.kinds_complete,
         stats: &g.stats,
+            vectors: &g.vectors,
     };
     // a script score is explained as the script's value over the inner
     // query's own explanation, boosted once

@@ -49,6 +49,7 @@ pub(crate) fn collect_field_values(
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
+            vectors: &g.vectors,
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
@@ -200,6 +201,7 @@ pub(crate) fn collect_field_pairs(
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
+            vectors: &g.vectors,
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;

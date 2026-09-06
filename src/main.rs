@@ -14,6 +14,7 @@ mod hdr;
 mod http_compat;
 mod ingest;
 mod ism;
+mod knn;
 mod painless;
 mod query;
 mod search;
@@ -419,6 +420,10 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_ism/change_policy/{index}", post(api::ism::change_policy))
         .route("/_plugins/_ism/retry/{index}", post(api::ism::retry_policy))
         .route("/_plugins/_ism/explain", get(api::ism::explain))
+        .route("/_plugins/_knn/stats", get(api::knn::stats))
+        .route("/_plugins/_knn/{node}/stats", get(api::knn::stats))
+        .route("/_plugins/_knn/warmup", get(api::knn::warmup))
+        .route("/_plugins/_knn/warmup/{index}", get(api::knn::warmup))
         .route("/_plugins/_ism/explain/{index}", get(api::ism::explain))
         .route("/_plugins/_security/authinfo", get(security::api::authinfo))
         .route("/_plugins/_security/health", get(security::api::health))

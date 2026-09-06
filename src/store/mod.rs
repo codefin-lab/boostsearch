@@ -204,6 +204,9 @@ pub fn build_schema() -> (Schema, Fields) {
 #[derive(Default, Clone, Debug)]
 pub struct Mapping {
     pub types: HashMap<String, String>,
+    /// the `knn_vector` fields declared here, worked out when the mapping
+    /// changes rather than once per document written
+    pub vector_fields: HashMap<String, crate::knn::Field>,
     /// Which of the two views each declared field's values are written into,
     /// worked out when the mapping changes rather than per document.
     pub views: HashMap<String, crate::store::mapping::Views>,
@@ -385,6 +388,10 @@ pub struct IdxState {
     /// search never needs a write lock -- taking one here would deadlock any
     /// caller that already holds the read guard.
     pub search_count: std::sync::atomic::AtomicU64,
+    /// The vectors this index holds, which live beside the inverted index
+    /// rather than in it: a term dictionary cannot answer "which documents
+    /// are near this point".
+    pub vectors: RwLock<crate::knn::Vectors>,
     /// searches answered out of the request cache, and searches that could
     /// have been but were not there yet, reported by _stats
     pub request_cache_hit: std::sync::atomic::AtomicU64,

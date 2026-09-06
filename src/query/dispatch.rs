@@ -207,6 +207,80 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .collect();
             Box::new(ConstScore::new(any_of(terms), 1.0))
         }
+        // `{"knn": {"embedding": {"vector": [...], "k": 5}}}` -- the documents
+        // nearest a point, rather than the ones holding a word.
+        //
+        // The search happens outside the inverted index, over the table of
+        // vectors kept beside it, and comes back as a set of ids with the
+        // score each earned. Those become the query: one clause per document,
+        // each scoring what its distance was worth. It is the only way to say
+        // "these documents, with these scores" in terms an index understands.
+        "knn" => {
+            let (field, spec) = single_key(&body)?;
+            let asked = spec
+                .get("vector")
+                .and_then(crate::knn::as_vector)
+                .ok_or_else(|| anyhow!("[knn] requires a [vector]"))?;
+            let declared = ctx.mapping.vector_fields.get(&field).ok_or_else(|| {
+                anyhow!("field [{field}] is not knn_vector type")
+            })?;
+            if asked.len() != declared.dimension {
+                return Err(anyhow!(
+                    "Query vector has invalid dimension: {}. Dimension should be: {}",
+                    asked.len(),
+                    declared.dimension
+                ));
+            }
+            // a filter narrows what may be returned before the distances are
+            // compared, so that asking for five near documents among those
+            // that also match something else gives five, not five minus
+            // however many the filter threw away
+            let allowed: Option<std::collections::HashSet<String>> = match spec.get("filter") {
+                Some(filter) => Some(ids_matching(ctx, filter)?),
+                None => None,
+            };
+            let keep = allowed.as_ref().map(|set| {
+                move |id: &str| set.contains(id)
+            });
+            let keep_ref: Option<&dyn Fn(&str) -> bool> =
+                keep.as_ref().map(|f| f as &dyn Fn(&str) -> bool);
+            let held = ctx.vectors.read();
+            let space = declared.space;
+            // `k` asks for the nearest few; `min_score` and `max_distance`
+            // ask for everything close enough, however many that is
+            let found = match (
+                spec.get("min_score").and_then(|v| v.as_f64()),
+                spec.get("max_distance").and_then(|v| v.as_f64()),
+            ) {
+                (Some(score), _) => held.within(
+                    &field,
+                    space,
+                    &asked,
+                    space.distance_of(score as f32),
+                    keep_ref,
+                ),
+                (_, Some(distance)) => {
+                    held.within(&field, space, &asked, distance as f32, keep_ref)
+                }
+                _ => {
+                    let k = spec.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                    held.nearest(&field, space, &asked, k, keep_ref)
+                }
+            };
+            if found.is_empty() {
+                return Ok(Box::new(EmptyQuery));
+            }
+            let clauses: Vec<(Occur, Box<dyn Query>)> = found
+                .into_iter()
+                .map(|near| {
+                    let term = Term::from_field_text(ctx.fields.id, &near.id);
+                    let one: Box<dyn Query> =
+                        Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                    (Occur::Should, Box::new(ConstScore::new(one, near.score)) as Box<dyn Query>)
+                })
+                .collect();
+            Box::new(BooleanQuery::new(clauses))
+        }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
             // every document has an id and belongs to an index, so asking
@@ -626,4 +700,35 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
         "wrapper",
     ];
     !CLAUSES.contains(&name)
+}
+
+/// The ids of the documents a filter matches.
+///
+/// A `knn` filter narrows the field before the distances are compared, not
+/// after: asking for the five nearest documents that also match something
+/// else should give five, not five minus however many the filter removed.
+/// That means knowing which documents the filter matches before the search,
+/// which is what this is for.
+fn ids_matching(ctx: &Ctx, filter: &Value) -> Result<std::collections::HashSet<String>> {
+    let query = super::build(ctx, filter)?;
+    let reader = ctx
+        .index
+        .reader_builder()
+        .reload_policy(boostcore::ReloadPolicy::Manual)
+        .try_into()?;
+    let searcher: boostcore::Searcher = reader.searcher();
+    let found = searcher.search(&query, &boostcore::collector::DocSetCollector)?;
+    let mut out = std::collections::HashSet::with_capacity(found.len());
+    for address in found {
+        let Some(reader) = searcher.segment_readers().get(address.segment_ord as usize) else {
+            continue;
+        };
+        let Ok(Some(column)) = reader.fast_fields().str("_id") else { continue };
+        let Some(ord) = column.term_ords(address.doc_id).next() else { continue };
+        let mut id = String::new();
+        if column.ord_to_str(ord, &mut id).is_ok() {
+            out.insert(id);
+        }
+    }
+    Ok(out)
 }

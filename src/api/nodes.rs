@@ -430,6 +430,7 @@ fn plugins() -> Value {
         "analysis-ukrainian",
         "ingest-attachment",
         "opensearch-index-management",
+        "opensearch-knn",
         "opensearch-security",
         "repository-azure",
         "repository-gcs",

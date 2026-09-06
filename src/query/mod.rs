@@ -50,6 +50,9 @@ pub struct Ctx<'a> {
     pub observed_kinds: &'a std::collections::HashMap<String, u8>,
     pub kinds_complete: bool,
     pub stats: &'a std::sync::Arc<crate::blockstats::StatsCache>,
+    /// the vectors this index holds, which a `knn` query reads and nothing
+    /// else does
+    pub vectors: &'a parking_lot::RwLock<crate::knn::Vectors>,
 }
 
 #[derive(Clone, Copy, PartialEq)]

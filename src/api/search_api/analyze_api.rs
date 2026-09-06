@@ -88,6 +88,7 @@ pub async fn validate_query(
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
+            vectors: &g.vectors,
         };
         if let Err(e) = crate::query::build(&ctx, &query) {
             let mut out = json!({"_shards": shards, "valid": false});

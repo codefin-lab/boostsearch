@@ -76,6 +76,31 @@ pub async fn create_index(
             }
         }
     }
+    // a vector field has to say how long its vectors are: without that,
+    // nothing can be checked against it and nothing can be searched
+    for (path, field) in walk_properties(&body) {
+        if field.get("type").and_then(|t| t.as_str()) != Some("knn_vector") {
+            continue;
+        }
+        let dimension = field.get("dimension").and_then(|v| v.as_u64());
+        match dimension {
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "mapper_parsing_exception",
+                    format!("Failed to parse mapping: [dimension] is a required parameter for field [{path}]"),
+                );
+            }
+            Some(0) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "mapper_parsing_exception",
+                    format!("Failed to parse mapping: [dimension] must be greater than 0 for field [{path}]"),
+                );
+            }
+            Some(_) => {}
+        }
+    }
     // an index can only sort itself by a field whose values it can compare,
     // one at a time
     if let Some(fields) = body
@@ -385,4 +410,19 @@ pub async fn get_index(
         );
     }
     respond(&p, Value::Object(out))
+}
+
+/// Every field a mapping declares, by its dotted path.
+fn walk_properties(body: &Value) -> Vec<(String, Value)> {
+    fn walk(properties: Option<&Value>, prefix: &str, out: &mut Vec<(String, Value)>) {
+        let Some(properties) = properties.and_then(|p| p.as_object()) else { return };
+        for (name, spec) in properties {
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+            out.push((path.clone(), spec.clone()));
+            walk(spec.get("properties"), &path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(body.pointer("/mappings/properties"), "", &mut out);
+    out
 }
