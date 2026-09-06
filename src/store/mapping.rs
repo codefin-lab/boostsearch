@@ -596,7 +596,8 @@ impl Mapping {
 
     fn compute_views(&self, field: &str) -> Views {
         match self.type_of(field) {
-            Some("text") | Some("match_only_text") | Some("search_as_you_type") => Views {
+            Some("text") | Some("match_only_text") | Some("search_as_you_type")
+            | Some("annotated_text") => Views {
                 analysed: true,
                 // a text field that declares a keyword sub-field is asked
                 // about both ways, so it is written both ways
@@ -794,7 +795,16 @@ fn collect_analyzers(
 ) {
     for (name, spec) in props {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
-        if let Some(analyzer) = spec.get("analyzer").and_then(|a| a.as_str()) {
+        let declared = spec.get("analyzer").and_then(|a| a.as_str());
+        // an annotated field's markup is not part of its text, so the chain
+        // it is cut with is the one it asked for wrapped in the reading of
+        // that markup -- registered under a name a mapping cannot write
+        if spec.get("type").and_then(|t| t.as_str()) == Some("annotated_text") {
+            out.push((
+                path.clone(),
+                crate::analysis::annotated_name(declared.unwrap_or("standard")),
+            ));
+        } else if let Some(analyzer) = declared {
             out.push((path.clone(), analyzer.to_string()));
         }
         if let Some(sub) = spec.get("properties").and_then(|p| p.as_object()) {

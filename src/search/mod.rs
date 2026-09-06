@@ -38,7 +38,7 @@ pub(crate) mod extras;
 pub(crate) use extras::*;
 mod geo;
 pub(crate) use geo::*;
-mod highlight;
+pub(crate) mod highlight;
 pub(crate) use highlight::*;
 mod explain;
 pub(crate) use explain::*;

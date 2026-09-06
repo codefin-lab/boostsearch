@@ -174,6 +174,22 @@ pub(crate) fn build_highlight(
             // pieces cut out of whole words keep the word's offsets, so a match
             // on a piece marks the word it came from
             let within_words = chain.as_ref().map(|c| c.filters_into_ngrams()).unwrap_or(false);
+            // An annotated field carries its own markup -- `[shown](value)` --
+            // and highlighting it means saying which annotations were hit
+            // rather than wrapping words in tags: a reader of the answer gets
+            // the same markup back with `_hit_term` added to what matched.
+            let annotated = opts.get("type").and_then(|t| t.as_str()) == Some("annotated")
+                || spec.get("type").and_then(|t| t.as_str()) == Some("annotated");
+            if annotated {
+                let hits: Vec<String> = terms.iter().map(|(t, _)| t.clone()).collect();
+                let readers = vec![analyzer.clone()];
+                if let Some(marked) =
+                    mark_annotated(index, text, &terms, &hits, &readers, analysis)
+                {
+                    fragments.push(marked);
+                }
+                continue;
+            }
             let marked = match shingle_width(&name) {
                 Some(width) => mark_runs(text, &terms, width, &pre, &post),
                 None if pieces => mark_pieces(text, &terms, &pre, &post),
@@ -494,6 +510,120 @@ fn mark_pieces(text: &str, queries: &[(String, bool)], pre: &str, post: &str) ->
 }
 
 /// Mark the tokens of `text` that the query's words match.
+/// One `[shown](value)` in an annotated field, by where its text stands once
+/// the markup is taken off.
+pub(crate) struct Annotation {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
+    /// what the annotation says, as written -- several values are joined
+    /// with `&`, each one a thing the span is said to be
+    pub(crate) raw: String,
+}
+
+/// An annotated field as the text somebody wrote and the annotations on it.
+pub(crate) fn without_markup(text: &str) -> (String, Vec<Annotation>) {
+    let mut plain = String::with_capacity(text.len());
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        // `[shown](value)` and nothing else: a bracket with no annotation
+        // after it is a bracket somebody wrote
+        let after = &rest[open + 1..];
+        let shape = after
+            .find(']')
+            .filter(|close| after[close + 1..].starts_with('('))
+            .and_then(|close| after[close + 2..].find(')').map(|end| (close, end)));
+        let Some((close, end)) = shape else {
+            plain.push_str(&rest[..open + 1]);
+            rest = after;
+            continue;
+        };
+        plain.push_str(&rest[..open]);
+        let from = plain.len();
+        plain.push_str(&after[..close]);
+        found.push(Annotation {
+            from,
+            to: plain.len(),
+            raw: after[close + 2..close + 2 + end].to_string(),
+        });
+        rest = &after[close + 2 + end + 1..];
+    }
+    plain.push_str(rest);
+    (plain, found)
+}
+
+/// An annotated field with `_hit_term` added to what the query found.
+///
+/// Two things can be hit: an annotation, when the query asked for what it
+/// says, and a word of the text itself. An annotation that was hit comes back
+/// with the hit named in front of what it already said; a word that was hit
+/// becomes an annotation of its own. Everything else comes back as plain
+/// text, markup and all -- an annotation nobody asked about is not part of
+/// the answer to this query.
+fn mark_annotated(
+    index: &boostcore::Index,
+    text: &str,
+    queries: &[(String, bool)],
+    hits: &[String],
+    analyzers: &[Option<String>],
+    analysis: &crate::analysis::Registry,
+) -> Option<String> {
+    const OPEN: &str = "\u{1}";
+    const CLOSE: &str = "\u{2}";
+    let (plain, annotations) = without_markup(text);
+    // the words of the text that were hit, found the way any highlight finds
+    // them, and then read back off the marked copy
+    let marked = mark_terms(index, &plain, queries, analyzers, analysis, OPEN, CLOSE);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    if let Some(marked) = &marked {
+        let mut at = 0;
+        let mut plain_at = 0;
+        while let Some(open) = marked[at..].find(OPEN) {
+            plain_at += marked[at..at + open].chars().count();
+            let from = plain_at;
+            let rest = at + open + OPEN.len();
+            let Some(close) = marked[rest..].find(CLOSE) else { break };
+            plain_at += marked[rest..rest + close].chars().count();
+            spans.push((from, plain_at));
+            at = rest + close + CLOSE.len();
+        }
+    }
+    // the spans are in characters and the annotations in bytes; one map
+    // between them, made once
+    let byte_of: Vec<usize> =
+        plain.char_indices().map(|(at, _)| at).chain(std::iter::once(plain.len())).collect();
+    let spans: Vec<(usize, usize)> = spans
+        .into_iter()
+        .filter_map(|(a, b)| Some((*byte_of.get(a)?, *byte_of.get(b)?)))
+        .collect();
+    let hit_of = |annotation: &Annotation| -> Option<String> {
+        annotation.raw.split('&').find(|value| hits.iter().any(|h| h == value)).map(str::to_string)
+    };
+    if spans.is_empty() && !annotations.iter().any(|a| hit_of(a).is_some()) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0usize;
+    while at < plain.len() {
+        if let Some(a) = annotations.iter().find(|a| a.from == at)
+            && let Some(hit) = hit_of(a)
+        {
+            out.push_str(&format!("[{}](_hit_term={hit}&{})", &plain[a.from..a.to], a.raw));
+            at = a.to;
+            continue;
+        }
+        if let Some((from, to)) = spans.iter().find(|(from, _)| *from == at) {
+            out.push_str(&format!("[{0}](_hit_term={0})", &plain[*from..*to]));
+            at = *to;
+            continue;
+        }
+        let next = plain[at..].chars().next()?;
+        out.push(next);
+        at += next.len_utf8();
+    }
+    Some(out)
+}
+
 pub(crate) fn mark_terms(
     index: &boostcore::Index,
     text: &str,

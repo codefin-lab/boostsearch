@@ -287,3 +287,4 @@ mod tests {
         assert_eq!(read, vec!["寿司", "が", "おいしい", "ね"]);
     }
 }
+

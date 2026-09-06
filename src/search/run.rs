@@ -196,7 +196,7 @@ fn term_stats_for(
         // a keyword is kept whole in the raw view; text is tokenised into
         // the dynamic one, and a term of it is one lowercased token
         let kind = mapping.type_of(field).unwrap_or("keyword");
-        let (f, text) = if matches!(kind, "text" | "match_only_text") {
+        let (f, text) = if matches!(kind, "text" | "match_only_text" | "annotated_text") {
             (fields.dynamic, term.to_lowercase())
         } else {
             (fields.raw, term.to_string())

@@ -617,7 +617,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .unwrap_or_default();
             if matches!(
                 ctx.mapping.type_of(&field),
-                Some("text") | Some("keyword") | Some("match_only_text")
+                Some("text") | Some("keyword") | Some("match_only_text") | Some("annotated_text")
             ) {
                 return Err(anyhow!(
                     "[range] queries on [text] or [keyword] fields cannot be executed when \

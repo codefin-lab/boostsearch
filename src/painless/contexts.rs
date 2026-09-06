@@ -327,7 +327,7 @@ impl Doc {
             Some(v) => vec![v],
         };
         // a text field has no doc values to read; only its keyword does
-        if kind == "text" || kind == "match_only_text" {
+        if kind == "text" || kind == "match_only_text" || kind == "annotated_text" {
             values.clear();
         }
         values = values.into_iter().map(|v| typed(v, &kind)).collect();

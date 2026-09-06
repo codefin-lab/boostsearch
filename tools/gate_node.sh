@@ -22,6 +22,11 @@ DATA=${BOOST_DATA:-/tmp/boost-gate}
 REPO=${BOOST_URL_REPO:-/tmp/boost-url-repo}
 FIXTURE=${BOOST_URL_FIXTURE_PORT:-9280}
 rm -rf "$DATA" "$REPO"
+# the user-agent suite names a regex file its build copies into the node's
+# config; the file is in the OpenSearch tree, so it is copied from there
+mkdir -p "$DATA/config/ingest-user-agent"
+cp study/OpenSearch/modules/ingest-user-agent/src/test/test-regexes.yml \
+   "$DATA/config/ingest-user-agent/" 2>/dev/null || true
 BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
 BOOSTSEARCH_DATA="$DATA" \
 BOOSTSEARCH_NODE_ATTRS=testattr=test \

@@ -24,7 +24,7 @@ pub(crate) fn analysed_text_field(store: &Store, targets: &[String], field: &str
         if g.mapping.raw_view_parent(field).is_some() {
             return false;
         }
-        if matches!(g.mapping.type_of(field), Some("text" | "match_only_text")) {
+        if matches!(g.mapping.type_of(field), Some("text" | "match_only_text" | "annotated_text")) {
             return true;
         }
     }

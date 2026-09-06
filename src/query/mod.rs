@@ -96,7 +96,8 @@ impl<'a> Ctx<'a> {
             // is addressed as `field.keyword` and resolved before this.
             // Sorting or aggregating asks for a column, which such a field has
             // only where the mapping asked for one.
-            Some("text") | Some("match_only_text") | Some("search_as_you_type") => {
+            Some("text") | Some("match_only_text") | Some("search_as_you_type")
+            | Some("annotated_text") => {
                 if !analyzed && self.mapping.views_of(field).fielddata {
                     View::Fielddata
                 } else {

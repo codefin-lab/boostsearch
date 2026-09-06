@@ -48,7 +48,8 @@ def run(url, files, before=None):
 
 
 def main():
-    files = json.loads(pathlib.Path(MANIFEST).read_text())["clean"]
+    manifest = json.loads(pathlib.Path(MANIFEST).read_text())
+    files = manifest["clean"]
     together = [f for f in files if APART not in f]
     apart = [f for f in files if APART in f]
     passes = [
@@ -66,6 +67,14 @@ def main():
         failed += found["failed"]
         skipped += found["skipped"]
     print(f"  {'':18} {passed:4} of {total} sections, {failed} failed, {skipped} skipped")
+    # files that are not tests of a server at all, and why -- kept in sight so
+    # that setting one aside stays a decision somebody can argue with rather
+    # than a number that quietly moved
+    apart = manifest.get("not_a_server_test", {})
+    if apart:
+        print(f"\n  {len(apart)} files are not tests of a server:")
+        for name, why in apart.items():
+            print(f"    {name.split('/test/')[-1]}\n      {why}")
     for name, found in passes:
         for f in found["failures"]:
             print(f"    [{name}] {f['file'].split('/test/')[-1]} :: {f['section']}")
