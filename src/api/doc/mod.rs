@@ -223,6 +223,12 @@ pub fn write_doc_versioned(
             );
         }
     }
+    // a vector goes beside the index rather than into it, and it goes there
+    // before the document does: a search that finds the document must be able
+    // to find the vector too
+    if !st.mapping.vector_fields.is_empty() {
+        st.vectors.write().write(&st.mapping.vector_fields, id, &indexed);
+    }
     let doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
     st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -262,6 +268,9 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let shard = st.shard_of_doc(id);
     if existed {
         st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+        if !st.mapping.vector_fields.is_empty() {
+            st.vectors.write().forget(id);
+        }
         st.log_write(id, None, version, seq, None);
         st.note_pending(id, None);
         st.note_pending_seq(id, seq);

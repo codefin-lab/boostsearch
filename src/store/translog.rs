@@ -155,6 +155,7 @@ impl IdxState {
             w.commit()?;
         }
         self.save_meta();
+        self.save_vectors();
         self.reader.reload()?;
         self.realtime.reload()?;
         // what this shard held is in the index now, so the copy kept for a
@@ -185,6 +186,7 @@ impl IdxState {
             w.commit()?;
         }
         self.save_meta();
+        self.save_vectors();
         self.reader.reload()?;
         self.realtime.reload()?;
         self.pending.clear();

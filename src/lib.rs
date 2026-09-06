@@ -12,6 +12,7 @@ pub mod hdr;
 pub mod http_compat;
 pub mod ingest;
 pub mod ism;
+pub mod knn;
 pub mod painless;
 pub mod query;
 pub mod search;

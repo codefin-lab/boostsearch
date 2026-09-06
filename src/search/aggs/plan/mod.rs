@@ -565,6 +565,7 @@ pub(crate) fn filtered_count(
             observed_kinds: &g.observed_kinds,
             kinds_complete: g.kinds_complete,
             stats: &g.stats,
+            vectors: &g.vectors,
         };
         let q = crate::query::build(&ctx, query_json)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;

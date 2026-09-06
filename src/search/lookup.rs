@@ -313,6 +313,7 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
                         observed_kinds: &g.observed_kinds,
                         kinds_complete: g.kinds_complete,
                         stats: &g.stats,
+            vectors: &g.vectors,
                     };
                     crate::query::build(&ctx, &json!({"match": {field.clone(): word}}))
                         .ok()
@@ -414,6 +415,7 @@ pub(crate) fn resolve_terms_lookups(
                             observed_kinds: &g.observed_kinds,
                             kinds_complete: g.kinds_complete,
                             stats: &g.stats,
+            vectors: &g.vectors,
                         };
                         let built = crate::query::build(&ctx, q).map_err(|e| {
                             err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string())

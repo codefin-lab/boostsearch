@@ -2915,6 +2915,51 @@ pub fn call_free(name: &str, args: &[Value]) -> Result<Value, String> {
             );
             Ok(Value::Double(v.powf(e) / (v.powf(e) + p.powf(e))))
         }
+        // The vector functions the k-NN plugin adds to the language, for a
+        // script that wants to score by distance itself rather than let a
+        // `knn` query do it. Both sides are arrays of numbers; what differs
+        // is what "apart" means.
+        "cosineSimilarity" | "l2Squared" | "l1Norm" | "hammingDistance" | "innerProduct" => {
+            // a vector reaches a script as a list, and a field read through
+            // `doc[...]` reaches it as whatever that context hands back; both
+            // are arrays of numbers once they are written out
+            let read = |v: &Value| -> Option<Vec<f32>> {
+                match v.to_json() {
+                    serde_json::Value::Array(items) => {
+                        items.iter().map(|i| i.as_f64().map(|n| n as f32)).collect()
+                    }
+                    serde_json::Value::Number(one) => Some(vec![one.as_f64()? as f32]),
+                    _ => None,
+                }
+            };
+            let (a, b) = (read(&arg(args, 0)), read(&arg(args, 1)));
+            let (Some(a), Some(b)) = (a, b) else {
+                return no(format!("[{name}] takes two arrays of numbers"));
+            };
+            if a.len() != b.len() {
+                return no(format!(
+                    "[{name}]: query vector has {} dimensions and the document has {}",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            let space = match name {
+                "cosineSimilarity" => crate::knn::Space::Cosine,
+                "l1Norm" => crate::knn::Space::L1,
+                "hammingDistance" => crate::knn::Space::Hamming,
+                "innerProduct" => crate::knn::Space::InnerProduct,
+                _ => crate::knn::Space::L2,
+            };
+            let distance = space.distance(&a, &b);
+            Ok(Value::Double(match name {
+                // a similarity runs the other way from a distance: one is
+                // pointing the same way, minus one is pointing away
+                "cosineSimilarity" => (1.0 - distance) as f64,
+                // an inner product is what it is, not what it costs
+                "innerProduct" => (-distance) as f64,
+                _ => distance as f64,
+            }))
+        }
         n if n.starts_with("decayNumeric")
             || n.starts_with("decayDate")
             || n.starts_with("decayGeo") =>

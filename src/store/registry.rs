@@ -149,6 +149,15 @@ impl Store {
                             let scanned = IdxState::scan_ids(&reader, id_field);
                             st2.write().absorb_ids(scanned);
                         });
+                        // the vectors an index holds are read back beside it,
+                        // or worked out again from the documents where what
+                        // was written down does not match them
+                        {
+                            let mut g = st.write();
+                            if !g.mapping.vector_fields.is_empty() {
+                                g.load_vectors();
+                            }
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("could not reopen index {name}: {e}"),
@@ -236,6 +245,12 @@ impl Store {
             let (reader, id_field) = (g.realtime.clone(), g.fields.id);
             let scanned = IdxState::scan_ids(&reader, id_field);
             g.absorb_ids(scanned);
+            // the vectors an index holds live beside it, so they are read
+            // back beside it -- and worked out again from the documents when
+            // what was written down is missing or does not match them
+            if !g.mapping.vector_fields.is_empty() {
+                g.load_vectors();
+            }
         }
         Ok(held)
     }
@@ -549,6 +564,7 @@ impl Store {
             seq_no: 0,
             applied_term: 0,
             search_count: std::sync::atomic::AtomicU64::new(0),
+            vectors: RwLock::new(Default::default()),
             request_cache_hit: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_gen: std::sync::atomic::AtomicU64::new(crate::store::next_generation()),

@@ -412,6 +412,7 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
         ("lang-expression", "Lucene expressions integration for OpenSearch"),
         ("lang-mustache", "Mustache scripting integration for OpenSearch"),
         ("opensearch-index-management", "OpenSearch Index Management Plugin"),
+        ("opensearch-knn", "OpenSearch k-NN plugin"),
         ("opensearch-security", "Provide access control related features for OpenSearch"),
         ("repository-azure", "The Azure Repository plugin adds support for Azure storage \
                              repositories"),

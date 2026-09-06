@@ -160,6 +160,7 @@ pub(crate) fn term_vectors_of(
                     observed_kinds: &g.observed_kinds,
                     kinds_complete: g.kinds_complete,
                     stats: &g.stats,
+            vectors: &g.vectors,
                 };
                 let freq = crate::query::build(&ctx, &json!({"match": {name.clone(): term}}))
                     .ok()

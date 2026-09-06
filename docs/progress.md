@@ -2750,3 +2750,70 @@ the attachment are both still there afterwards.
 
 Gates: unit 71/71, phase 1 398/398, core corpus 1,100/1,100, module corpus
 850/895 unchanged.
+
+## Phase 11 — Vector search
+
+A `knn_vector` field holds what a model made of a sentence, a picture, a face,
+and searching it means finding the documents whose vectors are nearest the one
+asked about.
+
+**Vectors do not live in the inverted index, and cannot.** A term dictionary
+answers "which documents hold this word"; no arrangement of one answers "which
+documents are near this point in three hundred dimensions". So they live
+beside it: one table per index, keyed by field and then by document, kept up
+to date by the writer and read by a search. It is written down beside the
+index so a restart does not have to read every document back to learn what it
+already knew, and worked out again from the documents when that file is
+missing or does not match them -- the file is a shortcut, the documents are
+the truth.
+
+**Six spaces**: l2, l1, linf, cosine, inner product, hamming. Each says how
+far apart two vectors are and what score that distance earns, and every one of
+them scores so that nearer is higher and nothing is ever negative, which is
+what lets a caller compare against a `min_score` without knowing which space
+was used.
+
+**A filter narrows before the distances are compared, not after.** Asking for
+the two nearest documents that are also blue must give two, not two minus
+however many nearer ones were red. That means resolving the filter to a set of
+documents first and searching within it -- pre-filtering, which is what
+OpenSearch's exact search does too.
+
+**Radial search**: `max_distance` and `min_score` ask for everything close
+enough rather than the nearest few, however many that turns out to be.
+
+**In a script**: `cosineSimilarity`, `l2Squared`, `l1Norm`, `innerProduct` and
+`hammingDistance`, for a query that wants to score by distance itself.
+
+**The one real bug, and it would have been quiet.** `doc['field']` reads a
+column, and a column hands back the values it holds *in sorted order* --
+which is right for every other field and wrong for this one. A vector's order
+is its meaning: `[1, 0]` sorted is `[0, 1]`, which points somewhere else
+entirely. Every script scoring by cosine was scoring against a vector that had
+been quietly rearranged, and the answers looked plausible: the near document
+came second instead of first rather than the whole thing failing. A vector
+field keeps its order now, and `tools/knn_check.py` has a check whose whole
+job is to notice if it ever stops.
+
+`_plugins/_knn/stats` reports what is held, and `warmup` makes sure a table is
+built before the first search rather than during it.
+
+    ok     the nearest documents are the nearest ones
+    ok     a filter narrows before the distances are compared
+    ok     a radius returns everything within it
+    ok     different spaces measure differently
+    ok     a vector keeps the order it was written in
+    ok     a script can measure distance itself
+    ok     the mapping and the query are checked
+    ok     vectors outlive the node
+
+**What this is not.** The search is exact: every vector is compared. That is
+always right and it is what an approximate index has to be measured against,
+but it is linear in the number of documents, and an HNSW graph is what makes
+a hundred million vectors answerable in milliseconds. The mapping accepts
+`method` and records it; nothing yet builds the graph it names. That is the
+next piece of this phase, and until it exists the honest description is
+"correct, and linear".
+
+Gates: unit 78/78, phase 1 398/398, core corpus 1,100/1,100, module corpus
+850/895 unchanged.

@@ -331,10 +331,15 @@ impl Doc {
             values.clear();
         }
         values = values.into_iter().map(|v| typed(v, &kind)).collect();
-        // doc values come back sorted
-        if matches!(kind.as_str(), "keyword" | "ip" | "boolean" | "date") || kind.is_empty() {
-            values.sort_by(|a, b| compare(a, b).unwrap_or(std::cmp::Ordering::Equal));
-        } else if values.iter().all(|v| v.is_number()) {
+        // Doc values come back sorted, because that is the order a column
+        // holds them in. A vector is the exception: its order is its meaning,
+        // and [1, 0] sorted is [0, 1], which points somewhere else entirely.
+        let ordered = kind == "knn_vector";
+        if !ordered
+            && (matches!(kind.as_str(), "keyword" | "ip" | "boolean" | "date")
+                || kind.is_empty()
+                || values.iter().all(|v| v.is_number()))
+        {
             values.sort_by(|a, b| compare(a, b).unwrap_or(std::cmp::Ordering::Equal));
         }
         Value::DocValues(Rc::new(DocValues { field: name.to_string(), values }))

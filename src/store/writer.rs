@@ -118,3 +118,65 @@ impl IdxState {
             .unwrap_or_else(|| "0".repeat(22))
     }
 }
+
+impl IdxState {
+    /// Where this index's vectors are written down.
+    pub fn vector_path(&self) -> Option<std::path::PathBuf> {
+        self.path.as_ref().map(|p| p.join("vectors.bin"))
+    }
+
+    /// Read the vectors back, or work them out again from the documents.
+    ///
+    /// The file is a shortcut, not the truth: the documents are. A file that
+    /// holds fewer vectors than there are documents to hold them -- a crash
+    /// between a write and a save -- is thrown away and the whole thing is
+    /// read again, which is slower and always right.
+    pub fn load_vectors(&mut self) {
+        if let Some(path) = self.vector_path()
+            && let Some(held) = crate::knn::Vectors::load(&path)
+        {
+            let documents = self.realtime.searcher().num_docs() as usize;
+            let fields = self.mapping.vector_fields.len();
+            if !held.is_empty() && held.len() >= documents.min(documents * fields) {
+                *self.vectors.write() = held;
+                return;
+            }
+        }
+        self.rebuild_vectors();
+    }
+
+    /// Read every document and take the vectors out of it.
+    pub fn rebuild_vectors(&mut self) {
+        use boostcore::schema::document::Value as _;
+        let searcher = self.realtime.searcher();
+        let mut held = crate::knn::Vectors::default();
+        for segment in searcher.segment_readers() {
+            let Ok(store) = segment.get_store_reader(1) else { continue };
+            for doc_id in segment.doc_ids_alive() {
+                let Ok(doc) = store.get::<boostcore::TantivyDocument>(doc_id) else { continue };
+                let Some(id) = doc.get_first(self.fields.id).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(raw) = doc.get_first(self.fields.source).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Ok(source) = serde_json::from_str::<serde_json::Value>(raw) else { continue };
+                held.write(&self.mapping.vector_fields, id, &source);
+            }
+        }
+        *self.vectors.write() = held;
+        if let Some(path) = self.vector_path() {
+            self.vectors.write().save(&path);
+        }
+    }
+
+    /// Write the vectors down, as they stand.
+    pub fn save_vectors(&self) {
+        if self.mapping.vector_fields.is_empty() {
+            return;
+        }
+        if let Some(path) = self.vector_path() {
+            self.vectors.write().save(&path);
+        }
+    }
+}

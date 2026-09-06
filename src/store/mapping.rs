@@ -13,6 +13,7 @@ impl Mapping {
         }
         let mut m = Mapping {
             types,
+            vector_fields: HashMap::new(),
             views: HashMap::new(),
             every_field_both: true,
             raw: body,
@@ -458,6 +459,8 @@ impl Mapping {
             found.sort();
             found
         };
+        // which fields hold vectors, for the same reason
+        self.vector_fields = crate::knn::fields_of(&self.raw);
         // where each declared field's values go, worked out once here rather
         // than once per document per field
         self.views = self
