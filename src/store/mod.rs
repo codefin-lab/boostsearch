@@ -116,6 +116,15 @@ pub const RAW: &str = "_raw";
 /// The view that carries a column for a text field that asked for one.
 pub const FIELDDATA: &str = "_fd";
 
+/// Now, in milliseconds since the epoch -- which is the only clock anything
+/// in an answer is measured against.
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Handed out so that no two indices, and no two lives of one index, ever
 /// stand behind the same generation number.
 pub(crate) fn next_generation() -> u64 {

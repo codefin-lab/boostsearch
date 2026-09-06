@@ -267,6 +267,41 @@ pub(crate) fn next_rollover_name(current: &str) -> Option<String> {
     Some(format!("{stem}{next:06}"))
 }
 
+/// Move an alias from the index it points at to a new one.
+///
+/// This is the whole of what a rollover does once it has been decided: make
+/// the next index, give it the alias, take the alias off the one behind it.
+/// A policy that rolls an index over does it through here, so that an index
+/// rolled by a schedule is rolled the way one rolled by hand is.
+pub(crate) fn roll_alias(
+    store: &Store,
+    alias: &str,
+    from: &str,
+    to: &str,
+    create: &Value,
+) -> Result<(), String> {
+    let Some(src) = store.get(from) else { return Err(format!("no such index [{from}]")) };
+    store.create(to, create).map_err(|e| e.to_string())?;
+    // the alias moves; the old index keeps whatever else pointed at it
+    let def = { src.read().aliases.get(alias).cloned().unwrap_or_else(|| json!({})) };
+    if let Some(st) = store.get(to) {
+        let mut g = st.write();
+        g.aliases.insert(alias.to_string(), def);
+        // when it was rolled onto, which is what a policy asks about when it
+        // wants to know how long ago that was
+        if let Some(o) = g.settings.as_object_mut() {
+            o.insert("index.rollover_time".into(), json!(crate::store::now_millis().to_string()));
+        }
+        g.save_meta();
+    }
+    {
+        let mut g = src.write();
+        g.aliases.remove(alias);
+        g.save_meta();
+    }
+    Ok(())
+}
+
 /// `_rollover` -- start a new index behind an alias when the one it points at
 /// has had enough.
 pub async fn rollover(
@@ -358,20 +393,8 @@ pub async fn rollover(
                 c
             })
             .unwrap_or_else(|| json!({}));
-        if let Err(e) = store.create(&new_index, &create) {
-            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
-        }
-        // the alias moves; the old index keeps whatever else pointed at it
-        let def = { src.read().aliases.get(&alias).cloned().unwrap_or_else(|| json!({})) };
-        if let Some(st) = store.get(&new_index) {
-            let mut g = st.write();
-            g.aliases.insert(alias.clone(), def);
-            g.save_meta();
-        }
-        {
-            let mut g = src.write();
-            g.aliases.remove(&alias);
-            g.save_meta();
+        if let Err(e) = roll_alias(&store, &alias, &old, &new_index, &create) {
+            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e);
         }
     }
     respond(
