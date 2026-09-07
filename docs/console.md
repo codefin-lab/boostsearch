@@ -1,0 +1,85 @@
+# The console's server
+
+OpenSearch Dashboards is a browser application and a Node server. The
+application is a set of built bundles that boot from what the server tells
+them; the server serves those bundles, keeps the saved objects, and answers
+the few hundred routes the pages call. BoostSearch replaces the server. The
+application is not touched: it is served, byte for byte, from a Dashboards
+distribution the console is pointed at.
+
+## Running it
+
+```bash
+BOOSTSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards   # a 3.1.0 distribution
+BOOSTSEARCH_ENGINE=http://127.0.0.1:9200                    # BoostSearch, or OpenSearch
+./target/release/console
+```
+
+The distribution is the one thing to fetch: the tarball or the Docker image
+of OpenSearch Dashboards 3.1.0, extracted anywhere. The console reads its
+bundles, its assets, its translations and its plugin manifests from it, and
+nothing else of the Node server is run. The settings are in
+[settings.md](settings.md) under "The console".
+
+## What it pins
+
+Some of what the front end boots from is compiled into the Node server
+rather than written down anywhere: the injected metadata, the bundle list,
+the default settings, the capabilities, the saved-object index mapping, the
+versions each type migrates to, the Dev Tools' description of the engine's
+API, the sample data's mappings and saved objects. `tools/osd_pin.py` and
+`tools/osd_sample_data.js` take them from a running Dashboards and write
+them to `console/`. A console refuses to start against a distribution whose
+version it has no pin for, rather than guess.
+
+To make a pin, start the reference pair (`tools/dashboards_reference.sh`
+starts Dashboards 3.1.0 and an OpenSearch behind it in Docker) and run:
+
+```bash
+python3 tools/osd_pin.py --url http://127.0.0.1:5613 --engine http://127.0.0.1:9221
+```
+
+Two things it learned: the engine behind the reference has to be alive, or
+the probe that writes one object of each type finds nothing and records no
+migration versions at all; and the index is read through its alias, since a
+Dashboards that has had a suite run against it has migrated more than once.
+
+## What it carries
+
+The shell, the base path and the CSP; `uiSettings`; `/api/status` with its
+metrics; the saved objects -- the store under `.kibana`, the index migration
+that makes `.kibana_N` and moves the alias, the per-type document migrations
+(`src/console/migrations/`), the whole API including export, import and
+`_resolve_import_errors`, and the management routes; index patterns
+(`_fields_for_wildcard`, `_fields_for_time_pattern`, `resolve_index`);
+`_msearch`, the `opensearch` search strategy, value suggestions; short URLs;
+the Dev Tools proxy; the sample data sets; the DQL and usage counters;
+`/api/stats`; the Index Management plugin's index listing and its
+`apiCaller`; compression by referrer allowlist; a JSON 404 for the rest.
+
+## What it does not
+
+The other plugins' server halves -- alerting, anomaly detection,
+observability, notifications, security analytics, reports, ML -- and the
+rest of Index Management's own routes (policies, rollups, transforms,
+snapshots). Their pages load and say so. Telemetry, which the 3.1.0
+reference does not serve either. Multiple data sources and workspaces.
+
+## How it is measured
+
+- `tools/dashboards_gate.py`: OpenSearch Dashboards' own `test/api_integration`
+  (166 cases) against whichever server is named. The Node server's own
+  score is recorded in `tools/dashboards_baseline.json` -- it fails 24 --
+  and a failure counts against this console only when the Node server
+  passes the case. **146 of 166, none ours alone.**
+- `tools/console_diff.py`: the shell and `bootstrap.js` compared with a
+  running Dashboards, field by field and character by character.
+- `tools/dashboards_check.py`: six areas that suite never asks about.
+- Every flow driven by hand in a browser -- Discover, Visualize, a
+  dashboard, saved objects, Index Management, Dev Tools -- against a
+  BoostSearch node, in `docs/progress.md` under 13.6.
+
+The suite needs the Dashboards repository bootstrapped
+(`study/OpenSearch-Dashboards`, Node 20, `yarn osd bootstrap`) and the
+server it tests started with `--server.xsrf.disableProtection=true`, which
+is the difference between 76 and 140 for the Node server itself.

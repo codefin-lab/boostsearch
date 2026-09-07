@@ -1,4 +1,8 @@
-# ความคืบหน้า Phase 1 — พอร์ต OpenSearch เป็น Rust บน Tantivy
+# The ledger
+
+Every task, what it took, and what was got wrong on the way. The early
+entries are in Thai, as they were written; the language changed with the
+name, and nothing was rewritten.
 
 วัดด้วย **test suite ของ OpenSearch เอง** (`rest-api-spec` YAML) ไม่ได้เขียน test ใหม่
 harness: `tools/yaml_runner.py` · เป้า Phase 1: 124 ไฟล์ / 401 sections

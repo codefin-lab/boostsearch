@@ -36,5 +36,10 @@ named with their reasons in `docs/progress.md`. Two of the ten need
 dictionaries that are somebody else's to redistribute; one asserts that its
 plugin is the only one installed, which a single binary cannot be.
 
-Not yet done: the console's server (Phase 13), and a run of the bench matrix
-on the hardware a release would be cut on rather than on a developer machine.
+And the console's server (Phase 13): OpenSearch Dashboards' own browser
+application, served unchanged, on a server of this project's -- **146 of
+166** of Dashboards' own API suite, none failed that the Node server passes,
+14 MiB resident against its 223, ready in 45 ms.
+
+Not yet done: a run of the bench matrix on the hardware a release would be
+cut on rather than on a developer machine (`tools/cloud_bench_gcp.sh`).

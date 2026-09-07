@@ -48,9 +48,20 @@ src/
     objects        scrolls, templates, repositories, snapshots, pipelines, data streams
     translog  writer  ids  settings  mapping  coerce  dates  net
 
-  analysis.rs      the analysis chain: tokenizer, filters, the built-in analysers
-  snapshot.rs      snapshots that copy documents
-  source.rs        _source filtering and date formats
+  analysis/        the analysis chain: tokenizers, filters, the built-in analysers, the
+                   stemmers, the dictionary-backed languages, phonetic and phone numbers
+  ingest/          the ingest processors: grok, dissect, geoip, user-agent, attachment
+  painless/        Painless: lexer, parser, evaluator, the whitelist, the contexts
+  security/        TLS, users and roles, the caller in the query path, SAML/OIDC/LDAP, audit
+  cluster/         the cluster: transport, state, consensus, allocation, replication,
+                   recovery, the coordinator -- and the simulation it is checked in
+  snapshot/        repositories: filesystem, URL, S3, GCS, Azure
+  ism/             index state management: policies and their actions
+  knn/             vector search: the spaces, the store, the HNSW graph
+  sql/             SQL and PPL: lexer, parser, planner, the row shapes
+  console/         the console's server: the shell, settings, saved objects and their
+                   migrations, the searches, sample data, the plugin routes it answers for
+  bin/console.rs   the console's routing table, the way main.rs is the server's
   blockstats.rs    per-block statistics, so a range scan can skip runs
   hdr.rs  tz.rs    percentile sketches, and the zone database
 ```
@@ -73,8 +84,12 @@ and the corpus, which is the point of the whole thing:
 BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &
 python3 tools/yaml_runner.py --manifest tools/phase1_manifest.json    # 398/398
 python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json    # 1,100/1,100
-python3 tools/yaml_runner.py --manifest tools/modules_manifest.json   # the work list
+python3 tools/module_gate.py                                          # 880/890
 ```
+
+A change to the console is gated the same way, against OpenSearch
+Dashboards' own suite: `tools/dashboards_gate.py`, then `tools/console_diff.py`
+against a running Dashboards (`docs/console.md` says how to start one).
 
 CI runs all of it, twice: once with indices in memory, once on disk.
 
@@ -84,17 +99,27 @@ that moves the pin, not in whichever commit happens to be pushed afterwards.
 
 ## The tools
 
+Every number in the README is produced by one of these.
+
 | | |
 |---|---|
 | `tools/yaml_runner.py` | OpenSearch's own YAML tests against this server |
+| `tools/module_gate.py` | the module and plugin suites, run the way they were written (two nodes) |
+| `tools/gate_node.sh` | the node the suites expect, with everything they read back |
 | `tools/compat_audit.py` | what a cluster uses, and where two engines answer differently |
-| `tools/bench_matrix.py` | index throughput, memory, and query latency, both engines |
+| `tools/bench_matrix.py` | every bench dimension, both engines, same corpus, same machine |
+| `tools/cloud_bench_gcp.sh` | the same matrix on a machine rented from GCP (Terraform in `tools/cloud_bench/`) |
 | `tools/gen_dataset.py` | the http-log corpus the benchmarks use |
+| `tools/cluster_chaos.py`, `tools/linearize.py`, `tools/rolling_upgrade.py` | three real nodes: chaos and soak, linearizability, a rolling upgrade |
+| `tools/knn_check.py`, `tools/sql_check.py`, `tools/ism_check.py`, `tools/object_store_check.py` | end-to-end checks of the plugins' APIs |
+| `tools/dashboards_gate.py` | OpenSearch Dashboards' own API suite against the console's server, with the Node server's baseline |
+| `tools/dashboards_check.py`, `tools/console_diff.py` | what that suite never asks about, and the shell compared field by field with the Node server's |
+| `tools/osd_pin.py`, `tools/osd_sample_data.js` | what the console pins from a running Dashboards |
 
 ## What to read first
 
 `docs/plan-v1.md` is the work and its order. `CONTEXT.md` is what the words
-mean. `docs/adr/` is why five decisions were made the way they were -- read
+mean. `docs/adr/` is why seven decisions were made the way they were -- read
 0001 before touching analysis and 0002 before touching anything that will
 become the cluster.
 

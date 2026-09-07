@@ -1,0 +1,65 @@
+#!/bin/bash
+# Runs once, on first boot. Everything it says goes to the serial console,
+# which the driver script reads; the numbers go to the bucket.
+set -eu
+exec > >(tee -a /var/log/bench.log) 2>&1
+say() { echo "bench: $*"; }
+fail() { say "FAILED: $*"; echo "$*" > /tmp/failed.txt; gsutil cp /tmp/failed.txt gs://${bucket}/failed.txt || true; exit 1; }
+trap 'fail "the startup script stopped at line $LINENO"' ERR
+
+say "installing docker"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -y -q docker.io git python3 curl
+systemctl start docker
+
+say "starting ${opensearch}"
+sysctl -w vm.max_map_count=262144
+docker run -d --name os-bench -p 127.0.0.1:9201:9200 \
+  -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
+  -e "OPENSEARCH_JAVA_OPTS=-Xms${java_heap} -Xmx${java_heap}" \
+  ${opensearch}
+
+say "fetching ${source_url} at ${source_ref}"
+git clone --depth 1 --branch ${source_ref} ${source_url} /opt/bs || {
+  git clone ${source_url} /opt/bs && git -C /opt/bs checkout ${source_ref}; }
+cd /opt/bs
+say "building boostsearch (this is the slow part)"
+docker build -q -t boostsearch . 
+docker run -d --name bs -p 127.0.0.1:9202:9200 boostsearch
+
+say "generating ${docs} documents"
+python3 tools/gen_dataset.py --docs ${docs} --out /tmp/bench_logs.ndjson
+
+say "waiting for both engines"
+for i in $(seq 1 120); do
+  curl -sf http://127.0.0.1:9201/ >/dev/null && curl -sf http://127.0.0.1:9202/ >/dev/null && break
+  sleep 5
+done
+curl -sf http://127.0.0.1:9201/ >/dev/null || fail "OpenSearch did not come up"
+curl -sf http://127.0.0.1:9202/ >/dev/null || fail "BoostSearch did not come up"
+
+say "the machine: $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GiB"
+cat /proc/cpuinfo | grep -m1 'model name'
+
+say "running the matrix"
+BENCH_A=http://127.0.0.1:9201 BENCH_B=http://127.0.0.1:9202 \
+BENCH_A_CONTAINER=os-bench BENCH_B_CONTAINER=bs \
+BENCH_OUT=/tmp/matrix.json python3 tools/bench_matrix.py | tee /tmp/matrix.txt || true
+
+python3 - <<'PY'
+import json, platform, subprocess
+m = json.load(open("/tmp/matrix.json"))
+m["machine"] = {
+    "cloud": "gcp",
+    "cpus": __import__("os").cpu_count(),
+    "model": next((l.split(":",1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), ""),
+    "kernel": platform.release(),
+    "commit": subprocess.run(["git","-C","/opt/bs","rev-parse","--short","HEAD"],capture_output=True,text=True).stdout.strip(),
+}
+json.dump(m, open("/tmp/matrix.json","w"), indent=1)
+PY
+gsutil cp /tmp/matrix.json gs://${bucket}/matrix.json
+gsutil cp /tmp/matrix.txt gs://${bucket}/matrix.txt
+gsutil cp /var/log/bench.log gs://${bucket}/bench.log
+say "DONE"

@@ -22,6 +22,7 @@ rather than believed.
 | the same answer as OpenSearch 3.1.0 | **165 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
 | REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
+| OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |
 
 The ten sections that do not pass are named, with the reason, in
 `docs/progress.md`; five more are set aside as tests of the test framework
@@ -73,6 +74,25 @@ The settings that matter most:
 Everything else is a setting in `config/boostsearch.yml`, spelled the way
 OpenSearch spells it, and readable from the environment as
 `BOOSTSEARCH_` + the dotted name upper-cased. `docs/settings.md` lists them.
+
+## The console
+
+OpenSearch Dashboards is two things: a browser application and a Node server
+it boots from. BoostSearch replaces the server and leaves the application as
+it is -- the same bundles, served from a Dashboards distribution you point it
+at, talking to a BoostSearch (or OpenSearch) engine:
+
+```bash
+BOOSTSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards \
+BOOSTSEARCH_ENGINE=http://127.0.0.1:9200 \
+./target/release/console
+```
+
+It listens on `127.0.0.1:5601`. Discover, Visualize, dashboards, saved
+objects and their migrations, the sample data, index patterns, the Dev Tools
+and the Index Management page work through it; it starts in 45 ms and holds
+14 MiB against the Node server's several hundred. `docs/console.md` says how
+it is built and what it does not carry.
 
 ## The dictionaries
 
@@ -139,15 +159,15 @@ passes and adds them up.
 
 - **Not an OpenSearch product**, and not endorsed by the OpenSearch project. It
   implements the same HTTP API and says so.
-- **Not the console.** OpenSearch Dashboards' Node server is Phase 13 and is
-  not written yet; the browser application it serves is left alone. The gate it
-  will be measured by exists (`tools/dashboards_gate.py`, and
-  `tools/dashboards_check.py` for what that suite never asks about) and is
-  measured itself: the real Node server scores 140 of its own 166 cases.
+- **Not the console's front end.** The browser application is OpenSearch
+  Dashboards' own, served unchanged from a distribution; only the server
+  behind it is this project's. The other plugins' server halves -- alerting,
+  anomaly detection, observability -- are not written, and their pages say so.
 - **Not tested at every scale.** The cluster is checked in simulation across
   ten thousand seeds and on real nodes with real partitions, and the bench
-  matrix is measured on a developer machine. Numbers from hardware a release
-  would be cut on are not in yet, and `docs/progress.md` says so.
+  matrix is measured on a developer machine. `tools/cloud_bench_gcp.sh` runs
+  it on a machine rented for the run; the numbers from one are not in yet, and
+  `docs/progress.md` says so.
 
 ## How it is built
 
@@ -163,6 +183,25 @@ passes and adds them up.
 `docs/adr/` records the decisions that were hard to reverse and why. `docs/progress.md`
 is the working ledger: every task, what it took, and what was got wrong on the
 way.
+
+## The documents
+
+| | |
+|---|---|
+| [docs/plan-v1.md](docs/plan-v1.md) | the work, in the order it was done, and the gate each phase was measured by |
+| [docs/progress.md](docs/progress.md) | the ledger: every task, what it took, what was got wrong on the way |
+| [docs/settings.md](docs/settings.md) | every setting, the server's and the console's |
+| [docs/upgrading.md](docs/upgrading.md) | replacing an OpenSearch you run, and moving between versions of this |
+| [docs/console.md](docs/console.md) | the console's server: what it serves, what it pins, what it leaves out |
+| [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md) | the two processors that read data this does not ship |
+| [docs/boostcore.md](docs/boostcore.md) | what was changed in the fork of tantivy, and why |
+| [docs/adr/](docs/adr/) | the seven decisions that were hard to reverse |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | where things are, and what to run before you push |
+| [CONTEXT.md](CONTEXT.md) | what the words mean |
+
+The rest of `docs/` -- the tantivy study, the early comparisons, the Phase 2
+baseline -- are the notes the plan was made from, some of them in Thai, kept
+as they were written.
 
 ## Licence
 

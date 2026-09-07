@@ -13,6 +13,7 @@ p99 over a hundred and fifty requests moves more than a change usually does.
     BENCH_A             the engine to compare against  (default: OpenSearch)
     BENCH_B             the engine under test          (default: BoostSearch)
     BENCH_AUTH          user:pass, when either has security on
+    BENCH_B_CONTAINER   the container BoostSearch runs in, when it does
     BENCH_A_CONTAINER   the docker container A runs in, for its memory
     BENCH_DATA          the corpus  (default: /tmp/bench_logs.ndjson)
     BENCH_OUT           where the numbers are written  (default: /tmp/matrix.json)
@@ -332,9 +333,14 @@ for label, base in (A, B):
 
 res["OpenSearch"]["rss_mib"] = rss_mib(
     container=os.environ.get("BENCH_A_CONTAINER", "os-bench"))
-pids = subprocess.run(["pgrep", "-f", "release/boostsearch"],
-                      capture_output=True, text=True).stdout.split()
-res["BoostSearch"]["rss_mib"] = rss_mib(pid=pids[0]) if pids else 0.0
+# BoostSearch in a container is measured the way OpenSearch is; as a process
+# on this machine, by its pid
+if os.environ.get("BENCH_B_CONTAINER"):
+    res["BoostSearch"]["rss_mib"] = rss_mib(container=os.environ["BENCH_B_CONTAINER"])
+else:
+    pids = subprocess.run(["pgrep", "-f", "release/boostsearch"],
+                          capture_output=True, text=True).stdout.split()
+    res["BoostSearch"]["rss_mib"] = rss_mib(pid=pids[0]) if pids else 0.0
 
 json.dump(res, open(OUT, "w"), indent=1)
 
