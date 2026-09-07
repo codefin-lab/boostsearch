@@ -60,10 +60,35 @@ fn promoted(a: &Value, b: &Value) -> &'static str {
     }
 }
 
+/// The most text a script may build, and the longest list: past these a
+/// script is filling the process's memory, not computing a value.
+const MAX_TEXT_BYTES: usize = 1 << 26;
+const MAX_LIST_LEN: usize = 1 << 24;
+
+fn text_fits(len: usize) -> Result<(), String> {
+    if len > MAX_TEXT_BYTES {
+        return Err(format!(
+            "a string of [{len}] bytes is longer than a script may build [{MAX_TEXT_BYTES}]"
+        ));
+    }
+    Ok(())
+}
+
+fn list_fits(len: usize) -> Result<(), String> {
+    if len > MAX_LIST_LEN {
+        return Err(format!(
+            "a list of [{len}] elements is longer than a script may build [{MAX_LIST_LEN}]"
+        ));
+    }
+    Ok(())
+}
+
 pub fn binary(op: &str, a: &Value, b: &Value) -> Result<Value, String> {
     // `+` with a string on either side concatenates
     if op == "+" && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_))) {
-        return Ok(Value::str(&format!("{}{}", a.as_text(), b.as_text())));
+        let (x, y) = (a.as_text(), b.as_text());
+        text_fits(x.len() + y.len())?;
+        return Ok(Value::str(&format!("{x}{y}")));
     }
     match op {
         "==" => return Ok(Value::Bool(a.equals(b))),
@@ -755,7 +780,11 @@ fn string_method(s: &Rc<str>, name: &str, args: &[Value]) -> Result<Value, Strin
         "decodeBase64" => Value::str(&String::from_utf8_lossy(&base64_decode(text))),
         "getBytes" => Value::list(text.bytes().map(|b| Value::Int(b as i64)).collect()),
         "utf8ToString" => Value::str(text),
-        "repeat" => Value::str(&text.repeat(arg(args, 0).as_i64().unwrap_or(0).max(0) as usize)),
+        "repeat" => {
+            let n = arg(args, 0).as_i64().unwrap_or(0).max(0) as usize;
+            text_fits(text.len().saturating_mul(n))?;
+            Value::str(&text.repeat(n))
+        }
         "isBlank" => Value::Bool(text.trim().is_empty()),
         _ => return no(format!("unknown method [{name}] on String")),
     })
@@ -808,16 +837,20 @@ fn builder_method(b: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result
     }
     match name {
         "append" => {
-            b.borrow_mut().push_str(&arg(args, 0).as_text());
+            let more = arg(args, 0).as_text();
+            text_fits(b.borrow().len() + more.len())?;
+            b.borrow_mut().push_str(&more);
             Ok(Value::Builder(b.clone()))
         }
         "toString" => Ok(Value::str(&b.borrow())),
         "length" => Ok(Value::Int(b.borrow().chars().count() as i64)),
         "insert" => {
             let at = arg(args, 0).as_i64().unwrap_or(0) as usize;
+            let more = arg(args, 1).as_text();
+            text_fits(b.borrow().len() + more.len())?;
             let mut s = b.borrow_mut();
             let byte = s.char_indices().nth(at).map(|(i, _)| i).unwrap_or(s.len());
-            s.insert_str(byte, &arg(args, 1).as_text());
+            s.insert_str(byte, &more);
             Ok(Value::Builder(b.clone()))
         }
         "reverse" => {
@@ -868,6 +901,7 @@ fn list_method(
                 Value::DocValues(d) => d.values.clone(),
                 _ => Vec::new(),
             };
+            list_fits(l.borrow().len() + more.len())?;
             l.borrow_mut().extend(more);
             Value::Bool(true)
         }
@@ -2297,7 +2331,11 @@ pub fn call_static(
         ("Collections", "singletonMap") => {
             Value::map(vec![(arg(args, 0).clone(), arg(args, 1).clone())])
         }
-        ("Collections", "nCopies") => Value::list(vec![arg(args, 1).clone(); i(0).max(0) as usize]),
+        ("Collections", "nCopies") => {
+            let n = i(0).max(0) as usize;
+            list_fits(n)?;
+            Value::list(vec![arg(args, 1).clone(); n])
+        }
         ("Collections", "frequency") => match arg(args, 0) {
             Value::List(l) => {
                 Value::Int(l.borrow().iter().filter(|v| v.equals(arg(args, 1))).count() as i64)

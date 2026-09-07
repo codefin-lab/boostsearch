@@ -163,8 +163,8 @@ pub(crate) fn check_limits(
                  controlled by the [index.max_result_window] index level setting."
             )));
         }
-    } else if (from + size) as u64 > window {
-        let total = from + size;
+    } else if from.saturating_add(size) as u64 > window {
+        let total = from.saturating_add(size);
         return Err(bad(format!(
             "Result window is too large, from + size must be less than or equal to: [{window}] \
              but was [{total}]. See the scroll api for a more efficient way to request large data \

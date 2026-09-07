@@ -104,7 +104,7 @@ fn plural(w: &mut Word) -> bool {
     if w.ends_with("es") {
         let len = w.letters.len();
         // `crosses` is not `crosse`, which is why a doubled s is left alone
-        let try_e = len > 2 && !(w.letters[len - 3] == 's' && w.letters[len - 4] == 's');
+        let try_e = len > 2 && !(len > 3 && w.letters[len - 3] == 's' && w.letters[len - 4] == 's');
         w.truncate(1);
         if try_e && w.known() {
             return true;

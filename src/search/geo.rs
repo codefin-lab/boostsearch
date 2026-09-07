@@ -515,6 +515,21 @@ pub(crate) fn run_geo_grid_agg(
         .and_then(|v| v.as_u64())
         .map(|p| p as usize)
         .unwrap_or(if kind == "geotile_grid" { 7 } else { 5 });
+    // a cell's key is as long as the precision says, for every point
+    let (lowest, highest) = if kind == "geotile_grid" { (0, 29) } else { (1, 12) };
+    if precision < lowest || precision > highest {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            if kind == "geotile_grid" {
+                format!("Invalid geotile_grid precision of {precision}. Must be between 0 and 29.")
+            } else {
+                format!(
+                    "Invalid geohash aggregation precision of {precision}. Must be between 1 and 12."
+                )
+            },
+        ));
+    }
     let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(10_000) as usize;
     let points = points_found(store, targets, main_query, &field)?;
     let mut counts: std::collections::HashMap<String, usize> = Default::default();

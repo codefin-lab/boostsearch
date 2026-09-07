@@ -3719,3 +3719,52 @@ runs "failed" because `curl -s $A` under zsh does not split an unquoted
 variable, so `-u admin:admin` arrived as one argument with a leading
 space. Forty minutes on a bug in the shell.
 
+
+## The review's third step: one request, one process
+
+The review's third group was requests that end the process rather than
+the request: a stack that overflows aborts, and an allocation that cannot
+be met is killed. Every one of them was a ceiling applied after the work,
+or a size taken from the request and believed. Fourteen places.
+
+**Believed sizes.** A bitmap `terms` clause carried a container count in
+its header, and the decoder allocated for it before reading a container:
+twelve bytes asked for thirty-four gigabytes. The count is bounded by the
+bytes that follow it, since every container costs at least its key. A
+`_shrink` to zero shards divided by zero; `from + size` could wrap; a
+`geohash_grid` precision of a hundred million built a key that long for
+every point. Each is refused with the reference's message.
+
+**Recursion without a floor.** Mustache sections, the Painless parser,
+the SQL parser and the console's DQL filter all recursed once per level
+of nesting, and a request can nest as deep as it likes. Each stops at a
+hundred levels, and the Painless interpreter stops a function calling
+itself a hundred deep. The Mustache check that runs when a pipeline is
+written counts the nesting too, so an ingest template that cannot be
+rendered is refused there rather than rendering as nothing later.
+
+**What a script may build.** Painless ran five million statements, but a
+statement may double a string or a list: forty of them made a terabyte.
+A string past 64 MB or a list past sixteen million elements is a runtime
+error, wherever it is built (`+`, `repeat`, `append`, `insert`, `addAll`,
+`nCopies`).
+
+**Analysis and ingest.** `shingle` wrote every width from the smallest to
+the largest for every token, and the largest was whatever the settings
+said; the reference bounds the difference at `index.max_shingle_diff`
+(3), and so does this, with its message, when the index is created. The
+kstem filter indexed the fourth letter of `ses`. A grok pattern naming a
+pattern that names a pattern doubled at every level; an expansion past a
+megabyte is refused. A deflated part of an Office document is read to
+64 MB and no further.
+
+**One found by the gate.** The module suite fell from 880 to 874: the
+second step's snapshot-name rule refused `snapshot-one,snapshot-two` on a
+GET, and a lookup takes lists and patterns. A lookup now refuses only
+what would be a path.
+
+Measured: the recursion, the doubling, the bitmap header, the shrink, the
+window, the precision, the shingle diff, `ses`, the grok bank and the
+nested SQL each answer 400 and the node answers `_cat/health` after.
+Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890,
+clippy and the unit tests clean.

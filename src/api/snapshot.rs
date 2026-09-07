@@ -248,6 +248,16 @@ fn bad_snapshot_name(repo: &str, name: &str) -> Option<Response> {
     })
 }
 
+/// A name looked up or deleted may be a pattern or a list of names, so it is
+/// not held to what a name that is written must be; it is still not allowed
+/// to be a path.
+fn bad_snapshot_lookup(repo: &str, names: &str) -> Option<Response> {
+    names
+        .split(',')
+        .find(|one| one.contains(['/', '\\']) || *one == "." || *one == "..")
+        .and_then(|one| bad_snapshot_name(repo, one))
+}
+
 pub async fn create_snapshot(
     State(store): State<Store>,
     Path((repo, name)): Path<(String, String)>,
@@ -364,7 +374,7 @@ pub async fn get_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+    if let Some(refused) = bad_snapshot_lookup(&repo, &name) {
         return refused;
     }
     if !store.repositories().contains_key(&repo) {
@@ -406,7 +416,7 @@ pub async fn delete_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
-    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+    if let Some(refused) = bad_snapshot_lookup(&repo, &name) {
         return refused;
     }
     refresh_readonly(&store, &repo);

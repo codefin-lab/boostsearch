@@ -17,7 +17,14 @@ pub struct ParseError {
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// How many expressions and statements are open around the one being
+    /// read: the parser is recursive, and a script is not allowed the stack.
+    depth: usize,
 }
+
+/// Brackets inside brackets, blocks inside blocks, past which a script is
+/// refused rather than read.
+const MAX_NESTING: usize = 100;
 
 /// Names that begin a declaration rather than an expression.
 const TYPE_WORDS: &[&str] = &[
@@ -74,7 +81,7 @@ const TYPE_WORDS: &[&str] = &[
 ];
 
 pub fn parse(toks: Vec<Token>) -> Result<Program, ParseError> {
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, depth: 0 };
     let mut functions = Vec::new();
     let mut body = Vec::new();
     while !p.at_end() {
@@ -126,6 +133,15 @@ impl Parser {
     }
     fn error(&self, message: String) -> ParseError {
         ParseError { message, at: self.here() }
+    }
+
+    /// One level further in, or the refusal.
+    fn deeper(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(self.error(format!("script nests more than {MAX_NESTING} levels deep")));
+        }
+        Ok(())
     }
     fn ident(&mut self) -> Result<String, ParseError> {
         match self.next().kind {
@@ -244,6 +260,13 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Stmt, ParseError> {
+        self.deeper()?;
+        let out = self.statement_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn statement_within(&mut self) -> Result<Stmt, ParseError> {
         let at = self.here();
         if self.is_op("{") {
             return Ok(Stmt::Block(self.block()?));
@@ -425,7 +448,10 @@ impl Parser {
     }
 
     pub fn expr(&mut self) -> Result<Expr, ParseError> {
-        self.assignment()
+        self.deeper()?;
+        let out = self.assignment();
+        self.depth -= 1;
+        out
     }
 
     fn assignment(&mut self) -> Result<Expr, ParseError> {

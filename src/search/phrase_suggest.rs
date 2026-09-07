@@ -187,7 +187,7 @@ fn collate_matches(store: &Store, targets: &[String], collate: &Value, suggestio
     // the template is written as text or as the query it stands for
     let query = match source {
         Value::String(text) => {
-            let rendered = crate::api::mustache::render(text, &params);
+            let Ok(rendered) = crate::api::mustache::render(text, &params) else { return true };
             match serde_json::from_str::<Value>(&rendered) {
                 Ok(v) => v,
                 Err(_) => return true,

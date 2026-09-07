@@ -74,6 +74,11 @@ pub(crate) fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
     } else {
         return None;
     };
+    // a count the bytes cannot hold is not a count: every container costs at
+    // least its key and its cardinality, so the bytes bound what to allocate
+    if count > bytes.len().saturating_sub(at) / 4 {
+        return None;
+    }
     let mut runs = vec![false; count];
     if has_runs {
         let bytes_needed = count.div_ceil(8);

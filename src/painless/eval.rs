@@ -85,12 +85,22 @@ pub struct Interpreter<'a> {
     pub context: &'a mut dyn Context,
     pub steps: u64,
     pub max_steps: u64,
+    /// How many calls are open: a function that calls itself without end
+    /// is refused before the stack runs out.
+    pub depth: usize,
 }
+
+const MAX_CALL_DEPTH: usize = 100;
 
 impl<'a> Interpreter<'a> {
     pub fn run(program: &'a Program, context: &'a mut dyn Context) -> Result<Value, Flow> {
-        let mut it =
-            Interpreter { functions: &program.functions, context, steps: 0, max_steps: 5_000_000 };
+        let mut it = Interpreter {
+            functions: &program.functions,
+            context,
+            steps: 0,
+            max_steps: 5_000_000,
+            depth: 0,
+        };
         let mut scope = Scope::new();
         match it.block(&program.body, &mut scope, false) {
             Ok(v) => Ok(v),
@@ -549,11 +559,26 @@ impl<'a> Interpreter<'a> {
         for (p, a) in f.params.iter().zip(args) {
             scope.declare(p, a);
         }
-        match self.block(&f.body, &mut scope, false) {
+        self.enter(at)?;
+        let out = match self.block(&f.body, &mut scope, false) {
             Ok(v) => Ok(v),
             Err(Flow::Return(v)) => Ok(v),
             Err(e) => Err(e),
+        };
+        self.depth -= 1;
+        out
+    }
+
+    fn enter(&mut self, at: usize) -> Result<(), Flow> {
+        self.depth += 1;
+        if self.depth > MAX_CALL_DEPTH {
+            self.depth -= 1;
+            return Err(Flow::Error(
+                format!("The maximum depth of nested calls [{MAX_CALL_DEPTH}] has been reached."),
+                at,
+            ));
         }
+        Ok(())
     }
 
     pub fn call_lambda(&mut self, l: &Rc<Lambda>, args: Vec<Value>, at: usize) -> Fallible {
@@ -579,11 +604,14 @@ impl<'a> Interpreter<'a> {
         for (i, p) in l.params.iter().enumerate() {
             scope.declare(p, args.get(i).cloned().unwrap_or(Value::Null));
         }
-        match self.block(&l.body, &mut scope, false) {
+        self.enter(at)?;
+        let out = match self.block(&l.body, &mut scope, false) {
             Ok(v) => Ok(v),
             Err(Flow::Return(v)) => Ok(v),
             Err(e) => Err(e),
-        }
+        };
+        self.depth -= 1;
+        out
     }
 
     fn call_method(&mut self, target: &Value, name: &str, args: Vec<Value>, at: usize) -> Fallible {

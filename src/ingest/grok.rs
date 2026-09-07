@@ -10,6 +10,10 @@ use serde_json::Value;
 
 use super::IngestError;
 
+/// The most a pattern may expand to: a pattern naming a pattern that names
+/// a pattern doubles at every level, and is refused before it is exponential.
+const MAX_EXPANDED: usize = 1 << 20;
+
 /// The patterns OpenSearch ships, by name.
 pub fn bank() -> &'static HashMap<String, String> {
     static BANK: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
@@ -133,6 +137,11 @@ fn expand(
             None => {
                 out.push_str(&format!("(?:{inner})"));
             }
+        }
+        if out.len() > MAX_EXPANDED {
+            return Err(IngestError::illegal(format!(
+                "Invalid grok pattern: [{pattern}] expands to more than {MAX_EXPANDED} bytes"
+            )));
         }
     }
     out.push_str(&convert_syntax(rest));

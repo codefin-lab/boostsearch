@@ -9,8 +9,16 @@
 use super::*;
 
 /// The template, with what the parameters say put in place of its holes.
-pub fn render(template: &str, params: &Value) -> String {
-    render_within(template, std::slice::from_ref(params))
+pub fn render(template: &str, params: &Value) -> Result<String, String> {
+    render_within(template, std::slice::from_ref(params), 0)
+}
+
+/// Sections inside sections, past which a template is refused rather than
+/// followed: every level is a call, and the stack is not the template's.
+const MAX_SECTION_DEPTH: usize = 100;
+
+fn too_deep() -> String {
+    format!("Mustache template nests sections more than {MAX_SECTION_DEPTH} deep")
 }
 
 /// The hole a template opens and never closes, if there is one.
@@ -45,7 +53,10 @@ pub fn unclosed(template: &str) -> Option<String> {
 }
 
 /// The same, with the values a section put in front of the outer ones.
-fn render_within(template: &str, scope: &[Value]) -> String {
+fn render_within(template: &str, scope: &[Value], depth: usize) -> Result<String, String> {
+    if depth > MAX_SECTION_DEPTH {
+        return Err(too_deep());
+    }
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(at) = rest.find("{{") {
@@ -53,7 +64,7 @@ fn render_within(template: &str, scope: &[Value]) -> String {
         let after = &rest[at + 2..];
         let Some(end) = after.find("}}") else {
             out.push_str(&rest[at..]);
-            return out;
+            return Ok(out);
         };
         let tag = after[..end].trim().to_string();
         let mut tail = &after[end + 2..];
@@ -63,7 +74,7 @@ fn render_within(template: &str, scope: &[Value]) -> String {
             Some('#') => {
                 let name = tag[1..].trim().to_string();
                 let (body, after_section) = section(tail, &name);
-                out.push_str(&filled(&name, body, scope));
+                out.push_str(&filled(&name, body, scope, depth + 1)?);
                 tail = after_section;
             }
             // `{{^name}}...{{/name}}` is the other way about
@@ -71,7 +82,7 @@ fn render_within(template: &str, scope: &[Value]) -> String {
                 let name = tag[1..].trim().to_string();
                 let (body, after_section) = section(tail, &name);
                 if !truthy(&look_up(&name, scope)) {
-                    out.push_str(&render_within(body, scope));
+                    out.push_str(&render_within(body, scope, depth + 1)?);
                 }
                 tail = after_section;
             }
@@ -92,7 +103,7 @@ fn render_within(template: &str, scope: &[Value]) -> String {
         rest = tail;
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
 /// What a section holds, and what follows it.
@@ -112,6 +123,22 @@ fn section<'a>(text: &'a str, name: &str) -> (&'a str, &'a str) {
 /// render against is a function section: `{{#join}}{{/join}}` names no field
 /// to join, and `{{#join}}a b{{/join}}` names two.
 pub fn check(template: &str) -> Result<(), String> {
+    // a section opened inside a section is a level deeper, whatever the
+    // values turn out to be
+    let mut depth = 0usize;
+    let mut rest = template;
+    while let Some(at) = rest.find("{{") {
+        let after = &rest[at + 2..];
+        match after.trim_start().chars().next() {
+            Some('#' | '^') => depth += 1,
+            Some('/') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth > MAX_SECTION_DEPTH {
+            return Err(too_deep());
+        }
+        rest = after;
+    }
     for name in ["join", "toJson", "url"] {
         let opening = format!("{{{{#{name}}}}}");
         let closing = format!("{{{{/{name}}}}}");
@@ -131,23 +158,23 @@ pub fn check(template: &str) -> Result<(), String> {
 }
 
 /// A section, with what stands in it.
-fn filled(name: &str, body: &str, scope: &[Value]) -> String {
+fn filled(name: &str, body: &str, scope: &[Value], depth: usize) -> Result<String, String> {
     // the three functions a search template may name
     match name {
         "toJson" => {
-            let inner = render_within(body, scope).trim().to_string();
-            return look_up(&inner, scope).to_string();
+            let inner = render_within(body, scope, depth)?.trim().to_string();
+            return Ok(look_up(&inner, scope).to_string());
         }
         "join" => {
-            let inner = render_within(body, scope).trim().to_string();
-            return match look_up(&inner, scope) {
+            let inner = render_within(body, scope, depth)?.trim().to_string();
+            return Ok(match look_up(&inner, scope) {
                 Value::Array(items) => items.iter().map(as_text).collect::<Vec<_>>().join(","),
                 other => as_text(&other),
-            };
+            });
         }
         "url" => {
-            let inner = render_within(body, scope);
-            return url_escaped(&inner);
+            let inner = render_within(body, scope, depth)?;
+            return Ok(url_escaped(&inner));
         }
         _ => {}
     }
@@ -157,16 +184,16 @@ fn filled(name: &str, body: &str, scope: &[Value]) -> String {
             .map(|item| {
                 let mut inner: Vec<Value> = vec![item.clone()];
                 inner.extend_from_slice(scope);
-                render_within(body, &inner)
+                render_within(body, &inner, depth)
             })
             .collect(),
         Value::Object(map) => {
             let mut inner: Vec<Value> = vec![Value::Object(map)];
             inner.extend_from_slice(scope);
-            render_within(body, &inner)
+            render_within(body, &inner, depth)
         }
-        other if truthy(&other) => render_within(body, scope),
-        _ => String::new(),
+        other if truthy(&other) => render_within(body, scope, depth),
+        _ => Ok(String::new()),
     }
 }
 
@@ -300,7 +327,7 @@ fn rendered(template: &Value, params: &Value) -> std::result::Result<Value, Stri
     if let Some(name) = unclosed(&text) {
         return Err(format!("Improperly closed variable: {name} in query-template"));
     }
-    let filled = render(&text, params);
+    let filled = render(&text, params)?;
     let read: std::result::Result<Value, _> = serde_json::from_str(&filled);
     let Err(e) = read else { return read.map_err(|e| e.to_string()) };
     if !e.is_eof() {
@@ -551,12 +578,12 @@ mod tests {
     #[test]
     fn a_hole_is_filled_with_what_was_passed() {
         let params = json!({"value": "foo", "list": ["a", "b"], "on": true});
-        assert_eq!(render("{{value}}", &params), "foo");
-        assert_eq!(render("{{#on}}yes{{/on}}", &params), "yes");
-        assert_eq!(render("{{^on}}no{{/on}}", &params), "");
-        assert_eq!(render("{{#list}}[{{.}}]{{/list}}", &params), "[a][b]");
-        assert_eq!(render("{{#join}}list{{/join}}", &params), "a,b");
-        assert_eq!(render("{{#toJson}}list{{/toJson}}", &params), "[\"a\",\"b\"]");
-        assert_eq!(render("{{#url}}a b{{/url}}", &params), "a%20b");
+        assert_eq!(render("{{value}}", &params).unwrap(), "foo");
+        assert_eq!(render("{{#on}}yes{{/on}}", &params).unwrap(), "yes");
+        assert_eq!(render("{{^on}}no{{/on}}", &params).unwrap(), "");
+        assert_eq!(render("{{#list}}[{{.}}]{{/list}}", &params).unwrap(), "[a][b]");
+        assert_eq!(render("{{#join}}list{{/join}}", &params).unwrap(), "a,b");
+        assert_eq!(render("{{#toJson}}list{{/toJson}}", &params).unwrap(), "[\"a\",\"b\"]");
+        assert_eq!(render("{{#url}}a b{{/url}}", &params).unwrap(), "a%20b");
     }
 }

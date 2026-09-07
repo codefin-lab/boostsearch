@@ -253,7 +253,10 @@ impl IngestDoc {
         if !template.contains("{{") {
             return template.to_string();
         }
-        crate::api::mustache::render(template, &self.as_ctx())
+        // a template that cannot be rendered was refused when the pipeline was
+        // written; one that reaches here renders as nothing rather than failing
+        // the document
+        crate::api::mustache::render(template, &self.as_ctx()).unwrap_or_default()
     }
 
     /// A value that may be a template: rendered where it is text, kept

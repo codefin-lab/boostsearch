@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 /// A filter as a search, or why it is not one.
 pub fn parse(text: &str, types: &[String]) -> Result<Value, String> {
-    let mut reader = Reader { text, at: 0 };
+    let mut reader = Reader { text, at: 0, depth: 0 };
     let query = reader.or_group(types)?;
     reader.skip_space();
     if reader.at < text.len() {
@@ -22,7 +22,12 @@ pub fn parse(text: &str, types: &[String]) -> Result<Value, String> {
 struct Reader<'a> {
     text: &'a str,
     at: usize,
+    /// How many terms are open around the one being read: `not` and
+    /// brackets nest, and a filter is not allowed the stack.
+    depth: usize,
 }
+
+const MAX_NESTING: usize = 100;
 
 impl<'a> Reader<'a> {
     fn skip_space(&mut self) {
@@ -38,7 +43,7 @@ impl<'a> Reader<'a> {
             .get(word.len()..)
             .map(|r| r.is_empty() || r.starts_with(char::is_whitespace))
             .unwrap_or(false);
-        if rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word) && ends {
+        if rest.get(..word.len()).is_some_and(|head| head.eq_ignore_ascii_case(word)) && ends {
             self.at += word.len();
             true
         } else {
@@ -70,6 +75,16 @@ impl<'a> Reader<'a> {
 
     /// `type.attributes.field:value`, or `not` one, or a group in parentheses.
     fn term(&mut self, types: &[String]) -> Result<Value, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(format!("Filter nests more than {MAX_NESTING} levels deep: Bad Request"));
+        }
+        let out = self.term_within(types);
+        self.depth -= 1;
+        out
+    }
+
+    fn term_within(&mut self, types: &[String]) -> Result<Value, String> {
         if self.take_word("not") {
             let inner = self.term(types)?;
             return Ok(json!({"bool": {"must_not": [inner]}}));

@@ -2695,8 +2695,13 @@ impl Registry {
             .unwrap_or(Value::Null);
         let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
         for (name, spec) in analysis.get("filter").and_then(|f| f.as_object())?.iter() {
+            let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if kind == "shingle"
+                && let Some(why) = shingle_complaint(spec)
+            {
+                return Some(why);
+            }
             if filter_of_spec(spec, &filters).is_none() {
-                let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 return Some(match kind {
                     "elision" => {
                         "elision filter requires [articles] or [articles_path] setting".to_string()
@@ -3014,6 +3019,35 @@ fn token_filter(name: &str, defined: &Value) -> Option<Vec<Step>> {
     filter_of_name(name)
 }
 
+/// The most a shingle filter's widest shingle may exceed its narrowest, as
+/// `index.max_shingle_diff` fixes it: every width is written for every token.
+const MAX_SHINGLE_DIFF: usize = 3;
+
+/// What is wrong with a shingle filter's sizes, in the reference's words.
+fn shingle_complaint(spec: &Value) -> Option<String> {
+    let num =
+        |k: &str, d: usize| spec.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(d);
+    let min = num("min_shingle_size", 2);
+    let max = num("max_shingle_size", 2);
+    let unigrams = spec.get("output_unigrams").and_then(|v| v.as_bool()).unwrap_or(true);
+    if min < 2 {
+        return Some("Min shingle size must be >= 2".to_string());
+    }
+    if max < min {
+        return Some("Max shingle size must be >= min shingle size".to_string());
+    }
+    let diff = max - min + usize::from(unigrams);
+    if diff > MAX_SHINGLE_DIFF {
+        return Some(format!(
+            "In Shingle TokenFilter the difference between max_shingle_size and min_shingle_size \
+             (and +1 if outputting unigrams) must be less than or equal to: [{MAX_SHINGLE_DIFF}] \
+             but was [{diff}]. This limit can be set by changing the [index.max_shingle_diff] \
+             index level setting."
+        ));
+    }
+    None
+}
+
 /// A filter described rather than named.
 fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
     let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -3199,6 +3233,9 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
         "shingle" => {
             let min = num("min_shingle_size", 2);
             let max = num("max_shingle_size", 2);
+            if shingle_complaint(spec).is_some() {
+                return None;
+            }
             let text = |key: &str, fallback: &str| {
                 spec.get(key)
                     .and_then(|v| v.as_str())

@@ -207,6 +207,10 @@ fn two_letter(code: &str) -> Option<&'static str> {
     MAP.iter().find(|(three, _)| *three == code).map(|(_, two)| *two)
 }
 
+/// The most a part of an archive may inflate to: past it the archive is a
+/// bomb, and the document is unreadable rather than the process gone.
+const MAX_INFLATED: usize = 64 << 20;
+
 const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const DOC: &str = "application/msword";
 
@@ -330,7 +334,13 @@ fn zip_entry(bytes: &[u8], want: &str) -> Option<Vec<u8>> {
                 8 => {
                     use std::io::Read;
                     let mut out = Vec::new();
-                    flate2::read::DeflateDecoder::new(data).read_to_end(&mut out).ok()?;
+                    flate2::read::DeflateDecoder::new(data)
+                        .take(MAX_INFLATED as u64 + 1)
+                        .read_to_end(&mut out)
+                        .ok()?;
+                    if out.len() > MAX_INFLATED {
+                        return None;
+                    }
                     Some(out)
                 }
                 _ => None,

@@ -51,6 +51,15 @@ pub async fn resize_index(
     }
     let from = src.read().numeric_setting("number_of_shards").unwrap_or(1) as i64;
     if let Some(to) = num("number_of_shards") {
+        if to < 1 {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Failed to parse value [{to}] for setting [index.number_of_shards] must be >= 1"
+                ),
+            );
+        }
         // a split has to multiply the shard count, a shrink to divide it
         match kind {
             "split" => {

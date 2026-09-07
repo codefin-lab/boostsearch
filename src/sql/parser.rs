@@ -10,13 +10,18 @@ use super::lexer::{Token, read};
 pub struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    /// How many conditions and expressions are open around the one being
+    /// read: the parser is recursive, and a query is not allowed the stack.
+    depth: usize,
 }
+
+const MAX_NESTING: usize = 100;
 
 type Answer<T> = Result<T, String>;
 
 /// Read a whole statement.
 pub fn parse(source: &str) -> Answer<Select> {
-    let mut parser = Parser { tokens: read(source)?, at: 0 };
+    let mut parser = Parser { tokens: read(source)?, at: 0, depth: 0 };
     let select = parser.select()?;
     // a query that ends before its text does is a query with a mistake in it
     if !matches!(parser.peek(), Token::End) && !parser.peek().is(";") {
@@ -54,6 +59,15 @@ impl Parser {
             return Ok(());
         }
         Err(format!("expected [{word}] but found [{}]", self.peek().text()))
+    }
+
+    /// One level further in, or the refusal.
+    fn deeper(&mut self) -> Answer<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(format!("query nests more than {MAX_NESTING} levels deep"));
+        }
+        Ok(())
     }
 
     fn select(&mut self) -> Answer<Select> {
@@ -153,6 +167,13 @@ impl Parser {
     // conditions, loosest binding first
 
     fn condition(&mut self) -> Answer<Condition> {
+        self.deeper()?;
+        let out = self.condition_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn condition_within(&mut self) -> Answer<Condition> {
         let mut left = self.condition_and()?;
         while self.took("OR") || self.took("||") {
             let right = self.condition_and()?;
@@ -273,6 +294,13 @@ impl Parser {
     // values, loosest binding first
 
     fn expr(&mut self) -> Answer<Expr> {
+        self.deeper()?;
+        let out = self.expr_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn expr_within(&mut self) -> Answer<Expr> {
         let mut left = self.term()?;
         loop {
             let op = match self.peek() {
