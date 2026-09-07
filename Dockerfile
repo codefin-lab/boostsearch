@@ -40,6 +40,12 @@ USER boostsearch
 # configured -- or said to be unwanted:
 #   docker run -e BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true -p 9200:9200 boostsearch
 # Without either, the node refuses to start rather than answer anyone.
+#
+# The transport port is the same choice and a sharper one: whoever reaches it
+# is a node of the cluster. A container that publishes it wants
+# plugins.security.ssl.transport.enabled and the certificates beside it; one
+# that is a cluster of itself says so with
+# BOOSTSEARCH_TRANSPORT_INSECURE=true. See docs/adr/0008.
 ENV BOOSTSEARCH_ADDR=0.0.0.0:9200 \
     BOOSTSEARCH_DATA=/var/lib/boostsearch \
     BOOSTSEARCH_CONFIG=/etc/boostsearch

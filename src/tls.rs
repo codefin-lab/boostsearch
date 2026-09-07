@@ -240,3 +240,126 @@ pub async fn serve_tls(
         });
     }
 }
+
+/// What the node was told about the transport's TLS.
+///
+/// The transport is node to node, so it is mutual: every connection presents
+/// a certificate and verifies the one it is given. `nodes_dn` narrows what a
+/// verified certificate is allowed to be -- a certificate issued to a person
+/// chains to the same CA and is not a node.
+#[derive(Clone, Debug, Default)]
+pub struct TransportTls {
+    pub enabled: bool,
+    pub cert: Option<PathBuf>,
+    pub key: Option<PathBuf>,
+    pub trusted_cas: Option<PathBuf>,
+    pub nodes_dn: Vec<String>,
+}
+
+impl TransportTls {
+    pub fn read(settings: &Value) -> TransportTls {
+        let get = |k: &str| node_setting(settings, k);
+        let dir = config_dir();
+        let path_of = |v: Option<String>| -> Option<PathBuf> {
+            v.map(|p| {
+                let p = PathBuf::from(p);
+                if p.is_absolute() { p } else { dir.join(p) }
+            })
+        };
+        let nodes_dn = get("plugins.security.nodes_dn")
+            .map(|v| {
+                v.trim_matches(['[', ']'].as_slice())
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        TransportTls {
+            enabled: get("plugins.security.ssl.transport.enabled")
+                .or_else(|| get("transport.ssl.enabled"))
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            cert: path_of(get("plugins.security.ssl.transport.pemcert_filepath")),
+            key: path_of(get("plugins.security.ssl.transport.pemkey_filepath")),
+            trusted_cas: path_of(get("plugins.security.ssl.transport.pemtrustedcas_filepath")),
+            nodes_dn,
+        }
+    }
+
+    /// Whether a verified certificate's subject is one a node may have.
+    /// With nothing named, any certificate the CA signed is a node.
+    pub fn is_a_node(&self, dn: &str) -> bool {
+        if self.nodes_dn.is_empty() {
+            return true;
+        }
+        let dn = crate::security::normalize_dn(dn);
+        self.nodes_dn.iter().any(|pattern| {
+            let pattern = crate::security::normalize_dn(pattern);
+            crate::store::glob_match(&pattern, &dn)
+        })
+    }
+
+    fn material(
+        &self,
+    ) -> anyhow::Result<(
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+        rustls::RootCertStore,
+    )> {
+        let as_http = TlsSettings {
+            enabled: true,
+            cert: self.cert.clone(),
+            key: self.key.clone(),
+            trusted_cas: self.trusted_cas.clone(),
+            client_auth: "REQUIRE".into(),
+        };
+        let (certs, key) = load_or_make(&as_http)?;
+        let Some(ca_path) = self.trusted_cas.clone() else {
+            anyhow::bail!(
+                "transport TLS is on but plugins.security.ssl.transport.pemtrustedcas_filepath \
+                 names nothing: without it there is nothing to verify a peer against"
+            );
+        };
+        let mut roots = rustls::RootCertStore::empty();
+        let pem = std::fs::read(&ca_path)?;
+        let mut added = 0usize;
+        for c in rustls_pemfile::certs(&mut &pem[..]).flatten() {
+            if roots.add(c).is_ok() {
+                added += 1;
+            }
+        }
+        if added == 0 {
+            anyhow::bail!("no certificate authority in {}", ca_path.display());
+        }
+        Ok((certs, key, roots))
+    }
+
+    /// How this node answers a connection: a certificate is required, and it
+    /// must be one the cluster's authority signed.
+    pub fn server_config(&self) -> anyhow::Result<rustls::ServerConfig> {
+        let (certs, key, roots) = self.material()?;
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
+        Ok(rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)?)
+    }
+
+    /// How this node opens one.
+    pub fn client_config(&self) -> anyhow::Result<rustls::ClientConfig> {
+        let (certs, key, roots) = self.material()?;
+        Ok(rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, key)?)
+    }
+}
+
+/// The subject of the certificate a peer presented, if it presented one.
+pub fn peer_subject(
+    certs: Option<&[rustls::pki_types::CertificateDer<'static>]>,
+) -> Option<String> {
+    certs
+        .and_then(|chain| chain.first())
+        .and_then(|c| x509_parser::parse_x509_certificate(c.as_ref()).ok())
+        .map(|(_, cert)| crate::security::normalize_dn(&cert.subject().to_string()))
+}

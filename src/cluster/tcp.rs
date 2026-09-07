@@ -48,10 +48,39 @@ pub struct TcpTransport {
     handler: RwLock<Option<Arc<dyn Handler>>>,
     /// peers seen through a handshake, with what they said
     known: RwLock<HashMap<NodeId, Hello>>,
+    /// what makes a peer a peer: with this set, a connection is refused
+    /// unless both ends present a certificate the cluster's authority signed
+    tls: Option<Arc<TransportTls>>,
+}
+
+/// The certificate side of the transport, kept together so a connection can
+/// be accepted or opened without reading the settings again.
+pub struct TransportTls {
+    pub settings: crate::tls::TransportTls,
+    acceptor: tokio_rustls::TlsAcceptor,
+    connector: tokio_rustls::TlsConnector,
+}
+
+impl TransportTls {
+    /// Read the settings and build both ends, or say why it cannot.
+    pub fn read(settings: &serde_json::Value) -> anyhow::Result<Option<Arc<TransportTls>>> {
+        let s = crate::tls::TransportTls::read(settings);
+        if !s.enabled {
+            return Ok(None);
+        }
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(s.server_config()?));
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(s.client_config()?));
+        Ok(Some(Arc::new(TransportTls { settings: s, acceptor, connector })))
+    }
 }
 
 impl TcpTransport {
     pub fn new(identity: &NodeIdentity) -> Arc<TcpTransport> {
+        TcpTransport::new_with(identity, None)
+    }
+
+    /// The same transport, with the certificates that make a peer a peer.
+    pub fn new_with(identity: &NodeIdentity, tls: Option<Arc<TransportTls>>) -> Arc<TcpTransport> {
         Arc::new_cyclic(|weak| TcpTransport {
             self_weak: weak.clone(),
             cut: RwLock::new(std::collections::HashSet::new()),
@@ -67,7 +96,13 @@ impl TcpTransport {
             peers: Mutex::new(HashMap::new()),
             handler: RwLock::new(None),
             known: RwLock::new(HashMap::new()),
+            tls: tls.clone(),
         })
+    }
+
+    /// Whether a peer has to prove who it is.
+    pub fn secured(&self) -> bool {
+        self.tls.is_some()
     }
 
     pub fn hello(&self) -> &Hello {
@@ -118,7 +153,35 @@ impl TcpTransport {
             };
             let me = self.clone();
             tokio::spawn(async move {
-                let _ = me.serve_connection(stream, None).await;
+                match me.tls.clone() {
+                    Some(tls) => {
+                        let accepted = match tls.acceptor.accept(stream).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::debug!("transport: a connection was not accepted: {e}");
+                                return;
+                            }
+                        };
+                        // the certificate is what says this is a node, and the
+                        // list of subjects says which certificates may be one
+                        let subject =
+                            crate::tls::peer_subject(accepted.get_ref().1.peer_certificates());
+                        match subject {
+                            Some(dn) if tls.settings.is_a_node(&dn) => {}
+                            other => {
+                                tracing::warn!(
+                                    "transport: refused a connection from [{}]: not a node",
+                                    other.unwrap_or_else(|| "no certificate".into())
+                                );
+                                return;
+                            }
+                        }
+                        let _ = me.serve_connection(accepted, None).await;
+                    }
+                    None => {
+                        let _ = me.serve_connection(stream, None).await;
+                    }
+                }
             });
         }
     }
@@ -129,19 +192,41 @@ impl TcpTransport {
         stream.set_nodelay(true)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let me = self.clone();
-        tokio::spawn(async move {
-            let _ = me.serve_connection(stream, Some(tx)).await;
-        });
+        match self.tls.clone() {
+            Some(tls) => {
+                let name = server_name_of(address)?;
+                let opened = tls.connector.connect(name, stream).await?;
+                let subject = crate::tls::peer_subject(opened.get_ref().1.peer_certificates());
+                match subject {
+                    Some(dn) if tls.settings.is_a_node(&dn) => {}
+                    other => anyhow::bail!(
+                        "the node at {address} is not a node here: [{}]",
+                        other.unwrap_or_else(|| "no certificate".into())
+                    ),
+                }
+                tokio::spawn(async move {
+                    let _ = me.serve_connection(opened, Some(tx)).await;
+                });
+            }
+            None => {
+                tokio::spawn(async move {
+                    let _ = me.serve_connection(stream, Some(tx)).await;
+                });
+            }
+        }
         Ok(rx.await?)
     }
 
     /// One connection: say hello, hear theirs, then pump frames both ways.
-    async fn serve_connection(
+    async fn serve_connection<S>(
         self: Arc<Self>,
-        stream: TcpStream,
+        stream: S,
         tell: Option<tokio::sync::oneshot::Sender<Hello>>,
-    ) -> anyhow::Result<()> {
-        let (mut rd, mut wr) = stream.into_split();
+    ) -> anyhow::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        let (mut rd, mut wr) = tokio::io::split(stream);
         // hello first, both ways
         let hello =
             Envelope::request(HANDSHAKE, self.me.node_id.clone(), 0, serde_json::to_vec(&self.me)?);
@@ -175,9 +260,18 @@ impl TcpTransport {
         });
         // reader
         let me = self.clone();
+        let sender = peer_id.clone();
         let reader = async move {
             // a frame that cannot be read is the end of the connection
-            while let Ok(env) = read_frame(&mut rd).await {
+            while let Ok(mut env) = read_frame(&mut rd).await {
+                // whoever the sender wrote in the envelope, the frame came
+                // from the node that shook hands on this connection: a peer
+                // cannot speak as another, and a third party cannot answer
+                // a request that was not put to it
+                if env.from != sender {
+                    tracing::debug!("transport: a frame from {sender} called itself {}", env.from);
+                    env.from = sender.clone();
+                }
                 // a partition made real: a frame from a cut peer is lost on
                 // the wire, and the connection stays as it would
                 if me.is_cut(&env.from) {
@@ -288,7 +382,18 @@ pub fn global() -> Option<Arc<TcpTransport>> {
     GLOBAL.lock().as_ref().and_then(|w| w.upgrade())
 }
 
-async fn read_frame(rd: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<Envelope> {
+/// The name a peer's certificate is verified against: nodes dial each other
+/// by address, so an address is a name or an IP.
+fn server_name_of(address: &str) -> anyhow::Result<rustls::pki_types::ServerName<'static>> {
+    let host = match address.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => address,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Ok(rustls::pki_types::ServerName::try_from(host.to_string())?)
+}
+
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(rd: &mut R) -> anyhow::Result<Envelope> {
     let mut len = [0u8; 4];
     rd.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;

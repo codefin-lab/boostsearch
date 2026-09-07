@@ -528,8 +528,32 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    // the transport: other nodes reach this one here
-    let transport = cluster::tcp::TcpTransport::new(&identity);
+    // the transport: other nodes reach this one here. What makes a peer a
+    // peer is its certificate (docs/adr/0008), and without one a node is
+    // only allowed to listen where nothing else can reach it.
+    let transport_tls = match cluster::tcp::TransportTls::read(&node_settings) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("boostsearch: transport TLS is on but could not be set up: {e}");
+            std::process::exit(2);
+        }
+    };
+    let bind_host = identity.transport_bind.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+    let transport_loopback =
+        bind_host.starts_with("127.") || bind_host == "localhost" || bind_host == "[::1]";
+    let transport_said_so =
+        std::env::var("BOOSTSEARCH_TRANSPORT_INSECURE").map(|v| v != "false").unwrap_or(false);
+    if transport_tls.is_none() && !transport_loopback && !transport_said_so {
+        eprintln!(
+            "refusing to listen for transport connections on {} without transport TLS. \
+             Whoever reaches that port would be a node in this cluster: set \
+             plugins.security.ssl.transport.enabled and the certificates beside it, or say \
+             this is meant: BOOSTSEARCH_TRANSPORT_INSECURE=true",
+            identity.transport_bind
+        );
+        std::process::exit(2);
+    }
+    let transport = cluster::tcp::TcpTransport::new_with(&identity, transport_tls);
     transport.register();
     {
         let t = transport.clone();

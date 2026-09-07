@@ -3823,3 +3823,54 @@ there; a restore over an open index answers 400 and over a closed one
 brings back the snapshot's documents and not the ones written after it.
 Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890,
 the chaos run 44,599 writes with 39,479 acknowledged and none lost.
+
+## The review's fifth step: the transport had no boundary to draw
+
+The fourth group in the review was one finding wearing four hats: the
+transport port answered anyone. The handshake read the peer's own
+description of itself and checked that the cluster name matched, so
+whoever could open a socket was a node -- and a node may forward a REST
+request with any caller it likes, start an election in any term it likes,
+and report any copy of any shard as in sync. There was nothing to fix in
+those three messages, because there was nothing to judge them against.
+
+[ADR 0008](adr/0008-the-transport-is-a-trust-boundary.md) has the
+reasoning and what was weighed against what. The decision: a node is a
+peer because its certificate says so, and a frame is from the peer whose
+connection carried it.
+
+**Mutual TLS.** `plugins.security.ssl.transport.enabled` puts both ends
+of every transport connection behind a certificate, verified against
+`pemtrustedcas_filepath` before a frame is read, with the settings spelled
+as the reference spells them. `plugins.security.nodes_dn` says which
+subjects may be a node, so a certificate the same authority issued to a
+person is refused by name.
+
+**A frame is from its connection.** The envelope carries the sender's
+name as a string, and nothing checked it: a peer could speak as the
+manager. Every frame is now stamped with the node that shook hands on
+that connection, whatever it wrote.
+
+**The port is not opened by accident.** A node refuses to listen for
+transport connections on a non-loopback address with transport TLS off,
+unless the operator says `BOOSTSEARCH_TRANSPORT_INSECURE=true`. It is the
+rule the HTTP port already followed, and the image says so.
+
+**And what the cluster knows.** An election is started, and a shard
+reported, only by a node this one knows -- a peer discovery met, a seed,
+a node in the state or in either voting configuration. It is not the
+boundary; it is what keeps a node that is merely reachable from moving
+the cluster.
+
+Measured, with a CA and three certificates: two nodes with node
+certificates form a cluster and a write on one is searchable from the
+other; a node holding a certificate the same CA signed for `CN=alice` is
+refused by name and the cluster stays at two; a plain socket to the
+transport port gets a TLS alert and no handling. On a plaintext cluster,
+a stranger's `start_join` with `term: 2^64-1` claiming to be node `b` is
+answered "not a node of this cluster" -- the claim was overwritten by the
+connection it came on -- and the term and the manager are unchanged. A
+node told to bind the transport to `0.0.0.0` without TLS exits 2 with the
+two ways forward. Phase 1 398/398, the core corpus 1100/1100, the module
+suite 880/890, the chaos run with 26,066 acknowledged writes and none
+lost.

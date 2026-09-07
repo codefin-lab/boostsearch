@@ -422,6 +422,13 @@ impl Coordinator {
         out
     }
 
+    /// Whether a node is one of this cluster's, rather than one that merely
+    /// found the port: a peer discovery met, a seed, a node in the state, or
+    /// a node in either voting configuration.
+    fn knows(&self, who: &NodeId) -> bool {
+        *who == self.me.id || self.everyone().contains(who)
+    }
+
     /// Everyone this node could talk to, itself excluded.
     fn everyone(&self) -> BTreeSet<NodeId> {
         let mut all: BTreeSet<NodeId> = self.peers.keys().cloned().collect();
@@ -1808,6 +1815,16 @@ impl Coordinator {
                 out
             }
             (START_JOIN, Kind::Request) => {
+                // an election is started by a node of this cluster. A node
+                // that is merely reachable moves nothing: it could otherwise
+                // name a term nothing can reach and leave the cluster
+                // without a manager for good.
+                if !self.knows(&from) {
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not a node of this cluster"})
+                            .to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
                 let term = term_in(&e.body).unwrap_or(0);
                 let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
                 out.extend(self.on_start_join(term, &from, durable));
@@ -2055,6 +2072,14 @@ impl Coordinator {
                         _ => None,
                     };
                     let msg = json!({"term": self.current_term, "leader": who, "reason": "not the manager"}).to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
+                // a shard is reported by a node that holds one, which is a
+                // node of this cluster
+                if !self.knows(&from) {
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not a node of this cluster"})
+                            .to_string();
                     return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
                 }
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
