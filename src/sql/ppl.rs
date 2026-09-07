@@ -199,7 +199,10 @@ fn parse_stats(text: &str) -> Result<(Vec<Column>, Vec<Expr>), String> {
     // is applied to, matched without regard to case
     let at = text
         .char_indices()
-        .find(|(i, _)| text[*i..].len() >= 4 && text[*i..*i + 4].eq_ignore_ascii_case(" by "))
+        .find(|(i, _)| {
+            let rest = &text[*i..];
+            rest.len() >= 4 && rest.is_char_boundary(4) && rest[..4].eq_ignore_ascii_case(" by ")
+        })
         .map(|(i, _)| i);
     let (metrics, groups) = match at {
         Some(at) => (&text[..at], Some(&text[at + 4..])),

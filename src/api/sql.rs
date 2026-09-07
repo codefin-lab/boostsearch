@@ -19,12 +19,20 @@ pub async fn pipeline(
 
 /// `POST _plugins/_sql/_explain` and its PPL twin -- the search a query
 /// would run, without running it.
-pub async fn explain_sql(Query(p): Query<Params>, body: String) -> Response {
-    explain(&p, &body, false)
+pub async fn explain_sql(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    explain(&store, &p, &body, false)
 }
 
-pub async fn explain_ppl(Query(p): Query<Params>, body: String) -> Response {
-    explain(&p, &body, true)
+pub async fn explain_ppl(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    explain(&store, &p, &body, true)
 }
 
 fn query_of(body: &str) -> Result<String, Response> {
@@ -44,7 +52,7 @@ fn planned_of(text: &str, piped: bool) -> Result<plan::Planned, Response> {
     Ok(planned)
 }
 
-fn explain(p: &Params, body: &str, piped: bool) -> Response {
+fn explain(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
     let text = match query_of(body) {
         Ok(t) => t,
         Err(r) => return r,
@@ -53,6 +61,15 @@ fn explain(p: &Params, body: &str, piped: bool) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
+    // the plan names the index the query would read, which is as much as
+    // running it would tell a caller about what is there
+    if let Some(why) = crate::security::item_refusal(
+        store,
+        &["indices:data/read/search"],
+        &crate::security::layer::indices_for_expr(store, &planned.index),
+    ) {
+        return failed(StatusCode::FORBIDDEN, "SecurityException", why);
+    }
     // what the engine will actually be asked, which is the only honest answer
     // to "explain": not a description of a plan, the plan itself
     respond(

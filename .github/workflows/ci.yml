@@ -66,3 +66,21 @@ jobs:
             ./target/release/boostsearch &
           for i in $(seq 30); do curl -sf localhost:9200/ >/dev/null && break; sleep 1; done
           python3 tools/yaml_runner.py --manifest /tmp/every.json
+
+      # The suites above ask for the right answer to a sensible question. These
+      # three ask the other kind: what a caller may reach when they may not
+      # reach it, what an index holds after a write it refused, and whether the
+      # node is still there after a body nobody would write on purpose. Two
+      # whole-codebase reviews found most of what was wrong in those three
+      # shapes, and none of the suites above went red for any of it.
+      - name: Who may reach what
+        run: |
+          pkill -f 'release/boostsearch' || true
+          sleep 1
+          python3 tools/auth_matrix.py
+
+      - name: A refused write leaves the document alone
+        run: python3 tools/refusal_check.py
+
+      - name: Malformed input at everything that parses
+        run: python3 tools/fuzz_check.py --rounds 2000

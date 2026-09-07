@@ -10,12 +10,25 @@ use super::*;
 
 /// The template, with what the parameters say put in place of its holes.
 pub fn render(template: &str, params: &Value) -> Result<String, String> {
-    render_within(template, std::slice::from_ref(params), 0)
+    let mut budget = 0usize;
+    render_within(template, std::slice::from_ref(params), 0, &mut budget)
 }
 
 /// Sections inside sections, past which a template is refused rather than
 /// followed: every level is a call, and the stack is not the template's.
 const MAX_SECTION_DEPTH: usize = 100;
+
+/// The most a template may render into.
+///
+/// Depth alone does not bound the work: a section over a list of two, nested
+/// n deep, writes 2^n copies of what is inside it, and thirty-seven levels
+/// -- well within the depth a template may have -- is a hundred gigabytes.
+/// What comes out is bounded instead.
+const MAX_RENDERED: usize = 8 << 20;
+
+fn too_much(len: usize) -> String {
+    format!("Mustache template renders more than {MAX_RENDERED} bytes (reached {len})")
+}
 
 fn too_deep() -> String {
     format!("Mustache template nests sections more than {MAX_SECTION_DEPTH} deep")
@@ -53,13 +66,33 @@ pub fn unclosed(template: &str) -> Option<String> {
 }
 
 /// The same, with the values a section put in front of the outer ones.
-fn render_within(template: &str, scope: &[Value], depth: usize) -> Result<String, String> {
+fn render_within(
+    template: &str,
+    scope: &[Value],
+    depth: usize,
+    budget: &mut usize,
+) -> Result<String, String> {
     if depth > MAX_SECTION_DEPTH {
         return Err(too_deep());
+    }
+    // entering a section costs something whatever it writes, and a template
+    // that doubles its sections spends the budget on the calls rather than
+    // on the text: without this the ceiling was reached only after millions
+    // of them, which is seconds of work for an answer that is refused
+    *budget += 64;
+    if *budget > MAX_RENDERED {
+        return Err(too_much(*budget));
     }
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(at) = rest.find("{{") {
+        // the budget is shared by every level, so a section over a list of
+        // two nested thirty deep stops at the ceiling rather than after a
+        // billion copies of what is inside it
+        *budget += at;
+        if *budget > MAX_RENDERED {
+            return Err(too_much(*budget));
+        }
         out.push_str(&rest[..at]);
         let after = &rest[at + 2..];
         let Some(end) = after.find("}}") else {
@@ -74,7 +107,7 @@ fn render_within(template: &str, scope: &[Value], depth: usize) -> Result<String
             Some('#') => {
                 let name = tag[1..].trim().to_string();
                 let (body, after_section) = section(tail, &name);
-                out.push_str(&filled(&name, body, scope, depth + 1)?);
+                out.push_str(&filled(&name, body, scope, depth + 1, budget)?);
                 tail = after_section;
             }
             // `{{^name}}...{{/name}}` is the other way about
@@ -82,7 +115,7 @@ fn render_within(template: &str, scope: &[Value], depth: usize) -> Result<String
                 let name = tag[1..].trim().to_string();
                 let (body, after_section) = section(tail, &name);
                 if !truthy(&look_up(&name, scope)) {
-                    out.push_str(&render_within(body, scope, depth + 1)?);
+                    out.push_str(&render_within(body, scope, depth + 1, budget)?);
                 }
                 tail = after_section;
             }
@@ -103,6 +136,10 @@ fn render_within(template: &str, scope: &[Value], depth: usize) -> Result<String
         rest = tail;
     }
     out.push_str(rest);
+    *budget += rest.len();
+    if *budget > MAX_RENDERED {
+        return Err(too_much(*budget));
+    }
     Ok(out)
 }
 
@@ -158,22 +195,28 @@ pub fn check(template: &str) -> Result<(), String> {
 }
 
 /// A section, with what stands in it.
-fn filled(name: &str, body: &str, scope: &[Value], depth: usize) -> Result<String, String> {
+fn filled(
+    name: &str,
+    body: &str,
+    scope: &[Value],
+    depth: usize,
+    budget: &mut usize,
+) -> Result<String, String> {
     // the three functions a search template may name
     match name {
         "toJson" => {
-            let inner = render_within(body, scope, depth)?.trim().to_string();
+            let inner = render_within(body, scope, depth, budget)?.trim().to_string();
             return Ok(look_up(&inner, scope).to_string());
         }
         "join" => {
-            let inner = render_within(body, scope, depth)?.trim().to_string();
+            let inner = render_within(body, scope, depth, budget)?.trim().to_string();
             return Ok(match look_up(&inner, scope) {
                 Value::Array(items) => items.iter().map(as_text).collect::<Vec<_>>().join(","),
                 other => as_text(&other),
             });
         }
         "url" => {
-            let inner = render_within(body, scope, depth)?;
+            let inner = render_within(body, scope, depth, budget)?;
             return Ok(url_escaped(&inner));
         }
         _ => {}
@@ -184,15 +227,15 @@ fn filled(name: &str, body: &str, scope: &[Value], depth: usize) -> Result<Strin
             .map(|item| {
                 let mut inner: Vec<Value> = vec![item.clone()];
                 inner.extend_from_slice(scope);
-                render_within(body, &inner, depth)
+                render_within(body, &inner, depth, budget)
             })
             .collect(),
         Value::Object(map) => {
             let mut inner: Vec<Value> = vec![Value::Object(map)];
             inner.extend_from_slice(scope);
-            render_within(body, &inner, depth)
+            render_within(body, &inner, depth, budget)
         }
-        other if truthy(&other) => render_within(body, scope, depth),
+        other if truthy(&other) => render_within(body, scope, depth, budget),
         _ => Ok(String::new()),
     }
 }
@@ -495,6 +538,17 @@ pub async fn msearch_template(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| default_index.clone());
+        // the index a templated search names is judged the way a plain
+        // multi search judges its own: this list is the caller's, and each
+        // line of it names its index in the body where the layer cannot see
+        if let Some(why) = crate::security::item_refusal(
+            &store,
+            &["indices:data/read/search"],
+            &crate::security::layer::indices_for_expr(&store, &expr),
+        ) {
+            responses.push(json!({"error": crate::security::item_error(&why), "status": 403}));
+            continue;
+        }
         // a search in the list that names no template at all is not one
         // failure among several: the whole request was written wrongly
         let empty = request.get("source").map(|v| match v {

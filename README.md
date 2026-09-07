@@ -22,6 +22,9 @@ rather than believed.
 | the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
 | REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
+| who may reach what | **1,167 answers** over 239 routes and five callers | `tools/auth_matrix.py` |
+| a refused write leaves the document alone | **30 refusals** through five write paths | `tools/refusal_check.py` |
+| malformed input at everything that parses | **2,000 probes**, node still answering | `tools/fuzz_check.py` |
 | OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |
 
 The ten sections that do not pass are named, with the reason, in

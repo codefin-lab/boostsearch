@@ -4154,3 +4154,61 @@ does not name -- through the ISM caller as well as the Dev Tools route.
 One thing seen once and not explained: in one chaos run of six, a copy was
 393 acknowledged writes behind at the end while the primary had them all.
 No run lost a write. It is written down here rather than left out.
+
+## Three checks that can go red for what the suites cannot
+
+Two reviews found about fifty-three defects, and not one of them turned a
+suite red. That is not the suites failing at their job: they measure
+whether this server answers the way OpenSearch answers, which is the
+thing the project is for. It is a gap in what is measured. Every one of
+the fifty-three was one of three shapes, and each shape now has a check
+of its own, running in CI on every push.
+
+**Who may reach what** (`tools/auth_matrix.py`). It reads the router out
+of `src/main.rs`, starts a node with security on, and probes all 239
+routes as five callers: nobody at all, a caller with no roles, a reader
+and a writer on one index, and a caller with the composite-operations
+cluster permission. 1,167 answers, compared with a baseline. A route that
+starts answering a caller who should not reach it makes the file differ,
+and the run goes red. It also carries the shapes a route table cannot
+show: a path that merely *ends* with the token exchange, a request naming
+a forbidden index in its body, and -- the other way about -- the searches
+a restricted caller must still be able to run.
+
+It found something on its first run. `_msearch/template` never judged its
+items: a caller with no roles at all read a forbidden index, ssn and all,
+through a templated multi search. The `_explain` endpoints of SQL and PPL
+told a caller the plan for an index they may not read, and the two
+plugins' `stats` endpoints answered anyone. All three are judged now.
+
+**A refused write leaves the document alone** (`tools/refusal_check.py`).
+It writes a document, sends a request that must be refused -- a value the
+type will not take, a number past its range, an object where a value
+belongs, a vector of the wrong width -- and reads the document back.
+Through `_doc`, `_bulk`, `_update`, `_update_by_query` and `_reindex`,
+and then again through the three states an operator holds an index in.
+Thirty refusals. To prove it can go red, the delete-before-validation bug
+was put back: ten of the thirty reported the document GONE, and the fix
+turned them green again.
+
+**Malformed input at everything that parses** (`tools/fuzz_check.py`).
+Painless, SQL, PPL, the query DSL, templates, grok, date math, time
+zones, the analysers, `filter_path` and the aggregations, given deep
+nesting, long repetition, non-ASCII in the awkward places, numbers at the
+edges of their types, and structures that hold themselves. What it asks
+for is not a right answer: it is *an* answer, within the timeout, with
+the node still up.
+
+It killed the node on its first run, twice over. A PPL `stats` clause
+still cut a character in half -- the fix from the review had the same bug
+one line further on, taking four bytes from a character boundary that is
+not one four bytes later. And a search template nested thirty-seven
+sections deep over a list of two wrote 2^37 copies of what was inside it:
+the depth ceiling from the review bounded the nesting and not the work.
+Templates now spend a shared budget, on the text they write and on the
+sections they enter, so a template that doubles is refused in forty
+milliseconds instead of running for a day.
+
+Three seeds of fifteen hundred probes each pass now. The measure of these
+three is not that they are green today; it is that each of them was red
+when it was written.

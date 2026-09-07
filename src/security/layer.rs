@@ -190,7 +190,11 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     // the query languages name their index in the body, where this layer
     // cannot see it: the handler judges that index itself, the way a bulk
     // judges each item, and this layer only writes the request down
-    if path.starts_with("/_plugins/_sql") || path.starts_with("/_plugins/_ppl") {
+    let query_language = matches!(
+        path.trim_end_matches('/'),
+        "/_plugins/_sql" | "/_plugins/_ppl" | "/_plugins/_sql/_explain" | "/_plugins/_ppl/_explain"
+    );
+    if query_language {
         audit.granted_privileges(&caller, &action, &info, &[], &[]);
         return run_as(caller, req, next).await;
     }
@@ -438,7 +442,12 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             // the query languages name their index in the body; the handler
             // judges that index itself, and this judges the caller may
             // search at all
-            ("_sql" | "_ppl", _) => "indices:data/read/search".to_string(),
+            ("_sql" | "_ppl", _) => match rest.get(2).copied() {
+                // the stats of a plugin are the cluster's business, not a
+                // search: a caller with no index permissions was reading them
+                Some("stats") => "cluster:monitor/stats".to_string(),
+                _ => "indices:data/read/search".to_string(),
+            },
             ("_ism", "GET" | "HEAD") => "cluster:admin/opendistro/ism/policy/get".to_string(),
             ("_ism", _) => "cluster:admin/opendistro/ism/policy/write".to_string(),
             ("_knn", "GET" | "HEAD") => "cluster:admin/knn/stats".to_string(),

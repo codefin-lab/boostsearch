@@ -26,7 +26,7 @@ which is an operator's decision rather than a client's.
 | `node.name`, `network.host`, `transport.port` | as in OpenSearch. |
 | `plugins.security.ssl.transport.enabled` | mutual TLS between nodes. With it, a peer is a peer because its certificate says so; without it, a node only listens for transport connections on loopback. |
 | `plugins.security.ssl.transport.pemcert_filepath`, `...pemkey_filepath`, `...pemtrustedcas_filepath` | this node's certificate and key, and the authority every peer's certificate must chain to. Relative paths are read from the config directory. |
-| `plugins.security.nodes_dn` | the certificate subjects allowed to be nodes, as glob patterns (`CN=*.nodes.example.com`). A certificate the same authority issued to a person is then not a node. Unset, any certificate it signed is one. |
+| `plugins.security.nodes_dn` | the certificate subjects allowed to be nodes, as glob patterns (`CN=*.nodes.example.com`). A certificate the same authority issued to a person is then not a node. Transport TLS without it is refused at startup, since without it every certificate that authority signed would be a node. |
 | `BOOSTSEARCH_TRANSPORT_INSECURE` | `true` lets a node listen for transport connections on a non-loopback address with transport TLS off. It is an operator saying the network itself is the boundary. |
 | `discovery.seed_hosts` | the nodes this one looks for. |
 
