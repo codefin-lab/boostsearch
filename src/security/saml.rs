@@ -174,6 +174,20 @@ impl Node {
     }
 
     /// The element with this `ID`, anywhere below.
+    /// How many elements carry this id: one, in a document nobody has
+    /// tampered with.
+    pub fn count_id(&self, id: &str) -> usize {
+        let here = usize::from(self.attr("ID") == Some(id));
+        here + self
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                Child::Element(e) => Some(e.count_id(id)),
+                _ => None,
+            })
+            .sum::<usize>()
+    }
+
     pub fn by_id(&self, id: &str) -> Option<&Node> {
         if self.attr("ID") == Some(id) {
             return Some(self);
@@ -387,7 +401,7 @@ fn rsa_public_key(cert_der: &[u8]) -> Option<rsa::RsaPublicKey> {
 
 /// Whether one `Signature` element under `root` is valid for the element
 /// it references, by one of the certificates.
-fn verify_signature(root: &Node, sig: &Node, certs: &[Vec<u8>]) -> Option<String> {
+fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) -> Option<String> {
     let signed_info = sig.child("SignedInfo")?;
     let c14n_method =
         signed_info.child("CanonicalizationMethod").and_then(|m| m.attr("Algorithm")).unwrap_or("");
@@ -415,9 +429,29 @@ fn verify_signature(root: &Node, sig: &Node, certs: &[Vec<u8>]) -> Option<String
     if !c14n_method.starts_with("http://www.w3.org/2001/10/xml-exc-c14n#") {
         return Some(format!("unsupported canonicalisation {c14n_method}"));
     }
-    // the referenced element: `#id`, or the whole document when empty
-    let target: &Node =
-        if uri.is_empty() { root } else { root.by_id(uri.trim_start_matches('#'))? };
+    // the referenced element: `#id`, or the whole document when empty --
+    // and it has to be the element this signature sits in. A signature
+    // that vouches for some other element, found by its id anywhere in
+    // the document, would let a forged assertion stand beside a genuine
+    // one and borrow its signature.
+    let target: &Node = if uri.is_empty() {
+        if !std::ptr::eq(owner, root) {
+            return Some("the signature references the document but sits in the assertion".into());
+        }
+        root
+    } else {
+        let id = uri.trim_start_matches('#');
+        if root.count_id(id) != 1 {
+            return Some(format!("id [{id}] is not unique in the document"));
+        }
+        if owner.attr("ID") != Some(id) {
+            return Some(format!(
+                "the signature references [{id}] but is carried by [{}]",
+                owner.attr("ID").unwrap_or("an element with no id")
+            ));
+        }
+        owner
+    };
     let mut empty = BTreeMap::new();
     let scope = scope_at(root, target, &mut empty).unwrap_or_default();
     let stripped = target.without_signature();
@@ -576,9 +610,8 @@ pub fn validate(
     for (owner, sig) in
         [(&root, root.child("Signature")), (assertion, assertion.child("Signature"))]
     {
-        let _ = owner;
         if let Some(sig) = sig {
-            if let Some(why) = verify_signature(&root, sig, certs) {
+            if let Some(why) = verify_signature(&root, owner, sig, certs) {
                 return Err(format!("invalid signature: {why}"));
             }
             any = true;

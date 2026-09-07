@@ -20,6 +20,27 @@ pub async fn put_policy(
             "Missing [policy] in the request body",
         );
     }
+    // every transition condition has to be one the engine evaluates: a
+    // name it does not know is refused here rather than ignored at the tick
+    for state in body.pointer("/policy/states").and_then(|s| s.as_array()).into_iter().flatten() {
+        for transition in state.get("transitions").and_then(|t| t.as_array()).into_iter().flatten()
+        {
+            for name in transition
+                .get("conditions")
+                .and_then(|c| c.as_object())
+                .into_iter()
+                .flat_map(|c| c.keys())
+            {
+                if !crate::ism::engine::KNOWN_CONDITIONS.contains(&name.as_str()) {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!("Invalid field: [{name}] found in Conditions."),
+                    );
+                }
+            }
+        }
+    }
     let existed = crate::ism::read(&store, &crate::ism::policy_id(&id)).is_some();
     // `?if_seq_no=` is how a caller says "only if nobody has changed it since"
     if let (Some(want), Some(held)) = (

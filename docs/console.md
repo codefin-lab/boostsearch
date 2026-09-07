@@ -79,6 +79,11 @@ reference does not serve either. Multiple data sources and workspaces.
   dashboard, saved objects, Index Management, Dev Tools -- against a
   BoostSearch node, in `docs/progress.md` under 13.6.
 
+Every request that changes something must carry the `osd-xsrf` header, as
+the pages do; the suite does not, so the console it tests is started with
+`BOOSTSEARCH_CONSOLE_XSRF=false`, which is the `--server.xsrf.disableProtection=true`
+the suite starts the Node server with.
+
 The suite needs the Dashboards repository bootstrapped
 (`study/OpenSearch-Dashboards`, Node 20, `yarn osd bootstrap`) and the
 server it tests started with `--server.xsrf.disableProtection=true`, which

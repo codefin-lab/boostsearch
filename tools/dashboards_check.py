@@ -47,6 +47,8 @@ def call(path, method="GET", body=None, headers=None):
     """One request, and what came back: status, headers, body."""
     data = None
     head = {"content-type": "application/json", "osd-xsrf": "true"}
+    # the header every page sends, which a request from elsewhere cannot
+    head.setdefault("osd-xsrf", "true")
     head.update(headers or {})
     if body is not None:
         data = body if isinstance(body, bytes) else json.dumps(body).encode()

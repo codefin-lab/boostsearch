@@ -48,6 +48,11 @@ impl Source {
     }
 
     pub fn write(&self, relative: &str, bytes: &[u8]) -> std::io::Result<()> {
+        if climbs(relative) {
+            return Err(std::io::Error::other(format!(
+                "[{relative}] is not a path inside the repository"
+            )));
+        }
         match self {
             Source::Dir(dir) => {
                 let path = dir.join(relative);
@@ -63,6 +68,9 @@ impl Source {
 
     /// Forget everything a snapshot left behind.
     pub fn remove_prefix(&self, prefix: &str) {
+        if climbs(prefix) || prefix.trim_matches('/').is_empty() {
+            return;
+        }
         match self {
             Source::Dir(dir) => {
                 let _ = std::fs::remove_dir_all(dir.join(prefix));
@@ -122,6 +130,16 @@ use crate::store::{IdxState, Store};
 /// under it. Without one named, it sits beside the data a server was given, so
 /// a location a client makes up cannot land anywhere it likes -- least of all
 /// in whatever directory the process happens to have been started from.
+/// Whether a relative path leaves the directory it is joined to: a
+/// `..` component, or an absolute path, which `join` would take whole.
+fn climbs(relative: &str) -> bool {
+    let path = std::path::Path::new(relative);
+    path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+}
+
 pub fn repo_root() -> PathBuf {
     if let Ok(dir) = std::env::var("BOOSTSEARCH_PATH_REPO")
         && !dir.is_empty()
@@ -146,7 +164,17 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
         repo.pointer("/settings/location").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
     let path = PathBuf::from(named);
     if path.is_absolute() {
-        return Some(path);
+        // an absolute location is allowed where `path.repo` allows it and
+        // nowhere else: a repository at `/` is every file the process can
+        // reach, and a delete of a snapshot in it is a delete of anything
+        let root = repo_root();
+        let inside = path
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .is_some_and(|(p, r)| p.starts_with(&r))
+            || path.starts_with(&root);
+        return inside.then_some(path);
     }
     // a relative location is a name, not a path: nothing it contains may climb
     // out of the root repositories live under

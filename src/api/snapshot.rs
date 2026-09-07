@@ -229,12 +229,34 @@ fn refuse_if_readonly(store: &Store, repo: &str) -> Option<Response> {
     })
 }
 
+/// A snapshot name that could name a path is refused, with OpenSearch's own
+/// words: a name is a segment under the repository, never a route out of it.
+fn bad_snapshot_name(repo: &str, name: &str) -> Option<Response> {
+    let bad = name.is_empty()
+        || name.starts_with('_')
+        || name.chars().any(|c| c.is_whitespace() || "\\/*?\"<>|,#".contains(c))
+        || name == "."
+        || name == ".."
+        || name.chars().any(|c| c.is_uppercase());
+    bad.then(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid_snapshot_name_exception",
+            format!("[{repo}:{name}] Invalid snapshot name [{name}], must be lowercase, must not contain whitespace, \
+                     must not contain '\\', '/', '*', '?', '\"', '<', '>', '|', ',', '#', and must not start with '_'"),
+        )
+    })
+}
+
 pub async fn create_snapshot(
     State(store): State<Store>,
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+        return refused;
+    }
     if !store.repositories().contains_key(&repo) {
         return err(
             StatusCode::NOT_FOUND,
@@ -342,6 +364,9 @@ pub async fn get_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+        return refused;
+    }
     if !store.repositories().contains_key(&repo) {
         return err(
             StatusCode::NOT_FOUND,
@@ -381,6 +406,9 @@ pub async fn delete_snapshot(
     Path((repo, name)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+        return refused;
+    }
     refresh_readonly(&store, &repo);
     // a snapshot that was never there is missing whoever asked: only one that
     // is really held runs into the repository being read-only
@@ -463,6 +491,11 @@ pub async fn clone_snapshot(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(refused) =
+        bad_snapshot_name(&repo, &name).or_else(|| bad_snapshot_name(&repo, &target))
+    {
+        return refused;
+    }
     refresh_readonly(&store, &repo);
     let held = store.snapshots(&repo);
     // a restore that names a snapshot which is not there failed to restore,
@@ -499,6 +532,9 @@ pub async fn restore_snapshot(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    if let Some(refused) = bad_snapshot_name(&repo, &name) {
+        return refused;
+    }
     refresh_readonly(&store, &repo);
     let held = store.snapshots(&repo);
     // a restore that names a snapshot which is not there failed to restore,

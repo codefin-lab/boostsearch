@@ -64,7 +64,7 @@ async fn chaos_or_404(
 }
 
 fn app(store: Store) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/", any(root))
         // --- bulk (static paths must be declared before `/{index}`) ---
         .route("/_rank_eval", post(api::rank_eval).get(api::rank_eval))
@@ -445,10 +445,17 @@ fn app(store: Store) -> Router {
                 .patch(security::api::patch_one),
         )
         .route("/_plugins/_security/{*rest}", any(security::api::unknown))
-        .layer(axum::middleware::from_fn_with_state(store.clone(), cluster::forward::layer))
-        .layer(axum::middleware::from_fn_with_state(store.clone(), security::layer::authenticate))
         .layer(axum::extract::DefaultBodyLimit::max(max_content_bytes()))
-        .with_state(store)
+        .with_state(store.clone());
+    // the two layers that decide who is asking and where the request runs
+    // sit outside the routes, not on them: a router's own layers run after
+    // it has matched the path and read its parameters, and the security
+    // layer may rewrite the path to the indices the caller was granted --
+    // a rewrite the inner router has to see before it routes
+    Router::new()
+        .fallback_service(routes)
+        .layer(axum::middleware::from_fn_with_state(store.clone(), cluster::forward::layer))
+        .layer(axum::middleware::from_fn_with_state(store, security::layer::authenticate))
 }
 
 /// How large a request body may be, in bytes.
@@ -486,6 +493,23 @@ async fn main() -> anyhow::Result<()> {
     // first request is answered
     api::recover(&store);
     security::audit::attach_store(&store);
+    // a node reachable from other machines with nobody asked who they are
+    // is a choice an operator makes, not a default they fall into: the image
+    // binds every interface, and without this check it would answer anyone
+    let loopback =
+        addr.starts_with("127.") || addr.starts_with("localhost") || addr.starts_with("[::1]");
+    let said_so = std::env::var("BOOSTSEARCH_PLUGINS_SECURITY_DISABLED").is_ok()
+        || std::env::var("BOOSTSEARCH_DISABLED").is_ok()
+        || std::env::var("DISABLE_SECURITY_PLUGIN").is_ok()
+        || tls::node_setting(&tls::node_settings(), "plugins.security.disabled").is_some();
+    if !store.security.enabled && !loopback && !said_so {
+        eprintln!(
+            "refusing to listen on {addr} with security off. Either configure security \
+             (plugins.security.disabled: false and a config directory), or say this is \
+             meant: BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true"
+        );
+        std::process::exit(2);
+    }
     // Index management: every so often, each index under a policy is looked
     // at and moved along. It runs on the cluster manager only -- two nodes
     // both deleting the same index on the same tick is not twice as helpful.

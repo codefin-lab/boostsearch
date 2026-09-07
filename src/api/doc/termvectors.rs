@@ -240,6 +240,14 @@ pub async fn mtermvectors(
             other => other.to_string(),
         });
         let Some(id) = id else { continue };
+        if let Some(why) = crate::security::item_refusal(
+            &store,
+            &["indices:data/read/tv"],
+            &crate::security::layer::indices_for_expr(&store, &idx),
+        ) {
+            out.push(json!({"_index": idx, "_id": id, "error": crate::security::item_error(&why)}));
+            continue;
+        }
         let Some(st) = store.get(&idx) else {
             let reason = format!("no such index [{idx}]");
             let cause = json!({

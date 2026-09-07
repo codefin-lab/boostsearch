@@ -85,6 +85,15 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
             format!("no such index [{}]", planned.index),
         );
     }
+    // the index is named in the body, where the security layer cannot see
+    // it, so it is judged here the way a bulk item is
+    if let Some(why) = crate::security::item_refusal(
+        store,
+        &["indices:data/read/search"],
+        &crate::security::layer::indices_for_expr(store, &planned.index),
+    ) {
+        return failed(StatusCode::FORBIDDEN, "SecurityException", why);
+    }
     let answer = match crate::search::run(store, &planned.index, &planned.body, &Params::new()) {
         Ok(out) => crate::search::envelope(out, &planned.body, &Params::new()),
         Err(r) => return r,

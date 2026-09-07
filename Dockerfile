@@ -36,6 +36,10 @@ COPY --from=build /src/target/release/boostsearch /usr/local/bin/boostsearch
 RUN mkdir -p /var/lib/boostsearch /etc/boostsearch \
     && chown -R boostsearch:boostsearch /var/lib/boostsearch /etc/boostsearch
 USER boostsearch
+# The image listens on every interface, which is only safe with security
+# configured -- or said to be unwanted:
+#   docker run -e BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true -p 9200:9200 boostsearch
+# Without either, the node refuses to start rather than answer anyone.
 ENV BOOSTSEARCH_ADDR=0.0.0.0:9200 \
     BOOSTSEARCH_DATA=/var/lib/boostsearch \
     BOOSTSEARCH_CONFIG=/etc/boostsearch

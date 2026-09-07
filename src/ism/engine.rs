@@ -32,6 +32,11 @@ pub fn tick(store: &Store) {
 }
 
 /// Indices that match a policy's template and are not managed yet.
+/// The transition conditions this engine evaluates; a policy naming any
+/// other is refused when it is written.
+pub const KNOWN_CONDITIONS: [&str; 6] =
+    ["min_index_age", "min_state_age", "min_doc_count", "min_size", "min_rollover_age", "cron"];
+
 fn adopt_new_indices(store: &Store) {
     for index in store.names() {
         if index.starts_with('.') || super::managed(store, &index).is_some() {
@@ -163,7 +168,10 @@ fn met(store: &Store, index: &str, conditions: &Value, entered: i64) -> bool {
             // a cron condition is a schedule, and a tick is not the place to
             // work out whether one has come round; it is taken as not met
             "cron" => false,
-            _ => true,
+            // a condition this engine does not know cannot be met: taking
+            // it as met would run the next state -- delete, as often as
+            // not -- on a typo
+            _ => false,
         };
         if !ok {
             return false;

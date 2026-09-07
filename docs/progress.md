@@ -3648,3 +3648,74 @@ order the review put them: the security layer, the console, the snapshot
 paths, the process-killing requests, the durability edges, and the
 transport's trust boundary.
 
+## The review's second step: what failed open
+
+The findings that were a default rather than a bug, fixed in the order the
+review put them.
+
+**The security layer.** A path `action_for` did not know answered `None`,
+and `None` meant *run unjudged*: every `/_plugins/*` route but `_security`
+-- SQL, PPL, ISM, kNN -- ran without a privilege check and without DLS or
+FLS. The plugin routes are judged under their own actions now; the query
+languages, which name their index in the body, are judged in the handler
+the way a bulk item is (`indices:data/read/search` over the index the
+query names). A `Verdict::Partial` -- allowed for some of what was asked,
+under `do_not_fail_on_forbidden` -- was thrown away and the request ran
+over everything it had asked for; it narrows the request to the granted
+indices now. To do that, the layer had to move: a router's own layers run
+after it has matched the path and read its parameters, so a rewritten path
+was never seen. The two layers that decide who is asking and where the
+request runs sit outside the routes now (`fallback_service`), and the
+inner router sees the narrowed path. `indices_of` reads the path decoded,
+as the handler will, so `public%2Csecret` is two indices to both.
+`_mtermvectors` judges each document's index, as `_mget` does.
+
+**SAML.** The signature's `Reference URI` was resolved against the whole
+document and never tied to the element carrying the signature, and
+identity was read from the first `<Assertion>`: a forged first assertion
+carrying a genuine signature whose reference pointed at the real assertion
+elsewhere in the document verified, and minted a token for whoever the
+forgery named. The reference must now name the element the signature sits
+in, and that id must be unique in the document. Checked with a crafted
+wrapping response (forged `admin`/`all_access` first, the genuine signed
+assertion second, the genuine `<Signature>` moved into the forgery): 401,
+no token. The fixture's twelve legitimate cases answer as before.
+
+**The console.** No request-authenticity check at all: a page on any
+origin could `POST /api/ism/apiCaller` with `transport.request DELETE /*`
+as a CORS-simple request. A request that changes something must carry the
+`osd-xsrf` header now, as the Node server requires; `BOOSTSEARCH_CONSOLE_XSRF=false`
+is its `--server.xsrf.disableProtection=true`, which its own suite needs.
+The Dev Tools proxy takes `BOOSTSEARCH_CONSOLE_PROXY_FILTER`, the Node
+server's `console.proxyFilter`, defaulting as it does to everything.
+
+**Snapshots.** A snapshot name was joined onto the repository path as
+given: `..%2F..%2Fetc` was a write outside the repository and a delete was
+`remove_dir_all` of anything. Names are validated at the API with the
+reference's own rule and message, an absolute `fs` location must sit under
+`path.repo`, and the source refuses a relative path that climbs.
+
+**ISM.** A transition condition the engine did not know was `_ => true`:
+`min_age` -- a typo for `min_index_age` -- ran the next state on the first
+tick, and the next state is `delete` as often as not. It is `false` now,
+and a policy naming a condition the engine does not evaluate is refused
+when it is written, with the plugin's message.
+
+**The image.** It bound every interface with security off by default. A
+node refuses to listen on a non-loopback address with security off unless
+the operator says so (`BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true`), which
+is what the OpenSearch image asks for as `DISABLE_SECURITY_PLUGIN`.
+
+Measured: a restricted user (`public*` read only) gets 403 on `secret`,
+on `public%2Csecret`, on `SELECT * FROM secret`, an item error on a
+`_mtermvectors` doc in `secret`, 403 on `_plugins/_knn` and `_ism`; with
+`do_not_fail_on_forbidden` on, `/_search`, `/*/_search`, `/public,secret/_search`
+and `/pub*,sec*/_search` each answer with `public` alone. Phase 1 398/398
+and the core corpus through the moved layer; the Dashboards suite with
+XSRF off.
+
+One thing found on the way, and worth writing down: two of the earlier
+runs "failed" because `curl -s $A` under zsh does not split an unquoted
+variable, so `-u admin:admin` arrived as one argument with a leading
+space. Forty minutes on a bug in the shell.
+

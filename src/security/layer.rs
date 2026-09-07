@@ -159,7 +159,7 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
                 && !a.starts_with("indices:admin/aliases/get")
         })
         .unwrap_or(false);
-    let (req, body_text) =
+    let (mut req, body_text) =
         if audit.quotes_bodies(admin_action, path_now.starts_with("/_plugins/_security/api/")) {
             buffered(req).await
         } else {
@@ -179,10 +179,19 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     let Some(action) = action_for(&method, &path) else {
         return run_as(caller, req, next).await;
     };
+    // the query languages name their index in the body, where this layer
+    // cannot see it: the handler judges that index itself, the way a bulk
+    // judges each item, and this layer only writes the request down
+    if path.starts_with("/_plugins/_sql") || path.starts_with("/_plugins/_ppl") {
+        audit.granted_privileges(&caller, &action, &info, &[], &[]);
+        return run_as(caller, req, next).await;
+    }
     let named = indices_of(&path);
     // every index the request turns out to touch, which the audit log records
     // and which is only known once the request has been classified
     let mut resolved: Vec<String>;
+    // the indices a partial grant narrows the request to
+    let mut narrowed: Option<Vec<String>> = None;
     // the guard must be gone before the handler is awaited
     let refusal = {
         let cfg = sec.config.read();
@@ -202,7 +211,16 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
             };
             resolved = indices.clone();
             match cfg.index_verdict(&caller, &action, &indices) {
-                Verdict::Allowed | Verdict::Partial(_) => None,
+                Verdict::Allowed => None,
+                // allowed for some of what was asked: the request is
+                // narrowed to those before it runs, which is what
+                // do_not_fail_on_forbidden means -- not that the rest is
+                // reached anyway
+                Verdict::Partial(granted) => {
+                    resolved = granted.clone();
+                    narrowed = Some(granted);
+                    None
+                }
                 Verdict::Denied { missing } => Some(missing),
             }
         }
@@ -210,6 +228,12 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     if let Some(missing) = refusal {
         audit.missing_privileges(&caller, &missing, &info, &named, &resolved);
         return no_permissions(&missing, &caller);
+    }
+    if let Some(granted) = narrowed {
+        if granted.is_empty() {
+            return no_permissions(&action, &caller);
+        }
+        narrow_request(&mut req, &named, &granted);
     }
     let admin_action = action.starts_with("indices:admin/")
         && !action.starts_with("indices:admin/get")
@@ -320,11 +344,46 @@ fn bad_headers_response() -> Response {
         .into_response()
 }
 
+/// The request's path rewritten to name only the indices it was granted:
+/// the first segment replaced where it named indices, or the granted
+/// list put in front where it named none (`/_search` over everything).
+fn narrow_request(req: &mut Request, named: &[String], granted: &[String]) {
+    let joined: String = granted
+        .iter()
+        .map(|g| {
+            percent_encoding::utf8_percent_encode(g, percent_encoding::NON_ALPHANUMERIC).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let uri = req.uri().clone();
+    let path = uri.path();
+    let rest = path.trim_start_matches('/');
+    let new_path = match named.is_empty() {
+        true => format!("/{joined}/{rest}"),
+        false => match rest.split_once('/') {
+            Some((_, tail)) => format!("/{joined}/{tail}"),
+            None => format!("/{joined}"),
+        },
+    };
+    let full = match uri.query() {
+        Some(q) => format!("{new_path}?{q}"),
+        None => new_path,
+    };
+    if let Ok(new_uri) = full.parse::<axum::http::Uri>() {
+        *req.uri_mut() = new_uri;
+    }
+}
+
 /// The index expression a path names, split on commas; nothing for
 /// paths that name no index.
 pub fn indices_of(path: &str) -> Vec<String> {
     let trimmed = path.trim_start_matches('/');
-    let first = trimmed.split('/').next().unwrap_or("");
+    // decoded first, as the handler will see it: `public%2Csecret` is two
+    // indices to the handler and must be two to the judge
+    let first = percent_encoding::percent_decode_str(trimmed.split('/').next().unwrap_or(""))
+        .decode_utf8_lossy()
+        .to_string();
+    let first = first.as_str();
     if first.is_empty() || (first.starts_with('_') && first != "_all") {
         return Vec::new();
     }
@@ -362,6 +421,28 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
     let rest: Vec<&str> = if has_index { segs[1..].to_vec() } else { segs.clone() };
     let tail = rest.first().copied().unwrap_or("");
     let m = method.as_str();
+    // a plugin's routes name their plugin first; none of them may run
+    // unjudged, so an unknown plugin is judged under its own name and a
+    // role that does not grant it does not reach it
+    if !has_index && tail == "_plugins" {
+        let plugin = rest.get(1).copied().unwrap_or("");
+        let a = match (plugin, m) {
+            // the query languages name their index in the body; the handler
+            // judges that index itself, and this judges the caller may
+            // search at all
+            ("_sql" | "_ppl", _) => "indices:data/read/search".to_string(),
+            ("_ism", "GET" | "HEAD") => "cluster:admin/opendistro/ism/policy/get".to_string(),
+            ("_ism", _) => "cluster:admin/opendistro/ism/policy/write".to_string(),
+            ("_knn", "GET" | "HEAD") => "cluster:admin/knn/stats".to_string(),
+            ("_knn", _) => "cluster:admin/knn/model/write".to_string(),
+            ("_query", "GET" | "HEAD") => {
+                "cluster:admin/opensearch/ql/datasources/read".to_string()
+            }
+            ("_query", _) => "cluster:admin/opensearch/ql/datasources/write".to_string(),
+            (other, _) => format!("cluster:admin/plugins/{}", other.trim_start_matches('_')),
+        };
+        return Some(a);
+    }
     let a = match (has_index, tail, m) {
         (false, "", _) => "cluster:monitor/main",
         (_, "_search", _) => "indices:data/read/search",

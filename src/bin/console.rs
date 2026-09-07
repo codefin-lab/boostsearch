@@ -39,6 +39,12 @@ struct Serving {
     addr: String,
     /// the referrers compressed answers may go to; empty for any
     compression_referrers: Vec<String>,
+    /// whether a request that changes something has to carry the
+    /// `osd-xsrf` header, which a page from another origin cannot add
+    xsrf: bool,
+    /// the engine paths the Dev Tools proxy carries, as regular
+    /// expressions; `console.proxyFilter` in the Node server
+    proxy_filter: Vec<regex::Regex>,
 }
 
 type Shared = Arc<Serving>;
@@ -89,12 +95,24 @@ async fn main() -> anyhow::Result<()> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+    // on unless the operator turns it off, as `server.xsrf.disableProtection`
+    // does in the Node server -- and its own suite needs it off
+    let xsrf = std::env::var("BOOSTSEARCH_CONSOLE_XSRF").map(|v| v != "false").unwrap_or(true);
+    let proxy_filter: Vec<regex::Regex> = std::env::var("BOOSTSEARCH_CONSOLE_PROXY_FILTER")
+        .unwrap_or_else(|_| ".*".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| regex::Regex::new(s).ok())
+        .collect();
     let console = Arc::new(Serving {
         console,
         engine: Engine::at(&engine_url),
         metrics: Metrics::default(),
         addr: addr.clone(),
         compression_referrers,
+        xsrf,
+        proxy_filter,
     });
     let routes: Router<Shared> = Router::new()
         .route("/", get(root))
@@ -191,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(console.clone(), compressed))
         .layer(axum::middleware::from_fn(cookies_checked))
+        .layer(axum::middleware::from_fn_with_state(console.clone(), xsrf_checked))
         .layer(axum::middleware::from_fn_with_state(console.clone(), counted))
         .with_state(console.clone());
 
@@ -1299,6 +1318,15 @@ async fn console_proxy(
         Some(_) => return bad_query("path", "Expected non-empty string"),
         None => return bad_query("path", "expected value of type [string] but got [undefined]"),
     };
+    // the paths the operator lets the page reach, and no others
+    if !serving.proxy_filter.iter().any(|re| re.is_match(&path)) {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "text/plain")],
+            format!("Error connecting to '{path}':\n\nUnable to send requests to that path."),
+        )
+            .into_response();
+    }
     // the engine's answer pretty-printed unless the caller said otherwise,
     // as the page shows it
     let mut path = format!("/{}", path.trim_start_matches('/'));
@@ -1364,6 +1392,27 @@ async fn opensearch_config(State(serving): State<Shared>) -> Response {
 /// What the server being replaced says about a path it does not serve.
 async fn not_found() -> Response {
     refused(Failed::of(404, "Not Found"))
+}
+
+/// A request that changes something has to say it came from the page: the
+/// `osd-xsrf` header (or `osd-version`), which a script on another origin
+/// cannot add to a request the browser will still send. Refused in the
+/// words the server being replaced uses.
+async fn xsrf_checked(
+    State(serving): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let safe = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let carried =
+        request.headers().contains_key("osd-xsrf") || request.headers().contains_key("osd-version");
+    if serving.xsrf && !safe && !carried {
+        return refused(Failed::of(400, "Request must contain the osd-xsrf header."));
+    }
+    next.run(request).await
 }
 
 /// A cookie header that cannot be read is refused before anything looks at
