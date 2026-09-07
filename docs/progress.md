@@ -3453,3 +3453,47 @@ thousand), and `courier:maxConcurrentShardRequests` at its default of none.
 An operator who set those in the Node server's configuration has nowhere to
 set them here yet.
 
+### 13.5 — The plugin routes the pages need, and a plain refusal for the rest
+
+What the plugins' server halves answer for the pages we serve.
+`src/console/sample_data.rs`: the three sample data sets — flights, web
+logs, e-commerce — listed with whether they are installed, installed (the
+index remade with its mapping, thirteen thousand documents read from the
+distribution's gzipped file and dated anew so that the data ends today with
+each Monday still a Monday, the twenty saved objects written over) and
+uninstalled. What is code in the server being replaced — the mappings, the
+saved objects, which fields are dates — is pinned to
+`console/sample_data.json` by `tools/osd_sample_data.js`; the data is read
+from the distribution. `src/console/usage.rs`: the DQL opt-in counter and
+the pages' usage reports, as counters in the console's index through one
+scripted update so that two pages counting at once both count; `/api/stats`
+in that route's spelling, with the cluster's id and what the server has been
+used for when asked at length. And three things of the server itself:
+answers compressed for a caller that takes them unless the page is embedded
+somewhere the operator did not list (`BOOSTSEARCH_CONSOLE_COMPRESSION_REFERRERS`),
+a cookie header that cannot be read refused with the reference's words, and
+a JSON 404 for every path nobody serves.
+
+Against `test/api_integration`: **146 of 166, none ours alone**, where the
+reference scores 140. Six pass here that fail against the reference: the
+management counts (13.3), compression by referrer, and installing the
+flights sample data. The twenty-two that fail here fail there too, and
+most of them are one thing: the reference has no `/api/telemetry/*` routes
+at all — the telemetry plugin is not in its front end and its server
+answers 404 — so a faithful replacement answers 404 too, and the suite's
+telemetry cases fail on both.
+
+**The gate counted what never ran as passing.** A case whose suite's hook
+fails never runs, and the runner lists it neither as passed nor failed;
+the baseline recorded only the failures, so such a case looked like one the
+reference passes, and a server that fails it looked worse than the
+reference. `tools/dashboards_gate.py` records the passes by name now, and
+a failure is ours alone only when the reference passed that case. The
+baseline was recorded again with the fix; the totals are what they were.
+
+Not carried: the `otel` sample data set, which a plugin registers rather
+than the home plugin; the usage collectors of every plugin (`/api/stats`
+reports the objects' counts, the DQL counters and the event counters, not
+the forty collectors' worth the reference reports); telemetry's own
+collection, which the reference does not serve either.
+

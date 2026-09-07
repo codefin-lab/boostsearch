@@ -21,11 +21,13 @@ pub mod metrics;
 pub mod migrate;
 pub mod migrations;
 pub mod pinned;
+pub mod sample_data;
 pub mod saved;
 pub mod search;
 pub mod settings;
 pub mod shell;
 pub mod urls;
+pub mod usage;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,6 +65,9 @@ pub struct Console {
     /// the shape the console's index should have, taken out of the pin once
     /// so that everything that may have to put it back has it
     pub mapping: Value,
+    /// the sample data sets the home page offers, as pinned by
+    /// `tools/osd_sample_data.js`; none where the pin is not there
+    pub sample_data: Vec<Value>,
     /// what this server calls itself, kept for as long as it runs
     ///
     /// The one it replaces keeps its across restarts, in a file beside its
@@ -113,7 +118,12 @@ impl Console {
         let anonymous_status = std::env::var("BOOSTSEARCH_CONSOLE_ANONYMOUS_STATUS")
             .map(|v| v != "false")
             .unwrap_or(true);
+        let sample_data: Vec<Value> = std::fs::read_to_string(pins.join("sample_data.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
         Ok(Console {
+            sample_data,
             home,
             pinned,
             base_path,

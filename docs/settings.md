@@ -94,6 +94,7 @@ a worse console.
 | `BOOSTSEARCH_CONSOLE_BASE_PATH` | the path everything is served under, for a console behind a proxy that gives it one. Empty by default. |
 | `BOOSTSEARCH_ENGINE` | the engine behind it, which is where everything the console knows is kept. Default `http://127.0.0.1:9200`; credentials may be given in the URL. |
 | `BOOSTSEARCH_CONSOLE_ANONYMOUS_STATUS` | whether `/api/status` and the status page answer without a sign-in. Default `true`, which is what the reference's own suite starts it with. |
+| `BOOSTSEARCH_CONSOLE_COMPRESSION_REFERRERS` | the hosts a page may be embedded from and still get compressed answers, separated by commas; `server.compression.referrerWhitelist` in the Node server. Empty by default, which compresses for every referrer. |
 | `BOOSTSEARCH_CONSOLE_OVERRIDE` | settings an operator fixes, as `key=value` pairs separated by commas. A reader is shown them as `isOverridden` and refused when they try to change one — an operator's decision is not a reader's to undo. A value is JSON where it reads as JSON and the text it is otherwise, so `false` is a boolean and `Asia/Bangkok` is a string. |
 
 The distribution's version decides which pinned contract is read from

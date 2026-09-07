@@ -56,7 +56,14 @@ def read(text):
         for line in text.splitlines()
         if "✖ fail: " in line
     ]
-    return totals, failed
+    # the cases that ran and passed, by name -- a case whose suite's hook
+    # failed never ran, and is neither passed nor failed
+    passed = [
+        line.split('"', 1)[1].rsplit('"', 1)[0]
+        for line in text.splitlines()
+        if "✓ pass" in line and line.count('"') >= 2
+    ]
+    return totals, failed, passed
 
 
 def main():
@@ -77,10 +84,20 @@ def main():
         print("  cd study/OpenSearch-Dashboards && yarn osd bootstrap")
         return 2
 
-    totals, failed = read(run(args.url, args.opensearch, args.node))
+    totals, failed, passed = read(run(args.url, args.opensearch, args.node))
 
     if args.write_baseline:
-        BASELINE.write_text(json.dumps({"totals": totals, "failing": failed}, indent=2) + "\n")
+        if not passed and not failed:
+            print("  the suite did not run at all -- nothing written; is the server there?")
+            return 2
+        BASELINE.write_text(json.dumps({
+            "what": "what the reference server does against its own suite: the cases "
+                    "that ran and failed, and the cases that ran and passed. A case in "
+                    "neither never ran, because a hook before it failed.",
+            "totals": totals,
+            "failing": failed,
+            "passing": passed,
+        }, indent=2) + "\n")
         print(f"  {totals['passing']} passing, {totals['failing']} failing, "
               f"{totals['pending']} pending -- written to {BASELINE}")
         return 0
@@ -89,8 +106,13 @@ def main():
     if BASELINE.exists():
         known = json.loads(BASELINE.read_text())
     reference = set(known.get("failing", []))
-    ours = [f for f in failed if f not in reference]
-    also = [f for f in failed if f in reference]
+    reference_passing = set(known.get("passing", []))
+    # a failure is ours alone when the reference passed that case; one the
+    # reference also failed, or never ran, is not ours
+    ours = [f for f in failed if f in reference_passing] if reference_passing else [
+        f for f in failed if f not in reference
+    ]
+    also = [f for f in failed if f not in ours]
 
     print(f"  {totals['passing']:3} passing   {totals['failing']:3} failing   "
           f"{totals['pending']:3} pending")
@@ -101,9 +123,12 @@ def main():
         print(f"    {f}")
     # a case the reference fails and we pass is worth saying out loud: either
     # we are better than it or the case is not measuring what it thinks
-    fixed = [f for f in reference if f not in failed]
+    fixed = [f for f in reference if f in passed]
     for f in fixed:
         print(f"    [passes here, fails against the reference] {f}")
+    never_ran = [f for f in passed if reference_passing and f not in reference_passing and f not in reference]
+    if never_ran:
+        print(f"  {len(never_ran):3} pass here that never ran against the reference (a hook failed there)")
     return 1 if ours else 0
 
 

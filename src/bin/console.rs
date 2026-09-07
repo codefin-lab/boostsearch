@@ -35,6 +35,10 @@ struct Serving {
     console: Console,
     engine: Engine,
     metrics: Metrics,
+    /// where this listens, for the stats route to say so
+    addr: String,
+    /// the referrers compressed answers may go to; empty for any
+    compression_referrers: Vec<String>,
 }
 
 type Shared = Arc<Serving>;
@@ -78,8 +82,20 @@ async fn main() -> anyhow::Result<()> {
 
     let build = console.pinned.build_number;
     let base = console.base_path.clone();
-    let console =
-        Arc::new(Serving { console, engine: Engine::at(&engine_url), metrics: Metrics::default() });
+    let compression_referrers: Vec<String> =
+        std::env::var("BOOSTSEARCH_CONSOLE_COMPRESSION_REFERRERS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    let console = Arc::new(Serving {
+        console,
+        engine: Engine::at(&engine_url),
+        metrics: Metrics::default(),
+        addr: addr.clone(),
+        compression_referrers,
+    });
     let routes: Router<Shared> = Router::new()
         .route("/", get(root))
         .route("/app/{app}", get(page))
@@ -138,6 +154,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/goto/{id}", get(goto))
         .route("/api/console/proxy", post(console_proxy))
         .route("/api/console/opensearch_config", get(opensearch_config))
+        .route("/api/opensearch-dashboards/dql_opt_in_stats", post(dql_opt_in_stats))
+        .route("/api/ui_metric/report", post(ui_metric_report))
+        .route("/api/stats", get(stats))
+        .route("/api/sample_data", get(sample_data_list))
+        .route("/api/sample_data/{id}", post(sample_data_install).delete(sample_data_uninstall))
         .route("/api/saved_objects/_bulk_get", post(bulk_get))
         .route("/api/saved_objects/_bulk_create", post(bulk_create))
         .route("/api/saved_objects/_bulk_update", axum::routing::put(bulk_update))
@@ -153,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
         base => Router::new().nest(base, routes).route("/", get(root)),
     };
     let app = routes
+        .fallback(not_found)
+        .layer(axum::middleware::from_fn_with_state(console.clone(), compressed))
+        .layer(axum::middleware::from_fn(cookies_checked))
         .layer(axum::middleware::from_fn_with_state(console.clone(), counted))
         .with_state(console.clone());
 
@@ -1300,4 +1324,262 @@ async fn console_proxy(
 
 async fn opensearch_config(State(serving): State<Shared>) -> Response {
     axum::Json(serde_json::json!({"host": serving.engine.host()})).into_response()
+}
+
+// ---- the plugin routes the pages need (13.5) --------------------------------
+
+/// What the server being replaced says about a path it does not serve.
+async fn not_found() -> Response {
+    refused(Failed::of(404, "Not Found"))
+}
+
+/// A cookie header that cannot be read is refused before anything looks at
+/// it, in the words the server being replaced uses.
+async fn cookies_checked(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(cookie) = request.headers().get(header::COOKIE) {
+        let text = cookie.to_str().unwrap_or("=");
+        let readable = text
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .all(|part| part.split_once('=').is_some_and(|(name, _)| !name.trim().is_empty()));
+        if !readable {
+            return refused(Failed::of(400, "Invalid cookie header"));
+        }
+    }
+    next.run(request).await
+}
+
+/// Answers compressed for a caller that takes them, unless the page asking
+/// is embedded somewhere the operator did not list.
+async fn compressed(
+    State(serving): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let wants_gzip = request
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|e| e.trim().starts_with("gzip")));
+    let referrer_allowed =
+        match request.headers().get(header::REFERER).and_then(|v| v.to_str().ok()) {
+            None => true,
+            Some(referrer) => {
+                serving.compression_referrers.is_empty() || {
+                    let host = referrer
+                        .split("://")
+                        .nth(1)
+                        .unwrap_or(referrer)
+                        .split(['/', ':', '?', '#'])
+                        .next()
+                        .unwrap_or("");
+                    serving.compression_referrers.iter().any(|h| h == host)
+                }
+            }
+        };
+    let response = next.run(request).await;
+    if !wants_gzip || !referrer_allowed || response.headers().contains_key(header::CONTENT_ENCODING)
+    {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return refused(Failed::of(500, "the answer could not be read back"));
+    };
+    // the server being replaced leaves anything under a kilobyte alone
+    if bytes.len() < 1024 {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    if encoder.write_all(&bytes).is_err() {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    let Ok(zipped) = encoder.finish() else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    parts.headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));
+    Response::from_parts(parts, Body::from(zipped))
+}
+
+async fn dql_opt_in_stats(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let Some(opt_in) = body.get("opt_in").and_then(|v| v.as_bool()) else {
+        let got = match body.get("opt_in") {
+            None | Some(Value::Null) => "undefined",
+            Some(Value::String(_)) => "string",
+            Some(Value::Number(_)) => "number",
+            Some(Value::Array(_)) => "array",
+            Some(Value::Object(_)) => "object",
+            Some(Value::Bool(_)) => "boolean",
+        };
+        return refused(Failed::of(
+            400,
+            format!("[request body.opt_in]: expected value of type [boolean] but got [{got}]"),
+        ));
+    };
+    on_engine(serving, move |s| boostsearch::console::usage::dql_opt_in(&saved_of(s), opt_in)).await
+}
+
+async fn ui_metric_report(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let Some(report) = body.get("report").cloned() else {
+        return refused(Failed::of(
+            400,
+            "[request body.report]: expected value of type [object] but got [undefined]",
+        ));
+    };
+    on_engine(serving, move |s| {
+        match boostsearch::console::usage::store_report(&saved_of(s), &report) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"})),
+            Err(e) if e.status == 400 => Err(e),
+            // a report that could not be kept is not the page's problem
+            Err(_) => Ok(serde_json::json!({"status": "fail"})),
+        }
+    })
+    .await
+}
+
+/// `/api/stats`: the process's numbers in this route's spelling, what the
+/// server is, and -- when asked at length -- the cluster's id and what the
+/// server has been used for.
+async fn stats(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let pairs = query_pairs(query);
+    let flag = |key: &str| -> Result<bool, Box<Response>> {
+        match pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()) {
+            None => Ok(false),
+            Some("" | "true") => Ok(true),
+            Some("false") => Ok(false),
+            Some(other) => Err(Box::new(bad_query(
+                key,
+                &format!(
+                    "types that failed validation:\n- [request query.{key}.0]: expected value to equal [] but got [{other}]\n- [request query.{key}.1]: expected value of type [boolean] but got [string]"
+                ),
+            ))),
+        }
+    };
+    let (extended, legacy, exclude_usage) =
+        match (flag("extended"), flag("legacy"), flag("exclude_usage")) {
+            (Ok(e), Ok(l), Ok(x)) => (e, l, x),
+            (Err(r), _, _) | (_, Err(r), _) | (_, _, Err(r)) => return *r,
+        };
+    for (key, _) in &pairs {
+        if !matches!(key.as_str(), "extended" | "legacy" | "exclude_usage") {
+            return bad_query(key, "definition for this key is missing");
+        }
+    }
+    on_engine(serving, move |s| {
+        let reachable = s.engine.reachable();
+        let (host, port) = s.addr.rsplit_once(':').unwrap_or((s.addr.as_str(), ""));
+        let mut metrics = s.metrics.report();
+        if let Some(m) = metrics.as_object_mut() {
+            m.insert(
+                "opensearchDashboards".into(),
+                serde_json::json!({
+                    "uuid": s.console.uuid(),
+                    "name": "boostsearch-console",
+                    "index": boostsearch::console::engine::INDEX,
+                    "host": host,
+                    "locale": "en",
+                    "transport_address": format!("{host}:{port}"),
+                    "version": s.console.pinned.version,
+                    "snapshot": false,
+                    "status": if reachable.is_ok() { "green" } else { "red" },
+                }),
+            );
+        }
+        let mut out = boostsearch::console::usage::api_field_names(metrics);
+        if extended {
+            let cluster_uuid = reachable
+                .ok()
+                .and_then(|info| info.get("cluster_uuid").cloned())
+                .unwrap_or(Value::Null);
+            let usage = match exclude_usage {
+                true => serde_json::json!({}),
+                false => boostsearch::console::usage::usage(&saved_of(s)),
+            };
+            if legacy {
+                // the old shape: the server's own usage spread at the top,
+                // names as the collectors spell them
+                let mut flat = serde_json::Map::new();
+                if let Some(usage) = usage.as_object() {
+                    for (key, value) in usage {
+                        if key == "opensearchDashboards" {
+                            if let Some(inner) = value.as_object() {
+                                flat.extend(inner.clone());
+                            }
+                        } else {
+                            flat.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                out["usage"] = Value::Object(flat);
+                out["clusterUuid"] = cluster_uuid;
+            } else {
+                out["usage"] = boostsearch::console::usage::api_field_names(usage);
+                out["cluster_uuid"] = cluster_uuid;
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
+async fn sample_data_list(State(serving): State<Shared>) -> Response {
+    on_engine(serving, move |s| {
+        Ok(Value::Array(boostsearch::console::sample_data::list(
+            &s.engine,
+            &saved_of(s),
+            &s.console.sample_data,
+        )))
+    })
+    .await
+}
+
+fn sample_set<'a>(serving: &'a Serving, id: &str) -> Option<&'a Value> {
+    serving.console.sample_data.iter().find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
+}
+
+async fn sample_data_install(
+    State(serving): State<Shared>,
+    Path(id): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let now = query_pairs(query).into_iter().find(|(k, _)| k == "now").map(|(_, v)| v);
+    on_engine(serving, move |s| {
+        let Some(set) = sample_set(s, &id) else { return Err(Failed::of(404, "Not Found")) };
+        boostsearch::console::sample_data::install(
+            &s.engine,
+            &saved_of(s),
+            &s.console.home,
+            set,
+            now.as_deref(),
+        )
+    })
+    .await
+}
+
+async fn sample_data_uninstall(State(serving): State<Shared>, Path(id): Path<String>) -> Response {
+    let done = tokio::task::spawn_blocking({
+        let serving = serving.clone();
+        move || {
+            let Some(set) = sample_set(&serving, &id) else {
+                return Err(Failed::of(404, "Not Found"));
+            };
+            boostsearch::console::sample_data::uninstall(&serving.engine, &saved_of(&serving), set)
+        }
+    })
+    .await;
+    match done {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => refused(e),
+        Err(e) => refused(Failed::of(500, format!("{e}"))),
+    }
 }

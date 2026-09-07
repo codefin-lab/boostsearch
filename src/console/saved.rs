@@ -261,6 +261,55 @@ impl<'a> Saved<'a> {
         Ok(Prepared { kind: writing.kind, id, document, source, overwrite: writing.overwrite })
     }
 
+    /// A counter in an object gone up, the object made when it is not there.
+    ///
+    /// One update with a script, so that two pages counting at once both
+    /// count: the engine runs the two scripts one after the other, where two
+    /// reads and two writes would lose one.
+    pub fn increment_counter(
+        &self,
+        kind: &str,
+        id: &str,
+        field: &str,
+        by: i64,
+    ) -> Result<Value, Failed> {
+        let document = document_id(kind, id);
+        let now = super::now();
+        let body = json!({
+            "script": {
+                "source": "if (ctx._source[params.type][params.counterFieldName] == null) { \
+                           ctx._source[params.type][params.counterFieldName] = params.count; } \
+                           else { ctx._source[params.type][params.counterFieldName] += params.count; } \
+                           ctx._source.updated_at = params.time;",
+                "lang": "painless",
+                "params": {"count": by, "time": now, "type": kind, "counterFieldName": field},
+            },
+            "upsert": {
+                "type": kind,
+                kind: {field: by},
+                "updated_at": now,
+            },
+        });
+        let path = format!("/{INDEX}/_update/{document}?refresh=wait_for&require_alias=true");
+        let mut found = self.engine.call("POST", &path, Some(&body))?;
+        match refused_for_the_index(&found) {
+            Refusal::NoIndex => {
+                self.make_it_right()?;
+                found = self.engine.call("POST", &path, Some(&body))?;
+            }
+            Refusal::NotAnAlias => {
+                let plain = format!("/{INDEX}/_update/{document}?refresh=wait_for");
+                found = self.engine.call("POST", &plain, Some(&body))?;
+            }
+            Refusal::None => {}
+        }
+        if let Some(what) = found.pointer("/error/type").and_then(|v| v.as_str()) {
+            let reason = found.pointer("/error/reason").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(Failed::of(400, format!("{reason}: {what}")));
+        }
+        self.get(kind, id)
+    }
+
     /// Change an object that is already there.
     ///
     /// A change is of the attributes it names and nothing else, so a page that

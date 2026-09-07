@@ -251,6 +251,7 @@ mod tests {
             overrides: Default::default(),
             anonymous_status: true,
             mapping: Default::default(),
+            sample_data: Default::default(),
             uuid: "test".into(),
             plugin_dirs: Default::default(),
         }
