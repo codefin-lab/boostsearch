@@ -16,6 +16,7 @@ pub mod assets;
 pub mod engine;
 pub mod fields;
 pub mod filter;
+pub mod ism;
 pub mod management;
 pub mod metrics;
 pub mod migrate;

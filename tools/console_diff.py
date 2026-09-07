@@ -46,7 +46,12 @@ def shell(url):
                    re.search(r"__osdPublicPath__ = (\{.*?\});", boot, re.S).group(1))
     )
     block = re.search(r"\[\s*((?:'[^']*',?\s*)+)\]\s*,\s*function", boot)
-    return meta, paths, re.findall(r"'([^']+)'", block.group(1))
+    # the rest of the bootstrap, with the two lists that are compared as
+    # sets taken out, is compared as text: the loader, the theme choice and
+    # the order of things are the front end's contract too
+    rest = boot.replace(re.search(r"__osdPublicPath__ = (\{.*?\});", boot, re.S).group(1), "{}")
+    rest = rest.replace(block.group(1), "")
+    return meta, paths, re.findall(r"'([^']+)'", block.group(1)), rest
 
 
 def compare(what, ours, theirs, path=""):
@@ -92,8 +97,14 @@ def main():
     args = ap.parse_args()
     ours, theirs = args.ours.rstrip("/"), args.reference.rstrip("/")
 
-    our_meta, our_paths, our_bundles = shell(ours)
-    ref_meta, ref_paths, ref_bundles = shell(theirs)
+    our_meta, our_paths, our_bundles, our_boot = shell(ours)
+    ref_meta, ref_paths, ref_bundles, ref_boot = shell(theirs)
+    if our_boot != ref_boot:
+        import difflib
+        lines = [l for l in difflib.unified_diff(ref_boot.splitlines(), our_boot.splitlines(),
+                                                 "reference bootstrap.js", "our bootstrap.js", lineterm="", n=0)
+                 if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]
+        failures.append("bootstrap.js differs from the reference's text:\n      " + "\n      ".join(lines[:12]))
 
     # the settings somebody has changed are live state, and the overrides are
     # what each server was started with; neither is the contract

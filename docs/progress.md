@@ -3497,3 +3497,63 @@ reports the objects' counts, the DQL counters and the event counters, not
 the forty collectors' worth the reference reports); telemetry's own
 collection, which the reference does not serve either.
 
+### 13.6 — The gate
+
+Every flow Phase 7.1 drove, driven again through our server with the front
+end unchanged, against a BoostSearch node with a 500-line index: an index
+pattern made in the management page (the fields resolved through
+`_fields_for_wildcard`, the pattern through `resolve_index`); **Discover**
+drawing its sidebar, its histogram and its table, 500 of 500; the
+**Visualize** editor drawing a count and then a terms bucket over
+`method.keyword`, saved; a **dashboard** made from it, saved, listed, and
+loaded again by reference; the **Saved Objects** page listing, inspecting,
+showing a dashboard's relationships and exporting everything; **Index
+Management** listing the indices with their health, counts and sizes; and
+**Dev Tools** sending a search through the proxy with the reference's own
+autocomplete.
+
+What driving it found, none of it in the API suite's reach:
+
+  - **The bootstrap was a paraphrase.** `bootstrap.js` chose its
+    stylesheets from a pinned list; the reference chooses them at load
+    time from the theme tag `startup.js` set -- the theme's own sheet, the
+    KUI sheet and the legacy theme, three that were never asked for -- and
+    every page drew without a style. `console_diff` had compared two lists
+    out of the script and called the rest the same. The bootstrap is the
+    reference's text now, to the character, with the theme maps pinned;
+    the diff tool compares the whole script.
+  - **A plugin's server half.** Index Management is a plugin with a server
+    of its own, and its page asks it for the index listing and for any
+    engine call by the old client's name (`apiCaller`). `src/console/ism.rs`
+    answers both: the listing as the plugin computes it, and the
+    vocabulary -- forty names -- as the requests they stand for.
+  - **Four core routes the suite never touches:** `resolve_index`,
+    `preview_scripted_field`, the home page's `hits_status`, and the Dev
+    Tools' `api_server`, whose 144 KB of endpoint descriptions are pinned
+    from the reference along with the tutorials.
+  - **Plugin assets** (`/plugins/{id}/assets/…`), the KUI stylesheet under
+    `/node_modules/@osd/ui-framework/dist/`, and a two-segment app path,
+    which the router refused.
+  - **`opensearch-with-long-numerals`** is Discover's name for the search
+    strategy; it is the same strategy.
+  - **The engine answered `GET /_aliases` with 501.** The Dev Tools ask it
+    for their autocomplete. Routed like `GET /_alias`, which it is.
+
+The gate, measured: `test/api_integration` **146 of 166, none ours alone**
+(the reference: 140); `tools/console_diff.py`: the shell and the bootstrap
+are the reference's; `tools/dashboards_check.py`: six of six. **Resident
+memory 14 MiB** after the flows against the Node server's 223 MiB;
+**ready in 45 ms** against the 3.5 seconds the Node server's container takes from restart to a status answer (the plan's "thirty" was a cold start on a slower machine; this is the warm one, and the ratio is what it is).
+
+Not carried, and known: `/api/dataconnections` (the observability plugin's
+server, asked on every page, answered 404 -- the page shrugs), the rest of
+the Index Management plugin's own routes (policies, rollups, transforms,
+snapshots), and every other plugin's server half. They are the plugins'
+work, and Phase 13 was the core's.
+
+**Phase 13 closed.** A console that is the unchanged OpenSearch Dashboards
+front end on a Rust server: the shell, the settings, the saved objects and
+their migrations, the searches, the sample data, and what the pages ask
+of the core plugins. 43 days planned; the number that matters is at the
+top of this section.
+

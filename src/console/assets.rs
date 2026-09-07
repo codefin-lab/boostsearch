@@ -45,6 +45,21 @@ impl Console {
         self.file(&base, file, accepts)
     }
 
+    /// The file a URL under `/plugins/{id}/assets/…` names: what a plugin
+    /// ships beside its bundles and shows on its own pages -- the home
+    /// page's illustrations, the sample data's preview images.
+    pub fn plugin_asset(&self, id: &str, rest: &str, accepts: &str) -> Option<Served> {
+        let dir = self.plugin_dirs.get(id)?.join("public/assets");
+        self.file(&dir, rest, accepts)
+    }
+
+    /// The file a URL under `/node_modules/@osd/ui-framework/dist/…` names:
+    /// the one directory of a distribution's `node_modules` the browser is
+    /// sent to, for the theme's stylesheet.
+    pub fn ui_framework(&self, rest: &str, accepts: &str) -> Option<Served> {
+        self.file(&self.home.join("node_modules/@osd/ui-framework/dist"), rest, accepts)
+    }
+
     /// The file a URL under `/ui/…` names: the favicons, the logos, the fonts
     /// and the two legacy themes.
     pub fn ui_asset(&self, rest: &str, accepts: &str) -> Option<Served> {

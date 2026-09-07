@@ -38,6 +38,12 @@ pub struct Pinned {
     pub bundles: Vec<String>,
     #[serde(rename = "styleSheets")]
     pub style_sheets: Vec<String>,
+    /// the theme stylesheet for each theme version and mode, chosen by the
+    /// bootstrap from the tag the startup script set
+    #[serde(rename = "themeCss", default)]
+    pub theme_css: Value,
+    #[serde(rename = "kuiCss", default)]
+    pub kui_css: Value,
     /// the page around the two elements: the fonts, the favicons, the loading
     /// markup and the two scripts. The same bytes for every request, so they
     /// are carried rather than written again
@@ -63,6 +69,12 @@ pub struct Pinned {
     /// what the management page shows for each type: the icon, where to edit
     #[serde(rename = "managementMeta")]
     pub management_meta: std::collections::BTreeMap<String, Value>,
+    /// the engine's API as the Dev Tools console autocompletes it
+    #[serde(rename = "devToolsApi", default)]
+    pub dev_tools_api: Value,
+    /// the tutorials the home page lists
+    #[serde(default)]
+    pub tutorials: Value,
 }
 
 impl Pinned {

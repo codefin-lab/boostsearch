@@ -104,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/startup.js", get(startup))
         .route(&format!("/{build}/bundles/{{*rest}}"), get(bundle))
         .route("/ui/{*rest}", get(ui_asset))
+        .route("/plugins/{id}/assets/{*rest}", get(plugin_asset))
+        .route("/node_modules/@osd/ui-framework/dist/{*rest}", get(ui_framework))
         .route("/translations/{locale}", get(translations))
         .route("/api/status", get(status))
         .route("/api/core/capabilities", post(capabilities))
@@ -157,6 +159,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/opensearch-dashboards/dql_opt_in_stats", post(dql_opt_in_stats))
         .route("/api/ui_metric/report", post(ui_metric_report))
         .route("/api/stats", get(stats))
+        .route("/internal/index-pattern-management/resolve_index/{query}", get(resolve_index))
+        .route(
+            "/internal/index-pattern-management/preview_scripted_field",
+            post(preview_scripted_field),
+        )
+        .route("/api/home/hits_status", post(hits_status))
+        .route("/api/opensearch-dashboards/home/tutorials", get(tutorials))
+        .route("/api/console/api_server", get(dev_tools_api))
+        .route("/api/ism/_indices", get(ism_indices))
+        .route("/api/ism/_data_streams", get(ism_data_streams))
+        .route("/api/ism/apiCaller", post(ism_api_caller))
+        .route("/api/ism/accountInfo", post(ism_api_caller))
         .route("/api/sample_data", get(sample_data_list))
         .route("/api/sample_data/{id}", post(sample_data_install).delete(sample_data_uninstall))
         .route("/api/saved_objects/_bulk_get", post(bulk_get))
@@ -217,7 +231,7 @@ fn redirect(to: &str) -> Response {
 
 /// Every application is the same page. Which one it is is in the URL, and the
 /// front end reads it from there.
-async fn page(State(serving): State<Shared>, _app: Path<String>) -> Response {
+async fn page(State(serving): State<Shared>) -> Response {
     // the settings are read for the page rather than fetched by it: a console
     // that drew itself with the default theme and then redrew with the chosen
     // one would flash white at every reader who did not want it. An engine
@@ -276,6 +290,22 @@ async fn bundle(
     // a bundle's name carries the build it came from, so it can be kept for
     // as long as the reader likes: a new build asks for a different URL
     served(console.console.bundle(&rest, accepts(&headers)), "public, max-age=31536000")
+}
+
+async fn ui_framework(
+    State(console): State<Shared>,
+    Path(rest): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    served(console.console.ui_framework(&rest, accepts(&headers)), "public, max-age=3600")
+}
+
+async fn plugin_asset(
+    State(console): State<Shared>,
+    Path((id, rest)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    served(console.console.plugin_asset(&id, &rest, accepts(&headers)), "public, max-age=3600")
 }
 
 async fn ui_asset(
@@ -1134,7 +1164,10 @@ async fn search_strategy(
 ) -> Response {
     let strategy =
         params.iter().find(|(k, _)| k == "strategy").map(|(_, v)| v.clone()).unwrap_or_default();
-    if strategy != "opensearch" {
+    // the second name is the same strategy with the answer's long numbers
+    // kept whole on the way to the browser; what goes to the engine and
+    // what comes back is the same
+    if strategy != "opensearch" && strategy != "opensearch-with-long-numerals" {
         return refused(Failed::of(404, format!("Search strategy {strategy} not found")));
     }
     let body = body.0;
@@ -1233,7 +1266,7 @@ async fn goto(State(serving): State<Shared>, Path(id): Path<String>) -> Response
             };
             (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
         }
-        Ok(Ok((_, true))) => page(State(serving), Path("goto".to_string())).await,
+        Ok(Ok((_, true))) => page(State(serving)).await,
         Ok(Err(e)) => refused(e),
         Err(e) => refused(Failed::of(500, format!("{e}"))),
     }
@@ -1582,4 +1615,188 @@ async fn sample_data_uninstall(State(serving): State<Shared>, Path(id): Path<Str
         Ok(Err(e)) => refused(e),
         Err(e) => refused(Failed::of(500, format!("{e}"))),
     }
+}
+
+// ---- the Index Management plugin's server half ------------------------------
+
+async fn ism_indices(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let pairs = query_pairs(query);
+    on_engine(serving, move |s| Ok(boostsearch::console::ism::indices(&s.engine, &pairs))).await
+}
+
+async fn ism_data_streams(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let search = query_pairs(query).into_iter().find(|(k, _)| k == "search").map(|(_, v)| v);
+    on_engine(serving, move |s| {
+        Ok(boostsearch::console::ism::data_streams(&s.engine, search.as_deref()))
+    })
+    .await
+}
+
+/// One call by the old client's name, from the body or -- for a caller
+/// that sent none -- the query string.
+async fn ism_api_caller(
+    State(serving): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> Response {
+    let asked: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            let pairs = query_pairs(query);
+            let value = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+            serde_json::json!({
+                "endpoint": value("endpoint"),
+                "data": value("data").and_then(|d| serde_json::from_str::<Value>(&d).ok()).unwrap_or(Value::Null),
+            })
+        }
+    };
+    let endpoint = asked.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let data = asked.get("data").cloned().unwrap_or(Value::Null);
+    on_engine(serving, move |s| {
+        if endpoint.is_empty() {
+            return Ok(
+                serde_json::json!({"ok": false, "error": "Expected non-empty string on endpoint"}),
+            );
+        }
+        Ok(boostsearch::console::ism::api_caller(&s.engine, &endpoint, &data))
+    })
+    .await
+}
+
+// ---- the rest of what the core pages ask their own plugins' servers -------
+
+/// The engine's answer carried back as the pages' search routes carry
+/// theirs: the body on success, `{message, attributes: {error}}` otherwise.
+fn carried(answer: boostsearch::console::engine::Answer) -> Result<Value, Failed> {
+    let found: Value = serde_json::from_slice(&answer.body)
+        .map_err(|e| Failed::of(502, format!("the engine's answer could not be read: {e}")))?;
+    if answer.status >= 300 {
+        let message = found
+            .pointer("/error/reason")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| found.to_string());
+        return Err(Failed::of(answer.status, message)
+            .with_error(found.get("error").cloned().unwrap_or(Value::Null)));
+    }
+    Ok(found)
+}
+
+async fn resolve_index(
+    State(serving): State<Shared>,
+    Path(query): Path<String>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+) -> Response {
+    let expand =
+        query_pairs(raw).into_iter().find(|(k, _)| k == "expand_wildcards").map(|(_, v)| v);
+    if let Some(e) = &expand
+        && !matches!(e.as_str(), "all" | "open" | "closed" | "hidden" | "none")
+    {
+        return bad_query(
+            "expand_wildcards",
+            &format!("expected value to equal [all] but got [{e}]"),
+        );
+    }
+    on_engine(serving, move |s| {
+        let mut path = format!(
+            "/_resolve/index/{}",
+            percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC)
+        );
+        if let Some(e) = expand {
+            path.push_str(&format!("?expand_wildcards={e}"));
+        }
+        carried(s.engine.raw("GET", &path, b"", "application/json")?)
+    })
+    .await
+}
+
+async fn preview_scripted_field(
+    State(serving): State<Shared>,
+    body: axum::Json<Value>,
+) -> Response {
+    let body = body.0;
+    let (Some(index), Some(name), Some(script)) = (
+        body.get("index").and_then(|v| v.as_str()).map(String::from),
+        body.get("name").and_then(|v| v.as_str()).map(String::from),
+        body.get("script").and_then(|v| v.as_str()).map(String::from),
+    ) else {
+        return refused(Failed::of(
+            400,
+            "[request body.index]: expected value of type [string] but got [undefined]",
+        ));
+    };
+    let query = body.get("query").cloned().unwrap_or_else(|| serde_json::json!({"match_all": {}}));
+    let fields =
+        body.get("additionalFields").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    on_engine(serving, move |s| {
+        let mut search = serde_json::json!({
+            "size": 10,
+            "timeout": "30s",
+            "query": query,
+            "script_fields": {name: {"script": {"lang": "painless", "source": script}}},
+        });
+        if !fields.is_empty() {
+            search["_source"] = Value::Array(fields);
+        }
+        let path = format!(
+            "/{}/_search",
+            percent_encoding::utf8_percent_encode(&index, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+                .replace("%2C", ",")
+                .replace("%2A", "*")
+        );
+        carried(s.engine.raw("POST", &path, search.to_string().as_bytes(), "application/json")?)
+    })
+    .await
+}
+
+/// Whether an index has anything in it, for the home page's "add data"
+/// step: one hit asked for, and how many came back.
+async fn hits_status(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
+    let (Some(index), Some(query)) = (
+        body.get("index").and_then(|v| v.as_str()).map(String::from),
+        body.get("query").filter(|q| q.is_object()).cloned(),
+    ) else {
+        return refused(Failed::of(
+            400,
+            "[request body.index]: expected value of type [string] but got [undefined]",
+        ));
+    };
+    on_engine(serving, move |s| {
+        let path = format!(
+            "/{}/_search",
+            percent_encoding::utf8_percent_encode(&index, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+                .replace("%2C", ",")
+                .replace("%2A", "*")
+        );
+        let search = serde_json::json!({"size": 1, "query": query});
+        let found = carried(s.engine.raw(
+            "POST",
+            &path,
+            search.to_string().as_bytes(),
+            "application/json",
+        )?)
+        .map_err(|e| Failed::of(400, e.message))?;
+        let count =
+            found.pointer("/hits/hits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        Ok(serde_json::json!({"count": count}))
+    })
+    .await
+}
+
+async fn tutorials(State(serving): State<Shared>) -> Response {
+    let pinned = &serving.console.pinned.tutorials;
+    axum::Json(if pinned.is_null() { serde_json::json!([]) } else { pinned.clone() })
+        .into_response()
+}
+
+async fn dev_tools_api(State(serving): State<Shared>) -> Response {
+    axum::Json(serving.console.pinned.dev_tools_api.clone()).into_response()
 }

@@ -204,7 +204,7 @@ instead of most of a minute and holds tens of megabytes instead of hundreds.
 | 13.3b | The migrations that change the *documents*: every type's own chain, run over an object written by an older console | 10 |
 | 13.4 | What the pages ask for: index patterns, `_fields_for_wildcard`, the internal search endpoints, the Dev Tools proxy, short URLs -- done, 130/166 | 5 |
 | 13.5 | The plugin routes the pages we answer for need; a plain refusal for the rest -- done, 146/166, none ours alone | 4 |
-| 13.6 | The gate: every Phase 7.1 flow, through our server, against the same browser | 4 |
+| 13.6 | The gate: every Phase 7.1 flow, through our server, against the same browser -- done; 146/166, 14 MiB, ready in 45 ms | 4 |
 
 Gate: `tools/dashboards_gate.py` -- OpenSearch Dashboards' own
 `test/api_integration`, 166 cases -- with no failure our server has that the

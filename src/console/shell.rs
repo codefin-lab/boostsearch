@@ -85,9 +85,31 @@ impl Console {
             .map(|(name, path)| (name.clone(), json!(self.at(path))))
             .collect();
         let bundles: Vec<String> =
-            self.pinned.bundles.iter().map(|b| format!("'{}'", self.at(b))).collect();
-        let styles: Vec<String> =
-            self.pinned.style_sheets.iter().map(|s| format!("'{}'", self.at(s))).collect();
+            self.pinned.bundles.iter().map(|b| format!("        '{}',", self.at(b))).collect();
+        // the theme maps, as the reference writes them; a pin from before
+        // they were pinned gets the ones every 3.x distribution ships
+        let theme_css = match self.pinned.theme_css.is_object() {
+            true => self.pinned.theme_css.clone(),
+            false => json!({
+                "v7": {"light": "osd-ui-shared-deps.v7.light.css", "dark": "osd-ui-shared-deps.v7.dark.css"},
+                "v8": {"light": "osd-ui-shared-deps.v8.light.css", "dark": "osd-ui-shared-deps.v8.dark.css"},
+                "v9": {"light": "osd-ui-shared-deps.v9.light.css", "dark": "osd-ui-shared-deps.v9.dark.css"},
+            }),
+        };
+        let kui_css = match self.pinned.kui_css.is_object() {
+            true => self.pinned.kui_css.clone(),
+            false => json!({
+                "v7": {"dark": "kui_dark.css", "light": "kui_light.css"},
+                "v8": {"dark": "kui_next_dark.css", "light": "kui_next_light.css"},
+                "v9": {"dark": "kui_v9_dark.css", "light": "kui_v9_light.css"},
+            }),
+        };
+        let shared = self.at(&format!("/{}/bundles/osd-ui-shared-deps/", self.pinned.build_number));
+        let kui = self.at("/node_modules/@osd/ui-framework/dist/");
+        let ui = self.at("/ui/");
+        // this is the reference's own bootstrap, kept to the character where
+        // the front end could tell: the loader it defines, the order it loads
+        // in, the theme it chooses from the tag the startup script set
         format!(
             r#"var osdCsp = JSON.parse(document.querySelector('osd-csp').getAttribute('data'));
 window.__osdStrictCsp__ = osdCsp.strictCsp;
@@ -101,7 +123,10 @@ window.__osdBundles__ = (function osdBundlesLoader() {{
     if (has(key)) {{
       throw new Error('__osdBundles__ already has a module defined for "' + key + '"');
     }}
-    modules[key] = {{ bundleRequire: bundleRequire, bundleModuleKey: bundleModuleKey }};
+    modules[key] = {{
+      bundleRequire,
+      bundleModuleKey
+    }};
   }}
   function get(key) {{
     if (!has(key)) {{
@@ -109,7 +134,11 @@ window.__osdBundles__ = (function osdBundlesLoader() {{
     }}
     return modules[key].bundleRequire(modules[key].bundleModuleKey);
   }}
-  return {{ has: has, define: define, get: get }};
+  return {{
+    has: has,
+    define: define,
+    get: get
+  }};
 }})();
 
 if (window.__osdStrictCsp__ && window.__osdCspNotEnforced__) {{
@@ -119,54 +148,98 @@ if (window.__osdStrictCsp__ && window.__osdCspNotEnforced__) {{
   if (!window.__osdCspNotEnforced__ && window.console) {{
     window.console.log("^ A single error about an inline script not firing due to content security policy is expected!");
   }}
+
+  var themeCssDistFilenames = {theme_css};
+  var kuiCssDistFilenames = {kui_css};
+
+  var isDarkMode = window.__osdThemeTag__.endsWith('dark');
+  var themeMode = isDarkMode ? 'dark' : 'light';
+  var themeVersion = window.__osdThemeTag__.replace(/(light|dark)$/, '');
+  if (!themeCssDistFilenames[themeVersion]) {{
+    themeVersion = 'v8'; // this default should only be needed by tests
+  }}
+
   var loadingMessage = document.getElementById('osd_loading_message');
   loadingMessage.style.display = 'flex';
 
-  window.onload = function () {{
-    var styleSheetPaths = [{styles}];
+  var styleSheetPaths = [
+    '{shared}osd-ui-shared-deps.css',
+    '{shared}' + themeCssDistFilenames[themeVersion][themeMode],
+    '{kui}' + kuiCssDistFilenames[themeVersion][themeMode],
+    '{ui}legacy_' + themeMode + '_theme.css',
+  ];
 
+  window.onload = function () {{
+    function failure() {{
+      // make subsequent calls to failure() noop
+      failure = function () {{}};
+
+      var err = document.createElement('h1');
+      err.style['color'] = 'white';
+      err.style['font-family'] = 'monospace';
+      err.style['text-align'] = 'center';
+      err.style['background'] = '#F44336';
+      err.style['padding'] = '25px';
+      err.innerText = document.querySelector('[data-error-message]').dataset.errorMessage;
+
+      document.body.innerHTML = err.outerHTML;
+    }}
+
+    var stylesheetTarget = document.querySelector('head meta[name="add-styles-here"]')
     function loadStyleSheet(url, cb) {{
       var dom = document.createElement('link');
       dom.rel = 'stylesheet';
       dom.type = 'text/css';
       dom.href = url;
-      dom.addEventListener('error', cb);
+      dom.addEventListener('error', failure);
       dom.addEventListener('load', cb);
-      document.head.appendChild(dom);
+      document.head.insertBefore(dom, stylesheetTarget);
+    }}
+
+    var scriptsTarget = document.querySelector('head meta[name="add-scripts-here"]')
+    function loadScript(url, cb) {{
+      var dom = document.createElement('script');
+      dom.async = false;
+      dom.src = url;
+      dom.addEventListener('error', failure);
+      dom.addEventListener('load', cb);
+      document.head.insertBefore(dom, scriptsTarget);
     }}
 
     function load(urls, cb) {{
       var pending = urls.length;
       urls.forEach(function (url) {{
-        var dom;
-        if (url.slice(-4) === '.css') {{
-          loadStyleSheet(url, done);
-          return;
-        }}
-        dom = document.createElement('script');
-        dom.setAttribute('src', url);
-        dom.addEventListener('error', done);
-        dom.addEventListener('load', done);
-        document.head.appendChild(dom);
-        function done() {{
+        var innerCb = function () {{
           pending = pending - 1;
           if (pending === 0 && typeof cb === 'function') {{
             cb();
           }}
         }}
+
+        if (typeof url !== 'string') {{
+          load(url, innerCb);
+        }} else if (url.slice(-4) === '.css') {{
+          loadStyleSheet(url, innerCb);
+        }} else {{
+          loadScript(url, innerCb);
+        }}
       }});
     }}
 
-    load([{bundles}], function () {{
+    load([
+{bundles}
+    ], function () {{
       __osdBundles__.get('entry/core/public').__osdBootstrap__();
+
       load(styleSheetPaths);
     }});
-  }};
+  }}
 }}
 "#,
             paths = Value::Object(paths),
-            styles = styles.join(", "),
-            bundles = bundles.join(",\n        "),
+            theme_css = theme_css,
+            kui_css = kui_css,
+            bundles = bundles.join("\n"),
         )
     }
 

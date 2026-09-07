@@ -142,6 +142,12 @@ def probe_types(url, types):
     return versions, meta
 
 
+def fetch_json(url):
+    """One GET, read as JSON."""
+    with urllib.request.urlopen(url, timeout=30) as answer:
+        return json.loads(answer.read())
+
+
 def capabilities(url):
     """What a caller may do, with the part that depends on the request left out."""
     request = urllib.request.Request(
@@ -197,6 +203,10 @@ def main():
                                                  re.S).group(1))),
         "bundles": bundles_of(boot),
         "styleSheets": re.findall(r"'(/[^']*\.css)'", boot),
+        # which theme stylesheet goes with which theme tag: the bootstrap
+        # picks at load time from the tag `startup.js` set
+        "themeCss": json.loads(re.search(r"var themeCssDistFilenames = (\{.*?\});", boot).group(1)),
+        "kuiCss": json.loads(re.search(r"var kuiCssDistFilenames = (\{.*?\});", boot).group(1)),
         # The page around the two elements: the fonts, the favicons, the
         # loading markup and the two scripts. It is not behaviour either --
         # it is the same bytes for every request but the metadata in the
@@ -227,6 +237,11 @@ def main():
         # plugin that owns the type, so it is asked the same way -- by making
         # one and looking at what came back.
         "managementMeta": probed[1],
+        # what the Dev Tools console autocompletes from: the engine's API as
+        # the console plugin describes it, and the home page's tutorials --
+        # both compiled into the server, both data
+        "devToolsApi": fetch_json(args.url + "/api/console/api_server?apis=opensearch"),
+        "tutorials": fetch_json(args.url + "/api/opensearch-dashboards/home/tutorials"),
     }
 
     OUT.mkdir(exist_ok=True)

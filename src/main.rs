@@ -161,7 +161,9 @@ fn app(store: Store) -> Router {
                 .put(api::put_alias_named)
                 .post(api::put_alias_named),
         )
-        .route("/_aliases", post(api::update_aliases))
+        // the Dev Tools console asks `GET _aliases` for its autocomplete, and
+        // OpenSearch answers it the way it answers `GET _alias`
+        .route("/_aliases", get(api::get_alias_scoped).post(api::update_aliases))
         // an alias may be named through `_aliases` as well as through `_alias`
         .route(
             "/_aliases/{*rest}",
