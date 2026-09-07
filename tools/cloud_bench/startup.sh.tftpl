@@ -4,7 +4,12 @@
 set -eu
 exec > >(tee -a /var/log/bench.log) 2>&1
 say() { echo "bench: $*"; }
-fail() { say "FAILED: $*"; echo "$*" > /tmp/failed.txt; gsutil cp /tmp/failed.txt gs://${bucket}/failed.txt || true; exit 1; }
+fail() {
+  say "FAILED: $*"; echo "$*" > /tmp/failed.txt
+  gsutil cp /tmp/failed.txt gs://${bucket}/failed.txt || true
+  gsutil cp /var/log/bench.log gs://${bucket}/bench.log || true
+  exit 1
+}
 trap 'fail "the startup script stopped at line $LINENO"' ERR
 
 say "installing docker"
@@ -40,12 +45,16 @@ curl -sf http://127.0.0.1:9201/ >/dev/null || fail "OpenSearch did not come up"
 curl -sf http://127.0.0.1:9202/ >/dev/null || fail "BoostSearch did not come up"
 
 say "the machine: $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GiB"
-cat /proc/cpuinfo | grep -m1 'model name'
+grep -m1 'model name' /proc/cpuinfo || true
 
 say "running the matrix"
 BENCH_A=http://127.0.0.1:9201 BENCH_B=http://127.0.0.1:9202 \
 BENCH_A_CONTAINER=os-bench BENCH_B_CONTAINER=bs \
-BENCH_OUT=/tmp/matrix.json python3 tools/bench_matrix.py | tee /tmp/matrix.txt || true
+BENCH_OUT=/tmp/matrix.json python3 tools/bench_matrix.py > /tmp/matrix.txt 2>&1 && bench_status=0 || bench_status=$?
+cat /tmp/matrix.txt
+# the matrix exits non-zero when a dimension is lost, which is an answer;
+# a matrix that wrote no numbers is a failure of the run
+[ -s /tmp/matrix.json ] || fail "the bench wrote no numbers (exit $bench_status)"
 
 python3 - <<'PY'
 import json, platform, subprocess

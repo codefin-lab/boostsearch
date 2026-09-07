@@ -52,9 +52,23 @@ bucket=$(terraform output -raw bucket)
 instance=$(terraform output -raw instance)
 echo "bucket $bucket, instance $instance; waiting (the serial console says where it is)"
 
+# a run takes about an hour; a driver still waiting after this long is
+# waiting for a machine that will never answer, and every minute costs
+DEADLINE=${BENCH_DEADLINE:-10800}
+started=$(date +%s)
 seen=0
 while :; do
     if gsutil -q stat "gs://$bucket/matrix.json" 2>/dev/null; then break; fi
+    if [ $(( $(date +%s) - started )) -gt "$DEADLINE" ]; then
+        echo "no numbers after $DEADLINE seconds; giving up"
+        gcloud compute instances get-serial-port-output "$instance" --zone "$ZONE" 2>/dev/null | grep "bench:" | tail -20
+        exit 1
+    fi
+    state=$(gcloud compute instances describe "$instance" --zone "$ZONE" --format='value(status)' 2>/dev/null || echo UNKNOWN)
+    case "$state" in
+        RUNNING|PROVISIONING|STAGING) ;;
+        *) echo "the instance is $state; it will not answer"; exit 1 ;;
+    esac
     if gsutil -q stat "gs://$bucket/failed.txt" 2>/dev/null; then
         echo "the run failed:"; gsutil cat "gs://$bucket/failed.txt"
         gcloud compute instances get-serial-port-output "$instance" --zone "$ZONE" 2>/dev/null | grep "bench:" | tail -20

@@ -23,6 +23,19 @@ pub struct Engine {
     auth: Option<String>,
 }
 
+/// An index expression as a path segment: percent-encoded, but with the
+/// characters an index name or pattern is allowed to carry left as they
+/// are, so that `logs-*,-.ds*` reaches the engine as the pattern it is.
+pub fn path_segment(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC)
+        .to_string()
+        .replace("%2C", ",")
+        .replace("%2A", "*")
+        .replace("%2D", "-")
+        .replace("%2E", ".")
+        .replace("%5F", "_")
+}
+
 /// An answer as the engine gave it.
 pub struct Answer {
     pub status: u16,

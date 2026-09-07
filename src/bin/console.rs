@@ -24,7 +24,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use boostsearch::console::Console;
-use boostsearch::console::engine::{Engine, Failed};
+use boostsearch::console::engine::{Engine, Failed, path_segment};
 use boostsearch::console::metrics::Metrics;
 use boostsearch::console::saved::{Looking, Saved, Writing};
 use boostsearch::console::settings::Settings;
@@ -1704,10 +1704,7 @@ async fn resolve_index(
         );
     }
     on_engine(serving, move |s| {
-        let mut path = format!(
-            "/_resolve/index/{}",
-            percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC)
-        );
+        let mut path = format!("/_resolve/index/{}", path_segment(&query));
         if let Some(e) = expand {
             path.push_str(&format!("?expand_wildcards={e}"));
         }
@@ -1744,13 +1741,7 @@ async fn preview_scripted_field(
         if !fields.is_empty() {
             search["_source"] = Value::Array(fields);
         }
-        let path = format!(
-            "/{}/_search",
-            percent_encoding::utf8_percent_encode(&index, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-                .replace("%2C", ",")
-                .replace("%2A", "*")
-        );
+        let path = format!("/{}/_search", path_segment(&index));
         carried(s.engine.raw("POST", &path, search.to_string().as_bytes(), "application/json")?)
     })
     .await
@@ -1769,13 +1760,7 @@ async fn hits_status(State(serving): State<Shared>, body: axum::Json<Value>) -> 
         ));
     };
     on_engine(serving, move |s| {
-        let path = format!(
-            "/{}/_search",
-            percent_encoding::utf8_percent_encode(&index, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-                .replace("%2C", ",")
-                .replace("%2A", "*")
-        );
+        let path = format!("/{}/_search", path_segment(&index));
         let search = serde_json::json!({"size": 1, "query": query});
         let found = carried(s.engine.raw(
             "POST",

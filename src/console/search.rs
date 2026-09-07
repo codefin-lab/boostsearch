@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value, json};
 
-use super::engine::{Engine, Failed};
+use super::engine::{Engine, Failed, path_segment};
 use super::saved::{Looking, Saved};
 
 /// What the server being replaced adds to every search from its own
@@ -185,13 +185,7 @@ pub fn search(engine: &Engine, request: &Value) -> Result<Value, Failed> {
         .join("&");
     let path = match index.is_empty() {
         true => format!("/_search?{query}"),
-        false => format!(
-            "/{}/_search?{query}",
-            percent_encoding::utf8_percent_encode(&index, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-                .replace("%2C", ",")
-                .replace("%2A", "*")
-        ),
+        false => format!("/{}/_search?{query}", path_segment(&index)),
     };
     let answer = engine.raw("POST", &path, body.to_string().as_bytes(), "application/json")?;
     let found: Value = serde_json::from_slice(&answer.body)
@@ -266,13 +260,7 @@ pub fn suggestions(
         "query": {"bool": {"filter": bool_filter.cloned().unwrap_or_else(|| json!([]))}},
         "aggs": aggs,
     });
-    let path = format!(
-        "/{}/_search",
-        percent_encoding::utf8_percent_encode(index, percent_encoding::NON_ALPHANUMERIC)
-            .to_string()
-            .replace("%2C", ",")
-            .replace("%2A", "*")
-    );
+    let path = format!("/{}/_search", path_segment(index));
     let found = engine.call("POST", &path, Some(&body)).map_err(|e| Failed::of(500, e.message))?;
     if let Some(error) = found.get("error") {
         return Err(Failed::of(500, error.to_string()));

@@ -190,6 +190,18 @@
       "config": {}
     },
     {
+      "id": "opensearchDashboardsUtils",
+      "plugin": {
+        "id": "opensearchDashboardsUtils",
+        "configPath": "opensearch_dashboards_utils",
+        "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
       "id": "opensearchDashboardsReact",
       "plugin": {
         "id": "opensearchDashboardsReact",
@@ -204,11 +216,46 @@
       "config": {}
     },
     {
-      "id": "opensearchDashboardsUtils",
+      "id": "inspector",
       "plugin": {
-        "id": "opensearchDashboardsUtils",
-        "configPath": "opensearch_dashboards_utils",
+        "id": "inspector",
+        "configPath": "inspector",
         "requiredPlugins": [],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsReact"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "embeddable",
+      "plugin": {
+        "id": "embeddable",
+        "configPath": "embeddable",
+        "requiredPlugins": [
+          "inspector",
+          "uiActions"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "savedObjects",
+          "opensearchDashboardsReact",
+          "opensearchDashboardsUtils"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
+      "id": "contentManagement",
+      "plugin": {
+        "id": "contentManagement",
+        "configPath": "content_management",
+        "requiredPlugins": [
+          "embeddable"
+        ],
         "optionalPlugins": [],
         "requiredBundles": [],
         "requiredEnginePlugins": {}
@@ -353,74 +400,6 @@
       "config": {}
     },
     {
-      "id": "inspector",
-      "plugin": {
-        "id": "inspector",
-        "configPath": "inspector",
-        "requiredPlugins": [],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsReact"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "embeddable",
-      "plugin": {
-        "id": "embeddable",
-        "configPath": "embeddable",
-        "requiredPlugins": [
-          "inspector",
-          "uiActions"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "savedObjects",
-          "opensearchDashboardsReact",
-          "opensearchDashboardsUtils"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "dataExplorer",
-      "plugin": {
-        "id": "dataExplorer",
-        "configPath": "data_explorer",
-        "requiredPlugins": [
-          "data",
-          "navigation",
-          "embeddable",
-          "expressions",
-          "usageCollection"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsReact",
-          "opensearchDashboardsUtils"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
-      "id": "contentManagement",
-      "plugin": {
-        "id": "contentManagement",
-        "configPath": "content_management",
-        "requiredPlugins": [
-          "embeddable"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {}
-    },
-    {
       "id": "home",
       "plugin": {
         "id": "home",
@@ -533,29 +512,6 @@
       }
     },
     {
-      "id": "visTypeMarkdown",
-      "plugin": {
-        "id": "visTypeMarkdown",
-        "configPath": "vis_type_markdown",
-        "requiredPlugins": [
-          "expressions",
-          "visualizations"
-        ],
-        "optionalPlugins": [],
-        "requiredBundles": [
-          "opensearchDashboardsReact",
-          "charts",
-          "visualizations",
-          "expressions",
-          "visDefaultEditor"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true
-      }
-    },
-    {
       "id": "visTypeTimeline",
       "plugin": {
         "id": "visTypeTimeline",
@@ -623,6 +579,29 @@
           "opensearchDashboardsUtils",
           "visDefaultEditor",
           "visTypeVislib"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true
+      }
+    },
+    {
+      "id": "visTypeMarkdown",
+      "plugin": {
+        "id": "visTypeMarkdown",
+        "configPath": "vis_type_markdown",
+        "requiredPlugins": [
+          "expressions",
+          "visualizations"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsReact",
+          "charts",
+          "visualizations",
+          "expressions",
+          "visDefaultEditor"
         ],
         "requiredEnginePlugins": {}
       },
@@ -899,29 +878,6 @@
       }
     },
     {
-      "id": "searchRelevanceDashboards",
-      "plugin": {
-        "id": "searchRelevanceDashboards",
-        "configPath": "search_relevance_dashboards",
-        "requiredPlugins": [
-          "navigation",
-          "opensearchDashboardsReact"
-        ],
-        "optionalPlugins": [
-          "dataSourceManagement",
-          "contentManagement"
-        ],
-        "requiredBundles": [],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "metrics": {
-          "metricInterval": 60000,
-          "windowSize": 3
-        }
-      }
-    },
-    {
       "id": "securityAnalyticsDashboards",
       "plugin": {
         "id": "securityAnalyticsDashboards",
@@ -943,6 +899,29 @@
       "config": {
         "enabled": true,
         "uxTelemetryInterval": 2
+      }
+    },
+    {
+      "id": "searchRelevanceDashboards",
+      "plugin": {
+        "id": "searchRelevanceDashboards",
+        "configPath": "search_relevance_dashboards",
+        "requiredPlugins": [
+          "navigation",
+          "opensearchDashboardsReact"
+        ],
+        "optionalPlugins": [
+          "dataSourceManagement",
+          "contentManagement"
+        ],
+        "requiredBundles": [],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "metrics": {
+          "metricInterval": 60000,
+          "windowSize": 3
+        }
       }
     },
     {
@@ -1288,6 +1267,27 @@
       "config": {}
     },
     {
+      "id": "dataExplorer",
+      "plugin": {
+        "id": "dataExplorer",
+        "configPath": "data_explorer",
+        "requiredPlugins": [
+          "data",
+          "navigation",
+          "embeddable",
+          "expressions",
+          "usageCollection"
+        ],
+        "optionalPlugins": [],
+        "requiredBundles": [
+          "opensearchDashboardsReact",
+          "opensearchDashboardsUtils"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {}
+    },
+    {
       "id": "charts",
       "plugin": {
         "id": "charts",
@@ -1361,33 +1361,6 @@
       "config": {}
     },
     {
-      "id": "visTypeTimeseries",
-      "plugin": {
-        "id": "visTypeTimeseries",
-        "configPath": "vis_type_timeseries",
-        "requiredPlugins": [
-          "charts",
-          "data",
-          "expressions",
-          "visualizations"
-        ],
-        "optionalPlugins": [
-          "usageCollection",
-          "dataSourceManagement"
-        ],
-        "requiredBundles": [
-          "opensearchDashboardsUtils",
-          "opensearchDashboardsReact"
-        ],
-        "requiredEnginePlugins": {}
-      },
-      "config": {
-        "enabled": true,
-        "chartResolution": 150,
-        "minimumBucketSize": 10
-      }
-    },
-    {
       "id": "visTypeVislib",
       "plugin": {
         "id": "visTypeVislib",
@@ -1433,6 +1406,33 @@
       },
       "config": {
         "enabled": true
+      }
+    },
+    {
+      "id": "visTypeTimeseries",
+      "plugin": {
+        "id": "visTypeTimeseries",
+        "configPath": "vis_type_timeseries",
+        "requiredPlugins": [
+          "charts",
+          "data",
+          "expressions",
+          "visualizations"
+        ],
+        "optionalPlugins": [
+          "usageCollection",
+          "dataSourceManagement"
+        ],
+        "requiredBundles": [
+          "opensearchDashboardsUtils",
+          "opensearchDashboardsReact"
+        ],
+        "requiredEnginePlugins": {}
+      },
+      "config": {
+        "enabled": true,
+        "chartResolution": 150,
+        "minimumBucketSize": 10
       }
     },
     {
@@ -2889,11 +2889,6 @@
       "description": "Show the Observability overview page cards",
       "scope": "global"
     },
-    "metrics:max_buckets": {
-      "name": "Maximum buckets",
-      "value": 2000,
-      "description": "The maximum number of buckets a single datasource can return"
-    },
     "visualization:dimmingOpacity": {
       "name": "Dimming opacity",
       "value": 0.5,
@@ -2911,6 +2906,11 @@
       "category": [
         "visualization"
       ]
+    },
+    "metrics:max_buckets": {
+      "name": "Maximum buckets",
+      "value": 2000,
+      "description": "The maximum number of buckets a single datasource can return"
     },
     "defaultColumns": {
       "name": "Default columns",
@@ -3030,14 +3030,13 @@
     "uiActions": "/8487/bundles/plugin/uiActions/",
     "share": "/8487/bundles/plugin/share/",
     "opensearchUiShared": "/8487/bundles/plugin/opensearchUiShared/",
-    "expressions": "/8487/bundles/plugin/expressions/",
+    "embeddable": "/8487/bundles/plugin/embeddable/",
     "savedObjects": "/8487/bundles/plugin/savedObjects/",
+    "contentManagement": "/8487/bundles/plugin/contentManagement/",
+    "expressions": "/8487/bundles/plugin/expressions/",
     "queryEnhancements": "/8487/bundles/plugin/queryEnhancements/",
     "navigation": "/8487/bundles/plugin/navigation/",
     "dataSourceManagement": "/8487/bundles/plugin/dataSourceManagement/",
-    "embeddable": "/8487/bundles/plugin/embeddable/",
-    "dataExplorer": "/8487/bundles/plugin/dataExplorer/",
-    "contentManagement": "/8487/bundles/plugin/contentManagement/",
     "home": "/8487/bundles/plugin/home/",
     "dashboard": "/8487/bundles/plugin/dashboard/",
     "visualizations": "/8487/bundles/plugin/visualizations/",
@@ -3045,11 +3044,11 @@
     "visAugmenter": "/8487/bundles/plugin/visAugmenter/",
     "savedObjectsManagement": "/8487/bundles/plugin/savedObjectsManagement/",
     "visTypeVega": "/8487/bundles/plugin/visTypeVega/",
-    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
     "visTypeTimeline": "/8487/bundles/plugin/visTypeTimeline/",
     "visTypeTable": "/8487/bundles/plugin/visTypeTable/",
     "visBuilder": "/8487/bundles/plugin/visBuilder/",
     "visTypeVislib": "/8487/bundles/plugin/visTypeVislib/",
+    "visTypeMarkdown": "/8487/bundles/plugin/visTypeMarkdown/",
     "tileMap": "/8487/bundles/plugin/tileMap/",
     "regionMap": "/8487/bundles/plugin/regionMap/",
     "inputControlVis": "/8487/bundles/plugin/inputControlVis/",
@@ -3059,8 +3058,8 @@
     "managementOverview": "/8487/bundles/plugin/managementOverview/",
     "management": "/8487/bundles/plugin/management/",
     "indexPatternManagement": "/8487/bundles/plugin/indexPatternManagement/",
-    "searchRelevanceDashboards": "/8487/bundles/plugin/searchRelevanceDashboards/",
     "securityAnalyticsDashboards": "/8487/bundles/plugin/securityAnalyticsDashboards/",
+    "searchRelevanceDashboards": "/8487/bundles/plugin/searchRelevanceDashboards/",
     "reportsDashboards": "/8487/bundles/plugin/reportsDashboards/",
     "mlCommonsDashboards": "/8487/bundles/plugin/mlCommonsDashboards/",
     "flowFrameworkDashboards": "/8487/bundles/plugin/flowFrameworkDashboards/",
@@ -3074,10 +3073,11 @@
     "devTools": "/8487/bundles/plugin/devTools/",
     "console": "/8487/bundles/plugin/console/",
     "advancedSettings": "/8487/bundles/plugin/advancedSettings/",
+    "dataExplorer": "/8487/bundles/plugin/dataExplorer/",
     "observabilityDashboards": "/8487/bundles/plugin/observabilityDashboards/",
     "queryWorkbenchDashboards": "/8487/bundles/plugin/queryWorkbenchDashboards/",
-    "visTypeTimeseries": "/8487/bundles/plugin/visTypeTimeseries/",
     "visTypeTagcloud": "/8487/bundles/plugin/visTypeTagcloud/",
+    "visTypeTimeseries": "/8487/bundles/plugin/visTypeTimeseries/",
     "visTypeMetric": "/8487/bundles/plugin/visTypeMetric/",
     "bfetch": "/8487/bundles/plugin/bfetch/"
   },
@@ -3099,14 +3099,13 @@
     "/8487/bundles/plugin/uiActions/uiActions.plugin.js",
     "/8487/bundles/plugin/share/share.plugin.js",
     "/8487/bundles/plugin/opensearchUiShared/opensearchUiShared.plugin.js",
-    "/8487/bundles/plugin/expressions/expressions.plugin.js",
+    "/8487/bundles/plugin/embeddable/embeddable.plugin.js",
     "/8487/bundles/plugin/savedObjects/savedObjects.plugin.js",
+    "/8487/bundles/plugin/contentManagement/contentManagement.plugin.js",
+    "/8487/bundles/plugin/expressions/expressions.plugin.js",
     "/8487/bundles/plugin/queryEnhancements/queryEnhancements.plugin.js",
     "/8487/bundles/plugin/navigation/navigation.plugin.js",
     "/8487/bundles/plugin/dataSourceManagement/dataSourceManagement.plugin.js",
-    "/8487/bundles/plugin/embeddable/embeddable.plugin.js",
-    "/8487/bundles/plugin/dataExplorer/dataExplorer.plugin.js",
-    "/8487/bundles/plugin/contentManagement/contentManagement.plugin.js",
     "/8487/bundles/plugin/home/home.plugin.js",
     "/8487/bundles/plugin/dashboard/dashboard.plugin.js",
     "/8487/bundles/plugin/visualizations/visualizations.plugin.js",
@@ -3114,11 +3113,11 @@
     "/8487/bundles/plugin/visAugmenter/visAugmenter.plugin.js",
     "/8487/bundles/plugin/savedObjectsManagement/savedObjectsManagement.plugin.js",
     "/8487/bundles/plugin/visTypeVega/visTypeVega.plugin.js",
-    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
     "/8487/bundles/plugin/visTypeTimeline/visTypeTimeline.plugin.js",
     "/8487/bundles/plugin/visTypeTable/visTypeTable.plugin.js",
     "/8487/bundles/plugin/visBuilder/visBuilder.plugin.js",
     "/8487/bundles/plugin/visTypeVislib/visTypeVislib.plugin.js",
+    "/8487/bundles/plugin/visTypeMarkdown/visTypeMarkdown.plugin.js",
     "/8487/bundles/plugin/tileMap/tileMap.plugin.js",
     "/8487/bundles/plugin/regionMap/regionMap.plugin.js",
     "/8487/bundles/plugin/inputControlVis/inputControlVis.plugin.js",
@@ -3128,8 +3127,8 @@
     "/8487/bundles/plugin/managementOverview/managementOverview.plugin.js",
     "/8487/bundles/plugin/management/management.plugin.js",
     "/8487/bundles/plugin/indexPatternManagement/indexPatternManagement.plugin.js",
-    "/8487/bundles/plugin/searchRelevanceDashboards/searchRelevanceDashboards.plugin.js",
     "/8487/bundles/plugin/securityAnalyticsDashboards/securityAnalyticsDashboards.plugin.js",
+    "/8487/bundles/plugin/searchRelevanceDashboards/searchRelevanceDashboards.plugin.js",
     "/8487/bundles/plugin/reportsDashboards/reportsDashboards.plugin.js",
     "/8487/bundles/plugin/mlCommonsDashboards/mlCommonsDashboards.plugin.js",
     "/8487/bundles/plugin/flowFrameworkDashboards/flowFrameworkDashboards.plugin.js",
@@ -3143,15 +3142,13 @@
     "/8487/bundles/plugin/devTools/devTools.plugin.js",
     "/8487/bundles/plugin/console/console.plugin.js",
     "/8487/bundles/plugin/advancedSettings/advancedSettings.plugin.js",
+    "/8487/bundles/plugin/dataExplorer/dataExplorer.plugin.js",
     "/8487/bundles/plugin/observabilityDashboards/observabilityDashboards.plugin.js",
     "/8487/bundles/plugin/queryWorkbenchDashboards/queryWorkbenchDashboards.plugin.js",
-    "/8487/bundles/plugin/visTypeTimeseries/visTypeTimeseries.plugin.js",
     "/8487/bundles/plugin/visTypeTagcloud/visTypeTagcloud.plugin.js",
+    "/8487/bundles/plugin/visTypeTimeseries/visTypeTimeseries.plugin.js",
     "/8487/bundles/plugin/visTypeMetric/visTypeMetric.plugin.js",
     "/8487/bundles/plugin/bfetch/bfetch.plugin.js"
-  ],
-  "styleSheets": [
-    "/8487/bundles/osd-ui-shared-deps/osd-ui-shared-deps.css"
   ],
   "themeCss": {
     "v7": {

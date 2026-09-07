@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value, json};
 
-use super::engine::{Engine, Failed};
+use super::engine::{Engine, Failed, path_segment};
 
 /// `{ok: true, response}`, the shape every answer of this plugin takes.
 fn ok(response: Value) -> Value {
@@ -56,16 +56,6 @@ fn segment(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn encoded(text: &str) -> String {
-    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC)
-        .to_string()
-        .replace("%2C", ",")
-        .replace("%2A", "*")
-        .replace("%2D", "-")
-        .replace("%2E", ".")
-        .replace("%5F", "_")
-}
-
 /// The query string from what is left of the parameters once the path has
 /// taken its own.
 fn query_of(params: &Map<String, Value>, taken: &[&str]) -> String {
@@ -100,9 +90,9 @@ pub fn api_caller(engine: &Engine, endpoint: &str, data: &Value) -> Value {
     let params = data.as_object().cloned().unwrap_or_default();
     let body = params.get("body");
     let at = |key: &str| segment(params.get(key));
-    let joined = |key: &str| at(key).map(|s| encoded(&s)).unwrap_or_default();
+    let joined = |key: &str| at(key).map(|s| path_segment(&s)).unwrap_or_default();
     let with = |base: String, key: &str| match at(key) {
-        Some(s) => format!("{base}/{}", encoded(&s)),
+        Some(s) => format!("{base}/{}", path_segment(&s)),
         None => base,
     };
     let (method, path, taken): (&str, String, Vec<&str>) = match endpoint {
@@ -256,14 +246,36 @@ pub fn indices(engine: &Engine, query: &[(String, String)]) -> Value {
     }
     let sort_field = value("sortField").unwrap_or_else(|| "index".into());
     let sort_direction = value("sortDirection").unwrap_or_else(|| "desc".into());
-    let mut path = format!("/_cat/indices/{}?format=json", encoded(&index));
+    let mut path = format!("/_cat/indices/{}?format=json", path_segment(&index));
+    // the caller's values, in the query string as values
+    let quoted = |v: &str| form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
     if sort_field != "managed" && sort_field != "data_stream" {
-        path.push_str(&format!("&s={sort_field}:{sort_direction}"));
+        path.push_str(&format!("&s={}", quoted(&format!("{sort_field}:{sort_direction}"))));
     }
     if let Some(expand) = value("expandWildcards") {
-        path.push_str(&format!("&expand_wildcards={expand}"));
+        path.push_str(&format!("&expand_wildcards={}", quoted(&expand)));
     }
-    let listed = match call(engine, "GET", &path, None) {
+    // the four answers this needs do not depend on each other, so they are
+    // asked for at once: one round trip's wait rather than four
+    let (listed, recovery, tasks, streams) = std::thread::scope(|scope| {
+        let listed = scope.spawn(|| call(engine, "GET", &path, None));
+        let recovery =
+            scope.spawn(|| call(engine, "GET", "/_cat/recovery?format=json&detailed=true", None));
+        let tasks = scope.spawn(|| {
+            call(
+                engine,
+                "GET",
+                "/_cat/tasks?format=json&detailed=true&actions=indices:data/write/reindex",
+                None,
+            )
+        });
+        let streams = scope.spawn(|| call(engine, "GET", "/_data_stream/*", None));
+        let joined = |h: std::thread::ScopedJoinHandle<'_, Result<Value, Failed>>| {
+            h.join().unwrap_or_else(|_| Err(Failed::of(500, "the request could not be run")))
+        };
+        (joined(listed), joined(recovery), joined(tasks), joined(streams))
+    });
+    let listed = match listed {
         Ok(Value::Array(rows)) => rows,
         Ok(_) => Vec::new(),
         Err(e) if e.status == 404 => {
@@ -271,34 +283,32 @@ pub fn indices(engine: &Engine, query: &[(String, String)]) -> Value {
         }
         Err(e) => return json!({"ok": false, "error": e.message}),
     };
-    let recoveries = call(engine, "GET", "/_cat/recovery?format=json&detailed=true", None)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    let tasks = call(
-        engine,
-        "GET",
-        "/_cat/tasks?format=json&detailed=true&actions=indices:data/write/reindex",
-        None,
-    )
-    .ok()
-    .and_then(|v| v.as_array().cloned())
-    .unwrap_or_default();
-    let data_streams = call(engine, "GET", "/_data_stream/*", None)
-        .ok()
-        .and_then(|v| v.get("data_streams").and_then(|d| d.as_array()).cloned())
-        .unwrap_or_default();
+    let recovery = recovery.unwrap_or(Value::Null);
+    let recoveries: &[Value] = recovery.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let tasks = tasks.unwrap_or(Value::Null);
+    let tasks: &[Value] = tasks.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let streams = streams.unwrap_or(Value::Null);
+    // which stream each backing index belongs to, looked up once per row
+    let stream_of: std::collections::HashMap<&str, &Value> = streams
+        .get("data_streams")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+        .flat_map(|ds| {
+            let name = ds.get("name");
+            ds.get("indices")
+                .and_then(|i| i.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |x| Some((x.get("index_name")?.as_str()?, name?)))
+        })
+        .collect();
     let mut rows: Vec<Value> = listed
         .into_iter()
         .map(|mut row| {
             let name = row.get("index").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let stream = data_streams.iter().find(|ds| {
-                ds.get("indices").and_then(|i| i.as_array()).is_some_and(|i| {
-                    i.iter().any(|x| x.get("index_name").and_then(|v| v.as_str()) == Some(&name))
-                })
-            });
             row["data_stream"] =
-                stream.and_then(|ds| ds.get("name").cloned()).unwrap_or(Value::Null);
+                stream_of.get(name.as_str()).map(|v| (*v).clone()).unwrap_or(Value::Null);
             let mut extra = row.get("status").cloned().unwrap_or(Value::Null);
             if row.get("health").and_then(|v| v.as_str()) == Some("green") {
                 if tasks.iter().any(|t| {
@@ -344,7 +354,7 @@ pub fn indices(engine: &Engine, query: &[(String, String)]) -> Value {
         false => match call(
             engine,
             "GET",
-            &format!("/_plugins/_ism/explain/{}", encoded(&names.join(","))),
+            &format!("/_plugins/_ism/explain/{}", path_segment(&names.join(","))),
             None,
         ) {
             Ok(explain) => explain
@@ -391,7 +401,7 @@ pub fn data_streams(engine: &Engine, search: Option<&str>) -> Value {
         Some(s) if !s.is_empty() => format!("*{s}*"),
         _ => "*".to_string(),
     };
-    match call(engine, "GET", &format!("/_data_stream/{}", encoded(&pattern)), None) {
+    match call(engine, "GET", &format!("/_data_stream/{}", path_segment(&pattern)), None) {
         Ok(found) => {
             let streams = found.get("data_streams").cloned().unwrap_or_else(|| json!([]));
             let total = streams.as_array().map(|a| a.len()).unwrap_or(0);
@@ -413,6 +423,6 @@ mod tests {
         .unwrap();
         assert_eq!(query_of(&params, &["index"]), "?format=json&h=index%2Chealth");
         assert_eq!(segment(params.get("h")), Some("index,health".to_string()));
-        assert_eq!(encoded("logs-*,.ds*"), "logs-*,.ds*");
+        assert_eq!(path_segment("logs-*,.ds*"), "logs-*,.ds*");
     }
 }

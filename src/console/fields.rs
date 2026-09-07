@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value, json};
 
-use super::engine::{Engine, Failed};
+use super::engine::{Engine, Failed, path_segment};
 
 /// What the engine calls a type, and what the page calls it.
 ///
@@ -89,10 +89,7 @@ fn no_matching_indices(pattern: &str) -> Failed {
 fn field_caps(engine: &Engine, indices: &str) -> Result<Value, Failed> {
     let path = format!(
         "/{}/_field_caps?fields=*&ignore_unavailable=true&allow_no_indices=false",
-        percent_encoding::utf8_percent_encode(indices, percent_encoding::NON_ALPHANUMERIC)
-            .to_string()
-            .replace("%2C", ",")
-            .replace("%2A", "*")
+        path_segment(indices)
     );
     let found = engine.call("GET", &path, None).map_err(|e| Failed::of(404, e.message))?;
     match found.pointer("/error/type").and_then(|v| v.as_str()) {
@@ -267,9 +264,7 @@ fn resolve_time_pattern(engine: &Engine, pattern: &str) -> Result<Vec<String>, F
     let wildcard = time_pattern_to_wildcard(pattern);
     let path = format!(
         "/{}/_alias?ignore_unavailable=true&allow_no_indices=false",
-        percent_encoding::utf8_percent_encode(&wildcard, percent_encoding::NON_ALPHANUMERIC)
-            .to_string()
-            .replace("%2A", "*")
+        path_segment(&wildcard)
     );
     let found = engine.call("GET", &path, None).map_err(|e| Failed::of(404, e.message))?;
     if found.get("error").is_some() {

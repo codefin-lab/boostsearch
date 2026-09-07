@@ -287,6 +287,9 @@ def store_bytes(base, name):
 
 
 def rss_mib(container=None, pid=None):
+    """Resident memory, or None where it could not be read: a wrong container
+    name or a process that is gone is not a server using no memory, and a
+    zero here would hand somebody the dimension."""
     if container:
         out = subprocess.run(
             ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container],
@@ -295,10 +298,12 @@ def rss_mib(container=None, pid=None):
         for unit, mul in (("GiB", 1024), ("MiB", 1), ("KiB", 1 / 1024)):
             if text.endswith(unit):
                 return float(text[:-len(unit)]) * mul
-        return 0.0
+        return None
+    if pid is None:
+        return None
     out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
                          capture_output=True, text=True).stdout.strip()
-    return int(out) / 1024 if out else 0.0
+    return int(out) / 1024 if out else None
 
 
 def human_bytes(n):
@@ -340,7 +345,7 @@ if os.environ.get("BENCH_B_CONTAINER"):
 else:
     pids = subprocess.run(["pgrep", "-f", "release/boostsearch"],
                           capture_output=True, text=True).stdout.split()
-    res["BoostSearch"]["rss_mib"] = rss_mib(pid=pids[0]) if pids else 0.0
+    res["BoostSearch"]["rss_mib"] = rss_mib(pid=pids[0] if pids else None)
 
 json.dump(res, open(OUT, "w"), indent=1)
 

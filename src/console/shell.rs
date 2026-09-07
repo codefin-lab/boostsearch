@@ -86,24 +86,8 @@ impl Console {
             .collect();
         let bundles: Vec<String> =
             self.pinned.bundles.iter().map(|b| format!("        '{}',", self.at(b))).collect();
-        // the theme maps, as the reference writes them; a pin from before
-        // they were pinned gets the ones every 3.x distribution ships
-        let theme_css = match self.pinned.theme_css.is_object() {
-            true => self.pinned.theme_css.clone(),
-            false => json!({
-                "v7": {"light": "osd-ui-shared-deps.v7.light.css", "dark": "osd-ui-shared-deps.v7.dark.css"},
-                "v8": {"light": "osd-ui-shared-deps.v8.light.css", "dark": "osd-ui-shared-deps.v8.dark.css"},
-                "v9": {"light": "osd-ui-shared-deps.v9.light.css", "dark": "osd-ui-shared-deps.v9.dark.css"},
-            }),
-        };
-        let kui_css = match self.pinned.kui_css.is_object() {
-            true => self.pinned.kui_css.clone(),
-            false => json!({
-                "v7": {"dark": "kui_dark.css", "light": "kui_light.css"},
-                "v8": {"dark": "kui_next_dark.css", "light": "kui_next_light.css"},
-                "v9": {"dark": "kui_v9_dark.css", "light": "kui_v9_light.css"},
-            }),
-        };
+        let theme_css = &self.pinned.theme_css;
+        let kui_css = &self.pinned.kui_css;
         let shared = self.at(&format!("/{}/bundles/osd-ui-shared-deps/", self.pinned.build_number));
         let kui = self.at("/node_modules/@osd/ui-framework/dist/");
         let ui = self.at("/ui/");

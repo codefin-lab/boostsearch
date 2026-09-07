@@ -36,13 +36,11 @@ pub struct Pinned {
     pub public_paths: std::collections::BTreeMap<String, String>,
     /// the bundles the boot script loads, in the order it loads them
     pub bundles: Vec<String>,
-    #[serde(rename = "styleSheets")]
-    pub style_sheets: Vec<String>,
     /// the theme stylesheet for each theme version and mode, chosen by the
     /// bootstrap from the tag the startup script set
-    #[serde(rename = "themeCss", default)]
+    #[serde(rename = "themeCss")]
     pub theme_css: Value,
-    #[serde(rename = "kuiCss", default)]
+    #[serde(rename = "kuiCss")]
     pub kui_css: Value,
     /// the page around the two elements: the fonts, the favicons, the loading
     /// markup and the two scripts. The same bytes for every request, so they
@@ -70,7 +68,7 @@ pub struct Pinned {
     #[serde(rename = "managementMeta")]
     pub management_meta: std::collections::BTreeMap<String, Value>,
     /// the engine's API as the Dev Tools console autocompletes it
-    #[serde(rename = "devToolsApi", default)]
+    #[serde(rename = "devToolsApi")]
     pub dev_tools_api: Value,
     /// the tutorials the home page lists
     #[serde(default)]
@@ -86,8 +84,15 @@ impl Pinned {
                 path.display()
             )
         })?;
-        let pinned: Pinned =
-            serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        // a pin missing a field is one taken before that field was pinned:
+        // served, it would name files that are not there, so it is refused
+        // the way a version mismatch is
+        let pinned: Pinned = serde_json::from_str(&raw).map_err(|e| {
+            format!(
+                "{}: {e}\nRun tools/osd_pin.py again against a running Dashboards.",
+                path.display()
+            )
+        })?;
         if pinned.version != version {
             return Err(format!(
                 "{} is the contract for {} and the distribution is {version}. \

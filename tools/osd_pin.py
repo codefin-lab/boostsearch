@@ -202,7 +202,6 @@ def main():
                                        re.search(r"__osdPublicPath__ = (\{.*?\});", boot,
                                                  re.S).group(1))),
         "bundles": bundles_of(boot),
-        "styleSheets": re.findall(r"'(/[^']*\.css)'", boot),
         # which theme stylesheet goes with which theme tag: the bootstrap
         # picks at load time from the tag `startup.js` set
         "themeCss": json.loads(re.search(r"var themeCssDistFilenames = (\{.*?\});", boot).group(1)),
@@ -249,8 +248,7 @@ def main():
     path.write_text(json.dumps(pinned, indent=2, sort_keys=False) + "\n")
     print(f"  {path}")
     print(f"  {len(pinned['uiPlugins'])} plugins, {len(pinned['bundles'])} bundles, "
-          f"{len(pinned['uiSettingDefaults'])} setting defaults, "
-          f"{len(pinned['styleSheets'])} stylesheets")
+          f"{len(pinned['uiSettingDefaults'])} setting defaults")
     return 0
 
 
