@@ -51,7 +51,8 @@ def tokens(base, body):
         with urllib.request.urlopen(req, timeout=30) as answer:
             return [t["token"] for t in json.load(answer)["tokens"]]
     except Exception as e:
-        return [f"<error {getattr(e, 'code', e)}>"]
+        # not a value: the two sides cannot be identical in having failed
+        return [f"<error {base} {getattr(e, 'code', e)} {id(e)}>"]
 
 def main():
     show = "-v" in sys.argv

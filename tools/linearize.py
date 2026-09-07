@@ -79,9 +79,14 @@ def check_key(ops):
     write that happened)."""
     ops = sorted(ops, key=lambda o: o["call"])
     n = len(ops)
+    truncated = 0
     if n > 400:
+        # the search is exponential in the worst case; what is not checked
+        # is said, and counts against the run rather than for it
+        truncated = n - 400
         ops = ops[:400]
         n = 400
+        print(f"HISTORY TRUNCATED: {truncated} of {truncated + 400} operations were not checked")
     done = [False] * n
     sys.setrecursionlimit(10000)
     calls = [o["call"] for o in ops]
@@ -288,8 +293,12 @@ def main():
     print(f"keys not linearizable: {stale_keys} of {len(keys)}")
     for d in stale_detail:
         print("  ", d)
-    print("RESULT", "LOST" if lost else "no acknowledged write lost", "|", "linearizable" if stale_keys == 0 else "stale reads (see above)")
-    return 1 if lost else 0
+    print("RESULT", "LOST" if lost else "no acknowledged write lost", "|",
+          "linearizable" if stale_keys == 0 else "NOT linearizable (see above)",
+          "| history truncated" if truncated else "")
+    # a stale read is a linearizability failure whichever window it fell in;
+    # an unchecked history is not a checked one
+    return 1 if lost or stale_keys or truncated else 0
 
 if __name__ == "__main__":
     sys.exit(main())

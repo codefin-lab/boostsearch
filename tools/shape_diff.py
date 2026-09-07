@@ -78,7 +78,9 @@ def call(base, method, path, body=None):
         except Exception:
             return {"__status": e.code}
     except Exception as e:
-        return {"__error": str(e)}
+        # a transport failure is this side's alone: it must not compare
+        # equal to the other side's
+        return {"__error": str(e), "__side": base, "__nonce": id(e)}
 
 
 def load(base):

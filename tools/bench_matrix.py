@@ -19,7 +19,8 @@ p99 over a hundred and fifty requests moves more than a change usually does.
     BENCH_OUT           where the numbers are written  (default: /tmp/matrix.json)
 """
 import urllib.parse, urllib.request, http.client
-import json, time, statistics, subprocess, sys, os, ssl, base64
+import json
+import sys, time, statistics, subprocess, sys, os, ssl, base64
 import concurrent.futures
 
 _CTX = ssl.create_default_context()
@@ -61,15 +62,25 @@ def bulk_index(base, name, path, batch=4000):
         pass
     req(base, "PUT", "/" + name, MAPPING)
     buf, n, t = [], 0, time.time()
+
+    def send(lines):
+        # a document the engine refused was not indexed, and an engine that
+        # refuses part of the corpus would otherwise win the dimension by
+        # doing less
+        answer = req(base, "POST", f"/{name}/_bulk", "\n".join(lines) + "\n")
+        if answer.get("errors"):
+            bad = next(i for i in answer["items"] if "error" in next(iter(i.values())))
+            sys.exit(f"{base}: a bulk item was refused: {json.dumps(bad)[:300]}")
+
     for line in open(path):
         buf.append('{"index":{}}')
         buf.append(line.strip())
         n += 1
         if len(buf) >= batch:
-            req(base, "POST", f"/{name}/_bulk", "\n".join(buf) + "\n")
+            send(buf)
             buf = []
     if buf:
-        req(base, "POST", f"/{name}/_bulk", "\n".join(buf) + "\n")
+        send(buf)
     el = time.time() - t
     req(base, "POST", f"/{name}/_refresh")
     return n / el, n
@@ -232,6 +243,8 @@ def throughput(base, name, workers=8, seconds=5):
     tls = parts.scheme == "https"
     port = parts.port or (443 if tls else 80)
 
+    errors = []
+
     def open_one():
         if tls:
             return http.client.HTTPSConnection(parts.hostname, port, context=_CTX)
@@ -243,7 +256,14 @@ def throughput(base, name, workers=8, seconds=5):
         while time.time() < stop:
             try:
                 c.request("POST", f"/{name}/_search", bodies[n % len(bodies)], headers)
-                c.getresponse().read()
+                answer = c.getresponse()
+                answer.read()
+                # an error is not a search answered; an engine that refuses a
+                # query would otherwise refuse its way to the top
+                if answer.status >= 300:
+                    errors.append(answer.status)
+                    if len(errors) > 10:
+                        return n
                 n += 1
             except Exception:
                 # a connection the server closed is reopened; the request it
@@ -258,6 +278,9 @@ def throughput(base, name, workers=8, seconds=5):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         done = [f.result() for f in [pool.submit(run) for _ in range(workers)]]
+    if errors:
+        sys.exit(f"{base}: {len(errors)} searches answered with an error "
+                 f"(first {errors[0]}) during the throughput run")
     return sum(done) / seconds
 
 
@@ -369,6 +392,8 @@ def row(name, ov, bv, higher_wins, fmt=lambda v: f"{v:,.0f}", note=""):
 
 
 print(f"\n{'dimension':<24}{'OpenSearch':>14}{'BoostSearch':>14}   winner")
+if o["docs"] != b["docs"]:
+    sys.exit(f"the engines hold different corpora: {o['docs']} against {b['docs']} documents")
 row("index docs/s", o["index_docs_per_s"], b["index_docs_per_s"], True)
 row("update docs/s", o["update_docs_per_s"], b["update_docs_per_s"], True)
 row("delete docs/s", o["delete_docs_per_s"], b["delete_docs_per_s"], True)

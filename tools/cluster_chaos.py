@@ -420,9 +420,15 @@ def main():
     lost = 0
     wrong = 0
     checked = 0
+    unread = 0
     lost_ids = []
     # doc id -> the holders that do not have it
     missing_from = {}
+    if not holders:
+        # nobody to ask is not "nothing lost": the listing failed, and the
+        # verdict below would be a verdict over zero documents
+        print("RESULT UNKNOWN: no node reports a started copy of the index; the lost-write check did not run")
+        return 2
     for n in nodes:
         if n.name not in holders:
             continue
@@ -448,9 +454,13 @@ def main():
                 if e.code == 404:
                     missing_from.setdefault(doc_id, []).append(n.name)
                 else:
-                    print(f"  read of {doc_id} on {n.name}: http {e.code}")
+                    unread += 1
+                    if unread <= 5:
+                        print(f"  read of {doc_id} on {n.name}: http {e.code}")
             except Exception as e:
-                print(f"  read of {doc_id} on {n.name}: {e}")
+                unread += 1
+                if unread <= 5:
+                    print(f"  read of {doc_id} on {n.name}: {e}")
     if samples:
         first = samples[0][1]
         last = samples[-1][1]
@@ -507,7 +517,9 @@ def main():
     )
     for n in nodes:
         n.stop_graceful(seconds=10)
-    return 1 if lost or wrong or settled is None else 0
+    if unread:
+        print(f"  {unread} acknowledged writes could not be read back at all; they are not counted as found")
+    return 1 if lost or wrong or settled is None or unread else 0
 
 
 if __name__ == "__main__":

@@ -153,12 +153,15 @@ def call(base, path, body=None, method="POST"):
         with urllib.request.urlopen(req, timeout=60) as answer:
             return json.load(answer)
     except urllib.error.HTTPError as e:
+        # an error is answered with the engine's own words, which the two
+        # engines may share -- but never with a transport failure, which is
+        # this side's alone and must not equal the other side's
         try:
             return json.load(e)
         except Exception:
-            return {"error": {"status": e.code}}
+            return {"error": {"status": e.code, "__side": base}}
     except Exception as e:
-        return {"error": {"reason": str(e)}}
+        return {"error": {"reason": str(e), "__side": base, "__nonce": id(e)}}
 
 
 def load(base):

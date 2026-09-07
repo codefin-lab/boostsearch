@@ -19,7 +19,7 @@ rather than believed.
 |---|---|---|
 | OpenSearch's core suite | **1,100 of 1,100** not skipped (75 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
 | its module and plugin suites | **880 of 890**, 4 skipped | `tools/module_gate.py` |
-| the same answer as OpenSearch 3.1.0 | **165 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
+| the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
 | REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
 | OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |

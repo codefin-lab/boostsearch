@@ -235,21 +235,45 @@ def index_patterns():
             holds(f"each field says `{key}`", key in one, f"got {sorted(one)}")
 
 
+CHECKS = [
+    ("the shell the browser boots from", the_shell),
+    ("settings and capabilities", settings_and_capabilities),
+    ("status", status_and_stats),
+    ("the saved-object management routes", management_routes),
+    ("the Dev Tools proxy", console_proxy),
+    ("the fields behind an index pattern", index_patterns),
+]
+
+
 def main():
     global NODE
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default=NODE)
+    ap.add_argument("--url", required=True, help="the server under test (ours)")
+    ap.add_argument("--reference", default=None,
+                    help="a running OpenSearch Dashboards; a check it fails now is "
+                         "not held against the server under test. Without it, "
+                         "every failure counts.")
     args = ap.parse_args()
     NODE = args.url.rstrip("/")
+    if args.reference:
+        # measured, not assumed: the exemptions are only the checks the
+        # reference fails when asked
+        global REFERENCE_FAILS
+        NODE = args.reference.rstrip("/")
+        for _, check in CHECKS:
+            try:
+                check()
+            except Exception:
+                pass
+        REFERENCE_FAILS = {what: why for what, why in REFERENCE_FAILS.items()
+                           if any(f.startswith(what) for f in failures)}
+        failures.clear()
+        expected_failures.clear()
+        NODE = args.url.rstrip("/")
+    else:
+        REFERENCE_FAILS = {}
 
-    for name, check in [
-        ("the shell the browser boots from", the_shell),
-        ("settings and capabilities", settings_and_capabilities),
-        ("status", status_and_stats),
-        ("the saved-object management routes", management_routes),
-        ("the Dev Tools proxy", console_proxy),
-        ("the fields behind an index pattern", index_patterns),
-    ]:
+    for name, check in CHECKS:
         before = len(failures)
         try:
             check()

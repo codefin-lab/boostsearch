@@ -16,9 +16,12 @@ TEST_ROOT = SPEC_ROOT / "test"
 
 # yaml `skip: features:` values we can honour; anything else skips the section
 CATCH_CODES = {
-    "bad_request": 400, "unauthorized": 401, "forbidden": 403, "missing": 404,
-    "request_timeout": 408, "conflict": 409, "request": 500, "unavailable": 503,
+    "bad_request": 400, "param": 400, "unauthorized": 401, "forbidden": 403,
+    "missing": 404, "request_timeout": 408, "conflict": 409, "unavailable": 503,
 }
+# `catch: request` is any error the named words do not cover: a 4xx or 5xx
+# other than those
+NAMED_CODES = set(CATCH_CODES.values())
 
 SUPPORTED_FEATURES = {
     "warnings", "warnings_regex", "allowed_warnings", "allowed_warnings_regex",
@@ -55,6 +58,11 @@ def load_api_specs():
         for name, body in d.items():
             specs[name] = body
     return specs
+
+
+class Skip(Exception):
+    """A section this runner cannot run as written: counted as skipped, never
+    as passed."""
 
 
 class Failure(Exception):
@@ -272,11 +280,19 @@ class Runner:
                     or re.search(pattern, blob)
                 ):
                     raise Failure(f"catch {catch} did not match {blob[:200]}")
-            else:
-                want = CATCH_CODES.get(catch)
-                if want and resp.status_code != want:
+            elif catch == "request":
+                if resp.status_code < 400 or resp.status_code in NAMED_CODES:
+                    raise Failure(f"catch [request] expected an unnamed 4xx/5xx, "
+                                  f"got {resp.status_code}")
+            elif catch in CATCH_CODES:
+                want = CATCH_CODES[catch]
+                if resp.status_code != want:
                     raise Failure(f"catch [{catch}] expected HTTP {want}, "
                                   f"got {resp.status_code}")
+            else:
+                # a word this runner does not know must not become "any
+                # error will do": that is how a 501 passes as a 400
+                raise Failure(f"catch [{catch}] is not a word this runner knows")
             return
         if resp.status_code in ignore_codes:
             return
@@ -401,7 +417,12 @@ class Runner:
                     self.do_set(val)
                 elif key == "contains":
                     self.assert_contains(val)
-                elif key in ("skip", "transform_and_set"):
+                elif key == "transform_and_set":
+                    # the stash this step fills is never filled here, so the
+                    # section would run with a literal `$name`: skipped, as a
+                    # section wanting a feature this runner lacks is
+                    raise Skip("transform_and_set")
+                elif key == "skip":
                     pass
                 else:
                     raise Failure(f"unsupported step [{key}]")
@@ -555,6 +576,9 @@ def main():
                 r.run_steps(steps)
                 passed += 1
                 fp += 1
+            except Skip:
+                skipped += 1
+                fs += 1
             except Failure as e:
                 failed += 1
                 fa += 1

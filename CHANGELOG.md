@@ -26,7 +26,7 @@ Against OpenSearch 3.1.0, measured rather than asserted:
 
 - **1,100 of 1,100** sections of OpenSearch's core suite that are not skipped
 - **880 of 890** sections of its module and plugin suites
-- **165 of 183** canonical requests answered byte for byte identically
+- **160 of 183** canonical requests answered byte for byte identically
 - **156 of 167** REST endpoints answered; the rest answer 501 rather than
   pretending
 - **17 of 18** bench dimensions ahead

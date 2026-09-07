@@ -78,7 +78,7 @@ def main():
     for name, found in passes:
         for f in found["failures"]:
             print(f"    [{name}] {f['file'].split('/test/')[-1]} :: {f['section']}")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

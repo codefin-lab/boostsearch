@@ -3595,3 +3595,56 @@ their migrations, the searches, the sample data, and what the pages ask
 of the core plugins. 43 days planned; the number that matters is at the
 top of this section.
 
+## The review, and the gates first
+
+A review of the whole tree — eleven passes, one per module, every finding
+grounded in a quoted line — found the gates could pass for the wrong
+reasons before it found anything in the server. So the gates were fixed
+first, and the numbers measured again before being quoted again.
+
+What could pass vacuously, and no longer can:
+
+  - **A `catch` word the runner did not know accepted any error.**
+    `catch: param` — the corpus's commonest — was not in the table, so a
+    501 passed as a 400. The runner knows `param`, treats `request` as any
+    unnamed 4xx/5xx, and fails a section on a word it does not know. A
+    section with `transform_and_set` used to run with a literal `$name`;
+    it is skipped now, as one wanting a feature the runner lacks is.
+  - **The module gate always exited 0.** It counted the failures, printed
+    them, and returned success. It returns 1 on any.
+  - **Two errors compared equal.** The analysis, search and shape diffs
+    and the compatibility replay returned an error string for a transport
+    failure, and the two sides' strings matched — both servers down was
+    100% identical. A failure carries which side and is never equal; the
+    replay compares an error whole rather than reduced to "no hits".
+  - **The bench counted refused work as work.** A bulk with refused items
+    and a search answered with an error both counted; an engine that
+    refused part of the corpus would have won two dimensions by doing
+    less. Both abort the run, and the two corpora must be the same size.
+  - **The support probe called anything supported** whose complaint did
+    not contain one of four phrases. It records the kind of answer and
+    compares it with the cluster's for the same probe.
+  - **The Dashboards check graded the reference by default** and excused
+    failures by name whichever server was under test. `--url` is
+    required, and a reference failure excuses ours only when a
+    `--reference` fails it now.
+  - **Chaos and linearizability could report nothing lost over nothing
+    checked.** An empty holder list is an unknown result, an unreadable
+    document is not a found one, a truncated history is said and counts
+    against the run, and a stale read fails it whichever window it fell in.
+
+Measured again with the fixed gates: phase 1 **398/398**, core corpus
+**1,100/1,100**, module corpus **880/890** (the six are the two
+dictionaries and the one-plugin assertion, as before), analysis diff
+520/522, search diff 92/92, shape diff 28/29, and the replay **160 of
+183** — five fewer than was quoted, and those five were pairs of different
+refusals that the reduced comparison had called the same answer. The
+number in the README is that one now.
+
+The review's findings on the server itself — twenty-three of the first
+severity, most of them a default that fails open, a ceiling applied after
+the work, or a count read out of the request — are the next work, in the
+order the review put them: the security layer, the console, the snapshot
+paths, the process-killing requests, the durability edges, and the
+transport's trust boundary.
+

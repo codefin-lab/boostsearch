@@ -81,16 +81,30 @@ def probe(url):
             or "unknown key for a start_object" in low and "aggregation" in low
         )
 
-    queries = set()
+    def kind_of(r):
+        # what the engine made of the probe: fine, a complaint about the
+        # probe's (empty) arguments, or a name it does not know at all
+        if r.status_code == 501 or unknown(r.text):
+            return "unknown"
+        if r.status_code < 300:
+            return "ok"
+        try:
+            return r.json().get("error", {}).get("type", f"http {r.status_code}")
+        except Exception:
+            return f"http {r.status_code}"
+
+    queries, query_kinds = set(), {}
     for q in QUERIES:
         r = sess.post(f"{base}/{idx}/_search", json={"query": {q: {}}}, timeout=30)
-        if not unknown(r.text):
+        query_kinds[q] = kind_of(r)
+        if query_kinds[q] != "unknown":
             queries.add(q)
 
-    aggs = set()
+    aggs, agg_kinds = set(), {}
     for a in AGGS:
         r = sess.post(f"{base}/{idx}/_search", json={"size": 0, "aggs": {"probe": {a: {}}}}, timeout=30)
-        if not unknown(r.text):
+        agg_kinds[a] = kind_of(r)
+        if agg_kinds[a] != "unknown":
             aggs.add(a)
 
     analyzers = set()
@@ -120,6 +134,10 @@ def probe(url):
         "types": types,
         "analyzers": analyzers,
         "custom_analysis": honours_custom,
+        # how each probe was answered, so that two engines can be compared
+        # by the kind of answer and not only by whether the name was known
+        "query_kinds": query_kinds,
+        "agg_kinds": agg_kinds,
     }
 
 
@@ -257,13 +275,17 @@ def replay(requests_file, a_url, b_url, out, keep_scores, strict=False):
             except Exception as e:
                 answers[label] = (0, {"__error": str(e)})
         (code_a, body_a), (code_b, body_b) = answers["a"], answers["b"]
-        if strict:
+        # an error is compared whole: reducing it to "no hits" would let two
+        # different refusals -- or a refusal and a transport failure -- pass
+        # as the same answer
+        errored = code_a >= 400 or code_b >= 400 or code_a == 0 or code_b == 0
+        if strict or errored:
             shown_a, shown_b = body_a, body_b
         else:
             shown_a, shown_b = answer_of(path, body_a), answer_of(path, body_b)
         left = json.dumps(scrub(shown_a, keep_scores), indent=1, sort_keys=True).splitlines()
         right = json.dumps(scrub(shown_b, keep_scores), indent=1, sort_keys=True).splitlines()
-        if code_a == code_b and left == right:
+        if code_a == code_b and left == right and code_a != 0:
             same += 1
             continue
         if code_a == 0 or code_b == 0:
@@ -482,6 +504,20 @@ def main():
         have = probe(args.engine)
         if not have["custom_analysis"]:
             print(f"  [GAP] {args.engine} accepts a custom analyzer and does not apply it")
+        # the same probes against the cluster being replaced: a name the
+        # engine answers with a different kind of complaint than the cluster
+        # does is a gap, whatever phrase the complaint used
+        reference = probe(args.cluster)
+        for what, ours, theirs in (("queries", have["query_kinds"], reference["query_kinds"]),
+                                   ("aggregations", have["agg_kinds"], reference["agg_kinds"])):
+            missing = sorted(n for n, k in theirs.items() if k != "unknown" and ours.get(n) == "unknown")
+            differ = sorted(n for n, k in theirs.items()
+                            if k != "unknown" and ours.get(n) not in ("unknown", k))
+            have[what] = {n for n, k in ours.items() if k != "unknown"}
+            print(f"  [{'GAP' if missing else 'OK '}] {what} the cluster knows and the engine does not: "
+                  f"{', '.join(missing) or 'none'}")
+            if differ:
+                print(f"  [?  ] {what} answered with a different kind of complaint: {', '.join(differ)}")
         r = inventory(args.cluster, args.out, have)
         print(f"{len(r['indices'])} indices, {r['capacity']['documents']:,} documents, "
               f"{r['capacity']['primary_gb']} GB of primaries")
