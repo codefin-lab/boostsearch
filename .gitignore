@@ -53,3 +53,7 @@ __pycache__/
 
 # the editor's own working directories
 /.claude/
+
+# working notes from the study phase, written with an AI and not
+# reviewed as documents: kept locally, not published
+/docs/notes/

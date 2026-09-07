@@ -199,10 +199,6 @@ way.
 | [CONTRIBUTING.md](CONTRIBUTING.md) | where things are, and what to run before you push |
 | [CONTEXT.md](CONTEXT.md) | what the words mean |
 
-The rest of `docs/` -- the tantivy study, the early comparisons, the Phase 2
-baseline -- are the notes the plan was made from, some of them in Thai, kept
-as they were written.
-
 ## Licence
 
 Dual licensed under either of

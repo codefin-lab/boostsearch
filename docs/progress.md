@@ -1,21 +1,24 @@
 # The ledger
 
-Every task, what it took, and what was got wrong on the way. The early
-entries are in Thai, as they were written; the language changed with the
-name, and nothing was rewritten.
+Every task, what it took, and what was got wrong on the way. The earliest
+entries were written in Thai and are translated here; nothing else was
+changed in them.
 
-วัดด้วย **test suite ของ OpenSearch เอง** (`rest-api-spec` YAML) ไม่ได้เขียน test ใหม่
-harness: `tools/yaml_runner.py` · เป้า Phase 1: 124 ไฟล์ / 401 sections
+# Phase 1 -- the core of the REST API
 
-| จุด | PASS | % |
+Measured with **OpenSearch's own test suite** (the `rest-api-spec` YAML); no
+tests were written. Harness: `tools/yaml_runner.py`. The Phase 1 target: 124
+files, 401 sections.
+
+| where | PASS | % |
 |---|---:|---:|
-| RED baseline | 0 / 400 | 0.0% |
-| หลัง slice 1 (index + doc CRUD) | 56 / 400 | 14.0% |
-| หลัง slice 2 (search + agg) | 229 / 400 | 57.2% |
-| หลังไล่หาง Phase 1 | 275 / 400 | 68.8% |
-| **Phase 1 ปิดครบ** | **297 / 400** | **74.6%** |
+| the red baseline | 0 / 400 | 0.0% |
+| after slice 1 (index and document CRUD) | 56 / 400 | 14.0% |
+| after slice 2 (search and aggregations) | 229 / 400 | 57.2% |
+| after the Phase 1 tail | 275 / 400 | 68.8% |
+| **Phase 1 complete** | **297 / 400** | **74.6%** |
 
-## คะแนนรายพื้นที่ (Phase 1 ปิดครบ)
+## By area, at the close of Phase 1
 
 | area | pass | fail |
 |---|---:|---:|
@@ -35,13 +38,14 @@ harness: `tools/yaml_runner.py` · เป้า Phase 1: 124 ไฟล์ / 401 
 | exists / indices.exists / field_caps | 6 | 0 |
 | explain / indices.get_alias | 2 | 0 |
 | range | 0 | 7 |
-| **รวม** | **297** | **101** |
+| **total** | **297** | **101** |
 
-## สถานะ: ขอบเขต Phase 1 เหลือ 0
+## Where it stood: nothing of Phase 1's scope left
 
-101 ที่ยังล้มทั้งหมดเป็น **Phase 3 ตามแผน** ไม่มีตัวไหนอยู่ในขอบเขต Phase 1 อีกแล้ว
+All 101 still failing were **Phase 3 by plan**; none was in Phase 1's scope
+any more.
 
-| กลุ่ม | ไฟล์ |
+| group | files |
 |---|---:|
 | HDR percentiles | 16 |
 | wildcard field type | 9 |
@@ -60,75 +64,95 @@ harness: `tools/yaml_runner.py` · เป้า Phase 1: 124 ไฟล์ / 401 
 | weighted_avg / variable_width_histogram | 3 |
 | dynamic mapping modes / field collapsing / span queries / shard stats | 5 |
 
-## สถาปัตยกรรมที่ลงตัวแล้ว
+## The architecture that settled
 
-**Dynamic mapping ด้วย JSON field คู่** — เอกสารทุกฉบับ index ลง 2 JSON field พร้อมกัน:
-- `_dyn` — tokenizer `default` + positions ⇒ พฤติกรรม `text`
-- `_raw` — tokenizer `raw` + `set_fast` ⇒ พฤติกรรม `keyword` + doc values
+**Dynamic mapping with a pair of JSON fields.** Every document is indexed
+into two JSON fields at once:
+- `_dyn` -- the `default` tokenizer with positions, which behaves like `text`
+- `_raw` -- the `raw` tokenizer with `set_fast`, which behaves like `keyword`
+  with doc values
 
-ไม่ต้องจัดการ schema เลย tantivy แยกชนิด `i64/f64/bool/Str/Date` ให้เองต่อ path
-การเลือก view: mapped `text` → `_dyn`, mapped `keyword` → `_raw`, unmapped → `_dyn`
-สำหรับ full-text / `_raw` สำหรับ exact — ตรงกับ dynamic mapping (text + `.keyword`) ของ OpenSearch
+No schema to manage: tantivy tells `i64/f64/bool/Str/Date` apart per path by
+itself. Choosing the view: a mapped `text` goes to `_dyn`, a mapped `keyword`
+to `_raw`, an unmapped field to `_dyn` for full text and `_raw` for exact
+matches -- which is OpenSearch's dynamic mapping (text plus `.keyword`).
 
-**Aggregation ส่งผ่านเกือบตรง** — agg JSON ของ tantivy เข้ากันได้กับ OpenSearch อยู่แล้ว
-เราแค่ (1) เขียน `field` ใหม่ให้ชี้ `_raw.x`/`_dyn.x` (2) ถอด `meta` ออกแล้วแปะกลับตอนตอบ
-(3) เปลี่ยน `aggregations` → `aggs`
+**Aggregations pass through almost as they are.** tantivy's aggregation JSON
+is already compatible with OpenSearch's; we (1) rewrite `field` to point at
+`_raw.x` or `_dyn.x`, (2) take `meta` off and put it back on the answer,
+(3) turn `aggregations` into `aggs`.
 
-**สิ่งที่ tantivy ไม่มี เราทำเองเหนือมัน** — `filters`, `filter`, `missing` เป็น bucket agg
-ที่รันเป็น filtered search แยกต่อ bucket แล้วประกอบผลเอง (tantivy's `filter` รับแค่
-query string dialect ของตัวเอง ใช้กับ JSON view ของเราไม่ได้)
+**What tantivy has not, we build above it.** `filters`, `filter` and
+`missing` are bucket aggregations run as a filtered search per bucket and
+assembled by us (tantivy's `filter` takes only its own query-string dialect,
+which does not work with our JSON views).
 
-**Realtime GET vs near-realtime search** — `pending: HashMap<id, Option<Value>>`
-เก็บ write ที่ยังไม่ commit ⇒ GET เห็นทันที search เห็นหลัง refresh ตรงกับ OpenSearch
-โดยไม่ต้อง commit ทุก write
+**Realtime GET against near-realtime search.** `pending: HashMap<id,
+Option<Value>>` holds writes not yet committed, so a GET sees them at once
+and a search sees them after a refresh -- OpenSearch's behaviour, without
+committing on every write.
 
-## สิ่งที่เพิ่มตอนปิด Phase 1 ให้ครบ
+## Added to complete Phase 1
 
-- **multi-value sort ที่ตรงกับ Java** — `mode` min/max/avg/sum/median พร้อม
-  **long overflow แบบ Java** (`[i64::MAX, 1]` sum ได้ค่าติดลบจริง ๆ),
-  `unsigned_long` ใช้เลขจำนวนเต็มแบบ exact + ปัดครึ่งขึ้น, `avg` ของ long
-  ใช้ `round((wrapping_sum as f64)/n)` — สามอย่างนี้ให้ผลต่างกันและต้องแยกกันจริง
-- **`terms` lookup** (`{index, id, path}`) ทั้งใน query และใน filter aggregation
-- **`_index` terms agg** — `_index` เป็น metadata ไม่ใช่ column จึงทำ bucket เอง
-  ต่อ index พร้อมรองรับ `min_doc_count: 0`
-- **`global` aggregation** — รันด้วย `match_all` แยกจาก query หลัก
-- **`terms` order by nested bucket doc_count** — tantivy ทำไม่ได้ จึงถอด order ออก
-  แล้วเรียง bucket เองหลังได้ผล
-- **shard skipping** (`pre_filter_shard_size`) — index ที่ match 0 ถือว่า skip
-  แต่ต้องเหลือรันอย่างน้อยหนึ่ง และ agg ที่ต้องการทุก shard (`global`,
-  `min_doc_count: 0`) ปิด skipping ทั้งหมด
-- **`index.append_only.enabled`** — bulk ที่ระบุ `_id` เองถูกปฏิเสธ
-- **`filter_path` matcher ที่ `**` ถูกต้อง**, `stored_fields` ใน search และ mget
+- **Multi-value sort as Java does it** -- `mode` min/max/avg/sum/median with
+  **Java's long overflow** (`[i64::MAX, 1]` really sums to a negative),
+  `unsigned_long` in exact integers rounded half up, and `avg` of longs as
+  `round((wrapping_sum as f64)/n)` -- three things that give different
+  answers and had to be kept apart
+- **`terms` lookup** (`{index, id, path}`), in queries and in filter
+  aggregations
+- **`_index` terms aggregation** -- `_index` is metadata rather than a
+  column, so the buckets are made by us, one per index, with
+  `min_doc_count: 0` honoured
+- **`global` aggregation** -- run with `match_all`, apart from the main query
+- **`terms` ordered by a nested bucket's doc_count** -- tantivy cannot, so the
+  order is taken off and the buckets sorted afterwards
+- **Shard skipping** (`pre_filter_shard_size`) -- an index matching nothing
+  counts as skipped, at least one still runs, and an aggregation that needs
+  every shard (`global`, `min_doc_count: 0`) turns skipping off
+- **`index.append_only.enabled`** -- a bulk that names its own `_id` is
+  refused
+- **A `filter_path` matcher that gets `**` right**, and `stored_fields` in
+  search and mget
 
-## สิ่งที่เพิ่มตอนไล่หาง Phase 1
+## Added in the Phase 1 tail
 
-- **`multi_match` เต็มรูป** — `type` (best_fields / most_fields / cross_fields / phrase /
-  phrase_prefix / bool_prefix), per-field `^boost`, `analyzer`, `fuzziness`,
-  `minimum_should_match`, `operator` ส่งต่อไปทุก field
-- **named analyzer ฝั่ง query** — `whitespace` / `keyword` / `english` map ไปยัง tokenizer ของ tantivy
-- **`filter_path`** — รองรับ `*`, `**`, และ `-` สำหรับ exclude ทำเป็นชั้นกลางที่ทุก endpoint ใช้ร่วมกัน
-- **`_field_caps`, `_explain`, `_alias`, `_stats`, `_update`** พอร์ตเพิ่ม
-- **dynamic type tracking** — จำ field path ที่เห็นในเอกสารพร้อมชนิดที่ dynamic mapping
-  จะให้ ทำให้ `field_caps` และ `query_string` ทำงานกับ field ที่ไม่ได้ประกาศ mapping
-- **extended_stats คำนวณใหม่จาก sum/sum_of_squares** ด้วยสูตรของ OpenSearch
-  เพื่อให้ float ตรงถึงบิตสุดท้าย (tantivy สะสมค่าคนละแบบ ต่างกันที่ ULP สุดท้าย)
-- **`filters` / `filter` / `missing` bucket agg** ที่ tantivy ไม่มี ทำเองเป็น filtered search ต่อ bucket
-- **sort `mode`** min/max/avg/sum สำหรับ field หลายค่า
+- **`multi_match` in full** -- `type` (best_fields / most_fields /
+  cross_fields / phrase / phrase_prefix / bool_prefix), per-field `^boost`,
+  `analyzer`, `fuzziness`, `minimum_should_match`, `operator` passed to every
+  field
+- **Named analyzers on the query side** -- `whitespace` / `keyword` /
+  `english` mapped to tantivy's tokenizers
+- **`filter_path`** -- `*`, `**` and `-` for exclusion, as a layer every
+  endpoint shares
+- **`_field_caps`, `_explain`, `_alias`, `_stats`, `_update`** ported
+- **Dynamic type tracking** -- the field paths seen in documents are
+  remembered with the type dynamic mapping would give them, so `field_caps`
+  and `query_string` work on fields no mapping declared
+- **extended_stats recomputed from sum and sum_of_squares** by OpenSearch's
+  formula, so the floats agree to the last bit (tantivy accumulates
+  differently and differs in the last ULP)
+- **`filters` / `filter` / `missing` bucket aggregations** that tantivy has
+  not, as a filtered search per bucket
+- **Sort `mode`** min/max/avg/sum for multi-valued fields
 
-## ค้นพบระหว่างทางที่สำคัญที่สุด
+## The most important thing found on the way
 
-**Automaton query บน JSON path ต้อง anchor ด้วย prefix ของ term จริง**
-`AutomatonWeight::new_for_json_path` รัน automaton บน serialized term ทั้งก้อน
-(`<json path>\0<type byte><text>`) ไม่ใช่เฉพาะข้อความ ⇒ regex ต้องขึ้นต้นด้วย
-byte ของ path ที่ escape แล้ว มิฉะนั้น `prefix`/`wildcard`/`regexp` คืน 0 เสมอแบบเงียบ ๆ
+**An automaton query over a JSON path has to be anchored with the term's
+real prefix.** `AutomatonWeight::new_for_json_path` runs the automaton over
+the whole serialized term (`<json path>\0<type byte><text>`), not over the
+text alone, so the regex has to begin with the escaped bytes of the path --
+otherwise `prefix`, `wildcard` and `regexp` quietly return nothing.
 
-## ข้อจำกัดที่รู้ตัว (งานของ Phase 2)
+## Known limits (Phase 2's work)
 
-- **sort ใช้การรวบทุก doc ที่ match แล้วเรียงในหน่วยความจำ** ถูกต้องแต่ O(matched)
-  ต้องเปลี่ยนเป็น collector ที่เรียงระหว่าง collect
-- `took` เป็นค่าคงที่ ยังไม่จับเวลาจริง
-- ทุก index เป็น single shard, `Index::create_in_ram` — ยังไม่แตะ mmap/persistence
-- scoring ของ prefix clause เป็น const score ⇒ ลำดับผลต่างจาก OpenSearch ในบางกรณี
+- **Sorting gathers every matching document and sorts in memory.** Correct
+  but O(matched); it has to become a collector that sorts while collecting.
+- `took` is a constant; nothing is timed yet.
+- Every index is a single shard on `Index::create_in_ram`; mmap and
+  persistence are untouched.
+- A prefix clause scores as a constant, so the order of hits differs from
+  OpenSearch's in some cases.
 
 ## Phase 1 cut: 388 of 398 (97.5%)
 
@@ -165,70 +189,80 @@ way round. Ordering the segments by the index's own segment list does not fix it
 either -- measured, then reverted. Matching this needs a sequence number stored
 per document, which is memory we spent a while reclaiming.
 
-# ความคืบหน้า Phase 2 — query, aggregation, endpoint, field type
+# Phase 2 -- queries, aggregations, endpoints, field types
 
-วัดด้วย suite เดิมของ OpenSearch สามชุด กับ diff สามตัวที่รันคู่กับ OpenSearch 3.1.0 จริง
+Measured with the same three OpenSearch suites and three diffs run beside a
+real OpenSearch 3.1.0.
 
-| gate | ก่อน Phase 2 | ปิด Phase 2 |
+| gate | before Phase 2 | at the close of Phase 2 |
 |---|---:|---:|
 | core corpus (`/tmp/every_manifest.json`) | 1,427 / 1,427 | **1,427 / 1,427** |
 | phase1 corpus | 398 / 398 | **398 / 398** |
 | module corpus (`tools/modules_manifest.json`) | 346 / 895 | **506 / 895** |
-| `tools/search_diff.py` (query + agg answers) | 67 / 92 | **92 / 92** |
+| `tools/search_diff.py` (query and aggregation answers) | 67 / 92 | **92 / 92** |
 | `tools/analysis_diff.py` (token for token) | 519 / 522 | 519 / 522 |
 | `tools/shape_diff.py` (answer shapes) | 10 / 29 | 27 / 29 |
 | index docs/s (`tools/bench_matrix.py`) | 77,346 vs 67,141 | **81,340 vs 67,598** |
 
-## รายโมดูลที่อยู่ในขอบเขต Phase 2
+## The modules in Phase 2's scope
 
-| module | pass / total | ที่เหลือ |
+| module | pass / total | what is left |
 |---|---:|---|
-| mapper-extras | 100 / 100 | — |
-| parent-join | 14 / 14 | — |
-| aggs-matrix-stats | 15 / 15 | — |
-| geo | 7 / 7 | — |
-| lang-mustache | 21 / 21 | — |
-| rank-eval | 8 / 8 | — |
-| percolator | 1 / 1 | — |
-| analysis-common | 166 / 172 | 4 ต้องการ painless (Phase 3), 2 คือ `common` query กับ `minimum_should_match` ที่ยังหา semantics ของ Lucene ไม่เจอ |
-| reindex | 131 / 166 | 33 ต้องการ script (Phase 3), 2 คือ reindex จาก remote cluster |
+| mapper-extras | 100 / 100 | -- |
+| parent-join | 14 / 14 | -- |
+| aggs-matrix-stats | 15 / 15 | -- |
+| geo | 7 / 7 | -- |
+| lang-mustache | 21 / 21 | -- |
+| rank-eval | 8 / 8 | -- |
+| percolator | 1 / 1 | -- |
+| analysis-common | 166 / 172 | 4 need Painless (Phase 3); 2 are the `common` query with `minimum_should_match`, whose Lucene semantics were not yet found |
+| reindex | 131 / 166 | 33 need scripts (Phase 3); 2 are reindex from a remote cluster |
 
-385 ที่ยังล้มใน module corpus: lang-painless 106 + ingest-common 100 (Phase 3/4),
-reindex-with-script 33, search-pipeline-common 5 (feature ใหม่ นอกแผน),
-ingest-* / repository-url / smoke-test-ingest ~30 (Phase 4), plugins (phonetic,
-icu collation, kuromoji completion, annotated-text) ~8
+The 385 still failing in the module corpus: lang-painless 106 and
+ingest-common 100 (Phases 3 and 4), reindex-with-script 33,
+search-pipeline-common 5 (a feature newer than the plan), ingest-* /
+repository-url / smoke-test-ingest about 30 (Phase 4), and the plugins
+(phonetic, ICU collation, kuromoji completion, annotated-text) about 8.
 
-## สิ่งที่ลงไปใน Phase 2
+## What went into Phase 2
 
-- **BM25 ตรง Lucene** — สถิติต่อ path ของ JSON field (BoostCore เขียน docs/tokens ต่อ path),
-  ตัด `(k1+1)` ออกจาก numerator, span query ชั่งน้ำหนักครั้งเดียว (idf รวมทุกคำ)
-- **token graph** — token มี `positionLength`; `synonym_graph` วาง path แบบ Lucene,
-  `flatten_graph` กดกราฟให้แบน, phrase/match/phrase-prefix เดินทุก path
-  และ phrase บนกราฟให้คะแนนเป็น span query เดียว
-- **dynamic mapping** — field ที่ไม่ได้ประกาศถูก map แบบ OpenSearch (text+keyword,
-  long, float, date, boolean, object) และโผล่ใน `_mapping`; keyword sub-field
-  ที่ไม่มี normalizer อ่านจาก raw view ของ parent แทนการ index ซ้ำ
-- **explain tree** — `_explain` และ `explain:true` ให้ต้นไม้แบบ Lucene
-  (`weight(field:term in doc) [PerFieldSimilarity]`, `score(freq=…)`, idf, tf)
-- **by-query walks** — validation ครบ, routing, `_source` filtering, throttling,
-  `slices: auto`, `.tasks`, `wait_for_active_shards`
-- **field types** — percolator, `_size`, `copy_to`, rank_feature negative impact,
-  `match_only_text` scoring (freq 1, ไม่มี norms)
-- **aggregations** — matrix_stats ตามเลขคณิตของ OpenSearch (accumulate ต่อ shard แล้ว merge),
-  children/parent, geohash_grid / geotile_grid, composite over grid sources,
-  ranges เขียนเป็น object
-- **analysis** — shingle, keyword_repeat (stacked stems), Bengali/Persian stemmers,
-  synonym rules ถูกตัดด้วย chain ข้างหน้า, multiplexer, char filter offset map,
-  ngram highlighting, matched_fields, intervals `use_field`
-- **runner** — `catch` regex เทียบกับ `[type=…, reason=…]` แบบ client ของ OpenSearch,
-  body ที่ spec บอกว่า required, `$body.x` ใน assertion
+- **BM25 as Lucene computes it** -- statistics per path of a JSON field
+  (BoostCore writes docs and tokens per path), `(k1+1)` taken out of the
+  numerator, span queries weighted once (one idf over all the terms)
+- **The token graph** -- tokens carry `positionLength`; `synonym_graph` lays
+  paths out as Lucene does, `flatten_graph` flattens them, phrase / match /
+  phrase-prefix walk every path, and a phrase over a graph scores as one
+  span query
+- **Dynamic mapping** -- an undeclared field is mapped as OpenSearch maps it
+  (text plus keyword, long, float, date, boolean, object) and appears in
+  `_mapping`; a keyword sub-field with no normalizer reads the parent's raw
+  view rather than being indexed again
+- **The explain tree** -- `_explain` and `explain:true` give Lucene's tree
+  (`weight(field:term in doc) [PerFieldSimilarity]`, `score(freq=...)`, idf,
+  tf)
+- **The by-query walks** -- validation in full, routing, `_source`
+  filtering, throttling, `slices: auto`, `.tasks`, `wait_for_active_shards`
+- **Field types** -- percolator, `_size`, `copy_to`, rank_feature negative
+  impact, `match_only_text` scoring (freq 1, no norms)
+- **Aggregations** -- matrix_stats by OpenSearch's arithmetic (accumulated
+  per shard, then merged), children / parent, geohash_grid / geotile_grid,
+  composite over grid sources, ranges written as objects
+- **Analysis** -- shingle, keyword_repeat (stacked stems), Bengali and
+  Persian stemmers, synonym rules cut by the chain before them, multiplexer,
+  char filter offset maps, ngram highlighting, matched_fields, intervals
+  `use_field`
+- **The runner** -- `catch` regexes matched against `[type=..., reason=...]`
+  as OpenSearch's client does, bodies the spec says are required, `$body.x`
+  in assertions
 
-## ข้อจำกัดที่รู้ตัว (ยกไป Phase 3+)
+## Known limits (carried to Phase 3 and later)
 
-- `common` query กับ `minimum_should_match.low_freq/high_freq` — 2 sections
-- `ignore_above` บน keyword sub-field ที่อ่านจาก raw view: ค่ายาวเกินยังถูกนับใน agg
-- reindex จาก remote cluster ยังไม่ทำ (validation ครบแล้ว)
-- search pipelines (`search-pipeline-common`) นอกขอบเขตแผน
+- The `common` query with `minimum_should_match.low_freq/high_freq` -- 2
+  sections
+- `ignore_above` on a keyword sub-field read from the raw view: a value
+  longer than the limit is still counted in aggregations
+- Reindex from a remote cluster is not done (the validation is)
+- Search pipelines (`search-pipeline-common`) are outside the plan's scope
 
 ## Phase 3 -- Painless (in progress)
 
