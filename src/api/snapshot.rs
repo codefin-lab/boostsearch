@@ -591,6 +591,19 @@ pub async fn restore_snapshot(
         .filter(|n| wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n)))
     {
         let target = rename(n);
+        // a name that stands for several indices is not a name a restore
+        // may write to: `store.get` answers for an alias with one of the
+        // indices behind it, while deleting that name deletes all of them
+        if store.resolve(&target).len() > 1 || store.is_alias(&target) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_index_name_exception",
+                format!(
+                    "[{target}] is an alias, and a restore writes to an index: restore under a \
+                     different name by providing a rename pattern and replacement name"
+                ),
+            );
+        }
         if let Some(st) = store.get(&target) {
             // an open index is being written to: restoring over it would
             // mean two sets of documents under one name, so the reference
@@ -610,6 +623,14 @@ pub async fn restore_snapshot(
             // closed: what the snapshot holds replaces it
             match from.as_ref() {
                 Some(source) => {
+                    // the index that is here goes only once the snapshot has
+                    // been read far enough to replace it. A snapshot that
+                    // holds nothing for this index -- a clone, which records
+                    // a snapshot without writing one -- used to take the
+                    // index with it and then report the failure.
+                    if let Err(e) = crate::snapshot::readable(source, &name, n) {
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+                    }
                     store.delete(&target);
                     if let Err(e) =
                         crate::snapshot::restore_index(&store, source, &name, n, &target)

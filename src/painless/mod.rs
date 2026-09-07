@@ -45,9 +45,25 @@ impl ScriptError {
         // the stack shows a window of 25 characters either side of the
         // fault, with an ellipsis where the script goes on
         let len = self.source.len();
-        let offset = self.offset.min(len);
-        let start = offset.saturating_sub(25);
-        let end = (offset + 25).min(len);
+        // the window is cut where characters begin: an offset lands in the
+        // middle of a character as often as not, and a script written in
+        // any other alphabet would have panicked on its own error message
+        let boundary = |at: usize| -> usize {
+            let mut at = at.min(len);
+            while at > 0 && !self.source.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        let offset = boundary(self.offset);
+        let start = boundary(offset.saturating_sub(25));
+        let end = {
+            let mut at = (offset + 25).min(len);
+            while at < len && !self.source.is_char_boundary(at) {
+                at += 1;
+            }
+            at
+        };
         let mut snippet = String::new();
         if start > 0 {
             snippet.push_str("... ");

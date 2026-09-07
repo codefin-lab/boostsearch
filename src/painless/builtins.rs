@@ -2903,6 +2903,7 @@ pub fn construct(class: &str, args: &[Value]) -> Result<Value, String> {
     Ok(match (class.ends_with("[]"), base) {
         (true, _) => {
             let n = arg(args, 0).as_i64().unwrap_or(0).max(0) as usize;
+            list_fits(n)?;
             let fill = match base {
                 "int" | "long" | "short" | "byte" => Value::Int(0),
                 "double" | "float" => Value::Double(0.0),

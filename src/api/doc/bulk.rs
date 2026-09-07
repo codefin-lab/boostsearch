@@ -74,6 +74,16 @@ pub async fn bulk(
         };
         let id_opt = meta.get("_id").and_then(scalar_str);
         let doc_line = if op == "delete" { None } else { lines.next().map(|(_, l)| l) };
+        // an action that names no document is a request that was cut short:
+        // writing an empty document in its place overwrote whatever the
+        // action named, and said `"errors": false` about it
+        if op != "delete" && doc_line.is_none() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "The bulk request must be terminated by a newline [\\n]",
+            );
+        }
         ops.push(Op { op, meta: meta.clone(), index: idx, id: id_opt, doc_line });
     }
 

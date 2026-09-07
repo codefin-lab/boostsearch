@@ -385,8 +385,7 @@ pub(crate) fn run_scripted_value_metric(
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
     // `track_scores` because `_score` is one of the things such a script is
     // most often written over
-    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
-    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    let found = crate::search::walk_every_hit(store, targets, &query, true)?;
     let mut values: Vec<f64> = Vec::new();
     for hit in &found.hits {
         let name = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("");
@@ -534,8 +533,7 @@ pub(crate) fn run_scripted_metric_agg(
         Runner::new(&init.params).with_state(state.clone()).run(&init.script).map_err(failed)?;
     }
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
-    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    let found = crate::search::walk_every_hit(store, targets, &query, true)?;
     for hit in &found.hits {
         let name = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("");
         let Some(st) = store.get(name) else { continue };

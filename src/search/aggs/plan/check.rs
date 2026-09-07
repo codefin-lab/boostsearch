@@ -9,6 +9,12 @@ pub(crate) fn check_agg_types(node: &Value, ctx: &Ctx) -> std::result::Result<()
 
 /// Numeric parameter bounds OpenSearch enforces; `owner` is the aggregation
 /// name the message has to quote.
+/// The name a complaint names: the aggregation the caller wrote, where
+/// there is one, and the kind otherwise.
+fn owner_or<'a>(name: &'a str, owner: &'a str) -> &'a str {
+    if owner.is_empty() { name } else { owner }
+}
+
 pub(crate) fn check_agg_params(
     name: &str,
     def: &Value,
@@ -29,6 +35,18 @@ pub(crate) fn check_agg_params(
         )
     };
     let num = |k: &str| def.get(k).and_then(|v| v.as_f64());
+    // an aggregation over ranges with no ranges in it is not an aggregation
+    // over ranges: the engine's own bucket builder indexes the first one
+    if matches!(name, "range" | "date_range" | "ip_range" | "geo_distance")
+        && def.get("ranges").map(|r| r.as_array().map(|a| a.is_empty()).unwrap_or(false))
+            == Some(true)
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("No [ranges] specified for the [{}] aggregation", owner_or(name, owner)),
+        ));
+    }
     match name {
         "extended_stats" => {
             if let Some(v) = num("sigma")

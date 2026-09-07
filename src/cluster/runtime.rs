@@ -27,8 +27,14 @@ pub struct Shared {
     pub manager: std::sync::atomic::AtomicBool,
 }
 
-/// Answers awaited by callers on this node, by request id.
-type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Envelope>>>>;
+/// Answers awaited by callers on this node, by request id -- and by the node
+/// each answer is expected from.
+///
+/// A request id alone is not enough to say an answer belongs to a call: the
+/// ids are a counter, so any peer could have answered any of them. Every
+/// frame carries the peer whose connection it arrived on, and an answer from
+/// anyone else is not this call's answer.
+type Pending = Arc<Mutex<BTreeMap<u64, (NodeId, tokio::sync::oneshot::Sender<Envelope>)>>>;
 
 /// What answers a data-plane action (replication, recovery, a forwarded
 /// request): not the coordinator, which only minds the cluster.
@@ -54,12 +60,29 @@ struct Inbox {
 
 impl Handler for Inbox {
     fn handle(&self, envelope: Envelope) {
-        // an answer someone on this node is waiting for goes to them, not to the logic
-        if envelope.kind != super::transport::Kind::Request
-            && let Some(tx) = self.pending.lock().remove(&envelope.request_id)
-        {
-            let _ = tx.send(envelope);
-            return;
+        // an answer someone on this node is waiting for goes to them, not to
+        // the logic -- and only if it came from the node that was asked
+        if envelope.kind != super::transport::Kind::Request {
+            let waiting = {
+                let mut pending = self.pending.lock();
+                match pending.get(&envelope.request_id) {
+                    Some((expected, _)) if *expected == envelope.from => {
+                        pending.remove(&envelope.request_id).map(|(_, tx)| tx)
+                    }
+                    Some((expected, _)) => {
+                        tracing::debug!(
+                            "transport: {} answered a call put to {expected}",
+                            envelope.from
+                        );
+                        return;
+                    }
+                    None => None,
+                }
+            };
+            if let Some(tx) = waiting {
+                let _ = tx.send(envelope);
+                return;
+            }
         }
         // a data-plane request runs on its own task and answers over the transport
         if envelope.kind == super::transport::Kind::Request
@@ -207,7 +230,7 @@ impl Runtime {
                         Output::Send { to, envelope } if to == me => {
                             // the logic answering a caller on this node
                             match answers.lock().remove(&envelope.request_id) {
-                                Some(tx) => {
+                                Some((_, tx)) => {
                                     let _ = tx.send(envelope);
                                 }
                                 None => {
@@ -320,7 +343,7 @@ impl Runtime {
             }
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.lock().insert(rid, tx);
+        self.pending.lock().insert(rid, (to.clone(), tx));
         if *to == me {
             let _ = self.inputs.send(Input::Message(envelope));
         } else if self.transport.send(to, envelope).is_err() {

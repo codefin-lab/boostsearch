@@ -597,6 +597,22 @@ fn task_name(store: &Store) -> String {
     format!("{}:{}", crate::store::index_uuid("node"), seq)
 }
 
+/// Why a walk that writes may not run over these indices, if it may not.
+fn change_refusal_for(store: &Store, expr: &str) -> Option<Response> {
+    for name in store.resolve(expr) {
+        let Some(st) = store.get(&name) else { continue };
+        let refusal = st.read().change_refusal();
+        if let Some((kind, why)) = refusal {
+            let status = match kind {
+                "index_closed_exception" => StatusCode::BAD_REQUEST,
+                _ => StatusCode::FORBIDDEN,
+            };
+            return Some(err(status, kind, why));
+        }
+    }
+    None
+}
+
 pub async fn delete_by_query(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -607,6 +623,12 @@ pub async fn delete_by_query(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
+    }
+    // an index that takes no changes takes no walk over it either: the
+    // deletes would each be refused and the answer would still say the walk
+    // had run
+    if let Some(refusal) = change_refusal_for(&store, &index) {
+        return refusal;
     }
     // a walk that deletes has to be told what to delete
     if body.get("query").is_none() {
@@ -665,6 +687,9 @@ pub async fn update_by_query(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
+    }
+    if let Some(refusal) = change_refusal_for(&store, &index) {
+        return refusal;
     }
     // a script says what to change; without one the walk rewrites each
     // document as it stands, which is what gives it a new version
@@ -832,6 +857,26 @@ pub async fn reindex(
             "Validation Failed: 1: index is missing;",
         );
     };
+    // the indices are named in the body, where the security layer cannot see
+    // them: a caller with the ordinary cluster permission for a composite
+    // request could otherwise copy an index they may not read into one they
+    // may, or write over an index they may not touch
+    if remote.is_none()
+        && let Some(why) = crate::security::item_refusal(
+            &store,
+            &["indices:data/read/search"],
+            &crate::security::layer::indices_for_expr(&store, &from),
+        )
+    {
+        return err(StatusCode::FORBIDDEN, "security_exception", why);
+    }
+    if let Some(why) = crate::security::item_refusal(
+        &store,
+        &["indices:data/write/index"],
+        &crate::security::layer::indices_for_expr(&store, &to),
+    ) {
+        return err(StatusCode::FORBIDDEN, "security_exception", why);
+    }
     // reading from another cluster, an index of the same name is a different
     // index, so writing into it is not writing into what is being read
     if remote.is_none() && store.resolve(&from).contains(&to) {

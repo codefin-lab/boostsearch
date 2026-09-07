@@ -152,6 +152,22 @@ pub fn repo_root() -> PathBuf {
     }
 }
 
+/// A path with `.` and `..` taken out, without asking the filesystem: a
+/// location that does not exist yet still has to be judged.
+fn tidy(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Where a repository keeps its snapshots, if it is one we can write to.
 ///
 /// Only `fs` repositories have somewhere to put anything; the rest are
@@ -168,13 +184,14 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
         // nowhere else: a repository at `/` is every file the process can
         // reach, and a delete of a snapshot in it is a delete of anything
         let root = repo_root();
-        let inside = path
-            .canonicalize()
-            .ok()
-            .zip(root.canonicalize().ok())
-            .is_some_and(|(p, r)| p.starts_with(&r))
-            || path.starts_with(&root);
-        return inside.then_some(path);
+        // `starts_with` compares components and does not know what `..`
+        // means, so `<path.repo>/../../anywhere` "starts with" the root: the
+        // path is resolved before it is judged, and a location that cannot
+        // be resolved is judged on the components it would have had
+        let cleaned = tidy(&path);
+        let cleaned_root = tidy(&root);
+        let inside = cleaned.starts_with(&cleaned_root);
+        return inside.then_some(cleaned);
     }
     // a relative location is a name, not a path: nothing it contains may climb
     // out of the root repositories live under
@@ -268,6 +285,17 @@ pub fn read_records(dir: &Path) -> Vec<(String, Value)> {
 /// The mapping and settings are recreated first, then the documents are
 /// written back through the ordinary path -- which is why a snapshot taken by
 /// one version can be restored by another.
+/// Whether the repository holds this index in this snapshot, without
+/// restoring it: what a caller must know before the index that is here is
+/// deleted to make room.
+pub fn readable(from: &Source, snapshot: &str, index: &str) -> Result<(), String> {
+    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
+    match from.read(&format!("{within}/meta.json")) {
+        Some(raw) if serde_json::from_slice::<Value>(&raw).is_ok() => Ok(()),
+        _ => Err(format!("[{snapshot}] holds nothing for index [{index}]")),
+    }
+}
+
 pub fn restore_index(
     store: &Store,
     from: &Source,

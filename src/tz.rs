@@ -115,7 +115,9 @@ pub fn offset_at(zone: &str, unix_secs: i64) -> Option<i32> {
         let sign = if z.starts_with('-') { -1 } else { 1 };
         let (h, m) = match rest.split_once(':') {
             Some((h, m)) => (h, m),
-            None if rest.len() == 4 => (&rest[..2], &rest[2..]),
+            // `+0730` is four digits; four *bytes* of something else is not
+            // a zone, and cutting it in two would cut a character in half
+            None if rest.len() == 4 && rest.is_char_boundary(2) => (&rest[..2], &rest[2..]),
             None => (rest, "0"),
         };
         let h: i32 = h.parse().ok()?;

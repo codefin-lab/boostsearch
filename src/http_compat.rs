@@ -72,7 +72,15 @@ impl<S> Lenient<S> {
     /// Whether the reader is part way through a head: something has arrived
     /// and the request it belongs to is not readable yet.
     fn mid_head(&self) -> bool {
-        matches!(self.phase, Phase::Line | Phase::Headers) && !self.hold.is_empty()
+        match self.phase {
+            // between requests on a kept-alive connection, with nothing
+            // read: the client may take as long as it likes to ask again
+            Phase::Line => !self.hold.is_empty(),
+            // a request line has arrived and its headers have not: the head
+            // has begun, whether or not a byte of it is being held
+            Phase::Headers => true,
+            _ => false,
+        }
     }
 }
 

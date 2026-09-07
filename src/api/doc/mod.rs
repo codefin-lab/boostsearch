@@ -81,13 +81,13 @@ pub fn write_doc_versioned(
     raw: Option<String>,
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
-    // an index held still refuses writes until the block is lifted
-    if st.knobs.blocks_write {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "cluster_block_exception",
-            format!("index [{}] blocked by: [FORBIDDEN/8/index write (api)];", st.name),
-        ));
+    // an index held still takes no writes until it is let go
+    if let Some((kind, why)) = st.change_refusal() {
+        let status = match kind {
+            "index_closed_exception" => StatusCode::BAD_REQUEST,
+            _ => StatusCode::FORBIDDEN,
+        };
+        return Err(err(status, kind, why));
     }
     // an id is carried in the index's terms, which caps how long it may be
     if id.len() > 512 {
@@ -139,11 +139,6 @@ pub fn write_doc_versioned(
     );
     // the shard a write belongs to decides which refresh will show it
     let shard = st.shard_of_doc(id);
-    // deleting is only needed when something is actually there to replace;
-    // a bulk load of new documents should not queue a delete per document
-    if existed {
-        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
-    }
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
         return Err(err_caused_by(&kind, &reason.replace("{id}", id), &cause));
     }
@@ -236,6 +231,14 @@ pub fn write_doc_versioned(
         st.vectors.write().write(&st.mapping.vector_fields, id, &indexed);
     }
     let doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
+    // the copy that is being replaced goes when the new one is ready to take
+    // its place, and not before: every complaint above this line returns
+    // without writing, and a delete queued before them destroyed the
+    // document the refused write was meant to replace.
+    // A bulk load of new documents queues no delete at all.
+    if existed {
+        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+    }
     st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     // recorded before it is answered for: the index has it only after a commit
@@ -269,6 +272,22 @@ pub fn write_doc_versioned(
 }
 
 pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
+    // a delete is a change like any other: a blocked, read-only or closed
+    // index refuses it, which is what an operator holding an index still
+    // before a snapshot or a shrink is relying on
+    if let Some((kind, why)) = st.change_refusal() {
+        let status = match kind {
+            "index_closed_exception" => StatusCode::BAD_REQUEST,
+            _ => StatusCode::FORBIDDEN,
+        };
+        return (
+            json!({
+                "_index": st.name, "_id": id,
+                "error": {"type": kind, "reason": why},
+            }),
+            status,
+        );
+    }
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     let shard = st.shard_of_doc(id);

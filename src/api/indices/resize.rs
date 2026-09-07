@@ -196,7 +196,15 @@ pub async fn resize_index(
         };
         let Some(v) = source_doc else { continue };
         let mut g = dst.write();
-        let _ = write_doc(&mut g, &id, v, "index");
+        // a document the target would not take is the copy failing, not a
+        // document to pass over: the answer used to say every shard
+        // succeeded while the new index was empty, and the next step of a
+        // shrink is to delete the source
+        if let Err(refusal) = write_doc(&mut g, &id, v, "index") {
+            drop(g);
+            store.delete(&target);
+            return refusal;
+        }
     }
     {
         let mut g = dst.write();

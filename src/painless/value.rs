@@ -76,6 +76,10 @@ pub trait NativeObject {
     fn describe(&self) -> String;
 }
 
+/// How deep a value may be written out or compared before it is taken to be
+/// one that holds itself.
+const MAX_VALUE_DEPTH: usize = 100;
+
 impl Value {
     pub fn str(s: &str) -> Value {
         Value::Str(Rc::from(s))
@@ -207,6 +211,14 @@ impl Value {
 
     /// How Java would print it.
     pub fn as_text(&self) -> String {
+        self.as_text_within(0)
+    }
+
+    /// The same, counting how deep it has gone: a list that holds itself is
+    /// a list Java writes as `(this Collection)` rather than following for
+    /// ever, and a structure deeper than a script can sensibly build is not
+    /// worth the stack it would take.
+    fn as_text_within(&self, depth: usize) -> String {
         match self {
             Value::Null => "null".into(),
             Value::Bool(b) => b.to_string(),
@@ -215,14 +227,23 @@ impl Value {
             Value::Str(s) => s.to_string(),
             Value::Char(c) => c.to_string(),
             Value::List(l) => {
-                let items: Vec<String> = l.borrow().iter().map(|v| v.as_text()).collect();
+                if depth > MAX_VALUE_DEPTH {
+                    return "(this Collection)".to_string();
+                }
+                let items: Vec<String> =
+                    l.borrow().iter().map(|v| v.as_text_within(depth + 1)).collect();
                 format!("[{}]", items.join(", "))
             }
             Value::Map(m) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return "(this Map)".to_string();
+                }
                 let items: Vec<String> = m
                     .borrow()
                     .iter()
-                    .map(|(k, v)| format!("{}={}", k.as_text(), v.as_text()))
+                    .map(|(k, v)| {
+                        format!("{}={}", k.as_text_within(depth + 1), v.as_text_within(depth + 1))
+                    })
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
@@ -263,6 +284,12 @@ impl Value {
 
     /// Java's `equals`: numbers by value, text by text, the rest by content.
     pub fn equals(&self, other: &Value) -> bool {
+        self.equals_within(other, 0)
+    }
+
+    /// The same, counting how deep it has gone: two structures that hold
+    /// each other are not compared for ever.
+    fn equals_within(&self, other: &Value, depth: usize) -> bool {
         match (self, other) {
             (Value::Null, Value::Null) => true,
             (Value::Null, _) | (_, Value::Null) => false,
@@ -276,13 +303,24 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => {
-                let (a, b) = (a.borrow(), b.borrow());
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y))
-            }
-            (Value::Map(a), Value::Map(b)) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return false;
+                }
                 let (a, b) = (a.borrow(), b.borrow());
                 a.len() == b.len()
-                    && a.iter().all(|(k, v)| b.iter().any(|(k2, v2)| k.equals(k2) && v.equals(v2)))
+                    && a.iter().zip(b.iter()).all(|(x, y)| x.equals_within(y, depth + 1))
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return false;
+                }
+                let (a, b) = (a.borrow(), b.borrow());
+                a.len() == b.len()
+                    && a.iter().all(|(k, v)| {
+                        b.iter().any(|(k2, v2)| {
+                            k.equals_within(k2, depth + 1) && v.equals_within(v2, depth + 1)
+                        })
+                    })
             }
             (Value::Date { millis: a, .. }, Value::Date { millis: b, .. }) => a == b,
             (Value::Builder(a), Value::Builder(b)) => *a.borrow() == *b.borrow(),

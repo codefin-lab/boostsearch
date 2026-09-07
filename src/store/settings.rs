@@ -228,6 +228,8 @@ impl IdxState {
     pub fn refresh_knobs(&mut self) {
         self.knobs = WriteKnobs {
             blocks_write: self.setting("blocks.write").as_deref() == Some("true"),
+            blocks_read_only: self.setting("blocks.read_only").as_deref() == Some("true")
+                || self.setting("blocks.read_only_allow_delete").as_deref() == Some("true"),
             ignore_malformed: self.setting("mapping.ignore_malformed").as_deref() == Some("true"),
             append_only: self.setting("append_only.enabled").as_deref() == Some("true"),
             nested_limit: self.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000),

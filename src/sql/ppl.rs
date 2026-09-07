@@ -194,8 +194,14 @@ fn parse_columns(text: &str) -> Result<Vec<Column>, String> {
 
 /// `stats count(), avg(price) by region, host`
 fn parse_stats(text: &str) -> Result<(Vec<Column>, Vec<Expr>), String> {
-    let lowered = text.to_lowercase();
-    let (metrics, groups) = match lowered.find(" by ") {
+    // `to_lowercase` does not keep the length -- one character can become
+    // another of a different width -- so the split is found in the text it
+    // is applied to, matched without regard to case
+    let at = text
+        .char_indices()
+        .find(|(i, _)| text[*i..].len() >= 4 && text[*i..*i + 4].eq_ignore_ascii_case(" by "))
+        .map(|(i, _)| i);
+    let (metrics, groups) = match at {
         Some(at) => (&text[..at], Some(&text[at + 4..])),
         None => (text, None),
     };

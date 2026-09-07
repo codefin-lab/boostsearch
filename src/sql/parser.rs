@@ -192,10 +192,15 @@ impl Parser {
     }
 
     fn condition_not(&mut self) -> Answer<Condition> {
-        if self.took("NOT") {
-            return Ok(Condition::Not(Box::new(self.condition_not()?)));
-        }
-        self.comparison()
+        // `NOT NOT NOT ...` recurses once per word without passing through
+        // `condition`, so the nesting is counted here as well
+        self.deeper()?;
+        let out = match self.took("NOT") {
+            true => self.condition_not().map(|inner| Condition::Not(Box::new(inner))),
+            false => self.comparison(),
+        };
+        self.depth -= 1;
+        out
     }
 
     fn comparison(&mut self) -> Answer<Condition> {

@@ -94,7 +94,10 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     }
     // the SAML token exchange is how a caller gets credentials: it runs
     // for anyone, as the plugin runs it inside its challenge
-    if req.uri().path().ends_with("/_plugins/_security/api/authtoken") {
+    // -- and it is that path, not any path that happens to end with it:
+    // `PUT /_alias/_plugins/_security/api/authtoken` ended with it too, and
+    // ran with no credentials at all
+    if req.uri().path().trim_end_matches('/') == "/_plugins/_security/api/authtoken" {
         return run_as(Caller::default(), req, next).await;
     }
     // the plain listener reports the peer as this crate's own type, the TLS
@@ -177,7 +180,12 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         return run_as(caller, req, next).await;
     }
     let Some(action) = action_for(&method, &path) else {
-        return run_as(caller, req, next).await;
+        // a path with no action is a path nothing judged. Running it was
+        // how `_upgrade` listed every index and its size to a caller with
+        // read on one of them.
+        let unmapped = format!("indices:admin/unmapped[{path}]");
+        audit.missing_privileges(&caller, &unmapped, &info, &[], &[]);
+        return no_permissions(&unmapped, &caller);
     };
     // the query languages name their index in the body, where this layer
     // cannot see it: the handler judges that index itself, the way a bulk

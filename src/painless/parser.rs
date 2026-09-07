@@ -530,6 +530,13 @@ impl Parser {
     }
 
     fn conditional(&mut self) -> Result<Expr, ParseError> {
+        self.deeper()?;
+        let out = self.conditional_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn conditional_within(&mut self) -> Result<Expr, ParseError> {
         let cond = self.elvis()?;
         if self.eat_op("?") {
             let then = self.assignment()?;
@@ -545,6 +552,13 @@ impl Parser {
     }
 
     fn elvis(&mut self) -> Result<Expr, ParseError> {
+        self.deeper()?;
+        let out = self.elvis_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn elvis_within(&mut self) -> Result<Expr, ParseError> {
         let value = self.binary(0)?;
         if self.eat_op("?:") {
             let fallback = self.elvis()?;
@@ -590,6 +604,15 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Expr, ParseError> {
+        // `!!!!...` and `(int)(int)...` recurse once per operator without
+        // passing through `expr`, so the nesting is counted here as well
+        self.deeper()?;
+        let out = self.unary_within();
+        self.depth -= 1;
+        out
+    }
+
+    fn unary_within(&mut self) -> Result<Expr, ParseError> {
         let at = self.here();
         for op in ["!", "-", "+", "~"] {
             if self.is_op(op) {

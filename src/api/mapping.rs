@@ -116,6 +116,24 @@ pub async fn put_mapping(
     if targets.is_empty() {
         return no_such_index(&index);
     }
+    // a field that is already mapped keeps the type it has: changing it
+    // leaves every document written under the old type unsearchable by the
+    // new one, which is why the reference refuses the change rather than
+    // taking it
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        for (path, ty) in crate::store::declared_types(&body) {
+            let Some(had) = g.mapping.type_of(&path) else { continue };
+            if had != ty {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("mapper [{path}] cannot be changed from type [{had}] to [{ty}]"),
+                );
+            }
+        }
+    }
     for n in targets {
         if let Some(st) = store.get(&n) {
             let mut g = st.write();

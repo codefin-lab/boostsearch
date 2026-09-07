@@ -527,6 +527,53 @@ fn matching_ids(
 }
 
 /// Run a search across every resolved index and merge the results.
+/// Every hit a query matches, a page at a time.
+///
+/// An aggregation written as a script is folded over the documents rather
+/// than over a column, so it has to see all of them. Reading one page and
+/// answering as though that were the index -- which is what these did -- is
+/// an answer that is quietly a fraction of the truth.
+pub fn walk_every_hit(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+    track_scores: bool,
+) -> std::result::Result<Outcome, Response> {
+    const PAGE: usize = 10_000;
+    const CEILING: usize = 1_000_000;
+    let mut out: Option<Outcome> = None;
+    let mut from = 0usize;
+    loop {
+        let probe = json!({
+            "query": query.clone(),
+            "from": from,
+            "size": PAGE,
+            "track_scores": track_scores,
+            crate::search::INTERNAL_WALK: true,
+        });
+        let page = run(store, &targets.join(","), &probe, &Params::new())?;
+        let read = page.hits.len();
+        match out.as_mut() {
+            Some(all) => all.hits.extend(page.hits),
+            None => out = Some(page),
+        }
+        if read < PAGE {
+            return Ok(out.unwrap_or_else(|| unreachable!("a page was read")));
+        }
+        from += PAGE;
+        if from >= CEILING {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "A scripted aggregation reads every matching document, and this one matches \
+                     more than [{CEILING}]. Narrow the query, or aggregate over a field."
+                ),
+            ));
+        }
+    }
+}
+
 pub fn run(
     store: &Store,
     expr: &str,
@@ -1064,7 +1111,18 @@ pub fn run(
     };
 
     for out in outs {
-        let Some(o) = out? else { continue };
+        let Some(mut o) = out? else { continue };
+        // a candidate names the searcher it came from by slot. The slot a
+        // target had in `targets` is not the slot its searcher takes here:
+        // a target that answered nothing -- an index deleted between the
+        // resolve and the search -- is not pushed, and every later
+        // candidate then pointed one place too far along. That was a panic
+        // where the list was short, and a document read out of a different
+        // index where it was not.
+        let slot = searchers.len();
+        for c in o.cands.iter_mut() {
+            c.shard = slot;
+        }
         shards += o.shards;
         total += o.count as u64;
         if o.count == 0 {
@@ -1330,7 +1388,18 @@ pub fn run(
     let suggest = match body.get("suggest") {
         Some(spec) => {
             let typed = p.get("typed_keys").map(|v| v != "false").unwrap_or(false);
-            Some(build_suggest(store, &targets, spec, typed)?)
+            // a suggester reads the term dictionary and the stored values
+            // themselves, not the documents the query matched, so a caller
+            // whose view narrows either would be offered words out of
+            // documents they may not read. Until the suggesters can be
+            // narrowed, a narrowed caller is offered nothing.
+            let restricted = targets
+                .iter()
+                .any(|t| views.get(t).map(|v| v.dls.is_some() || v.restricts()).unwrap_or(false));
+            match restricted {
+                true => Some(json!({})),
+                false => Some(build_suggest(store, &targets, spec, typed)?),
+            }
         }
         None => None,
     };

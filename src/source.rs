@@ -114,12 +114,17 @@ fn pattern_state(pat: &[String], path: &[String]) -> (bool, bool) {
         return (true, false);
     }
     if pat[0] == "**" {
-        let mut full = false;
+        // `**` swallows any number of segments, so the same (pattern, path)
+        // pair is reached along many routes: a pattern of a dozen `**`
+        // against a deep document was answered in the time a factorial
+        // takes. The answer for a pair is the same however it was reached,
+        // so the first one stands and the rest stop here.
         for k in 0..=path.len() {
-            let (f, _) = pattern_state(&pat[1..], &path[k..]);
-            full |= f;
+            if pattern_state(&pat[1..], &path[k..]).0 {
+                return (true, true);
+            }
         }
-        return (full, true);
+        return (false, true);
     }
     if seg_matches(&pat[0], &path[0]) {
         return pattern_state(&pat[1..], &path[1..]);

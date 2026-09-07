@@ -54,6 +54,9 @@ pub struct Fields {
 #[derive(Clone, Debug, Default)]
 pub struct WriteKnobs {
     pub blocks_write: bool,
+    /// `index.blocks.read_only`: nothing may be written and the index may
+    /// not be deleted
+    pub blocks_read_only: bool,
     pub ignore_malformed: bool,
     pub append_only: bool,
     pub nested_limit: u64,
@@ -92,6 +95,29 @@ pub(crate) fn keep_for(keep_alive_ms: u64) -> std::time::Duration {
         0 => DEFAULT_KEEP_ALIVE_MS,
         asked => asked,
     })
+}
+
+/// The types a mapping body declares, as `path -> type` pairs.
+///
+/// Used to check that an update does not change a field's type; the walk is
+/// over the body the caller sent, not over the mapping it would become.
+pub fn declared_types(body: &Value) -> Vec<(String, String)> {
+    fn walk(node: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
+        let Some(props) = node.get("properties").and_then(|p| p.as_object()) else { return };
+        for (name, spec) in props {
+            let path = match prefix.is_empty() {
+                true => name.clone(),
+                false => format!("{prefix}.{name}"),
+            };
+            if let Some(ty) = spec.get("type").and_then(|t| t.as_str()) {
+                out.push((path.clone(), ty.to_string()));
+            }
+            walk(spec, &path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, "", &mut out);
+    out
 }
 
 /// A name nobody can guess: whoever holds a search context's id can read it,

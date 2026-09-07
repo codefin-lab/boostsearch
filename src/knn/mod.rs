@@ -88,6 +88,11 @@ fn walk(properties: Option<&Value>, prefix: &str, out: &mut HashMap<String, Fiel
     }
 }
 
+/// The largest a graph parameter may be. OpenSearch's own ceiling for `m`
+/// is 100 and for `ef_construction` 512; this is looser than both and still
+/// far short of a number that cannot be allocated.
+const MAX_GRAPH_PARAMETER: usize = 4096;
+
 /// One of the numbers a `method` may carry, wherever it was written.
 fn number(spec: &Value, name: &str, fallback: usize) -> usize {
     spec.pointer(&format!("/method/parameters/{name}"))
@@ -95,7 +100,10 @@ fn number(spec: &Value, name: &str, fallback: usize) -> usize {
         .or_else(|| spec.get(name))
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .filter(|n| *n > 0)
+        // a graph parameter is a handful of neighbours, not a number of
+        // bytes to reserve: `m: 4611686018427387904` was accepted and every
+        // later refresh of that index panicked, taking its documents with it
+        .filter(|n| *n > 0 && *n <= MAX_GRAPH_PARAMETER)
         .unwrap_or(fallback)
 }
 

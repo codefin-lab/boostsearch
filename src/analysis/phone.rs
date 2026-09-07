@@ -17,6 +17,10 @@ use std::str::FromStr;
 ///
 /// `ngrams` is what separates the two analyzers the plugin offers: `phone`
 /// indexes with them, `phone-search` searches without them.
+/// The most digits a telephone number has, as E.164 fixes it, with a
+/// little room either side.
+const MAX_PHONE_DIGITS: usize = 20;
+
 pub fn tokens(text: &str, region: &str, ngrams: bool) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut input = text.to_string();
@@ -66,8 +70,13 @@ pub fn tokens(text: &str, region: &str, ngrams: bool) -> Vec<String> {
 
     // every prefix of the number, so that a number typed as far as the caller
     // got is a number that matches
+    // a telephone number is at most fifteen digits, and the prefixes of a
+    // longer run of them are not telephone numbers: without this, a request
+    // of a hundred thousand digits built a hundred thousand tokens, each as
+    // long as the one before it
+    let widest = input.len().min(MAX_PHONE_DIGITS);
     if ngrams && !input.is_empty() && input.chars().all(|c| c.is_ascii_digit()) {
-        for count in 1..=input.len() {
+        for count in 1..=widest {
             let prefix = &input[..count];
             out.insert(prefix.to_string());
             if let Some(code) = &country {

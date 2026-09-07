@@ -249,9 +249,13 @@ impl IdxState {
         self.pending.insert(id.to_string(), source);
         if self.pending_bytes > PENDING_BUDGET_BYTES {
             // the copy kept here is the only record of a queued write, so
-            // nothing can be dropped until the writer has it
-            let _ = self.apply_ops(None);
-            let committed = self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
+            // nothing can be dropped until the writer has it -- and the
+            // writer has it only when the queue was handed over whole: a
+            // write it refused is still owed, and clearing the record would
+            // leave it in memory and nowhere else
+            let applied = self.apply_ops(None).is_ok();
+            let committed =
+                applied && self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
             if committed {
                 let _ = self.realtime.reload();
                 self.pending.clear();

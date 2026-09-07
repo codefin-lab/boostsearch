@@ -226,8 +226,7 @@ pub(crate) fn run_scripted_terms_agg(
             )
         })?;
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
-    let probe = json!({"query": query, "size": 10_000, "track_scores": true});
-    let found = crate::search::run(store, &targets.join(","), &probe, &Params::new())?;
+    let found = crate::search::walk_every_hit(store, targets, &query, true)?;
     // what kind of key the field gives, so the buckets read as its values do
     let numeric = field.as_ref().and_then(|f| {
         targets.iter().find_map(|t| {

@@ -3,6 +3,34 @@
 use super::*;
 
 impl IdxState {
+    /// Why this index takes no changes, if it takes none.
+    ///
+    /// A write was held to `blocks.write` and nothing else: a delete went
+    /// through a blocked index, a read-only index and a closed one alike,
+    /// which are the three states an operator puts an index into precisely
+    /// so that it stops changing.
+    pub fn change_refusal(&self) -> Option<(&'static str, String)> {
+        if self.closed {
+            return Some((
+                "index_closed_exception",
+                format!("closed index [{}] cannot be written to", self.name),
+            ));
+        }
+        if self.knobs.blocks_read_only {
+            return Some((
+                "cluster_block_exception",
+                format!("index [{}] blocked by: [FORBIDDEN/5/index read-only (api)];", self.name),
+            ));
+        }
+        if self.knobs.blocks_write {
+            return Some((
+                "cluster_block_exception",
+                format!("index [{}] blocked by: [FORBIDDEN/8/index write (api)];", self.name),
+            ));
+        }
+        None
+    }
+
     /// Persist the learned field information next to the index so a reopen does
     /// not lose dynamic mappings or the range-narrowing kinds.
     pub fn save_meta(&self) {

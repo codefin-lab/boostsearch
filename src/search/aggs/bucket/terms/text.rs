@@ -77,15 +77,46 @@ pub(crate) fn run_text_terms_agg(
     let order = spec.get("order").cloned();
 
     let candidates = tokens_of(store, targets, &field);
+    // What the caller may see of these indices. This aggregation reads the
+    // term dictionary rather than going through the shard search, so the
+    // rules that path applies have to be applied here: a field the caller
+    // may not read has no buckets, and a caller whose documents are
+    // narrowed is counted over the narrowed set rather than over the
+    // dictionary's own totals.
+    let views = crate::security::view::views_for(store, targets);
+    for name in targets {
+        if views.get(name).map(|v| v.hidden(&field) || v.masked(&field)).unwrap_or(false) {
+            return Ok(json!({"buckets": [], "doc_count_error_upper_bound": 0,
+                             "sum_other_doc_count": 0}));
+        }
+    }
+    let restricted = targets.iter().any(|t| views.contains_key(t));
     // with nothing narrowing the documents, the term dictionary has already
     // counted them; otherwise each token is asked about in turn
-    let everything = main_query.is_none()
-        || main_query.as_ref().map(|q| q.get("match_all").is_some()).unwrap_or(false);
+    let everything = !restricted
+        && (main_query.is_none()
+            || main_query.as_ref().map(|q| q.get("match_all").is_some()).unwrap_or(false));
     let mut counted: Vec<(String, u64)> = Vec::new();
     if everything {
         counted = candidates;
     } else {
-        for (token, _) in candidates.into_iter().take(CANDIDATES) {
+        // every token in the dictionary is asked about, not the first two
+        // thousand by their dictionary-wide frequency: a token that is
+        // common in what the query matched and rare overall was dropped
+        // before it was counted, and the answer said nothing about it
+        if candidates.len() > CANDIDATES {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "A terms aggregation over the analysed field [{field}] asks a search per \
+                     distinct token, and this field has [{}] of them, more than the [{CANDIDATES}] \
+                     one request may walk. Aggregate over a keyword field, or narrow the query.",
+                    candidates.len()
+                ),
+            ));
+        }
+        for (token, _) in candidates.into_iter() {
             let narrowed = json!({"bool": {"filter": [
                 {"term": {field.clone(): token.clone()}},
                 main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),

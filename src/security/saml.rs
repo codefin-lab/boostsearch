@@ -399,22 +399,43 @@ fn rsa_public_key(cert_der: &[u8]) -> Option<rsa::RsaPublicKey> {
     rsa::RsaPublicKey::from_pkcs1_der(spki.subject_public_key.data.as_ref()).ok()
 }
 
-/// Whether one `Signature` element under `root` is valid for the element
-/// it references, by one of the certificates.
-fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) -> Option<String> {
-    let signed_info = sig.child("SignedInfo")?;
+/// Whether one `Signature` element under `root` is valid for the element it
+/// references, by one of the certificates.
+///
+/// `Ok(())` is the only way to pass. It used to answer `Option<String>` --
+/// `Some(reason)` for a bad signature and `None` for a good one -- and every
+/// `?` in it therefore said "valid" for a part that was missing: a signature
+/// element with nothing inside it verified, and with it any assertion an
+/// attacker cared to write.
+fn verify_signature(
+    root: &Node,
+    owner: &Node,
+    sig: &Node,
+    certs: &[Vec<u8>],
+) -> Result<(), String> {
+    let signed_info = sig.child("SignedInfo").ok_or("the signature has no SignedInfo")?;
     let c14n_method =
         signed_info.child("CanonicalizationMethod").and_then(|m| m.attr("Algorithm")).unwrap_or("");
     let sig_method =
         signed_info.child("SignatureMethod").and_then(|m| m.attr("Algorithm")).unwrap_or("");
-    let reference = signed_info.child("Reference")?;
+    let reference = signed_info.child("Reference").ok_or("the signature has no Reference")?;
     let uri = reference.attr("URI").unwrap_or("");
     let digest_method =
         reference.child("DigestMethod").and_then(|m| m.attr("Algorithm")).unwrap_or("");
-    let digest_value: String =
-        reference.child("DigestValue")?.text().chars().filter(|c| !c.is_whitespace()).collect();
-    let signature_value: String =
-        sig.child("SignatureValue")?.text().chars().filter(|c| !c.is_whitespace()).collect();
+    let digest_value: String = reference
+        .child("DigestValue")
+        .ok_or("the signature has no DigestValue")?
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let signature_value: String = sig
+        .child("SignatureValue")
+        .ok_or("the signature has no SignatureValue")?
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     let inclusive: Vec<String> = signed_info
         .child("CanonicalizationMethod")
         .and_then(|m| m.find_first("InclusiveNamespaces"))
@@ -427,7 +448,7 @@ fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) ->
         .map(|l| l.split_whitespace().map(|s| s.to_string()).collect())
         .unwrap_or_default();
     if !c14n_method.starts_with("http://www.w3.org/2001/10/xml-exc-c14n#") {
-        return Some(format!("unsupported canonicalisation {c14n_method}"));
+        return Err(format!("unsupported canonicalisation {c14n_method}"));
     }
     // the referenced element: `#id`, or the whole document when empty --
     // and it has to be the element this signature sits in. A signature
@@ -436,16 +457,16 @@ fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) ->
     // one and borrow its signature.
     let target: &Node = if uri.is_empty() {
         if !std::ptr::eq(owner, root) {
-            return Some("the signature references the document but sits in the assertion".into());
+            return Err("the signature references the document but sits in the assertion".into());
         }
         root
     } else {
         let id = uri.trim_start_matches('#');
         if root.count_id(id) != 1 {
-            return Some(format!("id [{id}] is not unique in the document"));
+            return Err(format!("id [{id}] is not unique in the document"));
         }
         if owner.attr("ID") != Some(id) {
-            return Some(format!(
+            return Err(format!(
                 "the signature references [{id}] but is carried by [{}]",
                 owner.attr("ID").unwrap_or("an element with no id")
             ));
@@ -457,7 +478,9 @@ fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) ->
     let stripped = target.without_signature();
     let canon = c14n_exclusive(&stripped, &scope, &ref_inclusive);
     use base64::Engine;
-    let want = base64::engine::general_purpose::STANDARD.decode(&digest_value).ok()?;
+    let want = base64::engine::general_purpose::STANDARD
+        .decode(&digest_value)
+        .map_err(|_| "the digest is not base64".to_string())?;
     let have: Vec<u8> = match digest_method {
         "http://www.w3.org/2001/04/xmlenc#sha256" => {
             use sha2::Digest as _;
@@ -471,15 +494,20 @@ fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) ->
             use sha2::Digest as _;
             sha2::Sha512::digest(canon.as_bytes()).to_vec()
         }
-        other => return Some(format!("unsupported digest {other}")),
+        other => return Err(format!("unsupported digest {other}")),
     };
     if want != have {
-        return Some("digest mismatch".into());
+        return Err("digest mismatch".into());
     }
     // SignedInfo canonicalised in its own scope
     let si_scope = scope_at(root, signed_info, &mut BTreeMap::new()).unwrap_or_default();
     let si_canon = c14n_exclusive(signed_info, &si_scope, &inclusive);
-    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(&signature_value).ok()?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&signature_value)
+        .map_err(|_| "the signature is not base64".to_string())?;
+    if certs.is_empty() {
+        return Err("no certificate to verify the signature against".into());
+    }
     for cert in certs {
         let Some(pk) = rsa_public_key(cert) else { continue };
         let ok = match sig_method {
@@ -504,13 +532,13 @@ fn verify_signature(root: &Node, owner: &Node, sig: &Node, certs: &[Vec<u8>]) ->
                     .map(|s| vk.verify(si_canon.as_bytes(), &s).is_ok())
                     .unwrap_or(false)
             }
-            other => return Some(format!("unsupported signature {other}")),
+            other => return Err(format!("unsupported signature {other}")),
         };
         if ok {
-            return None;
+            return Ok(());
         }
     }
-    Some("signature does not verify".into())
+    Err("signature does not verify".into())
 }
 
 // ---- the response ----------------------------------------------------------------
@@ -611,7 +639,7 @@ pub fn validate(
         [(&root, root.child("Signature")), (assertion, assertion.child("Signature"))]
     {
         if let Some(sig) = sig {
-            if let Some(why) = verify_signature(&root, owner, sig, certs) {
+            if let Err(why) = verify_signature(&root, owner, sig, certs) {
                 return Err(format!("invalid signature: {why}"));
             }
             any = true;
@@ -1075,5 +1103,38 @@ mod tests {
     fn reads_instants() {
         assert_eq!(parse_instant("1970-01-02T00:00:00Z"), Some(86_400));
         assert_eq!(parse_instant("2026-09-02T19:04:32Z"), Some(1_788_375_872));
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    /// A signature element with nothing in it is not a signature.
+    ///
+    /// This is the shape that let anyone log in as anyone: the check
+    /// answered "no reason to refuse" for a `<Signature/>` that had no
+    /// SignedInfo, no Reference and no SignatureValue.
+    #[test]
+    fn an_empty_signature_does_not_verify() {
+        let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+             xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="r1">
+             <saml:Issuer>https://idp.example</saml:Issuer>
+             <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/>
+             <saml:Assertion ID="a1">
+               <saml:Issuer>https://idp.example</saml:Issuer>
+               <saml:Subject><saml:NameID>admin</saml:NameID></saml:Subject>
+               <saml:AttributeStatement>
+                 <saml:Attribute Name="Role">
+                   <saml:AttributeValue>all_access</saml:AttributeValue>
+                 </saml:Attribute>
+               </saml:AttributeStatement>
+             </saml:Assertion>
+           </samlp:Response>"#;
+        let root = parse(xml).expect("the document parses");
+        let sig = root.child("Signature").expect("the document has a signature element");
+        let why = verify_signature(&root, &root, sig, &[vec![1, 2, 3]])
+            .expect_err("an empty signature must not verify");
+        assert!(why.contains("SignedInfo"), "unexpected reason: {why}");
     }
 }
