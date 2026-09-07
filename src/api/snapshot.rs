@@ -592,11 +592,44 @@ pub async fn restore_snapshot(
     {
         let target = rename(n);
         if let Some(st) = store.get(&target) {
-            // still here: a restore over it says it is back, as it does today
-            let mut g = st.write();
-            g.closed = false;
-            g.restored = true;
-            g.save_meta();
+            // an open index is being written to: restoring over it would
+            // mean two sets of documents under one name, so the reference
+            // refuses it and names the two ways out
+            if !st.read().closed {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "snapshot_restore_exception",
+                    format!(
+                        "[{repo}:{name}] cannot restore index [{target}] because an open index \
+                         with same name already exists in the cluster. Either close or delete the \
+                         existing index or restore the index under a different name by providing \
+                         a rename pattern and replacement name"
+                    ),
+                );
+            }
+            // closed: what the snapshot holds replaces it
+            match from.as_ref() {
+                Some(source) => {
+                    store.delete(&target);
+                    if let Err(e) =
+                        crate::snapshot::restore_index(&store, source, &name, n, &target)
+                    {
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+                    }
+                    if let Some(st) = store.get(&target) {
+                        let mut g = st.write();
+                        g.restored = true;
+                        g.save_meta();
+                    }
+                }
+                // nothing to read it back from: the index is opened again
+                None => {
+                    let mut g = st.write();
+                    g.closed = false;
+                    g.restored = true;
+                    g.save_meta();
+                }
+            }
             restored.push(target);
             continue;
         }

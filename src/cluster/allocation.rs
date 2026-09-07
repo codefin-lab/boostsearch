@@ -1355,11 +1355,11 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
             // set when it missed it, and promoting it would throw that write
             // away: the shard stays without a primary until a copy that has
             // everything comes back, which is what OpenSearch does too.
-            let in_sync: Vec<String> = ctx
-                .indices
-                .get(name)
-                .and_then(|m| m.in_sync_allocations.get(shard).cloned())
-                .unwrap_or_default();
+            // an empty set is not "any copy will do": it is every copy having
+            // missed something. No set at all is no information, and there the
+            // shard is better up than down.
+            let in_sync: Option<Vec<String>> =
+                ctx.indices.get(name).and_then(|m| m.in_sync_allocations.get(shard).cloned());
             if let Some(pi) =
                 copies.iter().position(|c| c.primary && c.state == ShardState::Unassigned)
             {
@@ -1368,7 +1368,10 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                         && matches!(c.state, ShardState::Started | ShardState::Relocating)
                         && c.allocation_id
                             .as_ref()
-                            .map(|a| in_sync.is_empty() || in_sync.iter().any(|i| i == a))
+                            .map(|a| match &in_sync {
+                                None => true,
+                                Some(set) => set.iter().any(|i| i == a),
+                            })
                             .unwrap_or(false)
                 }) {
                     let node = copies[ri].node.clone().unwrap();

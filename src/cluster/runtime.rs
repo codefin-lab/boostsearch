@@ -107,8 +107,15 @@ fn save_durable(
         }
         let path = dir.join("_state").join(format!("{key}.json"));
         let _ = std::fs::create_dir_all(path.parent().unwrap_or(dir));
-        if std::fs::write(&path, bytes).is_ok() {
-            written.insert(key.into(), bytes.clone());
+        // a vote is a promise, and a promise that a crash can tear is not
+        // one: it is written whole and forced before it counts as written
+        match crate::store::write_atomic(&path, bytes) {
+            Ok(()) => {
+                written.insert(key.into(), bytes.clone());
+            }
+            Err(e) => {
+                tracing::error!("could not write coordination state {}: {e}", path.display());
+            }
         }
     }
 }

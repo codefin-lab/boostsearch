@@ -3768,3 +3768,58 @@ window, the precision, the shingle diff, `ses`, the grok bank and the
 nested SQL each answer 400 and the node answers `_cat/health` after.
 Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890,
 clippy and the unit tests clean.
+
+## The review's fourth step: what a crash was allowed to take
+
+The fourth group is what a power cut or a `kill -9` could take away from
+a write that had already been answered, and what a file rewritten in
+place could take away from an index that was whole.
+
+**Written whole or not at all.** `_meta.json` was rewritten in place on
+every refresh: a crash between the truncate and the last byte left a file
+that does not parse, and an index whose meta does not parse is skipped at
+startup -- the index is simply gone. It is written to a file beside it,
+forced, renamed into place, and the directory forced after the rename.
+The coordination state a node votes with went the same way, and a torn
+term is a node that votes twice in one term; it is written the same way
+now, and a write that fails is said out loud rather than remembered as
+done.
+
+**`durability: async` never reached the disk.** The record went into a
+buffer that nothing flushed until the file was closed, so `async` risked
+the process's own memory rather than the disk's cache: a clean shutdown
+lost acknowledged writes, and a crash lost every one of them. Every
+request flushes the buffer, whatever the durability; `async` forces on
+`index.translog.sync_interval` (5s by default) rather than on every
+request; and a shutdown forces regardless. Measured with a node killed
+with `kill -9` a second after the write: the document is there.
+
+**A record is spent when the index has it.** A writer error left the
+queued writes it had not taken behind, and the translog was then cleared
+because the commit succeeded -- the writes were in neither place. What
+the writer did not take stays queued, and the record is only cleared
+after a commit that took all of it.
+
+**A record the crash cut in half.** Replay skipped the torn last line and
+left it there; the next write was appended to half a record, and then
+neither could be read. Replay stops at the last whole record, says how
+many bytes it dropped, and truncates the file there.
+
+**A restore over an index that is open** reported every shard restored
+and restored nothing. It is refused with the reference's message, which
+names the two ways out; a closed index is replaced by what the snapshot
+holds, and a rename still restores beside the original.
+
+**A promotion out of an empty in-sync set.** The comment said a copy that
+missed an acknowledged write is not promoted; the code read `in_sync
+.is_empty() || contains`, so a set that had been emptied -- every copy
+having missed something -- promoted any copy at all. An empty set now
+promotes nothing; no set at all is no information, and there the shard is
+still better up than down.
+
+Measured: `kill -9` with `async` durability keeps the write; a translog
+with a half-written tail replays what is whole, logs the drop and is cut
+there; a restore over an open index answers 400 and over a closed one
+brings back the snapshot's documents and not the ones written after it.
+Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890,
+the chaos run 44,599 writes with 39,479 acknowledged and none lost.

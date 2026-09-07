@@ -312,7 +312,36 @@ pub fn recover(store: &Store) {
         let Some(st) = store.get(&name) else { continue };
         let path = { st.read().path.clone() };
         let Some(dir) = path else { continue };
-        let Ok(text) = std::fs::read_to_string(dir.join(crate::store::TRANSLOG)) else { continue };
+        let log_path = dir.join(crate::store::TRANSLOG);
+        let Ok(text) = std::fs::read_to_string(&log_path) else { continue };
+        // the last record may be half-written: the crash landed between the
+        // first byte and the newline. Everything up to the last whole record
+        // is replayed, and the file is cut there, or the next write would be
+        // appended to half a record and both would be unreadable.
+        let mut whole = 0usize;
+        for chunk in text.split_inclusive('\n') {
+            let complete = chunk.ends_with('\n')
+                && (chunk.trim().is_empty() || serde_json::from_str::<Value>(chunk.trim()).is_ok());
+            if !complete {
+                break;
+            }
+            whole += chunk.len();
+        }
+        if whole < text.len() {
+            tracing::warn!(
+                "index [{name}]: the translog ends in a record the crash cut short; \
+                 {} bytes are dropped",
+                text.len() - whole
+            );
+            let cut = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&log_path)
+                .and_then(|f| f.set_len(whole as u64));
+            if let Err(e) = cut {
+                tracing::error!("index [{name}]: could not truncate the translog: {e}");
+            }
+        }
+        let text = &text[..whole];
         let mut replayed = 0usize;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(rec) = serde_json::from_str::<Value>(line) else { continue };

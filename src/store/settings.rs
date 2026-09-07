@@ -232,6 +232,10 @@ impl IdxState {
             append_only: self.setting("append_only.enabled").as_deref() == Some("true"),
             nested_limit: self.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000),
             durability: self.setting("translog.durability"),
+            sync_interval_ms: self
+                .setting("translog.sync_interval")
+                .and_then(|v| crate::cluster::allocation::time_ms(&v))
+                .unwrap_or(5_000),
             shards: self.numeric_setting("number_of_shards").unwrap_or(1).max(1),
         };
     }

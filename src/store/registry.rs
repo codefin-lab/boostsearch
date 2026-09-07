@@ -584,6 +584,7 @@ impl Store {
             path: None,
             translog_bytes_since_commit: 0,
             translog: None,
+            last_translog_sync: std::time::Instant::now(),
             stats: Arc::new(crate::blockstats::StatsCache::default()),
             ids_loaded: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };

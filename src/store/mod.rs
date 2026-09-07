@@ -58,6 +58,9 @@ pub struct WriteKnobs {
     pub append_only: bool,
     pub nested_limit: u64,
     pub durability: Option<String>,
+    /// how long `durability: async` may leave a record unforced, as
+    /// `index.translog.sync_interval` says
+    pub sync_interval_ms: u64,
     /// how many shards the index has, which every write is placed by
     pub shards: u64,
 }
@@ -68,6 +71,29 @@ pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
 /// Where an index keeps the writes that are acknowledged but not yet committed.
 pub const TRANSLOG: &str = "translog.ndjson";
+
+/// Write a file so that a crash finds either what was there before or what
+/// is written here, and never half of either.
+///
+/// A file rewritten in place is torn by a crash between the truncate and the
+/// last byte, and a torn `_meta.json` is an index that is not there on the
+/// next start. The bytes go to a file beside it, are forced, and the rename
+/// puts them in place -- and the directory is forced too, since the rename
+/// is what has to survive.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
+}
 
 /// How large that record may grow before the index is committed to spend it.
 /// OpenSearch calls this `index.translog.flush_threshold_size`.
@@ -450,6 +476,9 @@ pub struct IdxState {
     /// what `index.translog.durability: request` means: appended and fsynced
     /// before the write is answered.
     translog: Option<std::io::BufWriter<std::fs::File>>,
+    /// when the record was last forced to disk, which is what
+    /// `durability: async` measures its interval from
+    last_translog_sync: std::time::Instant,
     /// per-segment block statistics, built on demand
     pub stats: Arc<crate::blockstats::StatsCache>,
     /// False while the id table is still being rebuilt after a reopen. Until it

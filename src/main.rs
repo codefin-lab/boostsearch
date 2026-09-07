@@ -650,7 +650,7 @@ async fn shutdown_signal(store: Store) {
     }
     for name in store.names() {
         if let Some(st) = store.get(&name) {
-            st.write().sync_translog();
+            st.write().flush_translog(true);
         }
     }
 }

@@ -27,7 +27,12 @@ impl IdxState {
             // already carry, and a recovery pages by sequence number
             "seq_no": self.seq_no,
         });
-        let _ = std::fs::write(path.join("_meta.json"), meta.to_string());
+        let at = path.join("_meta.json");
+        if let Err(e) = write_atomic(&at, meta.to_string().as_bytes()) {
+            // an index whose state could not be written is an index that
+            // comes back changed, so it is said out loud rather than lost
+            tracing::error!("index [{}]: could not write {}: {e}", self.name, at.display());
+        }
     }
 
     /// Bytes each fast-field column occupies. This is the closest honest

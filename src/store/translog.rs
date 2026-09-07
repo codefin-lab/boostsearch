@@ -45,8 +45,12 @@ impl IdxState {
         // a record that outgrows the index it stands in for is a recovery that
         // would take longer than the writing did
         if self.translog_bytes_since_commit > TRANSLOG_FLUSH_BYTES {
-            let _ = self.apply_ops(None);
-            let committed = self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
+            // a queue that could not be handed to the writer is a queue the
+            // record still stands for: it is not spent until the commit that
+            // took every one of them
+            let applied = self.apply_ops(None).is_ok();
+            let committed =
+                applied && self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
             if committed {
                 let _ = self.realtime.reload();
                 self.clear_translog();
@@ -59,14 +63,27 @@ impl IdxState {
     /// Once per request rather than once per document: a bulk of ten thousand
     /// is one write to answer for, the way OpenSearch counts it too.
     pub fn sync_translog(&mut self) {
+        self.flush_translog(false);
+    }
+
+    /// The same, with the interval ignored: a shutdown or a flush forces
+    /// whatever `async` was still holding back.
+    pub fn flush_translog(&mut self, forced: bool) {
         use std::io::Write;
-        if self.durability_is_async() {
+        // `async` risks the disk's cache, not the process's own memory: what
+        // a write left in the buffer goes to the file either way, or a clean
+        // shutdown would lose writes that were acknowledged.
+        let force = forced
+            || !self.durability_is_async()
+            || self.last_translog_sync.elapsed()
+                >= std::time::Duration::from_millis(self.knobs.sync_interval_ms);
+        let Some(log) = self.translog.as_mut() else { return };
+        let _ = log.flush();
+        if !force {
             return;
         }
-        if let Some(log) = self.translog.as_mut() {
-            let _ = log.flush();
-            let _ = sync_file(log.get_ref());
-        }
+        let _ = sync_file(log.get_ref());
+        self.last_translog_sync = std::time::Instant::now();
     }
 
     /// `index.translog.durability: async` asks for speed over the guarantee:
@@ -131,18 +148,39 @@ impl IdxState {
             .partition(|(shard, _)| only.map(|one| *shard == one).unwrap_or(true));
         self.deferred = keep;
         let id_field = self.fields.id;
-        let w = self.writer()?;
-        for (_, op) in go {
-            match op {
-                PendingOp::Add(doc) => {
-                    w.add_document(*doc)?;
-                }
+        let w = match self.writer() {
+            Ok(w) => w,
+            Err(e) => {
+                // nothing was handed over, so nothing is lost by keeping it
+                self.deferred.extend(go);
+                return Err(e);
+            }
+        };
+        let mut left: Vec<(u64, PendingOp)> = Vec::new();
+        let mut failure = None;
+        let mut rest = go.into_iter();
+        for (shard, op) in rest.by_ref() {
+            let done = match op {
+                PendingOp::Add(doc) => w.add_document(*doc).map(|_| ()),
                 PendingOp::Delete(id) => {
                     w.delete_term(boostcore::Term::from_field_text(id_field, &id));
+                    Ok(())
                 }
+            };
+            if let Err(e) = done {
+                // what the writer did not take is still owed: it stays
+                // queued, and the record that stands for it stays unspent
+                let _ = shard;
+                failure = Some(e);
+                left.extend(rest);
+                break;
             }
         }
-        Ok(())
+        self.deferred.extend(left);
+        match failure {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
     }
 
     /// Refresh one shard, which is the only thing a write can force.
