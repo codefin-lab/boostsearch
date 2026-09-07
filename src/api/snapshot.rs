@@ -561,6 +561,19 @@ pub async fn restore_snapshot(
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    // a record naming no index at all is a repository this node could not
+    // read rather than a snapshot of nothing: answering 200 for it is a
+    // restore that says it worked and restored nothing
+    if held_indices.is_empty() {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!(
+                "[{repo}:{name}] lists no indices; the repository could not be read, or the \
+                 snapshot was never finished"
+            ),
+        );
+    }
     let wanted: Vec<String> = match body.get("indices") {
         Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).collect(),
         Some(Value::Array(a)) => {

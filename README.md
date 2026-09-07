@@ -24,6 +24,7 @@ rather than believed.
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
 | who may reach what | **1,167 answers** over 239 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths | `tools/refusal_check.py` |
+| every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
 | malformed input at everything that parses | **2,000 probes**, node still answering | `tools/fuzz_check.py` |
 | OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |
 

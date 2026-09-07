@@ -59,7 +59,10 @@ impl Source {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(path, bytes)
+                // a reader may be another node, or this node's own URL view
+                // of the same directory: a file it catches half-written is a
+                // snapshot that reads as empty or as nonsense
+                crate::store::write_atomic(&path, bytes)
             }
             Source::Url(_) => Err(std::io::Error::other("this repository is read-only")),
             Source::Blobs(store) => store.put(relative, bytes),
@@ -331,7 +334,7 @@ pub fn restore_index(
         if let Some(r) = record.get("_routing").and_then(|v| v.as_str()) {
             g.routing.insert(id.to_string(), r.to_string());
         }
-        if crate::api::write_doc_versioned(&mut g, id, source, "index", Some(raw.to_string()), None)
+        if crate::api::write_doc_internal(&mut g, id, source, "index", Some(raw.to_string()), None)
             .is_ok()
         {
             count += 1;

@@ -73,6 +73,24 @@ pub fn write_doc_raw(
     write_doc_versioned(st, id, source, op_type, raw, None)
 }
 
+/// A write the server is doing for itself: replaying its own record,
+/// restoring a snapshot, keeping its configuration index.
+///
+/// The blocks and the closed state are a caller's business: an index held
+/// still takes no writes *from outside*. Holding the server's own recovery
+/// to them means a node that is killed while an index is blocked comes back
+/// without the writes it had acknowledged -- which is how this was found.
+pub fn write_doc_internal(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    forced: Option<u64>,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    write_doc_within(st, id, source, op_type, raw, forced, false)
+}
+
 pub fn write_doc_versioned(
     st: &mut IdxState,
     id: &str,
@@ -81,8 +99,21 @@ pub fn write_doc_versioned(
     raw: Option<String>,
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
-    // an index held still takes no writes until it is let go
-    if let Some((kind, why)) = st.change_refusal() {
+    write_doc_within(st, id, source, op_type, raw, forced, true)
+}
+
+fn write_doc_within(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    forced: Option<u64>,
+    from_caller: bool,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    // an index held still takes no writes until it is let go -- from a
+    // caller. What the server is putting back is not a caller's write.
+    if let Some((kind, why)) = st.change_refusal().filter(|_| from_caller) {
         let status = match kind {
             "index_closed_exception" => StatusCode::BAD_REQUEST,
             _ => StatusCode::FORBIDDEN,
@@ -398,7 +429,7 @@ pub fn recover(store: &Store) {
                         }
                     }
                     let _ =
-                        write_doc_versioned(&mut g, id, source, "index", Some(raw), Some(version));
+                        write_doc_internal(&mut g, id, source, "index", Some(raw), Some(version));
                 }
                 _ => {
                     let (_, _) = g.bump_to(id, false, version);

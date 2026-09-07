@@ -58,7 +58,7 @@ pub fn put(store: &Store, id: &str, body: Value) -> Result<(), String> {
     let st = store.ensure(CONFIG_INDEX).map_err(|e| e.to_string())?;
     let mut g = st.write();
     let raw = body.to_string();
-    crate::api::write_doc_versioned(&mut g, id, body, "index", Some(raw), None)
+    crate::api::write_doc_internal(&mut g, id, body, "index", Some(raw), None)
         .map(|_| ())
         .map_err(|_| format!("[{id}] could not be written"))?;
     let _ = g.refresh();

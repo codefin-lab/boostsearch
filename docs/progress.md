@@ -4212,3 +4212,34 @@ milliseconds instead of running for a day.
 Three seeds of fifteen hundred probes each pass now. The measure of these
 three is not that they are green today; it is that each of them was red
 when it was written.
+
+## What a restart does with the record
+
+A write is answered once it is recorded and reaches the index at the next
+commit, so what a node does with that record when it starts again is the
+whole of its durability -- and no suite ever restarts a node. So a fourth
+check was written: five indices of different shapes are loaded, the node
+is killed with `kill -9`, and the counts are compared with what was
+acknowledged.
+
+It went red on the first run, on a defect two days old and mine. The
+block that refuses a caller's write to a held index was refusing the
+node's own replay of its record: an index with `blocks.write` or
+`blocks.read_only` set lost every write that had not yet been committed.
+Ten thousand acknowledged writes, gone at the next start. A caller's write
+is held to the blocks; what the server is putting back is not a caller's
+write, and there is now a separate entry point that says so.
+
+The same run turned up why the module suite had been failing one section
+in three: a snapshot's `snapshot.json` was written in place, and the URL
+repository reads that same directory over HTTP. A reader could catch the
+file half-written, and the restore then answered `200` having restored
+nothing. Repository blobs are written whole or not at all now, and a
+restore whose snapshot names no indices at all says so rather than
+reporting success. Three module runs in a row at 880 since.
+
+Measured: 10,001 acknowledged writes over five index shapes survive
+`kill -9`; putting the block back over the replay makes two of the five
+report zero. Phase 1 398/398, the core corpus 1100/1100, the module suite
+880/890 three times running, the chaos run with none lost, and the other
+three checks green.

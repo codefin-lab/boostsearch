@@ -282,7 +282,7 @@ pub fn index_audit_document(
     let Some(st) = store.get(index) else { return Ok(()) };
     let mut g = st.write();
     let id = g.next_auto_id();
-    let _ = crate::api::doc::write_doc_versioned(&mut g, &id, doc.clone(), "index", None, None)
+    let _ = crate::api::doc::write_doc_internal(&mut g, &id, doc.clone(), "index", None, None)
         .map_err(|_| anyhow::anyhow!("audit record refused"))?;
     // a record is for reading as soon as it is written
     let _ = g.refresh();

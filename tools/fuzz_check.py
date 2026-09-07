@@ -323,6 +323,21 @@ def main():
                 # the node may be gone: if it is, stop and say so
                 alive, _, _ = call(url, "GET", "/_cat/health", None, 10)
                 if not alive:
+                    # a node that was killed from outside is not a finding:
+                    # another session's `pkill` looks exactly like a crash
+                    # from here, and the log is what tells them apart
+                    node.poll()
+                    log = (pathlib.Path(data) / "node.log").read_text(errors="replace")
+                    crashed = any(
+                        word in log
+                        for word in ("panicked", "stack overflow", "memory allocation", "abort")
+                    )
+                    if not crashed and node.returncode is not None and node.returncode < 0:
+                        print(
+                            f"  the node was killed from outside (signal {-node.returncode}) "
+                            f"after {round_number + 1} probes; nothing was found"
+                        )
+                        return 2
                     print(f"  the node stopped answering after {round_number + 1} probes")
                     for row in dead[-3:]:
                         print(f"    {row[2]} {row[3]}  {row[4]}")
