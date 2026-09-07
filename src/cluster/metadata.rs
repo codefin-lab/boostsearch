@@ -115,7 +115,13 @@ pub fn with_terms(
     started: &[(u32, String)],
 ) -> IndexMetadata {
     for shard in 0..m.number_of_shards {
-        let term = terms.get(&(m.name.clone(), shard)).copied().unwrap_or(1);
+        // the term a shard is on: what this manager has counted, or what the
+        // state already carried. A manager keeps the terms in memory, so a
+        // new one starts with none -- and publishing 1 for a shard that had
+        // reached 3 would let two different primaries write under the same
+        // number, which is the very thing the term exists to tell apart.
+        let carried = m.primary_terms.get(&shard).copied().unwrap_or(1);
+        let term = terms.get(&(m.name.clone(), shard)).copied().unwrap_or(1).max(carried);
         m.primary_terms.insert(shard, term);
         // In sync: what was in sync before and was not retired, the primary
         // (it is the source every copy is filled from), and the copies whose

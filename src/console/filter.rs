@@ -31,8 +31,14 @@ const MAX_NESTING: usize = 100;
 
 impl<'a> Reader<'a> {
     fn skip_space(&mut self) {
-        while self.text[self.at..].starts_with(char::is_whitespace) {
-            self.at += 1;
+        // a space is a character, and a character is not always a byte:
+        // stepping one byte past U+00A0 left the cursor inside it, and the
+        // next slice panicked
+        while let Some(c) = self.text[self.at..].chars().next() {
+            if !c.is_whitespace() {
+                break;
+            }
+            self.at += c.len_utf8();
         }
     }
 

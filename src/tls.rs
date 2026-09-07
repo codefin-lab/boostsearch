@@ -319,14 +319,36 @@ impl TransportTls {
     /// Whether a verified certificate's subject is one a node may have.
     /// With nothing named, any certificate the CA signed is a node.
     pub fn is_a_node(&self, dn: &str) -> bool {
+        // an empty list is not "everyone": a transport with TLS on refuses
+        // to start without one, so reaching here with none is a mistake and
+        // the answer is no
         if self.nodes_dn.is_empty() {
-            return true;
+            return false;
         }
         let dn = crate::security::normalize_dn(dn);
         self.nodes_dn.iter().any(|pattern| {
             let pattern = crate::security::normalize_dn(pattern);
             crate::store::glob_match(&pattern, &dn)
         })
+    }
+
+    /// Whether the operator has said which certificates are nodes.
+    ///
+    /// The authority that signs a node's certificate is usually the one that
+    /// signs a person's, and a person's certificate reaching the transport
+    /// is a person with a node's privileges. Naming the subjects is the only
+    /// thing that tells them apart, so transport TLS without `nodes_dn` is
+    /// refused rather than trusted.
+    fn named_its_nodes(&self) -> anyhow::Result<()> {
+        if self.nodes_dn.is_empty() {
+            anyhow::bail!(
+                "transport TLS is on but plugins.security.nodes_dn names nothing: any \
+                 certificate the authority signed would be a node of this cluster, including \
+                 one it issued to a person. Name the subjects a node may have, for example \
+                 plugins.security.nodes_dn: ['CN=*.nodes.example.com']"
+            );
+        }
+        Ok(())
     }
 
     fn material(
@@ -367,6 +389,7 @@ impl TransportTls {
     /// How this node answers a connection: a certificate is required, and it
     /// must be one the cluster's authority signed.
     pub fn server_config(&self) -> anyhow::Result<rustls::ServerConfig> {
+        self.named_its_nodes()?;
         let (certs, key, roots) = self.material()?;
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
         Ok(rustls::ServerConfig::builder()
@@ -376,6 +399,7 @@ impl TransportTls {
 
     /// How this node opens one.
     pub fn client_config(&self) -> anyhow::Result<rustls::ClientConfig> {
+        self.named_its_nodes()?;
         let (certs, key, roots) = self.material()?;
         Ok(rustls::ClientConfig::builder()
             .with_root_certificates(roots)

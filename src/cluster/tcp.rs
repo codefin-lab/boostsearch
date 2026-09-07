@@ -22,6 +22,18 @@ use super::transport::{
 
 pub const HANDSHAKE: &str = "internal:transport/handshake";
 
+/// How long a connection may take to greet the other end: the TCP connect,
+/// the TLS handshake and the first frame each have this long.
+const GREETING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many frames may wait for a peer that is not reading them.
+const OUTBOUND_QUEUE: usize = 4096;
+
+/// The most a frame may carry before the peer has said who it is. A peer
+/// that has shaken hands may send a shard's worth of bulk; one that has not
+/// may send a hello, and a hello is small.
+const MAX_GREETING_FRAME: usize = 1 << 20;
+
 /// What one side tells the other when a connection opens.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
@@ -39,7 +51,7 @@ pub struct TcpTransport {
     addresses: RwLock<HashMap<NodeId, String>>,
     /// the outbound queues of the connections open to each peer: two nodes
     /// that dial each other at once hold two, and either serves
-    peers: Mutex<HashMap<NodeId, Vec<mpsc::UnboundedSender<Envelope>>>>,
+    peers: Mutex<HashMap<NodeId, Vec<mpsc::Sender<Envelope>>>>,
     /// the transport's own handle, so `send` can open a connection
     self_weak: std::sync::Weak<TcpTransport>,
     /// peers this node is cut off from: a partition made real at this end,
@@ -149,16 +161,35 @@ impl TcpTransport {
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(s) => s,
-                Err(_) => continue,
+                // the file descriptors are spent, or the peer went away
+                // between the SYN and the accept: spinning on it would make
+                // a busy loop of a full table
+                Err(e) => {
+                    tracing::debug!("transport: a connection could not be accepted: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
             };
             let me = self.clone();
             tokio::spawn(async move {
                 match me.tls.clone() {
                     Some(tls) => {
-                        let accepted = match tls.acceptor.accept(stream).await {
-                            Ok(s) => s,
-                            Err(e) => {
+                        // a peer that opens a connection and says nothing is
+                        // holding a task and a descriptor for the cost of a
+                        // SYN, before it has shown a certificate
+                        let accepted = match tokio::time::timeout(
+                            GREETING_TIMEOUT,
+                            tls.acceptor.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
                                 tracing::debug!("transport: a connection was not accepted: {e}");
+                                return;
+                            }
+                            Err(_) => {
+                                tracing::debug!("transport: a connection never greeted us");
                                 return;
                             }
                         };
@@ -188,14 +219,21 @@ impl TcpTransport {
 
     /// Open a connection to an address, shake hands, and keep it.
     pub async fn connect(self: Arc<Self>, address: &str) -> anyhow::Result<Hello> {
-        let stream = TcpStream::connect(address).await?;
+        let stream = tokio::time::timeout(GREETING_TIMEOUT, TcpStream::connect(address))
+            .await
+            .map_err(|_| anyhow::anyhow!("{address} did not answer"))??;
         stream.set_nodelay(true)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let me = self.clone();
         match self.tls.clone() {
             Some(tls) => {
                 let name = server_name_of(address)?;
-                let opened = tls.connector.connect(name, stream).await?;
+                let opened =
+                    tokio::time::timeout(GREETING_TIMEOUT, tls.connector.connect(name, stream))
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!("{address} did not finish the TLS handshake")
+                        })??;
                 let subject = crate::tls::peer_subject(opened.get_ref().1.peer_certificates());
                 match subject {
                     Some(dn) if tls.settings.is_a_node(&dn) => {}
@@ -214,7 +252,9 @@ impl TcpTransport {
                 });
             }
         }
-        Ok(rx.await?)
+        Ok(tokio::time::timeout(GREETING_TIMEOUT, rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("{address} did not shake hands"))??)
     }
 
     /// One connection: say hello, hear theirs, then pump frames both ways.
@@ -231,7 +271,12 @@ impl TcpTransport {
         let hello =
             Envelope::request(HANDSHAKE, self.me.node_id.clone(), 0, serde_json::to_vec(&self.me)?);
         wr.write_all(&hello.encode()).await?;
-        let theirs = read_frame(&mut rd).await?;
+        // the first frame is the handshake, and a peer that never sends one
+        // is a peer this node is holding a task open for
+        let theirs =
+            tokio::time::timeout(GREETING_TIMEOUT, read_frame_within(&mut rd, MAX_GREETING_FRAME))
+                .await
+                .map_err(|_| anyhow::anyhow!("the peer did not shake hands"))??;
         if theirs.action != HANDSHAKE {
             anyhow::bail!("peer did not shake hands");
         }
@@ -245,7 +290,11 @@ impl TcpTransport {
         }
         self.addresses.write().insert(peer_id.clone(), peer.transport_address.clone());
         self.known.write().insert(peer_id.clone(), peer.clone());
-        let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
+        // a peer that stops reading its socket must not fill this node's
+        // memory with what it is not taking: the queue has a floor and a
+        // ceiling, and a frame that will not fit is lost the way a frame on
+        // a cut connection is lost
+        let (tx, mut rx) = mpsc::channel::<Envelope>(OUTBOUND_QUEUE);
         self.peers.lock().entry(peer_id.clone()).or_default().push(tx.clone());
         if let Some(t) = tell {
             let _ = t.send(peer.clone());
@@ -303,7 +352,7 @@ impl TcpTransport {
     /// A connection to the node, opened if there is none and its address
     /// is known.
     /// A live queue to the node, if a connection is open.
-    fn queue_to(&self, to: &NodeId) -> Option<mpsc::UnboundedSender<Envelope>> {
+    fn queue_to(&self, to: &NodeId) -> Option<mpsc::Sender<Envelope>> {
         if self.is_cut(to) {
             return None;
         }
@@ -313,7 +362,7 @@ impl TcpTransport {
     async fn ensure_peer(
         self: Arc<Self>,
         to: &NodeId,
-    ) -> Result<mpsc::UnboundedSender<Envelope>, SendError> {
+    ) -> Result<mpsc::Sender<Envelope>, SendError> {
         if let Some(tx) = self.queue_to(to) {
             return Ok(tx);
         }
@@ -342,7 +391,10 @@ impl Transport for TcpTransport {
             return Ok(());
         }
         if let Some(tx) = self.queue_to(to) {
-            return tx.send(envelope).map_err(|_| SendError::Closed);
+            return tx.try_send(envelope).map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => SendError::Closed,
+                mpsc::error::TrySendError::Closed(_) => SendError::Closed,
+            });
         }
         // no connection yet: open one on the runtime and send when it is up
         let me: Arc<TcpTransport> = match self.self_arc() {
@@ -352,7 +404,7 @@ impl Transport for TcpTransport {
         let to = to.clone();
         tokio::spawn(async move {
             if let Ok(tx) = me.ensure_peer(&to).await {
-                let _ = tx.send(envelope);
+                let _ = tx.try_send(envelope);
             }
         });
         Ok(())
@@ -394,10 +446,17 @@ fn server_name_of(address: &str) -> anyhow::Result<rustls::pki_types::ServerName
 }
 
 async fn read_frame<R: tokio::io::AsyncRead + Unpin>(rd: &mut R) -> anyhow::Result<Envelope> {
+    read_frame_within(rd, MAX_FRAME).await
+}
+
+async fn read_frame_within<R: tokio::io::AsyncRead + Unpin>(
+    rd: &mut R,
+    most: usize,
+) -> anyhow::Result<Envelope> {
     let mut len = [0u8; 4];
     rd.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > most {
         anyhow::bail!(FrameError::TooLong(len));
     }
     let mut payload = vec![0u8; len];

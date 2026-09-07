@@ -1419,6 +1419,14 @@ pub fn narrow_term_vectors(store: &crate::store::Store, index: &str, fields: &mu
 /// Whether the caller may run every one of these actions over these
 /// indices; the refusal names the whole list, as the plugin's shard-level
 /// check does for a bulk, an mget or an msearch item.
+/// Whether security is off on this node.
+///
+/// A caller carried in from another node says whether it was unrestricted
+/// there; whether it is unrestricted *here* is this node's own business.
+pub fn disabled_here() -> bool {
+    audit::attached_store().map(|s| !s.security.enabled).unwrap_or(true)
+}
+
 pub fn item_refusal(
     store: &crate::store::Store,
     actions: &[&str],

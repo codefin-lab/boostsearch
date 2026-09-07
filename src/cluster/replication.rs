@@ -1204,7 +1204,14 @@ pub async fn resync(
                     Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
                     None => "no answer".to_string(),
                 };
-                fail_copy(store, index, shard, node, &format!("resync failed: {why}")).await;
+                let told =
+                    fail_copy(store, index, shard, node, &format!("resync failed: {why}")).await;
+                if !told {
+                    tracing::error!(
+                        "[{index}][{shard}]: a copy on {node} missed the resync and the manager \
+                         could not be told; it is still in the in-sync set"
+                    );
+                }
                 missed.push(node.clone());
             }
         }
@@ -1231,28 +1238,45 @@ pub async fn resync(
 
 /// Tell the manager a copy on this node's peer is no good, so it is taken out
 /// of the in-sync set and filled again.
-async fn fail_copy(store: &Store, index: &str, shard: u32, node: &NodeId, why: &str) {
+async fn fail_copy(store: &Store, index: &str, shard: u32, node: &NodeId, why: &str) -> bool {
     let _ = store;
-    let Some(rt) = super::runtime() else { return };
+    let Some(rt) = super::runtime() else { return false };
     let state = rt.state();
-    let Some(mgr) = state.cluster_manager.clone() else { return };
+    let Some(mgr) = state.cluster_manager.clone() else { return false };
     let ids: Vec<String> = state
         .routing
         .shards_of(index)
         .filter(|c| c.shard == shard && c.node.as_ref() == Some(node) && !c.primary)
         .filter_map(|c| c.allocation_id.clone())
         .collect();
+    let mut told = true;
     for aid in ids {
         let body = json!({"index": index, "shard": shard, "allocation_id": aid, "message": why});
-        let _ = rt
-            .call(
-                &mgr,
-                super::coordinator::SHARD_FAILED,
-                serde_json::to_vec(&body).unwrap_or_default(),
-                std::time::Duration::from_secs(10),
-            )
-            .await;
+        // the manager hearing this is what takes the copy out of the in-sync
+        // set. If it does not hear it, the copy stays eligible to be handed
+        // the primary while missing writes -- so it is tried again, and the
+        // caller is told when it never landed.
+        let mut landed = false;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            let answer = rt
+                .call(
+                    &mgr,
+                    super::coordinator::SHARD_FAILED,
+                    serde_json::to_vec(&body).unwrap_or_default(),
+                    std::time::Duration::from_secs(10),
+                )
+                .await;
+            if matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                landed = true;
+                break;
+            }
+        }
+        told &= landed;
     }
+    told
 }
 
 #[cfg(test)]

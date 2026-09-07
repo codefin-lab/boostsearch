@@ -254,6 +254,13 @@ fn migrate_610(
 
 fn migrate_620(panel: Value, version: &str, use_margins: bool) -> Value {
     let mut config = panel.get("embeddableConfig").cloned().unwrap_or_else(|| json!({}));
+    // a config that is not an object cannot take a field: a stored panel
+    // whose `embeddableConfig` is a string was a document that panicked the
+    // migration -- and the migration runs over documents somebody else
+    // saved
+    if !config.is_object() {
+        config = json!({});
+    }
     if panel.get("columns").is_some() || panel.get("sort").is_some() {
         config["columns"] = panel.get("columns").cloned().unwrap_or(Value::Null);
         config["sort"] = panel.get("sort").cloned().unwrap_or(Value::Null);
@@ -270,6 +277,13 @@ fn migrate_620(panel: Value, version: &str, use_margins: bool) -> Value {
 
 fn migrate_630(panel: Value, version: &str) -> Value {
     let mut config = panel.get("embeddableConfig").cloned().unwrap_or_else(|| json!({}));
+    // a config that is not an object cannot take a field: a stored panel
+    // whose `embeddableConfig` is a string was a document that panicked the
+    // migration -- and the migration runs over documents somebody else
+    // saved
+    if !config.is_object() {
+        config = json!({});
+    }
     if panel.get("columns").is_some() || panel.get("sort").is_some() {
         config["columns"] = panel.get("columns").cloned().unwrap_or(Value::Null);
         config["sort"] = panel.get("sort").cloned().unwrap_or(Value::Null);

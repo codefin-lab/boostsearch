@@ -86,7 +86,12 @@ fn query_of(params: &Map<String, Value>, taken: &[&str]) -> String {
 }
 
 /// One call by the old client's name.
-pub fn api_caller(engine: &Engine, endpoint: &str, data: &Value) -> Value {
+pub fn api_caller(
+    engine: &Engine,
+    endpoint: &str,
+    data: &Value,
+    allowed: &dyn Fn(&str) -> bool,
+) -> Value {
     let params = data.as_object().cloned().unwrap_or_default();
     let body = params.get("body");
     let at = |key: &str| segment(params.get(key));
@@ -99,6 +104,18 @@ pub fn api_caller(engine: &Engine, endpoint: &str, data: &Value) -> Value {
         "transport.request" => {
             let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let path = format!("/{}", path.trim_start_matches('/'));
+            // this is the Dev Tools proxy by another name, and the
+            // operator's filter over that proxy applies to it: without this,
+            // an allowlist of `^/_cat/indices` still let the page delete an
+            // index through the console's own credentials
+            if !allowed(&path) {
+                return not_ok(
+                    format!(
+                        "Error connecting to '{path}':\n\nUnable to send requests to that path."
+                    ),
+                    json!(""),
+                );
+            }
             let method =
                 params.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_ascii_uppercase();
             if !matches!(method.as_str(), "HEAD" | "GET" | "POST" | "PUT" | "DELETE") {

@@ -76,6 +76,21 @@ pub(crate) fn run_text_terms_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let order = spec.get("order").cloned();
 
+    // this aggregation asks a search per distinct token, and a parent
+    // aggregation runs it once per bucket of its own: the size a caller may
+    // ask for is bounded by the same ceiling the buckets are
+    let ceiling = crate::search::max_buckets(store) as usize;
+    if size > ceiling {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "too_many_buckets_exception",
+            format!(
+                "Trying to create too many buckets. Must be less than or equal to: [{ceiling}] \
+                 but was [{size}]. This limit can be set by changing the [search.max_buckets] \
+                 cluster level setting."
+            ),
+        ));
+    }
     let candidates = tokens_of(store, targets, &field);
     // What the caller may see of these indices. This aggregation reads the
     // term dictionary rather than going through the shard search, so the

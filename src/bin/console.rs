@@ -1713,7 +1713,9 @@ async fn ism_api_caller(
                 serde_json::json!({"ok": false, "error": "Expected non-empty string on endpoint"}),
             );
         }
-        Ok(boostsearch::console::ism::api_caller(&s.engine, &endpoint, &data))
+        let filter = s.proxy_filter.clone();
+        let allowed = move |path: &str| filter.iter().any(|re| re.is_match(path));
+        Ok(boostsearch::console::ism::api_caller(&s.engine, &endpoint, &data, &allowed))
     })
     .await
 }

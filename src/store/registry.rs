@@ -441,9 +441,13 @@ impl Store {
         match self.index_path(name) {
             Some(path) => {
                 std::fs::create_dir_all(&path)?;
-                std::fs::write(
-                    path.join("_meta.json"),
-                    serde_json::json!({"name": name, "body": body}).to_string(),
+                // written whole or not at all, the way every later write of
+                // this file is: a crash in the middle of it leaves a file
+                // that does not parse, and an index whose state does not
+                // parse is one this node passes over at startup
+                crate::store::write_atomic(
+                    &path.join("_meta.json"),
+                    serde_json::json!({"name": name, "body": body}).to_string().as_bytes(),
                 )?;
                 self.open_index(name, body, path.clone())?;
                 if let Some(st) = self.get(name) {
@@ -586,6 +590,10 @@ impl Store {
         };
         st.apply_analysis();
         st.refresh_knobs();
+        // the state file is written whole from the first moment: a crash
+        // during the write left an index whose meta does not parse, and an
+        // index whose meta does not parse is one this node does not open
+        st.save_meta();
         self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
         Ok(())
     }

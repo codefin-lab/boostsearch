@@ -117,12 +117,19 @@ fn load_durable(dir: Option<&std::path::Path>) -> Durable {
 }
 
 /// Write what changed since the last save, and nothing else.
+/// Write what changed since the last save, or say what could not be written.
+///
+/// A vote is a promise not to vote again in the same term, and the promise
+/// is only kept by the disk: a node that voted, failed to write it down and
+/// carried on could restart and vote a second time in that term, which is
+/// two managers and two primaries. So a failure here stops the outputs that
+/// promise rather than being logged and passed over.
 fn save_durable(
     dir: Option<&std::path::Path>,
     d: &Durable,
     written: &mut BTreeMap<String, Vec<u8>>,
-) {
-    let Some(dir) = dir else { return };
+) -> Result<(), String> {
+    let Some(dir) = dir else { return Ok(()) };
     for key in DURABLE_KEYS {
         let Some(bytes) = d.entries.get(key) else { continue };
         if written.get(key) == Some(bytes) {
@@ -138,9 +145,11 @@ fn save_durable(
             }
             Err(e) => {
                 tracing::error!("could not write coordination state {}: {e}", path.display());
+                return Err(format!("could not write {}: {e}", path.display()));
             }
         }
     }
+    Ok(())
 }
 
 impl Runtime {
@@ -221,7 +230,17 @@ impl Runtime {
                         eprintln!("cluster {me} -> {what}");
                     }
                 }
-                save_durable(data_dir.as_deref(), &durable, &mut written);
+                // what this node promised has to be on disk before the
+                // promise is sent: a vote written nowhere is a vote it can
+                // cast again after a restart, and that is two managers in
+                // one term. Nothing goes out until it is written.
+                if let Err(why) = save_durable(data_dir.as_deref(), &durable, &mut written) {
+                    tracing::error!(
+                        "this node cannot write its coordination state ({why}); it is saying \
+                         nothing rather than promising what it cannot keep"
+                    );
+                    continue;
+                }
                 *shared.state.write() = logic.state().clone();
                 *shared.mode.write() = format!("{:?}", logic.mode);
                 shared.manager.store(logic.manager_here(), std::sync::atomic::Ordering::Relaxed);

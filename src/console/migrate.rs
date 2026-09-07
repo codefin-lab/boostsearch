@@ -109,6 +109,24 @@ fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     if on.len() == 1 && same_shape(engine, &current, mapping)? {
         return Ok(Found::Ready(current));
     }
+    // the alias over more than one index is a migration somebody stopped
+    // halfway. Copying the newest and pointing the alias at the copy leaves
+    // everything in the others behind -- every saved object of a cluster
+    // that was mid-migration when this console started.
+    if on.len() > 1 {
+        return Err(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!(
+                "[{ALIAS}] points at {} indices ({}), which is a migration that did not finish. \
+                 Point it at the one that holds the objects, and start again.",
+                on.len(),
+                on.join(", ")
+            ),
+        });
+    }
     // one index behind the alias whose shape has moved on, or more than one
     // behind it at all -- either way the answer is the same: a new index with
     // the shape it should have, everything in it, and the alias on it alone
@@ -129,7 +147,25 @@ fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     // a write that lands after its document was read would be left behind in
     // an index nothing points at any more
     block_writes(engine, &current, true);
-    let copied = copy(engine, &current, &next);
+    // the copy runs where a panic in it cannot leave the block behind: a
+    // saved object that panicked one of the type migrations would otherwise
+    // leave the console's own index refusing every write, and each retry
+    // would meet the same document again
+    let copied = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        copy(engine, &current, &next)
+    })) {
+        Ok(answer) => answer,
+        Err(_) => Err(Failed {
+            objects: None,
+            error: None,
+            attributes: None,
+            status: 500,
+            message: format!(
+                "{current}: a saved object could not be migrated -- the copy was stopped and \
+                 nothing was changed"
+            ),
+        }),
+    };
     let documents = match copied {
         Ok(documents) => documents,
         // a half-made index left behind would be taken for the next free one

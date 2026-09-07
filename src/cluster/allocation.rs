@@ -1330,6 +1330,10 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 })
                 .map(|(i, _)| i)
                 .collect();
+            // the primary that was on the node that left, if there was one:
+            // its place in the in-sync set is kept while nothing has taken
+            // over from it, and given up the moment something does
+            let mut deposed: Option<String> = None;
             for i in gone {
                 let c = &mut copies[i];
                 let was_primary = c.primary;
@@ -1340,6 +1344,9 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                 // the one holding what everybody else is missing.
                 if !was_primary && let Some(a) = &c.allocation_id {
                     changes.retired.push((name.clone(), *shard, a.clone()));
+                }
+                if was_primary {
+                    deposed = c.allocation_id.clone();
                 }
                 c.state = ShardState::Unassigned;
                 c.node = None;
@@ -1380,6 +1387,14 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                     copies[ri].state = ShardState::Started;
                     copies[pi].primary = false;
                     copies.swap(0, ri);
+                    // the copy that was the primary is behind the one that
+                    // has taken over: every write acknowledged from here on
+                    // is one it does not have. Leaving it in the set let it
+                    // be handed the primary back when it returned, and the
+                    // writes taken in between went with it.
+                    if let Some(a) = deposed.take() {
+                        changes.retired.push((name.clone(), *shard, a));
+                    }
                     changes.promoted.push((name.clone(), *shard, node));
                 } else if copies[pi]
                     .unassigned

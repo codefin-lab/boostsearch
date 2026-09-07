@@ -4071,3 +4071,86 @@ the reference does the same thing, and the walk holds no thread.
 Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890, a
 chaos run with 42,244 acknowledged writes and none lost, clippy and 177
 unit tests clean.
+
+## The second review
+
+Nine readers over the same 107k lines, each told to find only what a first
+review would call P0: authorization that fails open, data that can be lost,
+a request that can kill the process. They found thirty-odd, which is what a
+first review's density predicts and why the second one was worth running.
+Everything below is fixed and checked; the ledger entry for each is in the
+commit that carried it.
+
+**The worst of them.** SAML signature verification answered
+`Option<String>` -- `Some(reason)` for a bad signature, `None` for a good
+one -- so every `?` in it said "valid" for a part that was missing. A
+`<Signature/>` element with nothing inside it verified, and with it any
+assertion an attacker cared to write: a login as any user with any roles,
+against a node with SAML configured. It answers `Result` now, and the
+empty signature has a test of its own.
+
+**Two more ways past the door.** The layer let any path *ending* in the
+token exchange run with no credentials, and the wildcard routes made that
+reachable: `PUT /_alias/_plugins/_security/api/authtoken` wrote an alias
+unauthenticated. A path the action table did not know was run unjudged,
+which is how `_upgrade` listed every index and its size to a caller with
+read on one of them. A reindex named its indices in the body, where the
+layer cannot see them, and was judged on a cluster permission alone.
+
+**Five ways to end the process with one request**, and five more to panic
+a worker: unary, elvis and ternary chains in Painless and `NOT` chains in
+SQL recursed without being counted; a value that holds itself was written
+out for ever; `new int[2000000000]` was allocated; `filter_path` with a
+dozen `**` was factorial; the phone analyser built a token per digit of
+any length of digits; and a script's own error message, a PPL `stats`
+clause, a time zone, an empty `ranges` list and a `knn_vector` with a huge
+`m` each panicked on caller input. The last of those took the index's
+documents with it: every later refresh panicked, and eleven hundred
+acknowledged documents became uncountable.
+
+**Data loss on the ordinary paths.** A write queued the delete of the
+document it was replacing *before* the validation that might refuse it, so
+a refused write destroyed the old document -- reported as a version
+conflict through `_bulk` and as nothing at all through
+`_update_by_query`. A bulk action with no document line indexed an empty
+document over whatever it named and answered `"errors": false`. Deletes
+ignored `blocks.write`, `blocks.read_only` and a closed index, which are
+the three states an operator uses to hold an index still. A `_shrink` that
+could not write a document reported every shard successful over an empty
+index. `PUT _mapping` changed a field's type. A restore through an alias
+deleted every index behind it, and a restore from a snapshot holding
+nothing deleted the index first and reported the failure after.
+
+**And the cluster.** A stranger that could open a transport connection
+could set every node's term to `u64::MAX`, on disk, so that no manager
+could ever be elected again; the same stranger could write itself into the
+book that the other checks read. A vote that could not be written down was
+logged and cast anyway, which is two managers in one term after a restart.
+An answer was matched to a call by request id alone, so any peer could
+complete another's call -- a replica that never took a write could be
+counted as having it. A primary that was replaced kept its place in the
+in-sync set, so it could be handed the primary back with every write since
+its departure missing. Primary terms reset to 1 whenever the manager
+changed. And a connection that said nothing held a task and a descriptor
+for as long as it liked, before it had shown a certificate.
+
+**What the certificates were worth.** `plugins.security.nodes_dn`
+defaulted to "any certificate this authority signed", and the authority
+that signs a node's certificate is usually the one that signs a person's:
+a client certificate issued to a user completed the transport handshake as
+a node, and a node may forward a request as any caller it names. Transport
+TLS without `nodes_dn` is refused at startup now, a forwarded request must
+come from a node the cluster state knows, and a caller carried in from
+another node cannot claim to be unrestricted here.
+
+Measured: every one of the thirty-odd was reproduced before it was fixed
+and re-run after. Phase 1 398/398, the core corpus 1100/1100, the module
+suite 880/890, six chaos runs with no acknowledged write lost, a two-node
+TLS cluster still forms and still replicates, a node with transport TLS
+and no `nodes_dn` exits with the reason, a silent transport connection is
+dropped after ten seconds, and the console refuses a proxy path its filter
+does not name -- through the ISM caller as well as the Dev Tools route.
+
+One thing seen once and not explained: in one chaos run of six, a copy was
+393 acknowledged writes behind at the end while the primary had them all.
+No run lost a write. It is written down here rather than left out.

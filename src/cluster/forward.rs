@@ -1274,11 +1274,29 @@ pub fn install(router: axum::Router) {
         std::sync::Arc::new(|e: Envelope| -> super::runtime::DataFuture {
             Box::pin(async move {
                 let from = super::identity().id.clone();
+                // the request is carried by a node of this cluster: the
+                // certificate said it was a node, and the state says it is
+                // one of ours
+                if !super::runtime()
+                    .map(|rt| {
+                        let state = rt.state();
+                        e.from == rt.local() || state.nodes.contains_key(&e.from)
+                    })
+                    .unwrap_or(false)
+                {
+                    return e.error(from, "not a node of this cluster");
+                }
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
-                let caller: Caller = v
+                let mut caller: Caller = v
                     .get("caller")
                     .and_then(|c| serde_json::from_value(c.clone()).ok())
                     .unwrap_or_default();
+                // "unrestricted" means this node has security off, which is
+                // this node's own business rather than something a peer may
+                // assert
+                if caller.unrestricted && !crate::security::disabled_here() {
+                    caller.unrestricted = false;
+                }
                 let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("GET");
                 let uri = v.get("uri").and_then(|u| u.as_str()).unwrap_or("/");
                 let body = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();

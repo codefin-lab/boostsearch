@@ -624,7 +624,7 @@ impl Coordinator {
 
     /// Start an election: a term above every one seen, and everyone told to join it.
     fn start_election(&mut self, durable: &mut Durable) -> Vec<Output> {
-        let term = self.max_term_seen.max(self.current_term) + 1;
+        let term = self.max_term_seen.max(self.current_term).saturating_add(1);
         // the pre-vote round is over: late answers start nothing
         self.prevote_rid = 0;
         self.prevotes.clear();
@@ -1721,7 +1721,15 @@ impl Coordinator {
                 if let Some(n) = serde_json::from_slice::<Value>(&e.body).ok().and_then(|v| {
                     serde_json::from_value::<DiscoveryNode>(v.get("node")?.clone()).ok()
                 }) {
-                    out.extend(self.learn(n));
+                    // discovery is how a node that belongs here is found, and
+                    // it is also how a stranger used to write itself into
+                    // the book that every other check reads. A node this one
+                    // has not met is answered with the peers it knows -- so
+                    // discovery still works -- but it is not learned unless
+                    // it is a seed, a node of the state, or already known.
+                    if self.knows(&n.id) {
+                        out.extend(self.learn(n));
+                    }
                 }
                 let leader = match &self.mode {
                     Mode::Leader => Some(self.me.id.as_str().to_string()),
@@ -1758,6 +1766,12 @@ impl Coordinator {
                 out
             }
             (PRE_VOTE, Kind::Request) => {
+                if !self.knows(&from) {
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not a node of this cluster"})
+                            .to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
                 let term = term_in(&e.body).unwrap_or(0);
                 self.max_term_seen = self.max_term_seen.max(term);
                 // a node with a manager does not encourage another
@@ -1980,6 +1994,17 @@ impl Coordinator {
                 vec![]
             }
             (FOLLOWER_CHECK, Kind::Request) => {
+                // a check comes from the node this one follows, or from one
+                // that believes it is the manager: either way it is a node
+                // of this cluster. Without this, one frame from a stranger
+                // carrying `term: u64::MAX` left every node in a term
+                // nothing can ever reach, on disk, for good.
+                if !self.knows(&from) {
+                    let msg =
+                        json!({"term": self.current_term, "reason": "not a node of this cluster"})
+                            .to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
                 let term = term_in(&e.body).unwrap_or(0);
                 let mut out = Vec::new();
                 if term < self.current_term {
