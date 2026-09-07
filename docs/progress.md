@@ -3929,3 +3929,61 @@ after thirty seconds and the node answers on; a scroll opened for a second
 is gone three seconds later while one opened for five minutes is not; an
 id in the old shape is not found. Phase 1 398/398, the core corpus
 1100/1100, the module suite 880/890, clippy and the unit tests clean.
+
+## The sixth step, second half: answers that were wrong
+
+**A write could create an index a `PUT` could not.** Five write paths
+called `ensure` straight, so a name with a `*` in it, or a name the
+cluster's `action.auto_create_index` forbids, became an index by being
+written to. Both checks now stand in front of every write, and in a bulk
+they are that item's error rather than the request's.
+
+**A number a field cannot hold was written as the nearest one it could.**
+`byte: 1000` was stored as 127 and the document then said something it had
+not been sent. Out-of-range values are refused, with the reference's own
+message -- the field, the document id, a preview of the value, and the
+exception underneath: `Value [1000] is out of range for a byte` for the
+narrow types, `Numeric value (9999999999) out of range of int` for the
+wider ones. A fractional value for a whole-number field is still
+truncated, as the reference truncates it.
+
+**A vector of the wrong width erased the one that was there.** A
+`knn_vector` field given three numbers where four were declared wrote
+nothing and forgot the old vector, so the document quietly stopped being
+findable. It is refused, with the reference's `Vector dimension mismatch.
+Expected: 4, Given: 3`.
+
+**A multi search said the wrong thing about every failure.** Every failing
+sub-search was reported as `no such index`, whatever had happened: a bad
+query, a shard failure, a refusal. Each sub-answer now carries the answer
+that search would have given on its own.
+
+**A task nobody had a record of reported success.** `GET /_tasks/{id}` for
+an id this node knew nothing about answered `"completed": true` with an
+acknowledged response -- a caller waiting on a reindex was told it had
+finished. It answers `resource_not_found_exception` with 404, as the
+reference does.
+
+**Shifts.** `<<`, `>>` and `>>>` on an `int` were done in 64 bits: `1 <<
+32` was four billion rather than 1, and `-8 >>> 1` was astronomical.
+Checked against the reference, all three agree now.
+
+**A bucket ceiling that was not there.** `search.max_buckets` was only
+enforced if somebody had set it. The reference's default (65,535) applies
+when nothing has.
+
+One thing looked at and left alone: an ingest `remove` of a dotted key
+written flat (`{"a": {"b.c": 1}}` with `field: a.b.c`). It looked like a
+gap; the reference refuses that too, with `field [a.b.c] doesn't exist`,
+and so do we. The change was reverted.
+
+Still on the list, and not done here: the offset arithmetic in
+`cjk_bigram` and the ICU/`html_strip` character map, the console's saved
+object migration, geo aggregations reading the first ten thousand
+documents, the calendar histogram's search per bucket, and a TLS shutdown
+that cuts requests off mid-answer.
+
+Measured against OpenSearch 3.1.0 running beside it: the out-of-range
+messages, the multi search sub-error, the unknown task, `1 << 32`,
+`-8 >>> 1` and `1L << 32` all agree. Phase 1 398/398, the core corpus
+1100/1100, the module suite 880/890, clippy and the unit tests clean.

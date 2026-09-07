@@ -155,9 +155,16 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> Result<Value, String> {
                 "&" => x & y,
                 "|" => x | y,
                 "^" => x ^ y,
-                "<<" => x.wrapping_shl(y as u32),
-                ">>" => x.wrapping_shr(y as u32),
-                ">>>" => ((x as u64).wrapping_shr(y as u32)) as i64,
+                // Java shifts an int by the low five bits of the count and a
+                // long by the low six, and `>>>` fills with zeros over the
+                // width being shifted: an int shifted as a long is a
+                // different number
+                "<<" if wide => x.wrapping_shl(y as u32 & 63),
+                ">>" if wide => x.wrapping_shr(y as u32 & 63),
+                ">>>" if wide => ((x as u64).wrapping_shr(y as u32 & 63)) as i64,
+                "<<" => (x as i32).wrapping_shl(y as u32 & 31) as i64,
+                ">>" => (x as i32).wrapping_shr(y as u32 & 31) as i64,
+                ">>>" => ((x as i32 as u32).wrapping_shr(y as u32 & 31)) as i32 as i64,
                 _ => return no(format!("unknown operator [{op}]")),
             };
             Ok(if wide { Value::Long(out) } else { Value::Int(out as i32 as i64) })

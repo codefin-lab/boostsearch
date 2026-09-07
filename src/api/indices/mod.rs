@@ -332,6 +332,18 @@ pub(crate) fn bad_index_name(name: &str) -> Option<Response> {
     ))
 }
 
+/// Why a write may not create the index it names.
+///
+/// A write that creates an index on the fly was creating it without either
+/// of the two checks a `PUT /{index}` goes through: the name it may have,
+/// and whether the cluster allows an index to appear this way at all.
+pub(crate) fn auto_create_refusal(store: &Store, name: &str) -> Option<Response> {
+    if store.get(name).is_some() || store.is_alias(name) {
+        return None;
+    }
+    bad_index_name(name).or_else(|| crate::api::auto_create_complaint(store, name))
+}
+
 /// Names beginning with an underscore are reserved for the API's own
 /// endpoints, so one cannot also be an index.
 pub(crate) fn reserved_index_name(expr: &str) -> Option<Response> {

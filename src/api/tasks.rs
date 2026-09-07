@@ -62,6 +62,18 @@ pub async fn get_task(
         );
     }
     let what = id.split_once(':').map(|(_, d)| d).unwrap_or(&id).to_string();
+    // a task this node ran and kept is answered above. One it has no record
+    // of is not one that finished well: saying it did tells a caller waiting
+    // on a reindex that their reindex is done.
+    if what.parse::<u64>().is_ok() {
+        return err_caused_by_status(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            &format!("task [{id}] isn't running and hasn't stored its results"),
+            "index_not_found_exception",
+            "no such index [.tasks]",
+        );
+    }
     let action = if what.starts_with("open") {
         "indices:admin/open"
     } else if what.starts_with("shrink") || what.starts_with("split") || what.starts_with("clone") {

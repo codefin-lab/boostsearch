@@ -218,6 +218,18 @@ pub async fn bulk(
             }}));
             continue;
         }
+        // an index a write would create is created with the same two checks a
+        // `PUT /{index}` goes through: the name it may have, and whether the
+        // cluster lets an index appear this way
+        if let Some(refusal) = crate::api::indices::auto_create_refusal(&store, &idx) {
+            errors = true;
+            let (status, error) = crate::api::error_parts(refusal).await;
+            items.push(json!({ op.clone(): {
+                "_index": idx, "_id": id_opt.clone().unwrap_or_default(),
+                "status": status, "error": error,
+            }}));
+            continue;
+        }
         let was_there = store.get(&idx).is_some();
         let st = match store.ensure(&idx) {
             Ok(s) => s,
@@ -411,6 +423,7 @@ pub async fn bulk(
                 // not the whole request's
                 if let Some((kind, reason, cause)) = document_complaint(&g, &src) {
                     errors = true;
+                    let reason = reason.replace("{id}", &id);
                     let mut error = json!({"type": kind, "reason": reason});
                     if !cause.is_empty() {
                         error["caused_by"] =

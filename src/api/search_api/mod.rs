@@ -195,26 +195,43 @@ pub async fn msearch(
                 env["status"] = json!(200);
                 responses.push(env);
             }
-            Err(_) => {
-                let reason = format!("no such index [{expr}]");
-                let mut error = json!({
-                    "type": "index_not_found_exception",
-                    "reason": reason,
-                    "index": expr,
-                    "resource.type": "index_or_alias",
-                    "resource.id": expr,
-                    "index_uuid": "_na_",
-                    "root_cause": [{
-                        "type": "index_not_found_exception",
-                        "reason": reason,
-                        "index": expr,
-                        "resource.type": "index_or_alias",
-                        "resource.id": expr,
-                        "index_uuid": "_na_"
-                    }]
-                });
-                add_stack_trace(&mut error, &p, "msearch");
-                responses.push(json!({"error": error, "status": 404}));
+            Err(refusal) => {
+                // one search of a multi search failing is that search's
+                // answer, not the whole request's -- and it is the answer it
+                // would have given on its own, rather than a missing index
+                // whatever went wrong
+                let status = refusal.status().as_u16();
+                let body = axum::body::to_bytes(refusal.into_body(), 64 * 1024 * 1024)
+                    .await
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+                match body.as_ref().and_then(|b| b.get("error")).cloned() {
+                    Some(mut error) => {
+                        add_stack_trace(&mut error, &p, "msearch");
+                        responses.push(json!({"error": error, "status": status}));
+                    }
+                    None => {
+                        let reason = format!("no such index [{expr}]");
+                        let mut error = json!({
+                            "type": "index_not_found_exception",
+                            "reason": reason,
+                            "index": expr,
+                            "resource.type": "index_or_alias",
+                            "resource.id": expr,
+                            "index_uuid": "_na_",
+                            "root_cause": [{
+                                "type": "index_not_found_exception",
+                                "reason": reason,
+                                "index": expr,
+                                "resource.type": "index_or_alias",
+                                "resource.id": expr,
+                                "index_uuid": "_na_"
+                            }]
+                        });
+                        add_stack_trace(&mut error, &p, "msearch");
+                        responses.push(json!({"error": error, "status": 404}));
+                    }
+                }
             }
         }
     }

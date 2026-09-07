@@ -145,17 +145,23 @@ pub fn write_doc_versioned(
         st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
     }
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
-        return Err(err_caused_by(&kind, &reason, &cause));
+        return Err(err_caused_by(&kind, &reason.replace("{id}", id), &cause));
     }
     let default_lenient = st.knobs.ignore_malformed;
     let ignored = match crate::store::scan_malformed(&source, &st.mapping, default_lenient) {
         Ok(v) => v,
-        Err((field, ty)) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "mapper_parsing_exception",
-                format!("failed to parse field [{field}] of type [{ty}]"),
-            ));
+        Err(bad) => {
+            let reason = format!(
+                "failed to parse field [{}] of type [{}] in document with id '{id}'. Preview of \
+                 field's value: '{}'",
+                bad.field, bad.ty, bad.preview
+            );
+            return Err(match bad.cause {
+                Some((kind, why)) => {
+                    err_caused_by_kind("mapper_parsing_exception", &reason, &kind, &why)
+                }
+                None => err(StatusCode::BAD_REQUEST, "mapper_parsing_exception", reason),
+            });
         }
     };
     // the ignored names ride along inside the stored source and are lifted back
@@ -559,6 +565,9 @@ pub(crate) async fn do_index(
             }
             Err(e) => return crate::api::ingest_failure(&e),
         }
+    }
+    if let Some(refusal) = crate::api::indices::auto_create_refusal(&store, &index) {
+        return refusal;
     }
     let was_there = store.get(&index).is_some();
     let st = match store.ensure(&index) {

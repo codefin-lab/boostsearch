@@ -93,6 +93,49 @@ pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {
 
 /// Whether a value can be read as the type its mapping declares.
 ///
+/// Whether a number is one the field's type holds. A fractional value for a
+/// whole-number field is not out of range -- OpenSearch truncates it -- but a
+/// value past the type's edge is.
+pub(crate) fn number_fits(v: &Value, ty: &str) -> bool {
+    let Some(f) = v.as_f64() else { return true };
+    let (low, high) = match ty {
+        "byte" => (-128.0, 127.0),
+        "short" => (-32_768.0, 32_767.0),
+        "integer" => (i32::MIN as f64, i32::MAX as f64),
+        "long" | "scaled_float" => (i64::MIN as f64, i64::MAX as f64),
+        "unsigned_long" => (0.0, u64::MAX as f64),
+        // a float that will not fit is written as infinity, which is what
+        // OpenSearch does with it too
+        _ => return true,
+    };
+    f >= low && f <= high
+}
+
+/// What the reference says about a value its field cannot hold, under the
+/// message that names the field: the whole-number types that fit in an int
+/// are refused by the mapper, and the wider ones by the parser that read the
+/// document.
+pub(crate) fn out_of_range_cause(v: &Value, ty: &str) -> Option<(String, String)> {
+    if number_fits(v, ty) {
+        return None;
+    }
+    let shown = crate::store::preview_of(v);
+    Some(match ty {
+        "byte" | "short" => (
+            "illegal_argument_exception".to_string(),
+            format!("Value [{shown}] is out of range for a {ty}"),
+        ),
+        "integer" => (
+            "input_coercion_exception".to_string(),
+            format!("Numeric value ({shown}) out of range of int ({} - {})", i32::MIN, i32::MAX),
+        ),
+        _ => (
+            "input_coercion_exception".to_string(),
+            format!("Numeric value ({shown}) out of range of long ({} - {})", i64::MIN, i64::MAX),
+        ),
+    })
+}
+
 /// Only the types with a real parse step are checked; a string field takes
 /// whatever it is given.
 pub(crate) fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool {
@@ -103,8 +146,16 @@ pub(crate) fn value_is_valid(v: &Value, ty: &str, format: Option<&str>) -> bool 
         "ip" => v.as_str().map(|s| canonical_ip(s).is_some()).unwrap_or(false),
         "byte" | "short" | "integer" | "long" | "unsigned_long" | "float" | "half_float"
         | "double" | "scaled_float" => match v {
-            Value::Number(_) => true,
-            Value::String(s) => s.parse::<f64>().is_ok(),
+            // a whole-number field saturated at its own edge rather than
+            // refusing the value: 1000 was written into a byte as 127, and
+            // the document then said something it had not been sent
+            Value::Number(_) => number_fits(v, ty),
+            Value::String(s) => match s.parse::<f64>() {
+                Ok(f) => serde_json::Number::from_f64(f)
+                    .map(|n| number_fits(&Value::Number(n), ty))
+                    .unwrap_or(false),
+                Err(_) => false,
+            },
             _ => false,
         },
         "boolean" => {
@@ -123,7 +174,7 @@ pub fn scan_malformed(
     source: &Value,
     mapping: &Mapping,
     index_default: bool,
-) -> std::result::Result<Vec<String>, (String, String)> {
+) -> std::result::Result<Vec<String>, crate::store::Malformed> {
     let mut ignored = Vec::new();
     walk_malformed(source, &mut String::new(), mapping, index_default, &mut ignored)?;
     ignored.sort();

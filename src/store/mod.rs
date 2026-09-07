@@ -796,13 +796,32 @@ pub struct ScrollState {
     pub implicit_sort: bool,
 }
 
+/// A value the mapping will not take, and what to say about it.
+pub struct Malformed {
+    pub field: String,
+    pub ty: String,
+    /// the value as the reference previews it in the message
+    pub preview: String,
+    /// the exception underneath, where there is one to name
+    pub cause: Option<(String, String)>,
+}
+
+/// A value as the reference shows it in a parse complaint: a string without
+/// its quotes, anything else as it was written.
+pub fn preview_of(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn walk_malformed(
     node: &Value,
     path: &mut String,
     mapping: &Mapping,
     index_default: bool,
     ignored: &mut Vec<String>,
-) -> std::result::Result<(), (String, String)> {
+) -> std::result::Result<(), Malformed> {
     match node {
         Value::Object(obj) => {
             // a field the mapping declares as a plain value cannot hold an
@@ -816,7 +835,12 @@ fn walk_malformed(
                     ignored.push(path.clone());
                     return Ok(());
                 }
-                return Err((path.clone(), ty.to_string()));
+                return Err(Malformed {
+                    field: path.clone(),
+                    ty: ty.to_string(),
+                    preview: preview_of(node),
+                    cause: None,
+                });
             }
             let base = path.len();
             for (k, v) in obj {
@@ -849,7 +873,19 @@ fn walk_malformed(
             if lenient {
                 ignored.push(path.clone());
             } else {
-                return Err((path.clone(), ty.to_string()));
+                return Err(Malformed {
+                    field: path.clone(),
+                    ty: ty.to_string(),
+                    preview: preview_of(leaf),
+                    cause: coerce::out_of_range_cause(leaf, ty).or_else(|| {
+                        leaf.as_str().map(|s| {
+                            (
+                                "number_format_exception".to_string(),
+                                format!("For input string: \"{s}\""),
+                            )
+                        })
+                    }),
+                });
             }
         }
     }

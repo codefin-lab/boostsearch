@@ -110,6 +110,30 @@ pub(crate) fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response>
 /// A write and one item of a bulk request both need to say the same thing, so
 /// neither of them decides it.
 pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, String, String)> {
+    // a vector of the wrong width is not a vector of that field: it was
+    // written as nothing and it took the old one with it, so the document
+    // silently lost what it was searched by
+    for (path, field) in st.mapping.vector_fields.iter() {
+        let Some(value) = source.pointer(&format!("/{}", path.replace('.', "/"))) else { continue };
+        if value.is_null() {
+            continue;
+        }
+        let Some(vector) = crate::knn::as_vector(value) else { continue };
+        if vector.len() != field.dimension {
+            return Some((
+                "mapper_parsing_exception".to_string(),
+                format!(
+                    "failed to parse field [{path}] of type [knn_vector] in document with id \
+                     '{{id}}'. Preview of field's value: 'null'"
+                ),
+                format!(
+                    "Vector dimension mismatch. Expected: {}, Given: {}",
+                    field.dimension,
+                    vector.len()
+                ),
+            ));
+        }
+    }
     // a date_nanos counts nanoseconds in an i64, which begins in 1970 and runs
     // out in 2262
     for name in st.mapping.nanos_fields().iter() {

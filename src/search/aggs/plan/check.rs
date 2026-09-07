@@ -249,9 +249,12 @@ pub(crate) fn check_max_buckets(
     store: &Store,
     aggs: &Option<Value>,
 ) -> std::result::Result<(), Response> {
-    if let Some(limit) = store
+    // the ceiling is the reference's default where nothing set one: without
+    // it, a request asking for a bucket per document is answered
+    let limit = store
         .cluster_setting("search.max_buckets")
         .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(65_535);
     {
         fn count_buckets(node: &Value) -> u64 {
             match node {
