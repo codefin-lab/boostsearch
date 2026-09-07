@@ -602,7 +602,9 @@ fn jwt_validation(
     v.leeway = skew;
     v.validate_exp = true;
     v.validate_nbf = true;
-    v.required_spec_claims.clear();
+    // a bearer token with no expiry is a credential that never stops being
+    // one: the claim is required rather than merely checked when present
+    v.required_spec_claims = ["exp".to_string()].into_iter().collect();
     if audience.is_empty() {
         v.validate_aud = false;
     } else {

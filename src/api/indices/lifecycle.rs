@@ -120,36 +120,43 @@ pub async fn force_merge(
     let max_segments: usize =
         p.get("max_num_segments").and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
 
-    for name in targets {
-        let Some(st) = store.get(&name) else { continue };
-        let mut g = st.write();
-        if g.refresh().is_err() {
-            continue;
-        }
-        loop {
-            let ids: Vec<boostcore::index::SegmentId> = g
-                .index
-                .searchable_segment_metas()
-                .unwrap_or_default()
-                .iter()
-                .map(|m| m.id())
-                .collect();
-            if ids.len() <= max_segments {
-                break;
+    // merging is work rather than waiting: on the runtime's own thread it
+    // would hold a worker for as long as the merge takes, and the requests
+    // that worker was serving with it
+    let merging = store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for name in targets {
+            let Some(st) = merging.get(&name) else { continue };
+            let mut g = st.write();
+            if g.refresh().is_err() {
+                continue;
             }
-            // merge the whole set down in one step; BoostCore handles the rest
-            let take = ids.len() - max_segments + 1;
-            let batch: Vec<_> = ids.into_iter().take(take).collect();
-            let merged = match g.writer() {
-                Ok(w) => w.merge(&batch).wait().is_ok(),
-                Err(_) => false,
-            };
-            if !merged {
-                break;
+            loop {
+                let ids: Vec<boostcore::index::SegmentId> = g
+                    .index
+                    .searchable_segment_metas()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|m| m.id())
+                    .collect();
+                if ids.len() <= max_segments {
+                    break;
+                }
+                // merge the whole set down in one step; BoostCore handles the rest
+                let take = ids.len() - max_segments + 1;
+                let batch: Vec<_> = ids.into_iter().take(take).collect();
+                let merged = match g.writer() {
+                    Ok(w) => w.merge(&batch).wait().is_ok(),
+                    Err(_) => false,
+                };
+                if !merged {
+                    break;
+                }
+                let _ = g.refresh();
             }
-            let _ = g.refresh();
         }
-    }
+    })
+    .await;
     respond(
         &p,
         json!({

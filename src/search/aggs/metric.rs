@@ -51,7 +51,10 @@ pub(crate) fn collect_field_values(
             stats: &g.stats,
             vectors: &g.vectors,
         };
-        let q = crate::query::build(&ctx, query_json)
+        // an aggregation peeled into a search of its own is narrowed here,
+        // the way `search_one_shard` narrows the search it stands in for
+        let (narrowed, _) = crate::security::view::narrowed_for(store, name, &g, query_json, &None);
+        let q = crate::query::build(&ctx, &narrowed)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let column = ctx.column_name(field, false);
         let searcher = g.reader.searcher();
@@ -203,7 +206,10 @@ pub(crate) fn collect_field_pairs(
             stats: &g.stats,
             vectors: &g.vectors,
         };
-        let q = crate::query::build(&ctx, query_json)
+        // an aggregation peeled into a search of its own is narrowed here,
+        // the way `search_one_shard` narrows the search it stands in for
+        let (narrowed, _) = crate::security::view::narrowed_for(store, name, &g, query_json, &None);
+        let q = crate::query::build(&ctx, &narrowed)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
         let searcher = g.reader.searcher();

@@ -111,6 +111,24 @@ pub(crate) fn check_scroll(
             ));
         }
     }
+    // every scroll holds a point in time, and a point in time holds segments
+    // open: there is a ceiling on how many may be open at once
+    let open_limit = store
+        .cluster_setting("search.max_open_scroll_context")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(crate::store::MAX_OPEN_SCROLLS as u64) as usize;
+    store.sweep_contexts();
+    if store.open_scrolls() >= open_limit {
+        return Some(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "search_phase_execution_exception",
+            format!(
+                "Trying to create too many scroll contexts. Must be less than or equal to: \
+                 [{open_limit}]. This limit can be set by changing the \
+                 [search.max_open_scroll_context] setting."
+            ),
+        ));
+    }
     let limit = store
         .cluster_setting("search.max_keep_alive")
         .and_then(|v| v.as_str().and_then(parse_keep_alive));
@@ -220,7 +238,12 @@ pub async fn scroll(
             // the caller chose, not the one the scroll was opened in
             let after =
                 state.after.is_some().then(|| crate::api::search_api::last_sort_of(&env)).flatten();
-            store.advance_scroll(&id, n, after);
+            let renew = asked
+                .as_deref()
+                .and_then(parse_keep_alive)
+                .map(|s| s * 1000)
+                .unwrap_or(crate::store::DEFAULT_KEEP_ALIVE_MS);
+            store.advance_scroll(&id, n, after, renew);
             if state.implicit_sort {
                 crate::api::search_api::strip_sort(&mut env);
             }

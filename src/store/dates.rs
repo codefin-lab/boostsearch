@@ -184,6 +184,13 @@ pub fn format_with_pattern(d: boostcore::time::OffsetDateTime, pattern: &str) ->
     out
 }
 
+/// The first character of a string, and the rest: a unit is one character,
+/// and a character may be several bytes.
+fn split_one(s: &str) -> (&str, &str) {
+    let n = s.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+    s.split_at(n)
+}
+
 pub(crate) fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTime, Option<char>)> {
     use boostcore::time::{Duration, OffsetDateTime};
     let (anchor, ops) = match s.split_once("||") {
@@ -194,10 +201,13 @@ pub(crate) fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTim
     let mut rounded = None;
     let mut rest = ops;
     while !rest.is_empty() {
-        let (op, tail) = rest.split_at(1);
+        // the operator is a character, and a character is not always a byte:
+        // `now/\u{e9}` would split inside one
+        let op_len = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let (op, tail) = rest.split_at(op_len);
         match op {
             "/" => {
-                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                let (unit, tail) = split_one(tail);
                 dt = round_down(dt, unit)?;
                 rounded = unit.chars().next();
                 rest = tail;
@@ -205,7 +215,7 @@ pub(crate) fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTim
             "+" | "-" => {
                 let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
                 let tail = &tail[digits.len()..];
-                let (unit, tail) = tail.split_at(1.min(tail.len()));
+                let (unit, tail) = split_one(tail);
                 let n: i64 = if digits.is_empty() { 1 } else { digits.parse().ok()? };
                 let n = if op == "-" { -n } else { n };
                 dt = match unit {

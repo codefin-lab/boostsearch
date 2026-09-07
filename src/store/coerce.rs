@@ -633,13 +633,25 @@ fn copy_fields(document: &mut Value, mapping: &Mapping) {
                     // the target may sit inside an object that is not there
                     let mut node = &mut *document;
                     let parts: Vec<&str> = target.split('.').collect();
+                    // a step of the path that is a value rather than an
+                    // object has nothing to copy into: the copy is dropped,
+                    // as it is in a document that says `a: 1` and copies
+                    // into `a.b`
+                    let mut reached = true;
                     for part in &parts[..parts.len() - 1] {
+                        if !node.is_object() {
+                            reached = false;
+                            break;
+                        }
                         node = node
                             .as_object_mut()
                             .map(|o| {
                                 o.entry(part.to_string()).or_insert_with(|| serde_json::json!({}))
                             })
-                            .unwrap();
+                            .expect("checked above");
+                    }
+                    if !reached {
+                        continue;
                     }
                     if let Some(o) = node.as_object_mut() {
                         o.insert(parts[parts.len() - 1].to_string(), value.clone());

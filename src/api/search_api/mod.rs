@@ -113,12 +113,18 @@ pub async fn search(
                 if implicit_sort {
                     strip_sort(&mut env);
                 }
+                let keep = p
+                    .get("scroll")
+                    .and_then(|v| crate::api::shared::parse_keep_alive(v))
+                    .map(|s| s * 1000)
+                    .unwrap_or(crate::store::DEFAULT_KEEP_ALIVE_MS);
                 let id = store.open_scroll(
                     &expr,
                     &body,
                     n.max(size).min(size.max(n)),
                     cursor,
                     implicit_sort,
+                    keep,
                 );
                 env["_scroll_id"] = json!(id);
             }

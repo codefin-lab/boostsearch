@@ -95,7 +95,11 @@ impl View {
             Value::Null => Value::Null,
             Value::Array(a) => Value::Array(a.iter().map(|x| self.mask(x)).collect()),
             Value::String(s) => Value::String(self.mask_text(s)),
-            Value::Object(_) => v.clone(),
+            // an object is masked value by value: a field the caller may
+            // not read is not readable for being written as an object
+            Value::Object(o) => {
+                Value::Object(o.iter().map(|(k, x)| (k.clone(), self.mask(x))).collect())
+            }
             other => Value::String(self.mask_text(&other.to_string())),
         }
     }
@@ -619,6 +623,32 @@ pub fn blake2b256_salted(data: &[u8], salt: &[u8]) -> [u8; 32] {
         out[i * 8..i * 8 + 8].copy_from_slice(&h[i].to_le_bytes());
     }
     out
+}
+
+/// What a peeled aggregation may ask of one index.
+///
+/// An aggregation that runs as a search of its own does not go through
+/// `search_one_shard`, so nothing had narrowed it: the caller's document
+/// filter was not applied and neither were the fields they may not read.
+/// This is the same narrowing that path does, for one index, and it is
+/// applied where the peeled search builds its query.
+pub fn narrowed_for(
+    store: &crate::store::Store,
+    index: &str,
+    state: &crate::store::IdxState,
+    query_json: &Value,
+    aggs: &Option<Value>,
+) -> (Value, Option<Value>) {
+    let views = views_for(store, std::slice::from_ref(&index.to_string()));
+    let Some(view) = views.get(index) else { return (query_json.clone(), aggs.clone()) };
+    let kinds: std::collections::HashMap<String, String> =
+        state.all_field_types().into_iter().collect();
+    let mut query = view.rewrite_query(query_json, &kinds);
+    if let Some(dls) = view.dls.clone() {
+        query = serde_json::json!({"bool": {"must": [query], "filter": [dls]}});
+    }
+    let aggs = aggs.as_ref().map(|a| view.rewrite_aggs(a, &kinds));
+    (query, aggs)
 }
 
 #[cfg(test)]

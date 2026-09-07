@@ -72,6 +72,45 @@ pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// Where an index keeps the writes that are acknowledged but not yet committed.
 pub const TRANSLOG: &str = "translog.ndjson";
 
+/// How long a search context nobody named a keep-alive for is kept, as
+/// OpenSearch's `search.default_keep_alive` says: five minutes.
+pub const DEFAULT_KEEP_ALIVE_MS: u64 = 5 * 60 * 1000;
+
+/// How many scrolls may be open at once, as `search.max_open_scroll_context`
+/// says: each holds a point in time, and a point in time holds segments open.
+pub const MAX_OPEN_SCROLLS: usize = 500;
+
+/// How long a context lives when it was asked for: what was asked, or the
+/// default where nothing was.
+pub(crate) fn keep_for(keep_alive_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(match keep_alive_ms {
+        0 => DEFAULT_KEEP_ALIVE_MS,
+        asked => asked,
+    })
+}
+
+/// A name nobody can guess: whoever holds a search context's id can read it,
+/// so the id is drawn at random rather than counted up from zero.
+pub(crate) fn random_token() -> String {
+    crate::cluster::NodeId::random().as_str().to_string()
+}
+
+/// The caller a search context belongs to, where callers are told apart.
+pub(crate) fn current_owner() -> Option<String> {
+    crate::security::layer::current_caller().map(|c| c.name.clone())
+}
+
+/// Whether the caller now is the one a context was opened by. A context
+/// opened when nobody was named is open to anyone, which is what a server
+/// with security off means.
+pub(crate) fn owner_matches(owner: &Option<String>) -> bool {
+    match (owner, current_owner()) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(a), Some(b)) => *a == b,
+    }
+}
+
 /// Write a file so that a crash finds either what was there before or what
 /// is written here, and never half of either.
 ///
@@ -532,7 +571,6 @@ pub struct Store {
     task_seq: Arc<std::sync::atomic::AtomicU64>,
     /// the scripts and templates stored under a name
     scripts: Arc<RwLock<HashMap<String, Value>>>,
-    scroll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
@@ -573,7 +611,6 @@ pub struct Store {
     repositories: Arc<RwLock<HashMap<String, Value>>>,
     /// Snapshots by repository and then by name.
     snapshots: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
-    pit_seq: Arc<std::sync::atomic::AtomicU64>,
     /// who may do what, and whether that is being asked at all
     pub security: Arc<crate::security::Security>,
 }
@@ -598,22 +635,46 @@ impl Store {
     /// Open a point in time over an expression: what each index it reaches
     /// had written by now, so a later search can be held to that.
     pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
-        let n = self.pit_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("boostsearch-pit-{n:016x}");
+        self.sweep_contexts();
+        let id = format!("boostsearch-pit-{}", random_token());
         let mut ceiling = HashMap::new();
         for name in self.resolve(expr) {
             if let Some(st) = self.get(&name) {
                 ceiling.insert(name, st.read().seq_no);
             }
         }
-        self.pits
-            .write()
-            .insert(id.clone(), PitState { expr: expr.to_string(), ceiling, keep_alive_ms });
+        self.pits.write().insert(
+            id.clone(),
+            PitState {
+                expr: expr.to_string(),
+                owner: current_owner(),
+                expires_at: std::time::Instant::now() + keep_for(keep_alive_ms),
+                ceiling,
+                keep_alive_ms,
+            },
+        );
         id
     }
 
     pub fn read_pit(&self, id: &str) -> Option<PitState> {
-        self.pits.read().get(id).cloned()
+        let held = self.pits.read().get(id).cloned()?;
+        if held.expires_at <= std::time::Instant::now() || !owner_matches(&held.owner) {
+            return None;
+        }
+        Some(held)
+    }
+
+    /// Search contexts nobody came back for: dropped when the next one is
+    /// opened, which is when their memory is wanted.
+    pub fn sweep_contexts(&self) {
+        let now = std::time::Instant::now();
+        self.scrolls.write().retain(|_, s| s.expires_at > now);
+        self.pits.write().retain(|_, p| p.expires_at > now);
+    }
+
+    /// How many scrolls are open, which is what the ceiling counts.
+    pub fn open_scrolls(&self) -> usize {
+        self.scrolls.read().len()
     }
 
     pub fn all_pits(&self) -> Vec<(String, PitState)> {
@@ -702,6 +763,10 @@ impl Store {}
 #[derive(Clone)]
 pub struct PitState {
     pub expr: String,
+    /// the caller who opened it, if this node knows callers apart
+    pub owner: Option<String>,
+    /// when it may be swept away
+    pub expires_at: std::time::Instant,
     /// per index, the sequence number the next write will take -- everything
     /// below it was already there when the point in time was opened
     pub ceiling: HashMap<String, u64>,
@@ -711,6 +776,11 @@ pub struct PitState {
 #[derive(Clone)]
 pub struct ScrollState {
     pub expr: String,
+    /// the caller who opened it: a search context is theirs to read, and a
+    /// scroll id is not a capability anyone who guesses it may spend
+    pub owner: Option<String>,
+    /// when it may be swept away, moved along by every batch
+    pub expires_at: std::time::Instant,
     pub body: Value,
     pub offset: usize,
     pub size: usize,

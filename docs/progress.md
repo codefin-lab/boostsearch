@@ -3874,3 +3874,58 @@ node told to bind the transport to `0.0.0.0` without TLS exits 2 with the
 two ways forward. Phase 1 398/398, the core corpus 1100/1100, the module
 suite 880/890, the chaos run with 26,066 acknowledged writes and none
 lost.
+
+## The sixth step: the P1 list, and what a request could still do
+
+The review's second list is the one that does not end the process: answers
+that are wrong, ceilings that are not there, and a few paths that panic.
+This is the first half of it.
+
+**Four panics and a spin.** `copy_to` into a field whose parent is a value
+rather than an object unwrapped a `None`; the copy is dropped now, as it
+is in a document that says `a: 1` and copies into `a.b`. Date math split
+its operator off by bytes, so `now/é` panicked. `List.add(9, x)` on a list
+of one panicked where Java throws, and the Painless lexer walked into the
+middle of a character after `\` before a multi-byte one. An
+`index_state_management.job_interval` of zero was a loop that looked at
+every index as fast as the machine could.
+
+**Work on the wrong thread.** `_forcemerge` merged on the runtime's own
+worker, holding it -- and every request it was serving -- for as long as
+the merge took. It runs where blocking work belongs.
+
+**A connection that says nothing.** There were no timeouts at all: a
+client could open a connection, send half a request line, and hold it for
+as long as it liked; enough of them are the whole server. A head that has
+begun and not arrived within thirty seconds ends the connection. The clock
+runs only while a head is half-read, so a keep-alive connection waiting
+for its next request is left alone.
+
+**Aggregations that ran as their own searches saw everything.** An
+aggregation peeled off into a search of its own did not go through the
+shard path, and that is where the caller's document filter and the fields
+they may not read are applied: a caller restricted to one part of an index
+could aggregate over all of it. The peeled searches narrow the same way
+now.
+
+**Three more of the same kind.** A masked field that was an object was
+handed back in the clear, because masking recursed into arrays and not
+into objects. A JWT with no `exp` was accepted, which is a bearer token
+that never stops being one; the claim is required. And
+`clientauth_mode: REQUIRE` with no trust store configured quietly asked
+for no certificate at all -- it is refused at startup, since asking for
+one that nothing can verify is not asking.
+
+**Search contexts.** A scroll id was a counter in hex, so the next one was
+the last one plus one, and any caller could spend another's. They are
+random now, they belong to the caller who opened them, they expire on the
+keep-alive that was asked for (five minutes by default, renewed by every
+batch), and `search.max_open_scroll_context` (500) is a ceiling on how
+many may be open. Points in time are the same.
+
+Measured: `copy_to` into a scalar, `now/é`, `l.add(9,2)` and `"a\é"` all
+answer rather than end the process; a half-written request line is dropped
+after thirty seconds and the node answers on; a scroll opened for a second
+is gone three seconds later while one opened for five minutes is not; an
+id in the old shape is not found. Phase 1 398/398, the core corpus
+1100/1100, the module suite 880/890, clippy and the unit tests clean.

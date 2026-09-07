@@ -181,6 +181,15 @@ pub async fn serve_tls(
             };
             builder.with_client_cert_verifier(verifier).with_single_cert(certs, key)?
         }
+        (None, "REQUIRE") => {
+            // asking for a certificate that nothing can verify is not asking
+            // for one: it would let every client in and say it had not
+            anyhow::bail!(
+                "plugins.security.ssl.http.clientauth_mode is REQUIRE but \
+                 plugins.security.ssl.http.pemtrustedcas_filepath names nothing: there is \
+                 nothing to verify a client certificate against"
+            );
+        }
         _ => builder.with_no_client_auth().with_single_cert(certs, key)?,
     };
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

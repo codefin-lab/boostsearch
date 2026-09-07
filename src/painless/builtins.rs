@@ -888,8 +888,12 @@ fn list_method(
         }
         "add" => {
             if args.len() == 2 {
-                let i = arg(args, 0).as_i64().unwrap_or(0) as usize;
-                l.borrow_mut().insert(i, arg(args, 1).clone());
+                let i = arg(args, 0).as_i64().unwrap_or(0);
+                let len = l.borrow().len();
+                if i < 0 || i as usize > len {
+                    return no(format!("Index: {i}, Size: {len}"));
+                }
+                l.borrow_mut().insert(i as usize, arg(args, 1).clone());
             } else {
                 l.borrow_mut().push(arg(args, 0).clone());
             }

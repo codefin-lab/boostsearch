@@ -194,15 +194,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             while j < bytes.len() && bytes[j] != quote {
                 if bytes[j] == b'\\' && j + 1 < bytes.len() {
                     j += 1;
-                    s.push(match bytes[j] {
-                        b'n' => '\n',
-                        b't' => '\t',
-                        b'r' => '\r',
-                        b'\\' => '\\',
-                        b'\'' => '\'',
-                        b'"' => '"',
-                        other => other as char,
-                    });
+                    match bytes[j] {
+                        b'n' => s.push('\n'),
+                        b't' => s.push('\t'),
+                        b'r' => s.push('\r'),
+                        b'\\' => s.push('\\'),
+                        b'\'' => s.push('\''),
+                        b'"' => s.push('"'),
+                        // anything else stands for itself -- and it may be a
+                        // character of several bytes, which is taken whole
+                        // rather than left half-read
+                        _ => {
+                            let ch = src[j..].chars().next().unwrap_or('\u{fffd}');
+                            s.push(ch);
+                            j += ch.len_utf8() - 1;
+                        }
+                    }
                     j += 1;
                     continue;
                 }

@@ -13,17 +13,24 @@ impl Store {
         size: usize,
         after: Option<Vec<Value>>,
         implicit_sort: bool,
+        keep_alive_ms: u64,
     ) -> String {
-        let n = self.scroll_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("boostsearch-scroll-{n:016x}");
+        self.sweep_contexts();
+        let keep = keep_alive_ms;
+        let id = format!("boostsearch-scroll-{}", random_token());
+        // the point in time is opened before the scrolls are locked: opening
+        // one sweeps the contexts that have run out, and that reads them
+        let pit = self.open_pit(expr, keep);
         self.scrolls.write().insert(
             id.clone(),
             ScrollState {
                 expr: expr.to_string(),
+                owner: current_owner(),
+                expires_at: std::time::Instant::now() + keep_for(keep),
                 body: body.clone(),
                 offset: size,
                 size,
-                pit: self.open_pit(expr, 0),
+                pit,
                 after,
                 implicit_sort,
             },
@@ -32,15 +39,29 @@ impl Store {
     }
 
     pub fn read_scroll(&self, id: &str) -> Option<ScrollState> {
-        self.scrolls.read().get(id).cloned()
+        let held = self.scrolls.read().get(id).cloned()?;
+        // a context that has run out is gone, and one somebody else opened
+        // was never this caller's to read
+        if held.expires_at <= std::time::Instant::now() || !owner_matches(&held.owner) {
+            return None;
+        }
+        Some(held)
     }
 
-    pub fn advance_scroll(&self, id: &str, by: usize, after: Option<Vec<Value>>) {
+    pub fn advance_scroll(
+        &self,
+        id: &str,
+        by: usize,
+        after: Option<Vec<Value>>,
+        keep_alive_ms: u64,
+    ) {
         if let Some(s) = self.scrolls.write().get_mut(id) {
             s.offset += by;
             if after.is_some() {
                 s.after = after;
             }
+            // every batch renews the keep-alive, the way asking again does
+            s.expires_at = std::time::Instant::now() + keep_for(keep_alive_ms);
         }
     }
 

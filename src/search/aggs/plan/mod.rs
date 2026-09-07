@@ -566,7 +566,12 @@ pub(crate) fn filtered_count(
             stats: &g.stats,
             vectors: &g.vectors,
         };
-        let q = crate::query::build(&ctx, query_json)
+        // the caller's own view of this index: the document filter their
+        // role carries, and the fields they may not aggregate over
+        let (narrowed, narrowed_aggs) =
+            crate::security::view::narrowed_for(store, name, &g, query_json, sub_aggs);
+        let sub_aggs = &narrowed_aggs;
+        let q = crate::query::build(&ctx, &narrowed)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let searcher = g.reader.searcher();
         total += searcher

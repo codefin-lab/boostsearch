@@ -12,6 +12,7 @@
 //! at. Anything it does not understand -- a chunked body, a header block
 //! longer than it will hold -- turns it off for the rest of the connection.
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -35,6 +36,14 @@ enum Phase {
 const LINE_LIMIT: usize = 16 * 1024;
 const HEADERS_LIMIT: usize = 256 * 1024;
 
+/// How long the head of one request may take to arrive once it has begun.
+///
+/// A client that opens a connection and says nothing is a client, and it is
+/// left alone; a client that sends half a request line and then trickles is
+/// holding a connection open for the cost of a byte a minute, and enough of
+/// them are the whole server. The clock runs only while a head is half-read.
+const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A connection whose request lines are read the way OpenSearch reads them.
 pub struct Lenient<S> {
     inner: S,
@@ -44,11 +53,26 @@ pub struct Lenient<S> {
     /// understood, not yet handed to the caller
     out: Vec<u8>,
     out_at: usize,
+    /// when the head being read now stops being worth waiting for
+    head_by: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S> Lenient<S> {
     pub fn new(inner: S) -> Self {
-        Lenient { inner, phase: Phase::Line, hold: Vec::new(), out: Vec::new(), out_at: 0 }
+        Lenient {
+            inner,
+            phase: Phase::Line,
+            hold: Vec::new(),
+            out: Vec::new(),
+            out_at: 0,
+            head_by: None,
+        }
+    }
+
+    /// Whether the reader is part way through a head: something has arrived
+    /// and the request it belongs to is not readable yet.
+    fn mid_head(&self) -> bool {
+        matches!(self.phase, Phase::Line | Phase::Headers) && !self.hold.is_empty()
     }
 }
 
@@ -219,6 +243,19 @@ impl<S: AsyncRead + Unpin> AsyncRead for Lenient<S> {
                     }
                     _ => {}
                 }
+            }
+            // a head that has begun and not finished is on the clock
+            if me.mid_head() {
+                let timer =
+                    me.head_by.get_or_insert_with(|| Box::pin(tokio::time::sleep(HEAD_TIMEOUT)));
+                if timer.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "the head of the request did not arrive",
+                    )));
+                }
+            } else {
+                me.head_by = None;
             }
             // otherwise read some more and see how far it gets
             let mut scratch = [0u8; 8192];
