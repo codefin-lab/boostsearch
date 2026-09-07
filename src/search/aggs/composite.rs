@@ -205,9 +205,24 @@ pub(crate) fn run_composite_agg(
             })
             .unwrap_or_default();
         let mut cursor = first;
-        let mut guard = 0;
-        while cursor <= hi && guard < 100_000 {
+        // each step of the window is a search, so the number of steps is the
+        // cost of the request: it is held to the bucket ceiling and refused
+        // rather than truncated
+        let ceiling = crate::search::max_buckets(store) as usize;
+        let mut guard = 0usize;
+        while cursor <= hi {
             guard += 1;
+            if guard > ceiling {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "too_many_buckets_exception",
+                    format!(
+                        "Trying to create too many buckets. Must be less than or equal to: \
+                         [{ceiling}] but this composite source spans more. This limit can be set \
+                         by changing the [search.max_buckets] cluster level setting."
+                    ),
+                ));
+            }
             let next = cursor + step;
             let window = json!({"range": {field: {
                 "gte": crate::store::format_millis(cursor as i64, "iso8601"),

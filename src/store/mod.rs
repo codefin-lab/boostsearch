@@ -72,6 +72,11 @@ pub const PENDING_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// Where an index keeps the writes that are acknowledged but not yet committed.
 pub const TRANSLOG: &str = "translog.ndjson";
 
+/// How long the answer of a finished task is kept for the caller who asked
+/// for it, and how many are held at once.
+pub const TASK_ANSWER_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub const MAX_TASK_ANSWERS: usize = 10_000;
+
 /// How long a search context nobody named a keep-alive for is kept, as
 /// OpenSearch's `search.default_keep_alive` says: five minutes.
 pub const DEFAULT_KEEP_ALIVE_MS: u64 = 5 * 60 * 1000;
@@ -567,7 +572,7 @@ pub struct Store {
     /// What a walk over a query answered, for the caller that asked not to
     /// wait for it. Nothing here runs long enough to need waiting on, so the
     /// answer is ready before the task's name is handed out.
-    tasks: Arc<RwLock<HashMap<String, Value>>>,
+    tasks: Arc<RwLock<HashMap<String, (std::time::Instant, Value)>>>,
     task_seq: Arc<std::sync::atomic::AtomicU64>,
     /// the scripts and templates stored under a name
     scripts: Arc<RwLock<HashMap<String, Value>>>,

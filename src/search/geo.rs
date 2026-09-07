@@ -266,15 +266,9 @@ pub(crate) fn run_geo_distance_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let probe = json!({
-        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
-        "size": 10_000,
-        "_source": [field.clone()],
-    });
-    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let hits = walk_hits(store, targets, main_query, &field)?;
     let path = format!("/_source/{}", field.replace('.', "/"));
-    let placed: Vec<(String, f64)> = answer
-        .hits
+    let placed: Vec<(String, f64)> = hits
         .iter()
         .filter_map(|h| {
             let id = h.get("_id")?.as_str()?.to_string();
@@ -387,21 +381,67 @@ pub(crate) fn run_geo_centroid_agg(
 }
 
 /// The points a query found, as latitude and longitude.
+/// How many documents one page of the walk reads, and how many documents a
+/// geo aggregation will walk in all.
+///
+/// A geo aggregation is answered from the values themselves rather than from
+/// a column, so every matching document has to be read. It used to read the
+/// first ten thousand and answer as though that were the index -- a wrong
+/// answer with nothing to say it was wrong. It reads all of them now, and
+/// where there are more than it will hold, it says so instead.
+const GEO_PAGE: usize = 10_000;
+const GEO_MAX_DOCS: usize = 1_000_000;
+
+fn too_many_points(found: usize) -> Response {
+    err(
+        StatusCode::BAD_REQUEST,
+        "too_many_buckets_exception",
+        format!(
+            "A geo aggregation reads every matching document, and this one matches more than \
+             [{found}]. Narrow the query, or aggregate over a filtered subset."
+        ),
+    )
+}
+
+/// Every document the query matches, a page at a time, as JSON hits.
+fn walk_hits(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    field: &str,
+) -> std::result::Result<Vec<Value>, Response> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut from = 0usize;
+    loop {
+        let probe = json!({
+            "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+            "from": from,
+            "size": GEO_PAGE,
+            "_source": [field],
+            crate::search::INTERNAL_WALK: true,
+        });
+        let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+        let read = answer.hits.len();
+        out.extend(answer.hits.iter().cloned());
+        if read < GEO_PAGE {
+            return Ok(out);
+        }
+        from += GEO_PAGE;
+        if from >= GEO_MAX_DOCS {
+            return Err(too_many_points(GEO_MAX_DOCS));
+        }
+    }
+}
+
 fn points_found(
     store: &Store,
     targets: &[String],
     main_query: &Option<Value>,
     field: &str,
 ) -> std::result::Result<Vec<(f64, f64)>, Response> {
-    let probe = json!({
-        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
-        "size": 10_000,
-        "_source": [field],
-    });
-    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    let hits = walk_hits(store, targets, main_query, field)?;
     let path = format!("/_source/{}", field.replace('.', "/"));
-    Ok(answer
-        .hits
+    Ok(hits
         .iter()
         .filter_map(|hit| {
             let here = hit.pointer(&path)?;

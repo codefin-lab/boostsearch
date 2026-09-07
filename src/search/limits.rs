@@ -39,6 +39,10 @@ pub fn validate_params(body: &Value, p: &Params) -> std::result::Result<(), Resp
 /// They exist because each one costs memory on the node answering, so the
 /// complaint says which setting to raise rather than only that the request was
 /// refused.
+/// The marker a probe the server runs for itself carries, so the ceilings
+/// meant for a caller's paging do not apply to it.
+pub const INTERNAL_WALK: &str = "__boostsearch_internal_walk";
+
 pub(crate) fn check_limits(
     store: &Store,
     targets: &[String],

@@ -106,11 +106,13 @@ pub(crate) fn term_vectors_of(
         let Some(text) = value.as_str() else { continue };
         // a keyword holds its whole value as one term; anything else is cut
         // by its analyzer
-        let spans = if g.mapping.type_of(name) == Some("keyword") {
+        let mut spans = if g.mapping.type_of(name) == Some("keyword") {
             vec![(text.to_string(), 0usize, 0usize, text.len(), 1usize)]
         } else {
             crate::query::analyze_spans(&g.index, text, None)
         };
+        // the offsets go out as Java counts them, not as bytes
+        crate::analysis::reported_offsets(text, &mut spans);
         // a chain that hangs the token's kind on it as a payload has it read
         // back here, and the kind of a word is `<ALPHANUM>`
         let payload = g

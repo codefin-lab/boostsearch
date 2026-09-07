@@ -554,6 +554,8 @@ pub fn run(
         return crate::cluster::search::run_spanning(store, expr, body, p, plan);
     }
     const BODY_KEYS: &[&str] = &[
+        // the marker a walk this server runs for itself carries
+        crate::search::INTERNAL_WALK,
         "derived",
         "query",
         "from",
@@ -670,7 +672,12 @@ pub fn run(
     let pit_ceiling: std::collections::HashMap<String, u64> =
         pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
     let targets = store.resolve_open(expr);
-    check_limits(store, &targets, body, p, from, size)?;
+    // the result window is a ceiling on what a caller may page through; a
+    // walk this server runs for itself -- a geo aggregation reading every
+    // matching document -- is not paging for anyone
+    if !body.get(crate::search::INTERNAL_WALK).and_then(|v| v.as_bool()).unwrap_or(false) {
+        check_limits(store, &targets, body, p, from, size)?;
+    }
     // `ignore_unavailable` says to pass over what cannot be searched rather
     // than to complain about it
     let lenient = p.get("ignore_unavailable").map(|v| v != "false").unwrap_or(false);

@@ -381,6 +381,10 @@ pub async fn analyze(
             }
         };
         let parts_len = parts.iter().map(|(_, at, _, _, _)| *at + 1).max().unwrap_or(0);
+        // the offsets go out as Java counts them, which is what a caller
+        // reading them back against their own text expects
+        let mut parts = parts;
+        crate::analysis::reported_offsets(t, &mut parts);
         for (tok, at, from, to, length) in parts {
             tokens.push(json!({
                 "token": tok, "start_offset": from, "end_offset": to,
@@ -492,7 +496,12 @@ pub async fn analyze(
             let mut filters = Vec::new();
             // the tokens as the stage before left them: a filter that reads a
             // frequency off the end of a word reports the frequency it read
-            let mut before: Vec<Token> = text.iter().flat_map(|t| base.cut(t)).collect();
+            let cut_one = |t: &String| -> Vec<Token> {
+                let mut out = base.cut(t);
+                crate::analysis::reported_offsets(t, &mut out);
+                out
+            };
+            let mut before: Vec<Token> = text.iter().flat_map(&cut_one).collect();
             for one in &asked {
                 steps.extend(registry.filter_steps(one));
                 let name = match one {
@@ -503,7 +512,14 @@ pub async fn analyze(
                     ),
                 };
                 let chain = crate::analysis::Chain::of(base.clone(), steps.clone());
-                let cut: Vec<Token> = text.iter().flat_map(|t| chain.tokens(t)).collect();
+                let cut: Vec<Token> = text
+                    .iter()
+                    .flat_map(|t| {
+                        let mut out = chain.tokens(t);
+                        crate::analysis::reported_offsets(t, &mut out);
+                        out
+                    })
+                    .collect();
                 let mut listed = as_json(cut.clone());
                 if steps.iter().any(|s| matches!(s, crate::analysis::Step::DelimitedTermFreq(_))) {
                     for (at, token) in listed.iter_mut().enumerate() {

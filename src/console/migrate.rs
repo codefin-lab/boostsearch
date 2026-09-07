@@ -99,7 +99,10 @@ fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     let on = behind_alias(engine)?;
     let Some(current) = on.last().cloned() else {
         let first = next_free(engine)?;
-        make(engine, &first, mapping)?;
+        if make(engine, &first, mapping)? == Made::Already {
+            wait_for_alias(engine, &first)?;
+            return Ok(Found::Ready(first));
+        }
         point_alias(engine, &[], &first)?;
         return Ok(Found::Made(first));
     };
@@ -109,21 +112,74 @@ fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     // one index behind the alias whose shape has moved on, or more than one
     // behind it at all -- either way the answer is the same: a new index with
     // the shape it should have, everything in it, and the alias on it alone
-    let next = next_free(engine)?;
-    make_after(engine, &next, mapping, Some(&current))?;
-    let documents = match copy(engine, &current, &next) {
+    // the name of the next index follows the one behind the alias rather than
+    // the highest that exists: two consoles starting at once then aim at the
+    // same name, exactly one of them creates it, and the other waits. Picking
+    // the next *free* name gave them one index each, two copies of every
+    // object, and a race over which alias flip landed last.
+    let next = after(&current);
+    // the console that made the index copies into it; another that finds it
+    // already there waits for the alias rather than copying the same
+    // documents into the same place beside it
+    if make_after(engine, &next, mapping, Some(&current))? == Made::Already {
+        wait_for_alias(engine, &next)?;
+        return Ok(Found::Ready(next));
+    }
+    // nothing may be written to the index being copied while it is copied:
+    // a write that lands after its document was read would be left behind in
+    // an index nothing points at any more
+    block_writes(engine, &current, true);
+    let copied = copy(engine, &current, &next);
+    let documents = match copied {
         Ok(documents) => documents,
         // a half-made index left behind would be taken for the next free one
         // by whoever looks after this, so it goes
         Err(e) => {
             let _ = engine.call("DELETE", &format!("/{next}"), None);
+            block_writes(engine, &current, false);
             return Err(e);
         }
     };
     // the alias moves in one step: a reader is looking at the old index or
     // the new one, never at neither and never at both
     point_alias(engine, &on, &next)?;
+    block_writes(engine, &current, false);
     Ok(Found::Migrated { from: current, to: next, documents })
+}
+
+/// Let the index be written to, or stop it being written to.
+///
+/// A failure here is reported and not fatal: the block is a guard over a copy
+/// that takes a moment, not a promise to the caller.
+fn block_writes(engine: &Engine, index: &str, blocked: bool) {
+    let body = json!({"index": {"blocks": {"write": blocked}}});
+    if let Err(e) = engine.call("PUT", &format!("/{index}/_settings"), Some(&body)) {
+        eprintln!("  {index}: could not set the write block to {blocked}: {}", e.message);
+    }
+}
+
+/// Wait for the console that is doing the migration to finish it.
+///
+/// The alias moving to the new index is that console saying it is done. Two
+/// minutes is longer than a copy of a console's own index takes and shorter
+/// than a caller will wait for a page that never loads.
+fn wait_for_alias(engine: &Engine, index: &str) -> Result<(), Failed> {
+    for _ in 0..240 {
+        if behind_alias(engine)?.iter().any(|n| n == index) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(Failed {
+        objects: None,
+        error: None,
+        attributes: None,
+        status: 503,
+        message: format!(
+            "another console is migrating into [{index}] and has not finished; \
+             the console will try again"
+        ),
+    })
 }
 
 /// Whether something has made an index under the alias's own name.
@@ -138,6 +194,19 @@ fn concrete_index(engine: &Engine) -> Result<bool, Failed> {
 }
 
 /// The first `.kibana_N` nothing has taken.
+/// The index that follows this one: `.kibana_7` after `.kibana_6`.
+///
+/// A name without a number at the end -- an index adopted under a name of
+/// somebody else's choosing -- starts the numbering again.
+fn after(current: &str) -> String {
+    let n = current
+        .rsplit_once('_')
+        .and_then(|(_, tail)| tail.parse::<u64>().ok())
+        .map(|n| n + 1)
+        .unwrap_or(1);
+    format!("{ALIAS}_{n}")
+}
+
 fn next_free(engine: &Engine) -> Result<String, Failed> {
     let found = engine.call("GET", &format!("/{ALIAS}_*"), None)?;
     let taken = found.as_object().map(|o| o.len()).unwrap_or(0);
@@ -186,8 +255,16 @@ fn same_shape(engine: &Engine, index: &str, mapping: &Value) -> Result<bool, Fai
     Ok(ours.keys().all(|k| theirs.get(k).is_some()))
 }
 
-fn make(engine: &Engine, index: &str, mapping: &Value) -> Result<(), Failed> {
+fn make(engine: &Engine, index: &str, mapping: &Value) -> Result<Made, Failed> {
     make_after(engine, index, mapping, None)
+}
+
+/// Who made the index: the console that creates it is the one that copies
+/// into it, and the other waits.
+#[derive(PartialEq, Eq)]
+enum Made {
+    Here,
+    Already,
 }
 
 /// Make an index, carrying over any type the index it follows knew about and
@@ -204,7 +281,7 @@ fn make_after(
     index: &str,
     mapping: &Value,
     after: Option<&str>,
-) -> Result<(), Failed> {
+) -> Result<Made, Failed> {
     let mut mapping = mapping.clone();
     if let Some(previous) = after
         && let Ok(found) = engine.call("GET", &format!("/{previous}/_mapping"), None)
@@ -226,11 +303,20 @@ fn make_after(
             "settings": {"number_of_shards": 1, "auto_expand_replicas": "0-1"},
             "mappings": mapping,
         })),
-    )?;
+    );
+    // the engine refuses a second creation with a 400, which is how the
+    // console learns it lost the race rather than won it
+    let made = match made {
+        Ok(answer) => answer,
+        Err(refused) if refused.message.contains("already exists") => return Ok(Made::Already),
+        Err(other) => return Err(other),
+    };
     // another console making it at the same moment is not a failure: one of
-    // us was going to, and which one does not matter
+    // us was going to. Which one does matter, though -- the one that made it
+    // is the one that copies into it, and the other waits for the alias.
     match made.pointer("/error/type").and_then(|v| v.as_str()) {
-        None | Some("resource_already_exists_exception") => Ok(()),
+        None => Ok(Made::Here),
+        Some("resource_already_exists_exception") => Ok(Made::Already),
         Some(other) => Err(Failed {
             objects: None,
             error: None,

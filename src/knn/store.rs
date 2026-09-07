@@ -80,9 +80,17 @@ impl Held {
     fn build_graph(&mut self, space: Space, parameters: Parameters) {
         let mut graph = Hnsw::new(space, parameters);
         // the order is compacted first: a graph built over retired numbers
-        // would carry them for the rest of its life
-        self.order.retain(|id| self.by_id.contains_key(id));
-        self.order.dedup();
+        // would carry them for the rest of its life. A document written
+        // again took a new number and left its old one standing here, so
+        // only the number it answers to now is kept -- without this the
+        // graph held the document twice and a search found it twice.
+        let mut kept: Vec<String> = Vec::with_capacity(self.order.len());
+        for (i, id) in self.order.iter().enumerate() {
+            if self.by_id.contains_key(id) && self.at.get(id) == Some(&(i as u32)) {
+                kept.push(id.clone());
+            }
+        }
+        self.order = kept;
         self.at = self.order.iter().enumerate().map(|(i, id)| (id.clone(), i as u32)).collect();
         let vectors = Vectors::reader(&self.by_id, &self.order);
         for item in 0..self.order.len() as u32 {

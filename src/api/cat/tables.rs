@@ -650,23 +650,50 @@ pub async fn cat_count(
 }
 
 pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> Response {
-    let n = store.names().len().to_string();
+    // the same answer `/_cluster/health` gives, in a table: a row that said
+    // one node and green whatever the cluster was doing is the first thing
+    // an operator looks at and the last thing that should be made up
+    let health = crate::api::cluster::cluster_health(
+        axum::extract::State(store.clone()),
+        None,
+        axum::extract::Query(Params::new()),
+    )
+    .await;
+    let (_, health) = crate::api::error_parts_or_body(health).await;
+    let text = |key: &str, fallback: &str| -> String {
+        match health.get(key) {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => fallback.to_string(),
+        }
+    };
+    let percent = health
+        .get("active_shards_percent_as_number")
+        .and_then(|v| v.as_f64())
+        .map(|f| format!("{f:.1}%"))
+        .unwrap_or_else(|| "0.0%".into());
+    // the clock the row is read at, as the reference writes it
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let clock = format!("{:02}:{:02}:{:02}", now / 3600 % 24, now / 60 % 60, now % 60);
     let mut row: Vec<(&str, String)> = vec![
-        ("epoch", "0".into()),
-        ("timestamp", "00:00:00".into()),
-        ("cluster", "boostsearch".into()),
-        ("status", "green".into()),
-        ("node.total", "1".into()),
-        ("node.data", "1".into()),
-        ("discovered_cluster_manager", "true".into()),
-        ("shards", n.clone()),
-        ("pri", n),
-        ("relo", "0".into()),
-        ("init", "0".into()),
-        ("unassign", "0".into()),
-        ("pending_tasks", "0".into()),
+        ("epoch", now.to_string()),
+        ("timestamp", clock),
+        ("cluster", text("cluster_name", "boostsearch")),
+        ("status", text("status", "red")),
+        ("node.total", text("number_of_nodes", "0")),
+        ("node.data", text("number_of_data_nodes", "0")),
+        ("discovered_cluster_manager", text("discovered_cluster_manager", "false")),
+        ("shards", text("active_shards", "0")),
+        ("pri", text("active_primary_shards", "0")),
+        ("relo", text("relocating_shards", "0")),
+        ("init", text("initializing_shards", "0")),
+        ("unassign", text("unassigned_shards", "0")),
+        ("pending_tasks", text("number_of_pending_tasks", "0")),
         ("max_task_wait_time", "-".into()),
-        ("active_shards_percent", "100.0%".into()),
+        ("active_shards_percent", percent),
     ];
     // `ts=false` drops the two time columns, leaving the cluster's own state
     if p.get("ts").map(|v| v == "false").unwrap_or(false) {

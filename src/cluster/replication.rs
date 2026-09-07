@@ -1167,6 +1167,9 @@ pub async fn resync(
     let Some(rt) = super::runtime() else { return Ok(()) };
     let mut from_seq = 0u64;
     let mut sent = 0usize;
+    // the copies that did not take everything: they are failed as they are
+    // found, and nothing further is sent to them
+    let mut missed: Vec<NodeId> = Vec::new();
     loop {
         let store2 = store.clone();
         let name = index.to_string();
@@ -1187,10 +1190,23 @@ pub async fn resync(
         sent += ops.len();
         let body = serde_json::to_vec(&json!({"index": index, "refresh": "", "ops": ops}))
             .unwrap_or_default();
-        for node in to {
-            let _ = rt
+        let reachable: Vec<NodeId> = to.iter().filter(|n| !missed.contains(n)).cloned().collect();
+        for node in &reachable {
+            // a copy that did not take a page of the resync is a copy that is
+            // missing writes the new primary has. Saying nothing left it in
+            // the in-sync set, where it could later be handed the primary and
+            // those writes would be gone for good.
+            let answer = rt
                 .call(node, REPLICA_WRITE, body.clone(), std::time::Duration::from_secs(60))
                 .await;
+            if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+                let why = match &answer {
+                    Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
+                    None => "no answer".to_string(),
+                };
+                fail_copy(store, index, shard, node, &format!("resync failed: {why}")).await;
+                missed.push(node.clone());
+            }
         }
         match next {
             Some(n) if n > from_seq => from_seq = n,
@@ -1203,7 +1219,40 @@ pub async fn resync(
             to.len()
         );
     }
+    if !missed.is_empty() {
+        return Err(format!(
+            "the resync of [{index}][{shard}] did not reach {} of {} copies",
+            missed.len(),
+            to.len()
+        ));
+    }
     Ok(())
+}
+
+/// Tell the manager a copy on this node's peer is no good, so it is taken out
+/// of the in-sync set and filled again.
+async fn fail_copy(store: &Store, index: &str, shard: u32, node: &NodeId, why: &str) {
+    let _ = store;
+    let Some(rt) = super::runtime() else { return };
+    let state = rt.state();
+    let Some(mgr) = state.cluster_manager.clone() else { return };
+    let ids: Vec<String> = state
+        .routing
+        .shards_of(index)
+        .filter(|c| c.shard == shard && c.node.as_ref() == Some(node) && !c.primary)
+        .filter_map(|c| c.allocation_id.clone())
+        .collect();
+    for aid in ids {
+        let body = json!({"index": index, "shard": shard, "allocation_id": aid, "message": why});
+        let _ = rt
+            .call(
+                &mgr,
+                super::coordinator::SHARD_FAILED,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                std::time::Duration::from_secs(10),
+            )
+            .await;
+    }
 }
 
 #[cfg(test)]

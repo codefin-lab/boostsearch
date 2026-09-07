@@ -3987,3 +3987,87 @@ Measured against OpenSearch 3.1.0 running beside it: the out-of-range
 messages, the multi search sub-error, the unknown task, `1 << 32`,
 `-8 >>> 1` and `1L << 32` all agree. Phase 1 398/398, the core corpus
 1100/1100, the module suite 880/890, clippy and the unit tests clean.
+
+## The sixth step, third half: the rest of the P1 list
+
+**Offsets were bytes where the reference counts characters.** This was
+the one worth finding. Every token's offsets are counted in bytes, which
+is what slices a Rust string; OpenSearch reports what Java counts, UTF-16
+units, so a letter with an accent is one and an emoji is two. Any document
+with a non-ASCII character before a word reported every offset after it
+too far along, and a highlighter reading them marked the wrong span. Every
+Thai, Japanese, Chinese or accented document was highlighted wrongly.
+Offsets are converted where they are reported -- `_analyze`, its `explain`
+view, and `_termvectors` -- and checked against the reference on Thai,
+Japanese, an accent and an emoji.
+
+**The offset map through the char filters was drawn with a ruler.** A
+filter that rewrote the text wholesale mapped its output back onto its
+input in proportion: `html_strip` and the ICU normalizer both did. So a
+word after a tag was reported where the arithmetic put it. `html_strip`
+now maps byte by byte, taking inline tags out with nothing in their place
+and leaving a break where a block tag stood, which is what Lucene does;
+the normalizer maps character by character, and falls back to the old
+proportion only where normalising piece by piece would not give what
+normalising the whole gives. `cjk_bigram` was mixing character indices
+into byte offsets on top of that. Four cases checked against the
+reference, byte for byte, including `escaped_tags`.
+
+**`_cat/health` was a fiction.** It answered `green`, one node, one data
+node, and every shard active, whatever the cluster was doing, while
+`/_cluster/health` beside it told the truth. It is the same answer now,
+in a table, with the real clock.
+
+**A geo aggregation read the first ten thousand documents** and answered
+as though that were the index. It walks all of them now, a page at a
+time, and where a query matches more than a million it says so rather
+than answering from a sample. Measured over twelve thousand documents:
+twelve thousand.
+
+**A calendar histogram is a search per bucket**, and so is a composite
+over a date source. Both were capped at a hundred thousand searches and
+truncated silently past that. They are held to `search.max_buckets` and
+refuse rather than truncate.
+
+**A vector rewritten was held twice.** A document written again took a
+new number in the graph and left its old one behind, so a search found it
+twice. Only the number a document answers to now is kept.
+
+**Task answers were kept for the life of the node.** They expire after an
+hour, and the newest ten thousand are kept when there are more.
+
+**A TLS shutdown cut requests off mid-answer**: the accept loop returned
+and every connection being served was dropped. The connections are waited
+for, up to thirty seconds, which is what the plain listener already did.
+
+**A copy that missed a resync was left in the in-sync set.** The resync
+sent each page to each copy and ignored what came back, so a copy that
+took none of it stayed eligible to be handed the primary -- and the
+writes it never took would have gone with it. A copy that misses a page
+is failed to the manager and nothing further is sent to it.
+
+**The console's migration.** It dropped `originId` and `namespaces` when
+it copied objects into the next index, which loses what an object was
+made from and the spaces it was shared with. It copied while the old
+index was still being written to. And it named the next index "the next
+free one", so two consoles starting at once made one each and raced over
+which alias flip landed last. The fields are carried, the source is
+blocked for writes while it is copied and unblocked after, and the next
+index is named after the one behind the alias -- so two consoles aim at
+the same name, one creates it and the other waits for the alias to move.
+Measured against a real Dashboards 3.1.0 distribution: an object with
+`originId` and `namespaces` through a migration keeps both, the write
+block is set and cleared, a console that finds the target already there
+waits and then carries on when the alias moves, and a second console
+started a moment later reports the index is ready rather than copying it
+again.
+
+Two things looked at and left as they are. A recovery that fails throws
+away the writes parked for it -- but the copy is failed to the manager in
+the same breath and filled again, so nothing is acknowledged that is not
+somewhere. And `requests_per_second=1e-12` makes a walk that never ends;
+the reference does the same thing, and the walk holds no thread.
+
+Phase 1 398/398, the core corpus 1100/1100, the module suite 880/890, a
+chaos run with 42,244 acknowledged writes and none lost, clippy and 177
+unit tests clean.

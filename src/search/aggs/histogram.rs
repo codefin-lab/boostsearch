@@ -241,11 +241,24 @@ pub(crate) fn run_calendar_histogram(
     let mut buckets = Vec::new();
     let mut cursor = shift(lo);
     let last = shift(hi);
-    // a runaway interval would otherwise spin: no calendar histogram the suite
-    // or a sane request produces comes near this
-    let mut guard = 0;
-    while cursor <= last && guard < 100_000 {
+    // every step of this histogram is a search of its own, so the number of
+    // steps is the cost of the request: it is held to the same ceiling the
+    // buckets themselves are held to, and refused rather than truncated
+    let ceiling = crate::search::max_buckets(store) as usize;
+    let mut guard = 0usize;
+    while cursor <= last {
         guard += 1;
+        if guard > ceiling {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "Trying to create too many buckets. Must be less than or equal to: \
+                     [{ceiling}] but this date_histogram spans more. This limit can be set by \
+                     changing the [search.max_buckets] cluster level setting."
+                ),
+            ));
+        }
         let o = zone_at(cursor);
         let next = match fixed {
             Some(step) => cursor + step,

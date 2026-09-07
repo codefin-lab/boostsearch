@@ -429,17 +429,31 @@ impl CharFilter {
                 }
                 Err(_) => (text.to_string(), (0..=text.len()).collect()),
             },
-            // a filter that rewrites the text wholesale is mapped end to end:
-            // the same byte where the lengths agree, and the last byte of
-            // the input for the end of the output where they do not
-            other => {
-                let out = other.applied(text);
-                let map: Vec<usize> = match out.len() == text.len() {
-                    true => (0..=text.len()).collect(),
-                    false => (0..=out.len())
-                        .map(|b| if out.is_empty() { 0 } else { (b * text.len()) / out.len() })
-                        .collect(),
-                };
+            CharFilter::HtmlStrip(kept) => strip_html_mapped(text, kept),
+            // a normalizer is mapped character by character: what one
+            // character became stands for that character, wherever the
+            // lengths differ. Where normalising piece by piece would not give
+            // what normalising the whole gives -- a combining mark joining
+            // the letter before it -- the whole is kept and the map falls
+            // back to the ends.
+            CharFilter::IcuNormalize(_) => {
+                let out = self.applied(text);
+                let mut pieces = String::with_capacity(out.len());
+                let mut map: Vec<usize> = Vec::with_capacity(out.len() + 1);
+                for (at, c) in text.char_indices() {
+                    let one = self.applied(&c.to_string());
+                    for _ in 0..one.len() {
+                        map.push(at);
+                    }
+                    pieces.push_str(&one);
+                }
+                map.push(text.len());
+                if pieces == out {
+                    return (out, map);
+                }
+                let map: Vec<usize> = (0..=out.len())
+                    .map(|b| if out.is_empty() { 0 } else { (b * text.len()) / out.len() })
+                    .collect();
                 (out, map)
             }
         }
@@ -482,6 +496,72 @@ impl CharFilter {
     }
 }
 
+/// Tags that mark part of a line rather than break it.
+///
+/// Lucene's HTML reader takes these out and leaves nothing where they stood,
+/// so `x<b>y</b>z` is the one word `xyz`; every other tag becomes a line
+/// break, which cuts the words either side of it apart.
+fn is_inline_tag(name: &str) -> bool {
+    const INLINE: [&str; 30] = [
+        "a", "abbr", "acronym", "b", "basefont", "bdo", "big", "cite", "code", "dfn", "em", "font",
+        "i", "img", "input", "kbd", "label", "q", "s", "samp", "select", "small", "span", "strike",
+        "strong", "sub", "sup", "textarea", "tt", "u",
+    ];
+    INLINE.iter().any(|t| t.eq_ignore_ascii_case(name))
+}
+
+/// The same, with each byte of the answer mapped back to the byte of the
+/// document it came from -- so a word found in the text without its tags is
+/// reported where it stands in the text with them.
+fn strip_html_mapped(text: &str, kept: &[String]) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        if c != '<' {
+            for _ in 0..c.len_utf8() {
+                map.push(at);
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let Some(close) = chars[i..].iter().position(|(_, c)| *c == '>').map(|p| i + p) else {
+            for _ in 0..c.len_utf8() {
+                map.push(at);
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        };
+        let tag: String = chars[i + 1..close].iter().map(|(_, c)| *c).collect();
+        let name = tag.trim_start_matches('/').split_whitespace().next().unwrap_or("").to_string();
+        if kept.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+            // a tag that is kept stands where it stood
+            for (byte, kc) in &chars[i..=close] {
+                for _ in 0..kc.len_utf8() {
+                    map.push(*byte);
+                }
+                out.push(*kc);
+            }
+        } else if is_inline_tag(&name) {
+            // a tag that marks part of a line is taken out and leaves nothing
+            // behind: `x<b>y</b>z` is one word, as Lucene reads it
+        } else {
+            // the break a tag leaves behind stands where the tag began: a
+            // word before it ends where it was written, and the word after
+            // it starts at the byte the tag ended on
+            map.push(at);
+            out.push('\n');
+        }
+        i = close + 1;
+    }
+    map.push(text.len());
+    (out, map)
+}
+
 /// The text of an HTML document, with the tags taken out.
 fn strip_html(text: &str, kept: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
@@ -503,8 +583,9 @@ fn strip_html(text: &str, kept: &[String]) -> String {
         // a tag the request asked to keep is left where it stands
         if kept.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
             out.extend(&chars[i..=close]);
-        } else {
-            // a tag is a break in the text, which is a line of its own
+        } else if !is_inline_tag(&name) {
+            // a tag is a break in the text, which is a line of its own --
+            // unless it marks part of a line, and then it leaves nothing
             out.push('\n');
         }
         i = close + 1;
@@ -1862,8 +1943,14 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
                     out.push((t, p, a, b, l));
                     continue;
                 }
+                // the offsets count bytes, as every other step's do, and a
+                // character is not a byte: the pair that begins at the third
+                // character of a Japanese word begins six bytes into it
+                let at: Vec<usize> = t.char_indices().map(|(b, _)| b).collect();
                 for (i, pair) in chars.windows(2).enumerate() {
-                    out.push((pair.iter().collect::<String>(), p + i, a + i, a + i + 2, 1));
+                    let from = a + at[i];
+                    let to = a + at.get(i + 2).copied().unwrap_or(t.len());
+                    out.push((pair.iter().collect::<String>(), p + i, from, to, 1));
                 }
             }
             out
@@ -3799,3 +3886,31 @@ const KNOWN_LANGUAGES: &[&str] = &[
     "lithuanian",
     "sorani",
 ];
+
+/// Offsets as the API reports them.
+///
+/// Everything inside the chain counts bytes, because that is what slices a
+/// Rust string. OpenSearch counts what Java counts: UTF-16 code units, so a
+/// letter with an accent is one and an emoji is two. A document with a
+/// single non-ASCII character before a word shifted every offset after it,
+/// and a highlighter reading those offsets marked the wrong span.
+pub fn reported_offsets(text: &str, tokens: &mut [Token]) {
+    if text.is_ascii() {
+        return;
+    }
+    // how many UTF-16 units stand before each byte of the text
+    let mut before = vec![0usize; text.len() + 1];
+    let mut units = 0usize;
+    for (at, c) in text.char_indices() {
+        for slot in before.iter_mut().skip(at).take(c.len_utf8()) {
+            *slot = units;
+        }
+        units += c.len_utf16();
+    }
+    before[text.len()] = units;
+    let at = |b: usize| before[b.min(text.len())];
+    for token in tokens.iter_mut() {
+        token.2 = at(token.2);
+        token.3 = at(token.3);
+    }
+}

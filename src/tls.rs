@@ -205,10 +205,30 @@ pub async fn serve_tls(
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(8192);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     tokio::pin!(shutdown);
+    // the connections being served: a shutdown that dropped them would cut
+    // every request in flight off mid-answer, which the plain listener has
+    // never done
+    let mut serving = tokio::task::JoinSet::new();
     loop {
+        // finished connections are reaped as they finish rather than piling
+        // up until the shutdown
+        while serving.try_join_next().is_some() {}
         let accepted = tokio::select! {
             a = listener.accept() => a,
-            _ = &mut shutdown => return Ok(()),
+            _ = &mut shutdown => {
+                let grace = std::time::Duration::from_secs(30);
+                let waited = tokio::time::timeout(grace, async {
+                    while serving.join_next().await.is_some() {}
+                })
+                .await;
+                if waited.is_err() {
+                    eprintln!(
+                        "boostsearch: stopping with requests still in flight after {}s",
+                        grace.as_secs()
+                    );
+                }
+                return Ok(());
+            }
         };
         let (stream, peer) = match accepted {
             Ok(s) => s,
@@ -219,7 +239,7 @@ pub async fn serve_tls(
         let _ = stream.set_nodelay(true);
         let acceptor = acceptor.clone();
         let app = app.clone();
-        tokio::spawn(async move {
+        serving.spawn(async move {
             let Ok(tls) = acceptor.accept(stream).await else { return };
             // who the connection is from: the peer address, and the subject
             // of the client certificate when one was presented

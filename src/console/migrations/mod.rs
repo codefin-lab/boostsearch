@@ -238,6 +238,14 @@ pub fn from_raw(id: &str, source: &Value) -> Value {
     if let Some(v) = source.get("updated_at") {
         out.insert("updated_at".into(), v.clone());
     }
+    // where an object came from, and which spaces it is in: an object copied
+    // into a new index without them is an object that has lost the copy it
+    // was made from and the spaces it was shared with
+    for kept in ["originId", "namespaces", "coreMigrationVersion", "typeMigrationVersion"] {
+        if let Some(v) = source.get(kept) {
+            out.insert(kept.into(), v.clone());
+        }
+    }
     Value::Object(out)
 }
 
@@ -265,12 +273,40 @@ pub fn to_raw(doc: &Value) -> (String, Value) {
     if let Some(v) = doc.get("updated_at") {
         source.insert("updated_at".into(), v.clone());
     }
+    for kept in ["originId", "namespaces", "coreMigrationVersion", "typeMigrationVersion"] {
+        if let Some(v) = doc.get(kept) {
+            source.insert(kept.into(), v.clone());
+        }
+    }
     (raw_id, Value::Object(source))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_an_object_came_from_and_where_it_is_shared_survives_a_migration() {
+        // an object copied into the next index without these has lost the
+        // object it was made from and the spaces it was shared with
+        let raw = json!({
+            "type": "dashboard",
+            "dashboard": {"title": "one"},
+            "references": [],
+            "originId": "other-dashboard",
+            "namespaces": ["default", "marketing"],
+            "coreMigrationVersion": "3.1.0",
+        });
+        let doc = from_raw("dashboard:abc", &raw);
+        assert_eq!(doc["originId"], "other-dashboard");
+        assert_eq!(doc["namespaces"], json!(["default", "marketing"]));
+        assert_eq!(doc["coreMigrationVersion"], "3.1.0");
+        let (id, back) = to_raw(&doc);
+        assert_eq!(id, "dashboard:abc");
+        assert_eq!(back["originId"], "other-dashboard");
+        assert_eq!(back["namespaces"], json!(["default", "marketing"]));
+        assert_eq!(back["coreMigrationVersion"], "3.1.0");
+    }
 
     #[test]
     fn versions_order_as_numbers_not_as_text() {

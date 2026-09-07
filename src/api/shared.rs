@@ -78,6 +78,18 @@ pub fn err_caused_by(kind: &str, reason: &str, cause: &str) -> Response {
     err_caused_by_kind(kind, reason, "illegal_argument_exception", cause)
 }
 
+/// An answer read back as JSON, whatever it was: a handler's own answer is
+/// sometimes another handler's input.
+pub async fn error_parts_or_body(answer: Response) -> (u16, Value) {
+    let status = answer.status().as_u16();
+    let body = axum::body::to_bytes(answer.into_body(), 64 * 1024 * 1024)
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or_else(|| json!({}));
+    (status, body)
+}
+
 /// A refusal taken apart, so it can be one item's answer inside another:
 /// the status it carried and the error it described.
 pub async fn error_parts(refusal: Response) -> (u16, Value) {
