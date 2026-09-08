@@ -157,7 +157,7 @@ pub fn repo_root() -> PathBuf {
 
 /// A path with `.` and `..` taken out, without asking the filesystem: a
 /// location that does not exist yet still has to be judged.
-fn tidy(path: &std::path::Path) -> PathBuf {
+pub(crate) fn tidy(path: &std::path::Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
@@ -243,6 +243,37 @@ pub fn write(
     Ok(())
 }
 
+/// Copy what one snapshot holds into another, without reading it back
+/// through an index.
+///
+/// A clone used to record a snapshot and write nothing: the record said
+/// SUCCESS, the repository held no files under that name, and a restore from
+/// it brought back an index with no documents -- or, before the check that
+/// now stands in front of it, took the index that was there with it.
+pub fn clone_into(
+    from: &Source,
+    to: &Source,
+    name: &str,
+    target: &str,
+    indices: &[String],
+    record: &Value,
+) -> std::io::Result<()> {
+    for index in indices {
+        let dir = crate::store::dir_name(index);
+        for file in ["meta.json", "docs.ndjson"] {
+            let Some(bytes) = from.read(&format!("{name}/{dir}/{file}")) else {
+                return Err(std::io::Error::other(format!(
+                    "[{name}] holds no [{file}] for index [{index}]"
+                )));
+            };
+            to.write(&format!("{target}/{dir}/{file}"), &bytes)?;
+        }
+    }
+    to.write(&format!("{target}/snapshot.json"), record.to_string().as_bytes())?;
+    to.write_index();
+    Ok(())
+}
+
 /// Write out every living document, as it was given to us.
 fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<()> {
     let searcher = g.reader.searcher();
@@ -294,8 +325,18 @@ pub fn read_records(dir: &Path) -> Vec<(String, Value)> {
 pub fn readable(from: &Source, snapshot: &str, index: &str) -> Result<(), String> {
     let within = format!("{snapshot}/{}", crate::store::dir_name(index));
     match from.read(&format!("{within}/meta.json")) {
-        Some(raw) if serde_json::from_slice::<Value>(&raw).is_ok() => Ok(()),
-        _ => Err(format!("[{snapshot}] holds nothing for index [{index}]")),
+        Some(raw) if serde_json::from_slice::<Value>(&raw).is_ok() => {}
+        _ => return Err(format!("[{snapshot}] holds nothing for index [{index}]")),
+    }
+    // a snapshot always writes the documents, even when there were none of
+    // them: a repository that answers for the mapping and not for the
+    // documents is one that was half written or is half readable, and a
+    // restore from it is an index that comes back empty
+    match from.read(&format!("{within}/docs.ndjson")) {
+        Some(_) => Ok(()),
+        None => {
+            Err(format!("[{snapshot}] holds the mapping of index [{index}] but not its documents"))
+        }
     }
 }
 
@@ -320,8 +361,14 @@ pub fn restore_index(
     let Some(st) = store.get(as_name) else {
         return Err(format!("[{as_name}] could not be created"));
     };
+    // the documents are written by every snapshot, empty index or not, so
+    // their absence is a repository that cannot be read rather than an index
+    // that held nothing: answering `0` for it is a restore that reports
+    // success and brings nothing back
     let Some(docs) = from.read(&format!("{within}/docs.ndjson")) else {
-        return Ok(0);
+        return Err(format!(
+            "[{snapshot}] holds the mapping of index [{index}] but not its documents"
+        ));
     };
     let mut count = 0usize;
     let mut g = st.write();

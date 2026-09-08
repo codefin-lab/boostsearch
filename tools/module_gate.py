@@ -40,7 +40,14 @@ def run(url, files, before=None):
     ]
     if before:
         command += ["--before", before]
-    subprocess.run(command, check=False, capture_output=True)
+    ran = subprocess.run(command, check=False, capture_output=True)
+    # a runner that could not run wrote no answer: it used to end this gate
+    # in a traceback about a missing temporary file, which says nothing about
+    # what went wrong
+    if not pathlib.Path(out).exists():
+        print(f"the runner did not finish (exit {ran.returncode}):")
+        print("\n".join((ran.stdout + ran.stderr).splitlines()[-15:]))
+        sys.exit(2)
     found = json.loads(pathlib.Path(out).read_text())
     os.unlink(manifest)
     os.unlink(out)

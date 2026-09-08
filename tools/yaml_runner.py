@@ -297,8 +297,11 @@ class Runner:
         if resp.status_code in ignore_codes:
             return
         if resp.status_code >= 400:
-            if method == "HEAD" and not resp.content:
-                return  # exists-style API: False is the answer, not a failure
+            # exists-style API: "no" is the answer, not a failure -- but only
+            # a 404 is that answer. Any status with an empty body used to pass
+            # here, so a HEAD that answered 500 read as "it is not there".
+            if method == "HEAD" and resp.status_code == 404 and not resp.content:
+                return
             raise Failure(f"{method} {path} -> {resp.status_code}: "
                           f"{json.dumps(parsed)[:300]}")
 
@@ -569,7 +572,15 @@ def main():
             # repositories and an HTTP fixture. The reset above takes those
             # with everything else, so they are put back here.
             if args.before:
-                subprocess.run([sys.executable, args.before], check=False)
+                # the script runs before every section: one that hangs used
+                # to hang the run, with no output and nothing to read
+                try:
+                    subprocess.run(
+                        [sys.executable, args.before], check=False, timeout=120
+                    )
+                except subprocess.TimeoutExpired:
+                    print(f"the --before script {args.before} did not finish; giving up")
+                    sys.exit(2)
             r = Runner(args.url, specs, args.verbose)
             try:
                 r.run_steps(setup)
@@ -599,6 +610,13 @@ def main():
                 except Exception:
                     pass
         per_file[rel] = {"pass": fp, "fail": fa, "skip": fs}
+        # a file the manifest names and that holds no section is a file that
+        # was moved, renamed or emptied: it used to count as nothing at all,
+        # so a manifest of names that no longer exist ran green
+        if not sections:
+            failures.append((rel, "<empty>", "the file holds no test section"))
+            failed += 1
+            total += 1
 
     print(f"\n{'='*66}")
     print(f"  files {len(files)}   sections {total}")
@@ -626,6 +644,11 @@ def main():
             "failures": [{"file": f, "section": s, "error": m} for f, s, m in failures],
         }, indent=1))
 
+    # a run that checked nothing is not a run that found nothing wrong: an
+    # empty manifest, a filter that matched no file, a corpus that moved
+    if total == 0:
+        print("RESULT no section was run: nothing was checked")
+        sys.exit(2)
     sys.exit(0 if failed == 0 else 1)
 
 

@@ -17,12 +17,12 @@ rather than believed.
 
 | | | how |
 |---|---|---|
-| OpenSearch's core suite | **1,100 of 1,100** not skipped (75 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
+| OpenSearch's core suite | **1,427 of 1,427** not skipped, over all 409 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
 | its module and plugin suites | **880 of 890**, 4 skipped | `tools/module_gate.py` |
-| the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests, byte for byte | `tools/compat_audit.py replay` |
+| the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response | `tools/compat_audit.py replay` |
 | REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
-| who may reach what | **1,167 answers** over 239 routes and five callers | `tools/auth_matrix.py` |
+| who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
 | malformed input at everything that parses | **2,000 probes**, node still answering | `tools/fuzz_check.py` |

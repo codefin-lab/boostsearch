@@ -4322,3 +4322,143 @@ with no answer at all.
 
 Measured: phase 1 398/398, the core corpus 1100/1100, the module suite
 880/890, the chaos run with none lost, and the four checks green.
+
+## The third review, part two: the repository, the manager, the console
+
+The rest of what the third review found. Where part one was about the
+ceilings and what a refused write leaves behind, this is about the three
+places a cluster keeps things: the repository it snapshots to, the state
+its manager publishes, and the index the console writes its own objects
+into.
+
+**A snapshot that recorded a success and wrote nothing.** A repository with
+no usable location -- anything that is not `fs` with a location, a `url`
+repository, an object store whose credentials were not there -- kept the
+record and warned into the log: the snapshot read back as `SUCCESS`, and a
+restore from it answered 200 having restored nothing at all. It is refused
+now, and so is a snapshot taken under a name the repository already holds:
+that wrote over the older snapshot's files while its record still stood.
+`_clone` was the same shape of lie -- a record with no blobs behind it --
+and now copies what it says it copied.
+
+**And two ways to lose one that was there.** An object store is asked for a
+prefix and answers with every name that begins with it, so deleting
+snapshot `s1` deleted `s10` as well, and `s11` through `s19`. What is
+deleted is held to the directory boundary now. A restore whose
+`docs.ndjson` could not be read returned `Ok(0)`: the index was deleted to
+make room, recreated from the mapping, and reported as restored with none
+of its documents. A repository that answers for the mapping and not for
+the documents is a repository that cannot be read.
+
+**A file URL could climb out of the repository root**, `starts_with`
+comparing components and knowing nothing of `..`; and a restore's
+`rename_replacement` reached the store without going through the name
+check `PUT /{index}` goes through, so `*` was an index name and deleting
+it was a pattern.
+
+**The manager stopped for good when a disk did.** A node that cannot write
+its coordination state says nothing rather than promising what it cannot
+keep -- but the `continue` that did the not-saying also dropped the timers,
+which are the only thing that would have brought it back. A disk that
+recovered a second later found a coordinator that would never ask again.
+The timers go out; nothing else does.
+
+**A promotion under a new manager could reuse the term it was replacing.**
+A manager counts primary terms in memory and a new one starts with none, so
+the first promotion under it published term 1, and `with_terms` kept the
+higher of that and what the state carried -- which was the term the old
+primary was already writing under. Two primaries in one term is the one
+thing a term exists to prevent.
+
+**A copy the host built stayed Initializing for ever.** The report went to
+whichever manager was there, and if that manager fell before publishing it,
+nothing said it again: the flag that has a copy re-reported to the next
+manager was set for the copies the node started itself and never for the
+ones its host finished. And a node that rejoined a manager whose state
+predates the index deleted the local copy it was the only holder of --
+"the manager does not place a copy here" is not "this data is somewhere
+else". It goes when the index was deleted or when someone else holds it.
+
+**A copy was reported started by whoever felt like it.** Any node of the
+cluster could name another node's allocation id and have it marked started
+and walked into the in-sync set holding none of the documents. A copy is
+reported by the node it was placed on.
+
+**The console's own objects.** The `version` a caller read an object at was
+answered for and then ignored on the way back in, so two people editing one
+dashboard both wrote and the second silently replaced the first; it is an
+`if_seq_no` now, and a conflict is a 409. An `_import` dropped every line it
+could not parse and reported success, so a truncated file restored a
+dashboard with some of its panels missing. `/translations/{locale}` joined
+the locale into a path. And the operator's filter over the Dev Tools proxy
+guarded `transport.request` alone, so the same request under its other name
+-- `indices.delete`, `cluster.putSettings` -- went through the console's own
+credentials whatever the allowlist said.
+
+**A version was spent before the write was judged.** The version and the
+sequence number were taken above every check that can refuse a write: a
+refused one burned a sequence number an `if_seq_no` caller was holding,
+moved the version the next write is compared against, and wrote an audit
+record saying a document had been written that never was. They are taken
+when the write is going to happen.
+
+**Two more places the sequence numbers could go backwards.** Where the
+sequence numbers had got to lives in the meta file and in the translog and
+nowhere else, and three paths threw the translog away without writing the
+meta first -- the idle-writer reaper, the pending-source budget, and the
+translog's own size flush. A restart after any of them handed new writes
+numbers old documents already carried. And `update_by_query?pipeline=` let
+go of the index to run the pipeline and took it back without looking
+again, so what the script produced from the version it read overwrote
+whatever had been written meanwhile.
+
+**A caller with no roles could rethrottle anyone's job.** `/_reindex/{id}/
+_rethrottle` was judged by its first path segment as
+`indices:data/write/reindex`, which is an index action on a request that
+names no index: every authenticated caller passed it. It is
+`cluster:admin/reindex/rethrottle`.
+
+### The gates that could not go red
+
+The auth matrix read `src/main.rs` a line at a time, so the 32 routes
+rustfmt had wrapped across lines -- the long ones, the ones with four
+methods on them -- were never probed at all. Reading the file whole took it
+from 239 routes to 334, and the first run of the wider matrix is what found
+the rethrottle hole above.
+
+The core corpus manifest named 352 of the corpus's 409 files. The other 57
+were not failing; they had simply never been added. The gate now runs all
+409, and the number in the README is the whole corpus rather than the part
+of it that was listed: **1,427 of 1,427** not skipped.
+
+`linearize.py` read a count that only existed inside another function, so
+every run of the linearizability checker ended in a `NameError` after doing
+all the work. `dashboards_gate.py` threw away the runner's exit status, so
+a runner that could not start at all -- the wrong Node, a server that was
+not there -- printed zero passing, zero failing, and exited 0.
+`rolling_upgrade.py` reported that every acknowledged write survived when
+nothing had been acknowledged. `yaml_runner.py` counted a manifest that
+matched no file as a pass, and let a HEAD answer any status at all with an
+empty body as long as it was empty. `knn_check.py` compared two empty
+answers across a restart and called them equal, and killed every
+`release/boostsearch` on the machine rather than its own. And `release.yml`
+ran `fmt`, `clippy` and the unit tests under a comment saying "the gates run
+again on the tag": it runs the ci workflow itself now.
+
+**And one the gates themselves found.** Chasing a run that hung led to a
+`ureq` call with no timeout, and then to every one of them: a repository read
+over a URL or held in an object store was asked with no bound on how long the
+answer could take. The stack of the node that had stopped answering ran
+`delete_snapshot` -> `refresh_readonly` -> `url::read_records` -> `fetch`,
+sitting on a runtime thread. `GET /_snapshot/{repo}` reads a read-only
+repository to see what it holds now, so one repository whose server had gone
+away took the node off the air a thread at a time: the listener was still
+there and nothing was left to accept. There is one client now, with a
+ten-second connect and a sixty-second whole-call bound, and the read runs
+under `block_in_place` so the runtime carries on around it.
+
+Measured: unit 181/181, phase 1 398/398, the core corpus 1,427/1,427 over all
+409 of its files, the module suite 880/890, a chaos run with 27,438
+acknowledged writes and 54,876 copies checked with none lost, the auth matrix
+at 1,587 answers over 334 routes, and the refusal, restart and fuzz checks
+green.

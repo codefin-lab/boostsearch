@@ -72,7 +72,14 @@ impl Console {
     /// strings are in the source -- so a locale nobody translated is answered
     /// the same way English is, with nothing to substitute.
     pub fn translations(&self, locale: &str) -> Served {
-        let file = self.home.join("src/core/server/i18n").join(format!("{locale}.json"));
+        // a locale is a tag, not a path: `..` in one named a file the server
+        // was never asked to publish
+        let named = if locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            locale
+        } else {
+            "en"
+        };
+        let file = self.home.join("src/core/server/i18n").join(format!("{named}.json"));
         let messages = std::fs::read_to_string(&file)
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())

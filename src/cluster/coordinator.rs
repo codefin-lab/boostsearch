@@ -53,9 +53,21 @@ pub const SHARD_STARTED: &str = "internal:cluster/shard/started";
 pub const SHARD_FAILED: &str = "internal:cluster/shard/failure";
 /// a copy that was in sync missed an acknowledged write: it is in sync no more
 pub const SHARD_STALE: &str = "internal:cluster/shard/stale";
+
 pub const REROUTE: &str = "internal:cluster/reroute";
 /// a node holding an index's primary tells the manager the index's metadata
 pub const METADATA_REPORT: &str = "internal:cluster/metadata/report";
+
+/// The term a promoted copy writes under.
+///
+/// `counted` is what this manager has counted, `carried` what the published
+/// state already says. A manager keeps its count in memory, so a new one
+/// starts from what was published rather than from one -- and the new term is
+/// above both, never equal to either. Two primaries under one term is the one
+/// thing a term exists to prevent.
+fn next_term(counted: u64, carried: u64) -> u64 {
+    counted.max(carried) + 1
+}
 
 /// What a node keeps across a restart, by durable key.
 pub const D_COMMITTED: &str = "cluster_state";
@@ -838,15 +850,18 @@ impl Coordinator {
                     // out of the in-sync set, and out of the routing: a copy
                     // that stayed active would be put back in the set by the
                     // next publication, and could then be handed the primary
-                    // though it is missing writes
-                    super::allocation::shard_stale(
+                    // though it is missing writes. An id the routing does not
+                    // know is not a copy: retiring it anyway took a name out
+                    // of the in-sync set that no copy answers to.
+                    if super::allocation::shard_stale(
                         &mut table,
                         &index,
                         shard,
                         &allocation_id,
                         self.last_wall,
-                    );
-                    retired.entry(index.clone()).or_default().push((shard, allocation_id));
+                    ) {
+                        retired.entry(index.clone()).or_default().push((shard, allocation_id));
+                    }
                 }
                 ShardEvent::Failed { index, shard, allocation_id, message } => {
                     if super::allocation::shard_failed(
@@ -943,7 +958,15 @@ impl Coordinator {
         let (routing, changes) = super::allocation::reroute(&ctx, &table);
         let mut out = Vec::new();
         for (index, shard, _node) in &changes.promoted {
-            *self.terms.entry((index.clone(), *shard)).or_insert(1) += 1;
+            // A manager counts the terms in memory, and a new one starts with
+            // none: seeding this from 1 made the first promotion under a new
+            // manager publish the term the old primary was already writing
+            // under, because `with_terms` keeps the higher of the two. Two
+            // primaries in one term is the one thing a term is for.
+            let carried =
+                base.get(index).and_then(|m| m.primary_terms.get(shard).copied()).unwrap_or(1);
+            let counted = self.terms.entry((index.clone(), *shard)).or_insert(carried);
+            *counted = next_term(*counted, carried);
         }
         // copies whose nodes left: out of the in-sync set, so a node that
         // comes back with an old copy is filled again rather than trusted
@@ -1287,12 +1310,45 @@ impl Coordinator {
             .map(|(a, v)| (a.clone(), v.clone()))
             .collect();
         for (aid, (index, shard)) in gone {
-            self.hosted.remove(&aid);
-            self.reported.remove(&aid);
             // an index the manager still publishes and this node still holds
             // a copy of keeps its local index
-            let holds_other = self.hosted.values().any(|(i, _)| *i == index);
-            if !holds_other && let Some(h) = &self.host {
+            let holds_other = self.hosted.iter().any(|(a, (i, _))| *i == index && a != &aid);
+            if holds_other {
+                self.hosted.remove(&aid);
+                self.reported.remove(&aid);
+                continue;
+            }
+            // A copy the manager does not place here is not by itself a
+            // reason to delete what is here. A node rejoining under a manager
+            // whose state predates the index -- or that has not published
+            // this node's copies yet -- would delete the only copy of it
+            // there is. The data goes when the index was deleted, or when
+            // somebody else is holding it.
+            let buried = !self.committed.indices.contains_key(&index)
+                && self.committed.graveyard.iter().any(|t| {
+                    t.pointer("/index/index_name").and_then(|n| n.as_str()) == Some(index.as_str())
+                });
+            let elsewhere = self.committed.routing.shards_of(&index).any(|c| {
+                c.shard == shard
+                    && c.node.as_ref() != Some(&me)
+                    && matches!(
+                        c.state,
+                        super::state::ShardState::Started | super::state::ShardState::Relocating
+                    )
+            });
+            if !buried && !elsewhere {
+                // kept, and looked at again at the next publication
+                if self.notes {
+                    out.push(self.note(format!(
+                        "[{index}][{shard}]: no longer placed here, and held nowhere else -- \
+                         the copy here is kept"
+                    )));
+                }
+                continue;
+            }
+            self.hosted.remove(&aid);
+            self.reported.remove(&aid);
+            if let Some(h) = &self.host {
                 h.remove_shard(&index, shard);
             }
         }
@@ -1683,7 +1739,16 @@ impl NodeLogic for Coordinator {
                 let mut out = Vec::new();
                 let ev =
                     match result {
-                        Ok(()) => ShardEvent::Started { index, shard, allocation_id },
+                        Ok(()) => {
+                            // the manager this is reported to may fall before
+                            // it publishes: remembering that the copy was
+                            // finished here is what has it reported again to
+                            // whoever leads next. Without it a copy the host
+                            // built -- every seeded copy -- stayed
+                            // Initializing for as long as the cluster ran.
+                            self.started_here.insert(allocation_id.clone());
+                            ShardEvent::Started { index, shard, allocation_id }
+                        }
                         Err(message) => {
                             if self.notes {
                                 out.push(self.note(format!(
@@ -2112,12 +2177,31 @@ impl Coordinator {
                 let shard = v.get("shard").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 let allocation_id =
                     v.get("allocation_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                // a copy speaks for itself when it is filled; a copy that
-                // missed a write or failed is the primary's to report, and
-                // only the node this manager placed the primary on may say
-                // so: a node that thinks it is still the primary would
-                // otherwise take the real one out of the in-sync set and
-                // leave the writes it acknowledged with nobody to hold them
+                // A copy speaks for itself when it is filled, and it has to
+                // be the copy: the node reporting one started has to be the
+                // node this manager placed that allocation id on. It was
+                // taken at its word, so any node of the cluster could have a
+                // copy on another node marked started and walked into the
+                // in-sync set without holding a document of it.
+                if e.action == SHARD_STARTED {
+                    let placed_here = self.committed.routing.shards_of(&index).any(|c| {
+                        c.shard == shard
+                            && c.allocation_id.as_deref() == Some(allocation_id.as_str())
+                            && c.node.as_ref() == Some(&from)
+                    });
+                    if !placed_here {
+                        let msg = json!({"term": self.current_term,
+                            "reason": "a copy is reported started by the node it was placed on"})
+                        .to_string();
+                        return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                    }
+                }
+                // A copy that missed a write or failed is the primary's to
+                // report, and only the node this manager placed the primary
+                // on may say so: a node that thinks it is still the primary
+                // would otherwise take the real one out of the in-sync set
+                // and leave the writes it acknowledged with nobody to hold
+                // them.
                 if e.action != SHARD_STARTED {
                     let primary_on =
                         self.committed.routing.primary(&index, shard).and_then(|p| p.node.clone());
@@ -2879,5 +2963,21 @@ mod tests {
                 .collect();
             assert_eq!(leaders.len(), 1, "seed {seed}: {leaders:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod term_tests {
+    use super::next_term;
+
+    #[test]
+    fn a_promotion_under_a_new_manager_rises_above_the_published_term() {
+        // an ordinary promotion, this manager having counted the shard
+        assert_eq!(next_term(2, 2), 3);
+        // a manager that has counted nothing: the state says 3, and the
+        // promoted copy must not write under 3 as the old primary did
+        assert_eq!(next_term(1, 3), 4);
+        // a state older than what this manager counted does not lower it
+        assert_eq!(next_term(5, 2), 6);
     }
 }

@@ -42,7 +42,7 @@ def run(url, opensearch, node):
     # the repo pins its Node, and the one on the path is usually not it
     command = [node, "scripts/functional_test_runner", "--config", "test/api_integration/config.js"]
     out = subprocess.run(command, cwd=REPO, env=env, capture_output=True, text=True)
-    return out.stdout + out.stderr
+    return out.returncode, out.stdout + out.stderr
 
 
 def read(text):
@@ -84,12 +84,18 @@ def main():
         print("  cd study/OpenSearch-Dashboards && yarn osd bootstrap")
         return 2
 
-    totals, failed, passed = read(run(args.url, args.opensearch, args.node))
+    status, text = run(args.url, args.opensearch, args.node)
+    totals, failed, passed = read(text)
+    # A runner that could not run -- the wrong Node, a config it could not
+    # read, a server that is not there -- prints no totals, and the counts
+    # come back zero. That used to read as "nothing of ours failed": the
+    # gate was green having measured nothing.
+    if not passed and not failed:
+        print(f"  the suite ran no case at all (the runner exited {status})")
+        print("\n".join(text.splitlines()[-15:]))
+        return 2
 
     if args.write_baseline:
-        if not passed and not failed:
-            print("  the suite did not run at all -- nothing written; is the server there?")
-            return 2
         BASELINE.write_text(json.dumps({
             "what": "what the reference server does against its own suite: the cases "
                     "that ran and failed, and the cases that ran and passed. A case in "

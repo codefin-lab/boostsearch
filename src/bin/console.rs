@@ -597,8 +597,13 @@ async fn update_one(
 ) -> Response {
     let attributes = body.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({}));
     let references = body.get("references").cloned();
-    on_engine(serving, move |s| saved_of(s).update(&kind, &id, &attributes, references.as_ref()))
-        .await
+    // the version the caller read the object at, where it gave one: what
+    // keeps two editors of one dashboard from overwriting each other
+    let version = body.get("version").and_then(|v| v.as_str()).map(String::from);
+    on_engine(serving, move |s| {
+        saved_of(s).update(&kind, &id, &attributes, references.as_ref(), version.as_deref())
+    })
+    .await
 }
 
 async fn delete_one(
@@ -667,7 +672,8 @@ async fn bulk_update(State(serving): State<Shared>, body: axum::Json<Value>) -> 
             let id = one.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             let attributes =
                 one.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({}));
-            match saved.update(kind, id, &attributes, one.get("references")) {
+            let version = one.get("version").and_then(|v| v.as_str());
+            match saved.update(kind, id, &attributes, one.get("references"), version) {
                 Ok(found) => out.push(found),
                 Err(e) => out.push(serde_json::json!({
                     "id": id, "type": kind,

@@ -25,9 +25,18 @@ pub trait Store: Send + Sync {
     fn list(&self, prefix: &str) -> Vec<String>;
     fn delete(&self, path: &str) -> std::io::Result<()>;
 
+    /// Everything a snapshot left behind, and nothing a neighbour did.
+    ///
+    /// The store is asked for a prefix, but a snapshot is a directory: asking
+    /// for `s1` is answered with `s10/docs.ndjson` as well, and deleting one
+    /// snapshot took the nine beside it. What is deleted is held to the
+    /// directory boundary the caller meant.
     fn delete_prefix(&self, prefix: &str) {
+        let within = format!("{}/", prefix.trim_end_matches('/'));
         for name in self.list(prefix) {
-            let _ = self.delete(&name);
+            if name == prefix || name.starts_with(&within) {
+                let _ = self.delete(&name);
+            }
         }
     }
 }
@@ -74,6 +83,28 @@ pub fn of(repo: &Value) -> Option<Box<dyn Store>> {
     }
 }
 
+/// The one HTTP client every repository that is not a directory speaks
+/// through.
+///
+/// It has timeouts, and that is the whole reason it exists. Every call used to
+/// be `ureq::get(..)` with none: a repository that stopped answering -- a
+/// bucket behind a broken route, a URL repository whose server went away --
+/// held the thread that asked it for as long as the operating system was
+/// willing to wait. The threads are the runtime's, and `GET /_snapshot/{repo}`
+/// reads a read-only repository to see what it holds now, so a handful of
+/// those requests took the whole node off the air: the listener was still
+/// there and nothing was left to accept.
+pub(crate) fn web() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .build()
+            .into()
+    })
+}
+
 /// A path under the repository's own prefix.
 pub(crate) fn under(prefix: &str, path: &str) -> String {
     match prefix.trim_matches('/') {
@@ -93,4 +124,45 @@ pub(crate) fn body_of(response: ureq::http::Response<ureq::Body>) -> Option<Vec<
 /// What went wrong, as the error kind everything above this expects.
 pub(crate) fn failed(what: &str, e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("{what}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// A store that is a list of names, which is all these tests need.
+    struct Names(Mutex<Vec<String>>);
+
+    impl Store for Names {
+        fn get(&self, _path: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn put(&self, _path: &str, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn list(&self, prefix: &str) -> Vec<String> {
+            // what an object store answers: every name beginning with this
+            self.0.lock().unwrap().iter().filter(|n| n.starts_with(prefix)).cloned().collect()
+        }
+        fn delete(&self, path: &str) -> std::io::Result<()> {
+            self.0.lock().unwrap().retain(|n| n != path);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn forgetting_one_snapshot_leaves_the_one_named_after_it() {
+        let store = Names(Mutex::new(vec![
+            "s1/snapshot.json".into(),
+            "s1/i/docs.ndjson".into(),
+            "s10/snapshot.json".into(),
+            "s10/i/docs.ndjson".into(),
+            "s1extra".into(),
+        ]));
+        store.delete_prefix("s1");
+        let left = store.0.lock().unwrap().clone();
+        assert_eq!(left, vec!["s10/snapshot.json", "s10/i/docs.ndjson", "s1extra"]);
+    }
 }

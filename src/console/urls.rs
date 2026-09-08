@@ -84,6 +84,7 @@ pub fn resolve(saved: &Saved<'_>, id: &str) -> Result<String, Failed> {
         id,
         &json!({"accessDate": now_millis(), "accessCount": count + 1}),
         None,
+        None,
     );
     Ok(url)
 }

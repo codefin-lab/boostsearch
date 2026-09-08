@@ -136,6 +136,11 @@ impl IdxState {
         self.pending_seq.clear();
         self.pending_bytes = 0;
         if self.deferred.is_empty() {
+            // where the sequence numbers had got to lives in the meta file
+            // and in the translog, and nowhere else: throwing the translog
+            // away without writing the meta had a restart hand new writes
+            // numbers old documents already carry
+            self.save_meta();
             self.clear_translog();
         }
         release_freed_memory();

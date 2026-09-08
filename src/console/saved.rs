@@ -320,6 +320,7 @@ impl<'a> Saved<'a> {
         id: &str,
         attributes: &Value,
         references: Option<&Value>,
+        version: Option<&str>,
     ) -> Result<Value, Failed> {
         let document = document_id(kind, id);
         let mut change = Map::new();
@@ -328,11 +329,26 @@ impl<'a> Saved<'a> {
         if let Some(references) = references {
             change.insert("references".into(), references.clone());
         }
-        let found = self.engine.call(
-            "POST",
-            &format!("/{INDEX}/_update/{document}?refresh=wait_for"),
-            Some(&json!({"doc": change})),
-        )?;
+        // The `version` a caller read the object at is what says nobody has
+        // written it since. It was answered for and then ignored: two people
+        // editing one dashboard both wrote, and the second write silently
+        // replaced the first -- which is the whole reason the field is there.
+        let mut path = format!("/{INDEX}/_update/{document}?refresh=wait_for");
+        if let Some(version) = version {
+            let Some((seq, term)) = version_parts(version) else {
+                return Err(Failed::of(400, format!("invalid version [{version}]")));
+            };
+            path.push_str(&format!("&if_seq_no={seq}&if_primary_term={term}"));
+        }
+        let found = self.engine.call("POST", &path, Some(&json!({"doc": change})))?;
+        if found.pointer("/error/type").and_then(|v| v.as_str())
+            == Some("version_conflict_engine_exception")
+        {
+            return Err(Failed::of(
+                409,
+                format!("Saved object [{kind}/{id}] conflict: it was written since it was read"),
+            ));
+        }
         if found.pointer("/error").is_some() {
             return Err(missing(kind, id));
         }
@@ -422,6 +438,16 @@ fn shape_source(source: &Value, kind: &str, id: &str) -> Value {
 /// Two numbers -- the sequence number and the term -- because either alone can
 /// repeat after a primary changes, and a change applied to the wrong one is a
 /// change applied to somebody else's edit.
+/// The `_seq_no` and `_primary_term` a caller's `version` stands for: what
+/// `version_of` wrote, read back.
+pub fn version_parts(version: &str) -> Option<(u64, u64)> {
+    let raw = base64::engine::general_purpose::STANDARD.decode(version).ok()?;
+    let text = String::from_utf8(raw).ok()?;
+    let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let (seq, term) = inner.split_once(',')?;
+    Some((seq.trim().parse().ok()?, term.trim().parse().ok()?))
+}
+
 pub fn version_of(found: &Value) -> String {
     let seq = found.get("_seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
     let term = found.get("_primary_term").and_then(|v| v.as_u64()).unwrap_or(0);

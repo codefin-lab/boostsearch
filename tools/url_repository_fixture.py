@@ -87,7 +87,10 @@ def put(path, body):
         headers={"content-type": "application/json"},
     )
     try:
-        urllib.request.urlopen(request).read()
+        # a call with no timeout can sit in `connect` for ever, and this
+        # script runs before every section: one of them hanging wedges the
+        # whole gate with nothing said
+        urllib.request.urlopen(request, timeout=20).read()
     except Exception:
         pass
 

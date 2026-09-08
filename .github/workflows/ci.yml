@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # the release workflow runs these same gates on the tag rather than a
+  # copy of two of them
+  workflow_call:
 
 jobs:
   conformance:

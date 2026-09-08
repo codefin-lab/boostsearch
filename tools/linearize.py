@@ -76,7 +76,13 @@ def check_key(ops):
     """Wing & Gong over a register: an order consistent with the windows in
     which each read returns the latest write. Writes that failed may or
     may not have taken effect: they are tried both ways (absent, or as a
-    write that happened)."""
+    write that happened).
+
+    Returns (linearizable, operations not checked). The count used to be a
+    local of this function that the summary below read as a global: the run
+    ended in a NameError, so a check that found nothing wrong and one that
+    was cut short both ended the same way -- in a traceback, after the work.
+    """
     ops = sorted(ops, key=lambda o: o["call"])
     n = len(ops)
     truncated = 0
@@ -123,7 +129,7 @@ def check_key(ops):
                         return True
                 done[i] = False
         return False
-    return search(None, n)
+    return search(None, n), truncated
 
 def main():
     ap = argparse.ArgumentParser()
@@ -282,9 +288,12 @@ def main():
     # per-key linearizability
     stale_keys = 0
     stale_detail = []
+    truncated = 0
     for k in keys:
         kops = [o for o in ops if o["key"] == k and (o["ok"] or o["kind"] == "write")]
-        if not check_key(kops):
+        ok, cut = check_key(kops)
+        truncated += cut
+        if not ok:
             stale_keys += 1
             # which reads sit inside fault windows
             reads = [o for o in kops if o["kind"] == "read"]

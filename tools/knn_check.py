@@ -230,7 +230,19 @@ def vectors_outlive_the_node():
     before = ids_of(
         req("POST", "/knn-basic/_search", {"query": {"knn": {"v": {"vector": [1.0, 0.0, 0.0], "k": 2}}}})
     )
-    subprocess.run(["pkill", "-9", "-f", binary or "release/boostsearch"], check=False)
+    # two empty answers are equal, so a search that failed both times used to
+    # pass this check: the restart is only measured against something
+    if not before:
+        failures.append(
+            "the restart could not be measured: the search found nothing before it"
+        )
+        return
+    # only this node, named outright: a bare `release/boostsearch` pattern
+    # kills every node on the machine, including other people's
+    if not binary:
+        print("       (skipped the restart: set BOOST_BINARY to the node's own binary path)")
+        return
+    subprocess.run(["pkill", "-9", "-f", binary], check=False)
     time.sleep(3)
     subprocess.Popen(
         [start],

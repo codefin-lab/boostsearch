@@ -399,13 +399,31 @@ pub fn import(
     overwrite: bool,
     retries: Option<&std::collections::BTreeMap<(String, String), Retry>>,
 ) -> Result<Value, Failed> {
-    let objects: Vec<Value> = lines
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    // A line that is not an object is a file that is not an export. It used
+    // to be dropped and the rest imported, so a truncated or corrupted file
+    // was answered `success: true` having left out whatever it could not
+    // read -- a dashboard restored with some of its panels missing, and
+    // nothing said which.
+    let mut objects: Vec<Value> = Vec::new();
+    for (n, line) in lines.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(one) = serde_json::from_str::<Value>(line) else {
+            return Err(Failed {
+                objects: None,
+                error: None,
+                attributes: None,
+                status: 400,
+                message: format!("Line {} of the file is not an object", n + 1),
+            });
+        };
         // the line that says what the file held is not an object in it
-        .filter(|one| one.get("exportedCount").is_none())
-        .collect();
+        if one.get("exportedCount").is_some() {
+            continue;
+        }
+        objects.push(one);
+    }
     if objects.len() > IMPORT_LIMIT {
         return Err(Failed {
             objects: None,

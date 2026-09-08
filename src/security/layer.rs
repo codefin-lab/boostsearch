@@ -460,6 +460,14 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
         };
         return Some(a);
     }
+    // `/_reindex/{id}/_rethrottle`, and the same for the two by-query jobs:
+    // changing the speed of a running task is the cluster's business, not the
+    // index's. Judged by its first segment it was `indices:data/write/reindex`
+    // on a request that names no index, which every authenticated caller
+    // passed -- a caller with no roles at all could rethrottle anyone's job.
+    if rest.last().copied() == Some("_rethrottle") {
+        return Some("cluster:admin/reindex/rethrottle".to_string());
+    }
     let a = match (has_index, tail, m) {
         (false, "", _) => "cluster:monitor/main",
         (_, "_search", _) => "indices:data/read/search",

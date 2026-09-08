@@ -786,6 +786,17 @@ pub async fn update_by_query(
                 None,
             );
             g = st.write();
+            // the document may have been written while the guard was let go,
+            // and what the script produced was computed from the version this
+            // walk read: writing it now would undo that write without a word
+            if moved_on(&g, &seen) {
+                tally.version_conflicts += 1;
+                if !proceed {
+                    tally.note_conflict(&seen);
+                    break;
+                }
+                continue;
+            }
             match piped {
                 Ok(Some(doc)) => next = doc.source,
                 Ok(None) => {

@@ -234,17 +234,35 @@ impl Runtime {
                 // promise is sent: a vote written nowhere is a vote it can
                 // cast again after a restart, and that is two managers in
                 // one term. Nothing goes out until it is written.
-                if let Err(why) = save_durable(data_dir.as_deref(), &durable, &mut written) {
-                    tracing::error!(
-                        "this node cannot write its coordination state ({why}); it is saying \
-                         nothing rather than promising what it cannot keep"
-                    );
-                    continue;
+                // A node that cannot write its promises says nothing that
+                // promises anything -- but it still has to wake up again. The
+                // timers are what bring it back: dropping them with the rest
+                // stopped the coordinator for good, so a disk that came back
+                // a second later found a node that would never ask again.
+                let mute = match save_durable(data_dir.as_deref(), &durable, &mut written) {
+                    Ok(()) => false,
+                    Err(why) => {
+                        tracing::error!(
+                            "this node cannot write its coordination state ({why}); it is saying \
+                             nothing rather than promising what it cannot keep, and will try \
+                             again when its timers fire"
+                        );
+                        true
+                    }
+                };
+                if !mute {
+                    *shared.state.write() = logic.state().clone();
+                    *shared.mode.write() = format!("{:?}", logic.mode);
+                    shared
+                        .manager
+                        .store(logic.manager_here(), std::sync::atomic::Ordering::Relaxed);
                 }
-                *shared.state.write() = logic.state().clone();
-                *shared.mode.write() = format!("{:?}", logic.mode);
-                shared.manager.store(logic.manager_here(), std::sync::atomic::Ordering::Relaxed);
                 for o in outputs {
+                    // everything but a timer either promises something or
+                    // acts on a state this node could not write down
+                    if mute && !matches!(o, Output::Timer { .. } | Output::Note(_)) {
+                        continue;
+                    }
                     match o {
                         Output::Send { to, envelope } if to == me => {
                             // the logic answering a caller on this node

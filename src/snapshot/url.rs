@@ -30,9 +30,13 @@ pub fn url_of(repo: &Value) -> Option<String> {
 /// two rules OpenSearch applies, and the same message when neither holds.
 pub fn allowed(url: &str, allowed_urls: &[String]) -> bool {
     if let Some(path) = url.strip_prefix("file://") {
-        let root = super::repo_root();
-        let path = PathBuf::from(path);
-        return path.starts_with(&root) || root.starts_with(&path);
+        // `starts_with` compares components and does not know what `..`
+        // means, so `<path.repo>/../../etc` "starts with" the root: the path
+        // is straightened before it is judged. Nor is a directory the root
+        // sits *under* the same as one under the root -- `file:///` is every
+        // file the process can read.
+        let root = super::tidy(&super::repo_root());
+        return super::tidy(&PathBuf::from(path)).starts_with(&root);
     }
     allowed_urls.iter().any(|pattern| matches_pattern(pattern, url))
 }
@@ -51,7 +55,9 @@ pub fn fetch(url: &str, path: &str) -> Option<Vec<u8>> {
     if let Some(local) = full.strip_prefix("file://") {
         return std::fs::read(local).ok();
     }
-    let response = ureq::get(&full).call().ok()?;
+    // with a timeout: a repository whose server stopped answering used to
+    // hold this thread, and this is called from a request handler
+    let response = super::blobs::web().get(&full).call().ok()?;
     let mut body = Vec::new();
     use std::io::Read;
     response.into_body().into_reader().read_to_end(&mut body).ok()?;
@@ -70,4 +76,18 @@ pub fn read_records(url: &str) -> Vec<(String, Value)> {
         out.push((name.to_string(), record));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_url_may_not_climb_out_of_the_repository_root() {
+        let root = super::super::repo_root();
+        let root = root.display().to_string();
+        assert!(allowed(&format!("file://{root}/one"), &[]));
+        assert!(!allowed(&format!("file://{root}/../../etc"), &[]));
+        assert!(!allowed("file:///", &[]));
+    }
 }

@@ -81,14 +81,32 @@ BODIES = {
 
 
 def routes():
-    """Every route the server declares, as (method, path)."""
+    """Every route the server declares, as (method, path).
+
+    The file is read whole rather than a line at a time: a route written
+    across several lines -- which is what a long path or a route with four
+    methods on it looks like after rustfmt -- matched nothing, so 32 of the
+    server's routes were never probed at all, and the ones written that way
+    are the complicated ones.
+    """
     text = MAIN.read_text()
     found = []
-    for line in text.splitlines():
-        m = re.search(r'\.route\(\s*"([^"]+)"\s*,\s*(.*)$', line)
-        if not m:
-            continue
-        path, rest = m.group(1), m.group(2)
+    for m in re.finditer(r'\.route\(\s*"([^"]+)"\s*,', text):
+        path = m.group(1)
+        # the handlers of this route: from the comma to the `)` that closes
+        # the `.route(` call
+        rest, depth, i = [], 1, m.end()
+        while i < len(text) and depth:
+            c = text[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if not depth:
+                    break
+            rest.append(c)
+            i += 1
+        rest = "".join(rest)
         methods = set(re.findall(r"\b(get|post|put|delete|head|patch|any)\s*\(", rest))
         if not methods:
             methods = {"get"}

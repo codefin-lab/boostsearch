@@ -114,15 +114,15 @@ impl S3 {
             headers.push(("x-amz-security-token", token.clone()));
         }
         if method == "PUT" {
-            let mut request = ureq::put(&full);
+            let mut request = super::web().put(&full);
             for (name, value) in &headers {
                 request = request.header(*name, value);
             }
             return request.send(body);
         }
         let mut request = match method {
-            "DELETE" => ureq::delete(&full),
-            _ => ureq::get(&full),
+            "DELETE" => super::web().delete(&full),
+            _ => super::web().get(&full),
         };
         for (name, value) in &headers {
             request = request.header(*name, value);

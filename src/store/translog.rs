@@ -53,6 +53,7 @@ impl IdxState {
                 applied && self.writer.as_mut().map(|w| w.commit().is_ok()).unwrap_or(false);
             if committed {
                 let _ = self.realtime.reload();
+                self.save_meta();
                 self.clear_translog();
             }
         }
@@ -260,6 +261,9 @@ impl IdxState {
                 let _ = self.realtime.reload();
                 self.pending.clear();
                 self.pending_bytes = 0;
+                // the sequence numbers go with it, as they do everywhere
+                // else the translog is thrown away
+                self.save_meta();
                 self.clear_translog();
             }
         }

@@ -125,7 +125,7 @@ impl Store for Azure {
     fn get(&self, path: &str) -> Option<Vec<u8>> {
         let url = self.url(path, "");
         let headers = self.common(&[]);
-        let mut request = ureq::get(&url);
+        let mut request = super::web().get(&url);
         for (name, value) in &headers {
             request = request.header(*name, value);
         }
@@ -142,7 +142,7 @@ impl Store for Azure {
             ("x-ms-blob-type", "BlockBlob".to_string()),
             ("content-type", "application/octet-stream".to_string()),
         ]);
-        let mut request = ureq::put(&url);
+        let mut request = super::web().put(&url);
         for (name, value) in &headers {
             request = request.header(*name, value);
         }
@@ -173,7 +173,7 @@ impl Store for Azure {
             Some(sas) => format!("{url}&{}", sas.trim_start_matches('?')),
             None => url,
         };
-        let mut request = ureq::get(&url);
+        let mut request = super::web().get(&url);
         for (name, value) in &headers {
             request = request.header(*name, value);
         }
@@ -197,7 +197,7 @@ impl Store for Azure {
     fn delete(&self, path: &str) -> std::io::Result<()> {
         let url = self.url(path, "");
         let headers = self.common(&[]);
-        let mut request = ureq::delete(&url);
+        let mut request = super::web().delete(&url);
         for (name, value) in &headers {
             request = request.header(*name, value);
         }

@@ -18,18 +18,12 @@ permissions:
 jobs:
   # The gates run again on the tag. A release that was not measured is not a
   # release: the tag may not be the commit the last green run was on.
+  # This used to be three commands of its own -- fmt, clippy and the unit
+  # tests -- so a tag was cut without the conformance suite, the auth matrix,
+  # the refusal check, the fuzzer or the restart check having run on it. It is
+  # the same job the branch runs, not a shorter one that reads like it.
   gates:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: '1.98.0'
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --release --all-targets -- -D warnings
-      - run: cargo test --release
+    uses: ./.github/workflows/ci.yml
 
   binaries:
     needs: gates

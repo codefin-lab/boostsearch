@@ -183,7 +183,15 @@ fn refresh_readonly(store: &Store, repo: &str) {
         return;
     }
     let Some(from) = crate::snapshot::Source::of(&found) else { return };
-    for (snap, record) in from.records() {
+    // Reading it means going over the network, and the answer may be a long
+    // time coming: the client has timeouts now, but a runtime thread spent
+    // waiting on a repository is a thread not answering anybody. This tells
+    // the runtime to carry on without it.
+    let records = match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(|| from.records()),
+        Err(_) => from.records(),
+    };
+    for (snap, record) in records {
         store.put_snapshot(repo, &snap, record);
     }
 }
@@ -202,8 +210,18 @@ pub(crate) fn allowed_urls(store: &Store) -> Vec<String> {
             _ => Vec::new(),
         }
     };
+    // A cluster setting says so where one names anything. OpenSearch has no
+    // such cluster setting -- `repositories.url.allowed_urls` is a node
+    // setting -- so this is ours, and it may only add to what the node was
+    // started with. Returning the setting whatever it held meant a
+    // `null` written over it (which is what clearing the cluster settings
+    // writes) hid the node's own list, and every URL repository the node was
+    // configured for stopped being registrable.
     if let Some(v) = store.cluster_setting("repositories.url.allowed_urls") {
-        return listed(v);
+        let named = listed(v);
+        if !named.is_empty() {
+            return named;
+        }
     }
     std::env::var("BOOSTSEARCH_URL_ALLOWED")
         .ok()
@@ -277,6 +295,21 @@ pub async fn create_snapshot(
     if let Some(r) = refuse_if_readonly(&store, &repo) {
         return r;
     }
+    // a snapshot is written under its name, so taking one under a name the
+    // repository already holds writes over the older snapshot's files while
+    // its record still says it is there: what was kept is gone, and nothing
+    // said so
+    refresh_readonly(&store, &repo);
+    if store.snapshots(&repo).contains_key(&name) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_snapshot_name_exception",
+            format!(
+                "[{repo}:{name}] Invalid snapshot name [{name}], snapshot with the same name \
+                 already exists"
+            ),
+        );
+    }
     let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
     let asked = match body.get("indices") {
         Some(Value::String(s)) => Some(s.clone()),
@@ -326,10 +359,20 @@ pub async fn create_snapshot(
                 );
             }
         }
-        None => tracing::warn!(
-            "snapshot [{name}] in repository [{repo}] records metadata only -- the repository \
-             has no filesystem location to copy documents to"
-        ),
+        // a repository nothing can be written to cannot hold a snapshot. It
+        // used to keep the record and warn: the snapshot read back as
+        // SUCCESS, and a restore from it answered 200 having restored
+        // nothing at all
+        None => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "repository_exception",
+                format!(
+                    "[{repo}] has nowhere to write snapshot [{name}]: the repository has no \
+                     usable location"
+                ),
+            );
+        }
     }
     store.put_snapshot(&repo, &name, record.clone());
     // without `wait_for_completion` the caller is told it has begun; with it,
@@ -517,21 +560,69 @@ pub async fn clone_snapshot(
             format!("[{repo}:{name}] snapshot does not exist"),
         );
     };
+    let source = source.clone();
+    if held.contains_key(&target) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_snapshot_name_exception",
+            format!(
+                "[{repo}:{target}] Invalid snapshot name [{target}], snapshot with the same name \
+                 already exists"
+            ),
+        );
+    }
+    if let Some(r) = refuse_if_readonly(&store, &repo) {
+        return r;
+    }
     let body: Value = parse_body(&body).unwrap_or_else(|_| json!({}));
-    let indices = match body.get("indices") {
-        Some(Value::String(s)) => store.resolve(s),
+    // a clone chooses among the indices the snapshot holds, which is not the
+    // same set as the indices the cluster holds now: resolving the pattern
+    // against the live cluster cloned indices the snapshot never had, and
+    // dropped the ones that have since been deleted -- the very ones a clone
+    // is for
+    let held_indices: Vec<String> = source["indices"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let wanted: Option<Vec<String>> = match body.get("indices") {
+        Some(Value::String(s)) => Some(s.split(',').map(|s| s.trim().to_string()).collect()),
         Some(Value::Array(a)) => {
-            let expr: Vec<String> =
-                a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-            store.resolve(&expr.join(","))
+            Some(a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         }
-        _ => source["indices"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_default(),
+        _ => None,
+    };
+    let indices: Vec<String> = match &wanted {
+        Some(w) => held_indices
+            .iter()
+            .filter(|n| w.iter().any(|one| one == *n || crate::store::glob_match(one, n)))
+            .cloned()
+            .collect(),
+        None => held_indices.clone(),
     };
     let global = source["include_global_state"].as_bool().unwrap_or(true);
-    let record = snapshot_record(&store, &target, indices, global);
+    let mut record = snapshot_record(&store, &target, indices.clone(), global);
+    // the shard counts come from the indices as they are now, and a clone is
+    // of what the snapshot holds: what it recorded is what is carried over
+    record["shards"] = source["shards"].clone();
+    // a clone that records a snapshot without writing one is a snapshot that
+    // reads as SUCCESS and restores nothing, so the files are copied
+    let Some(from) = store.repositories().get(&repo).and_then(crate::snapshot::Source::of) else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!("[{repo}] has nowhere to write snapshot [{target}]"),
+        );
+    };
+    if let Err(e) = crate::snapshot::clone_into(&from, &from, &name, &target, &indices, &record) {
+        // whatever landed before it failed is not a snapshot anybody may
+        // restore from
+        crate::snapshot::remove(&from, &target);
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!("[{repo}] could not clone [{name}] to [{target}]: {e}"),
+        );
+    }
     store.put_snapshot(&repo, &target, record);
     respond(&p, json!({"acknowledged": true}))
 }
@@ -604,6 +695,22 @@ pub async fn restore_snapshot(
         .filter(|n| wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n)))
     {
         let target = rename(n);
+        // a rename is a name a caller made up, and it becomes an index: it
+        // goes through the same door `PUT /{index}` does. A replacement of
+        // `` or `..` used to reach the store as an index name, and a delete
+        // of it reached the filesystem
+        if target.is_empty() || target == "." || target == ".." {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_index_name_exception",
+                format!("Invalid index name [{target}], must not be empty, '.' or '..'"),
+            );
+        }
+        if let Some(refused) = crate::api::indices::reserved_index_name(&target)
+            .or_else(|| crate::api::indices::bad_index_name(&target))
+        {
+            return refused;
+        }
         // a name that stands for several indices is not a name a restore
         // may write to: `store.get` answers for an alias with one of the
         // indices behind it, while deleting that name deletes all of them

@@ -99,7 +99,7 @@ impl Gcs {
                 let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).ok()?;
                 let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
                 let assertion = jsonwebtoken::encode(&header, &claims, &key).ok()?;
-                let response = ureq::post(token_uri)
+                let response = super::web().post(token_uri)
                     .send_form([
                         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                         ("assertion", assertion.as_str()),
@@ -126,7 +126,7 @@ impl Store for Gcs {
             self.bucket,
             super::s3::encode_query(&self.key(path))
         );
-        let response = with_token(ureq::get(&url), self.token()).call().ok()?;
+        let response = with_token(super::web().get(&url), self.token()).call().ok()?;
         (response.status().as_u16() == 200).then(|| body_of(response))?
     }
 
@@ -137,7 +137,7 @@ impl Store for Gcs {
             self.bucket,
             super::s3::encode_query(&self.key(path))
         );
-        let response = with_token(ureq::post(&url), self.token())
+        let response = with_token(super::web().post(&url), self.token())
             .header("content-type", "application/octet-stream")
             .send(bytes)
             .map_err(|e| failed("gcs put", e))?;
@@ -154,7 +154,7 @@ impl Store for Gcs {
             self.bucket,
             super::s3::encode_query(&self.key(prefix))
         );
-        let Ok(response) = with_token(ureq::get(&url), self.token()).call() else {
+        let Ok(response) = with_token(super::web().get(&url), self.token()).call() else {
             return Vec::new();
         };
         let Some(body) = body_of(response) else { return Vec::new() };
@@ -183,7 +183,7 @@ impl Store for Gcs {
             self.bucket,
             super::s3::encode_query(&self.key(path))
         );
-        let response = with_token(ureq::delete(&url), self.token())
+        let response = with_token(super::web().delete(&url), self.token())
             .call()
             .map_err(|e| failed("gcs delete", e))?;
         match response.status().as_u16() {

@@ -220,6 +220,17 @@ pub fn api_caller(
         }
         other => return not_ok(format!("Unknown endpoint: {other}"), json!("")),
     };
+    // The operator's filter over the Dev Tools proxy applies to every call
+    // this route makes, not only to `transport.request`. It used to guard
+    // that one alone, so an allowlist of `^/_cat/indices` still let the page
+    // send `indices.delete` or `cluster.putSettings` through the console's
+    // own credentials -- the same request under a different name.
+    if !allowed(&path) {
+        return not_ok(
+            format!("Error connecting to '{path}':\n\nUnable to send requests to that path."),
+            json!(""),
+        );
+    }
     let path = format!("{path}{}", query_of(&params, &taken));
     match call(engine, method, &path, body) {
         Ok(found) => ok(found),

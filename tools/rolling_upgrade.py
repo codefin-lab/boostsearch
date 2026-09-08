@@ -85,6 +85,17 @@ def main():
     settled = wait_green(nodes, a.index, 120)
     holders = copy_holders(nodes, a.index)
     print(f"settled: {'after %.1fs' % settled if settled is not None else 'NOT within 120s'}; copies on {holders}")
+    # a run that acknowledged nothing, or found no node holding a copy, has
+    # checked nothing: "every acknowledged write survived" was true of the
+    # empty set, and the gate was green having measured nothing
+    if not load.acked or not holders:
+        print(
+            f"RESULT nothing was checked: {len(load.acked)} acknowledged writes, "
+            f"copies on {holders or 'no node'}"
+        )
+        for n in nodes:
+            n.stop_graceful(seconds=10)
+        return 2
     lost = 0
     for n in nodes:
         if n.name not in holders:

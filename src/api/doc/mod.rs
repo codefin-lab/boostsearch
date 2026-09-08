@@ -156,18 +156,6 @@ fn write_doc_within(
             format!("[{id}]: version conflict, document already exists"),
         ));
     }
-    let (version, seq) = match forced {
-        Some(v) => st.bump_to(id, true, v),
-        None => st.bump(id, true, existed),
-    };
-    crate::security::audit_document_written(
-        &st.name,
-        id,
-        version,
-        audit_before.as_ref(),
-        Some(&source),
-        false,
-    );
     // the shard a write belongs to decides which refresh will show it
     let shard = st.shard_of_doc(id);
     if let Some((kind, reason, cause)) = document_complaint(st, &source) {
@@ -240,6 +228,10 @@ fn write_doc_within(
         crate::security::audit_index_event(&st.name, "indices:admin/mapping/auto_put", &body, true);
     }
     // normalized multi-fields are indexed alongside, but never stored
+    // the source as the caller wrote it, kept only where a record of the
+    // change is being written -- the document itself is moved into the
+    // indexed shape below
+    let source_for_audit = crate::security::audit_watches_write(&st.name).then(|| source.clone());
     let mut indexed = crate::store::expand_for_indexing(source, &st.mapping);
     // the kinds a query narrows against have to be the kinds actually indexed,
     // which is the coerced view rather than what the client wrote
@@ -261,6 +253,24 @@ fn write_doc_within(
     if !st.mapping.vector_fields.is_empty() {
         st.vectors.write().write(&st.mapping.vector_fields, id, &indexed);
     }
+    // The version and the sequence number are taken once the write is going
+    // to happen, and not before. They used to be taken above every check
+    // that can refuse one: a refused write burned a sequence number an
+    // `if_seq_no` caller was holding, moved the version the next write would
+    // be compared against, and wrote an audit record saying a document had
+    // been written that never was.
+    let (version, seq) = match forced {
+        Some(v) => st.bump_to(id, true, v),
+        None => st.bump(id, true, existed),
+    };
+    crate::security::audit_document_written(
+        &st.name,
+        id,
+        version,
+        audit_before.as_ref(),
+        source_for_audit.as_ref(),
+        false,
+    );
     let doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
     // the copy that is being replaced goes when the new one is ready to take
     // its place, and not before: every complaint above this line returns
