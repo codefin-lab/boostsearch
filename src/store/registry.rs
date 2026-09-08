@@ -609,23 +609,31 @@ impl Store {
         };
         st.apply_analysis();
         st.refresh_knobs();
-        // the state file is written whole from the first moment: a crash
-        // during the write left an index whose meta does not parse, and an
-        // index whose meta does not parse is one this node does not open
-        st.save_meta();
         // the name is claimed under the same lock that answers whether it is
         // taken: two creates of one index were both answered "created", the
         // second replaced the first in the map, and the writes the first had
         // already acknowledged were left in an index nothing points at
-        match self.inner.write().entry(name.to_string()) {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                Err(anyhow!("resource_already_exists_exception"))
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(Arc::new(RwLock::new(st)));
-                Ok(())
+        {
+            let mut held = self.inner.write();
+            match held.entry(name.to_string()) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    return Err(anyhow!("resource_already_exists_exception"));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(Arc::new(RwLock::new(st)));
+                }
             }
         }
+        // The state file is written whole, once the name is ours: a crash
+        // during the write left an index whose meta does not parse, and an
+        // index whose meta does not parse is one this node does not open.
+        // Writing it before the claim was worse -- both creates write to the
+        // same directory, so the one that was refused could leave its
+        // mapping behind for the winner to reopen with.
+        if let Some(held) = self.get(name) {
+            held.read().save_meta();
+        }
+        Ok(())
     }
 
     /// Auto-create on first write, the way OpenSearch does.

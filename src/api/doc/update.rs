@@ -154,8 +154,15 @@ pub async fn update_doc(
                 match op.as_str() {
                     "noop" | "none" => Some((base, "noop")),
                     "delete" => {
-                        let (_, status) = delete_doc(&mut g, &id);
-                        let _ = status;
+                        // the delete may be refused -- a closed index, a
+                        // write block, a read-only one -- and the refusal is
+                        // the answer. It used to be thrown away and the
+                        // update answered `"result": "deleted"` for a
+                        // document that is still there.
+                        let (body, status) = delete_doc(&mut g, &id);
+                        if status.is_client_error() || status.is_server_error() {
+                            return (status, axum::Json(body)).into_response();
+                        }
                         Some((source, "deleted"))
                     }
                     "index" | "create" => Some((source, if fresh { "created" } else { "updated" })),

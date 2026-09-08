@@ -155,6 +155,9 @@ fn make_self_signed(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
 }
 
 /// Serve the router over TLS on the listener, one task per connection.
+/// How long a peer has to finish a TLS handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub async fn serve_tls(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -240,7 +243,13 @@ pub async fn serve_tls(
         let acceptor = acceptor.clone();
         let app = app.clone();
         serving.spawn(async move {
-            let Ok(tls) = acceptor.accept(stream).await else { return };
+            // A handshake that never finishes is a task and a socket held
+            // for as long as the peer cares to hold them: a few thousand
+            // half-open ClientHellos and the node has no descriptors left.
+            // The plain listener is bounded by `Lenient`'s own head timeout,
+            // which cannot help here because it sits above the handshake.
+            let accepted = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+            let Ok(Ok(tls)) = accepted else { return };
             // who the connection is from: the peer address, and the subject
             // of the client certificate when one was presented
             let peer_dn = tls

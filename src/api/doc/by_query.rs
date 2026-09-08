@@ -447,12 +447,22 @@ fn remote_complaint(remote: &Value) -> Option<Response> {
 /// A remote host as the allowlist spells it: the authority, without a scheme
 /// and without a path.
 fn named_host(host: &str) -> String {
-    host.trim_start_matches("http://")
+    let authority = host
+        .trim_start_matches("http://")
         .trim_start_matches("https://")
-        .split('/')
+        .split(['/', '?', '#'])
         .next()
-        .unwrap_or_default()
-        .to_string()
+        .unwrap_or_default();
+    // A URL may carry a user name and password before the host, and what is
+    // in front of the `@` is not where the request goes: with an allowlist
+    // entry naming no port, `http://allowed.host:1@169.254.169.254` read as
+    // host `allowed.host` and port `1@169.254.169.254`, matched `*`, and
+    // fetched from the address after the `@`. What is judged is where the
+    // request will actually go.
+    match authority.rsplit_once('@') {
+        Some((_, real)) => real.to_string(),
+        None => authority.to_string(),
+    }
 }
 
 /// Whether this node was told it may read from a host.
@@ -467,7 +477,13 @@ fn remote_allowed(named: &str) -> bool {
     let Ok(listed) = std::env::var("BOOSTSEARCH_REINDEX_ALLOWLIST") else {
         return false;
     };
-    let (host, port) = named.rsplit_once(':').unwrap_or((named, ""));
+    let (host, port) = match named.rsplit_once(':') {
+        // a port is digits: anything else is not an authority this node will
+        // judge, whatever it might mean to a URL parser somewhere else
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        Some(_) => return false,
+        None => (named, ""),
+    };
     listed.split(',').map(str::trim).filter(|s| !s.is_empty()).any(|entry| {
         let (allowed_host, allowed_port) = entry.rsplit_once(':').unwrap_or((entry, "*"));
         let host_ok = allowed_host == "*" || allowed_host == host;
@@ -547,6 +563,10 @@ fn found_remote(
         if hits.is_empty() {
             break;
         }
+        // a page that adds nothing is a walk that is not moving: a remote
+        // answering hits with no `_id` scrolled for ever, one blocking
+        // thread at a time
+        let had = out.len();
         for hit in hits {
             if out.len() >= limit {
                 break;
@@ -563,7 +583,7 @@ fn found_remote(
                 seq_no: None,
             });
         }
-        if out.len() >= limit {
+        if out.len() >= limit || out.len() == had {
             break;
         }
         let Some(held) = scroll.clone() else { break };
@@ -573,7 +593,14 @@ fn found_remote(
     // the other cluster should not be left holding a context this walk is done
     // with, whether or not it minds
     if let Some(held) = scroll {
-        let _ = ureq::delete(&format!("{host}/_search/scroll?scroll_id={held}")).call();
+        // with the same bound as every other call to this remote: without
+        // one, a remote that stopped answering held this blocking thread for
+        // as long as the operating system would wait
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_millis(timeout.max(1.0) as u64)))
+            .build()
+            .into();
+        let _ = agent.delete(&format!("{host}/_search/scroll?scroll_id={held}")).call();
     }
     Ok(out)
 }

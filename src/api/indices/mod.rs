@@ -10,6 +10,11 @@ pub use resize::*;
 mod shards;
 pub use shards::*;
 
+/// The most shards, or copies of one, an index may be asked for. OpenSearch
+/// bounds `index.number_of_shards` at 1,024 and this holds the copies to the
+/// same, because every one of them is a row somebody's `_cat` request builds.
+const MOST_SHARDS: u64 = 1024;
+
 pub async fn create_index(
     State(store): State<Store>,
     Path(index): Path<String>,
@@ -167,6 +172,37 @@ pub async fn create_index(
             .or_else(|| body.pointer(&format!("/settings/index.{k}")))
             .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
     };
+    // How many shards and copies an index may be asked for. Nothing bounded
+    // these, and several handlers loop once per declared shard or copy to
+    // build a row -- so `number_of_shards: 1000000000000` was two ordinary
+    // requests and a node that never answered again. Zero shards is worse
+    // than useless: `_split` divides by it.
+    for (key, least) in [("number_of_shards", 1u64), ("number_of_replicas", 0)] {
+        let Some(raw) = setting(key) else { continue };
+        let asked: Option<u64> = raw.parse().ok();
+        let bad = match asked {
+            Some(n) => n < least || n > MOST_SHARDS,
+            None => true,
+        };
+        if bad {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                match asked {
+                    Some(n) if n < least => format!(
+                        "Failed to parse value [{n}] for setting [index.{key}] must be >= {least}"
+                    ),
+                    Some(n) => format!(
+                        "Failed to parse value [{n}] for setting [index.{key}] must be <= \
+                         {MOST_SHARDS}"
+                    ),
+                    None => format!(
+                        "Failed to parse value [{raw}] for setting [index.{key}] must be a number"
+                    ),
+                },
+            );
+        }
+    }
     if setting("bulk.adaptive_shard_selection.enabled").as_deref() == Some("true")
         && setting("append_only.enabled").as_deref() != Some("true")
     {

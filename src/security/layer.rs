@@ -390,6 +390,25 @@ fn narrow_request(req: &mut Request, named: &[String], granted: &[String]) {
 /// paths that name no index.
 pub fn indices_of(path: &str) -> Vec<String> {
     let trimmed = path.trim_start_matches('/');
+    // A plugin route may name its index further along: `_ism/add/{index}`
+    // and `_knn/warmup/{index}` are done to that index, and judging them
+    // over every index instead is both wrong and, where a role grants the
+    // action on `*`, wrong in the dangerous direction.
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.first() == Some(&"_plugins") {
+        let named = match (parts.get(1).copied(), parts.get(2).copied()) {
+            (Some("_ism"), Some("add" | "remove" | "change_policy" | "retry" | "explain")) => {
+                parts.get(3)
+            }
+            (Some("_knn"), Some("warmup")) => parts.get(3),
+            _ => None,
+        };
+        if let Some(named) = named {
+            let named = percent_encoding::percent_decode_str(named).decode_utf8_lossy();
+            return named.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        }
+        return Vec::new();
+    }
     // decoded first, as the handler will see it: `public%2Csecret` is two
     // indices to the handler and must be two to the judge
     let first = percent_encoding::percent_decode_str(trimmed.split('/').next().unwrap_or(""))
@@ -448,8 +467,26 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
                 Some("stats") => "cluster:monitor/stats".to_string(),
                 _ => "indices:data/read/search".to_string(),
             },
-            ("_ism", "GET" | "HEAD") => "cluster:admin/opendistro/ism/policy/get".to_string(),
-            ("_ism", _) => "cluster:admin/opendistro/ism/policy/write".to_string(),
+            // The policies themselves are the cluster's; attaching one to an
+            // index, taking it off, changing it or asking after it are
+            // things done *to an index*, and judging them all as a policy
+            // write meant the index was never judged at all: a caller with
+            // the ISM cluster permission and no index permission could
+            // attach a policy whose first action is `delete` to `*`.
+            ("_ism", _) => match rest.get(2).copied().unwrap_or("") {
+                "add" => "indices:admin/opendistro/ism/managedindex/add".to_string(),
+                "remove" => "indices:admin/opendistro/ism/managedindex/remove".to_string(),
+                "change_policy" => "indices:admin/opendistro/ism/managedindex/change".to_string(),
+                "retry" => "indices:admin/opendistro/ism/managedindex/retry".to_string(),
+                "explain" => "indices:monitor/opendistro/ism/managedindex/explain".to_string(),
+                _ if m == "GET" || m == "HEAD" => {
+                    "cluster:admin/opendistro/ism/policy/get".to_string()
+                }
+                _ => "cluster:admin/opendistro/ism/policy/write".to_string(),
+            },
+            // warming an index's vectors is done to that index, not to the
+            // plugin's statistics
+            ("_knn", _) if rest.get(2) == Some(&"warmup") => "indices:admin/knn/warmup".to_string(),
             ("_knn", "GET" | "HEAD") => "cluster:admin/knn/stats".to_string(),
             ("_knn", _) => "cluster:admin/knn/model/write".to_string(),
             ("_query", "GET" | "HEAD") => {
@@ -470,6 +507,14 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
     }
     let a = match (has_index, tail, m) {
         (false, "", _) => "cluster:monitor/main",
+        // `/_search/pipeline/{name}` only begins with `_search`: judging it
+        // by that first segment made writing one a *read* permission, and
+        // the arm written for it further down was never reached
+        (false, "_search", _) if rest.get(1) == Some(&"pipeline") => match m {
+            "GET" | "HEAD" => "cluster:admin/search/pipeline/get",
+            "DELETE" => "cluster:admin/search/pipeline/delete",
+            _ => "cluster:admin/search/pipeline/put",
+        },
         (_, "_search", _) => "indices:data/read/search",
         (_, "_msearch", _) => "indices:data/read/msearch",
         (_, "_count", _) => "indices:data/read/search",
@@ -519,7 +564,10 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
         (_, "_pit", _) => "indices:data/read/point_in_time/create",
         (_, "_search_pipeline", _) => "cluster:admin/search/pipeline/get",
         (true, "", "GET" | "HEAD") => "indices:admin/get",
-        (true, "", "PUT") => "indices:admin/create",
+        // `POST /{index}` is the same door as `PUT /{index}`; it used to fall
+        // through to the document write below, so the `write` action group
+        // created indices
+        (true, "", "PUT" | "POST") => "indices:admin/create",
         (true, "", "DELETE") => "indices:admin/delete",
         (true, _, "GET" | "HEAD") if !tail.starts_with('_') => "indices:data/read/get",
         (true, _, "DELETE") if !tail.starts_with('_') => "indices:data/write/delete",
@@ -537,10 +585,19 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             _ => "cluster:monitor/state",
         },
         (false, "_nodes", _) => "cluster:monitor/nodes/info",
+        // Everything under `_cat` that reads an index is an index action.
+        // The fallback used to make them all `cluster:monitor/state`, so a
+        // monitoring identity with no index permission read every index's
+        // field names out of `_cat/fielddata`.
         (false, "_cat", _) => match rest.get(1).copied().unwrap_or("") {
             "indices" => "indices:monitor/settings/get",
             "aliases" => "indices:admin/aliases/get",
-            "shards" | "segments" | "count" | "recovery" => "indices:monitor/stats",
+            "shards" | "segments" | "count" | "recovery" | "fielddata" | "docs" | "store" => {
+                "indices:monitor/stats"
+            }
+            "snapshots" => "cluster:admin/snapshot/get",
+            "repositories" => "cluster:admin/repository/get",
+            "templates" => "indices:admin/template/get",
             _ => "cluster:monitor/state",
         },
         (false, "_tasks", _) => "cluster:monitor/task",
@@ -561,12 +618,27 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             "cluster:admin/ingest/pipeline/simulate"
         }
         (false, "_ingest", _) => "cluster:admin/ingest/pipeline/put",
+        // `/_scripts/painless/_execute` compiles and runs what it is given,
+        // by GET as well as by POST: reading a stored script is not that
+        (false, "_scripts", _)
+            if rest.get(1) == Some(&"painless") && rest.get(2) == Some(&"_execute") =>
+        {
+            "cluster:admin/scripts/painless/execute"
+        }
         (false, "_scripts", "GET") => "cluster:admin/script/get",
         (false, "_scripts", "DELETE") => "cluster:admin/script/delete",
         (false, "_scripts", _) => "cluster:admin/script/put",
         (false, "_data_stream", "GET") => "indices:admin/data_stream/get",
         (false, "_data_stream", "DELETE") => "indices:admin/data_stream/delete",
         (false, "_data_stream", _) => "indices:admin/data_stream/create",
+        // A restore writes indices into the cluster and lets the caller
+        // choose their names: it is not the permission for taking a backup.
+        (false, "_snapshot", _) if rest.last() == Some(&"_restore") => {
+            "cluster:admin/snapshot/restore"
+        }
+        (false, "_snapshot", _) if rest.last() == Some(&"_status") => {
+            "cluster:admin/snapshot/status"
+        }
         (false, "_snapshot", "GET") => "cluster:admin/snapshot/get",
         (false, "_snapshot", "DELETE") => "cluster:admin/snapshot/delete",
         (false, "_snapshot", _) => "cluster:admin/snapshot/create",

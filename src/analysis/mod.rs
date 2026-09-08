@@ -1914,16 +1914,18 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
                     if *edges && start > 0 {
                         break;
                     }
-                    for size in *min..=*max {
-                        if start + size <= chars.len() {
-                            out.push((
-                                chars[start..start + size].iter().collect::<String>(),
-                                p,
-                                a,
-                                b,
-                                1,
-                            ));
-                        }
+                    // the widths that can actually fit: looping to `max`
+                    // and testing inside it meant a `max_gram` of a billion
+                    // span a billion iterations per position, doing nothing
+                    let widest = (chars.len() - start).min(*max);
+                    for size in *min..=widest {
+                        out.push((
+                            chars[start..start + size].iter().collect::<String>(),
+                            p,
+                            a,
+                            b,
+                            1,
+                        ));
                     }
                 }
             }
@@ -2783,9 +2785,7 @@ impl Registry {
         let filters = analysis.get("filter").cloned().unwrap_or(Value::Null);
         for (name, spec) in analysis.get("filter").and_then(|f| f.as_object())?.iter() {
             let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if kind == "shingle"
-                && let Some(why) = shingle_complaint(spec)
-            {
+            if let Some(why) = filter_complaint(spec, max_ngram_diff(settings)) {
                 return Some(why);
             }
             if filter_of_spec(spec, &filters).is_none() {
@@ -3111,6 +3111,78 @@ fn token_filter(name: &str, defined: &Value) -> Option<Vec<Step>> {
 const MAX_SHINGLE_DIFF: usize = 3;
 
 /// What is wrong with a shingle filter's sizes, in the reference's words.
+/// The most widths an ngram filter may span, and the most buckets a MinHash
+/// filter may be asked for.
+///
+/// Without these, `{"type":"ngram","min_gram":1,"max_gram":1000000000}` is
+/// one `_analyze` request that makes every substring of its text, and
+/// `{"type":"min_hash","bucket_count":100000000000}` is an allocation the
+/// process aborts on rather than an error anybody is told about.
+pub(crate) const MAX_NGRAM_DIFF_DEFAULT: usize = 1;
+const MOST_MINHASH_BUCKETS: usize = 4096;
+
+/// What is wrong with an ngram or edge_ngram filter's widths, if anything.
+///
+/// `allowed` is what the index says its `index.max_ngram_diff` is, which an
+/// index that means to build wide ngrams raises for itself.
+fn ngram_complaint(spec: &Value, kind: &str, allowed: usize) -> Option<String> {
+    let num =
+        |k: &str, d: usize| spec.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(d);
+    let min = num("min_gram", 1);
+    let max = num("max_gram", 2);
+    if max < min {
+        return Some(format!(
+            "In {kind} TokenFilter max_gram [{max}] must be greater than or equal to min_gram \
+             [{min}]"
+        ));
+    }
+    let span = max - min;
+    if span > allowed {
+        return Some(format!(
+            "The difference between max_gram and min_gram in {kind} TokenFilter must be less \
+             than or equal to: [{allowed}] but was [{span}]. This limit can be set by changing \
+             the [index.max_ngram_diff] index level setting."
+        ));
+    }
+    None
+}
+
+/// What an index says its widest ngram span may be.
+pub(crate) fn max_ngram_diff(settings: &Value) -> usize {
+    let read = |p: &str| settings.pointer(p).and_then(|v| v.as_u64());
+    read("/index/max_ngram_diff")
+        .or_else(|| read("/index.max_ngram_diff"))
+        .or_else(|| read("/max_ngram_diff"))
+        .map(|v| v as usize)
+        .unwrap_or(MAX_NGRAM_DIFF_DEFAULT)
+}
+
+/// What is wrong with a MinHash filter's bucket count, if anything.
+fn min_hash_complaint(spec: &Value) -> Option<String> {
+    let buckets =
+        spec.get("bucket_count").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(512);
+    (buckets > MOST_MINHASH_BUCKETS).then(|| {
+        format!(
+            "bucket_count in MinHash TokenFilter must be less than or equal to: \
+             [{MOST_MINHASH_BUCKETS}] but was [{buckets}]"
+        )
+    })
+}
+
+/// What is wrong with a filter, whatever kind it is.
+pub(crate) fn filter_complaint(spec: &Value, allowed_span: usize) -> Option<String> {
+    match spec.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "shingle" => shingle_complaint(spec),
+        // `max_ngram_diff` bounds the ngram filter and not the edge_ngram
+        // one: edge ngrams grow with the token rather than with the square
+        // of it, and the reference lets `min_gram: 3, max_gram: 6` through
+        "ngram" => ngram_complaint(spec, "NGram", allowed_span),
+        "edge_ngram" => ngram_complaint(spec, "EdgeNGram", usize::MAX),
+        "min_hash" => min_hash_complaint(spec),
+        _ => None,
+    }
+}
+
 fn shingle_complaint(spec: &Value) -> Option<String> {
     let num =
         |k: &str, d: usize| spec.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(d);

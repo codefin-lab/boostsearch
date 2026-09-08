@@ -91,6 +91,10 @@ pub fn write_doc_internal(
     write_doc_within(st, id, source, op_type, raw, forced, false)
 }
 
+/// How many fields an index may hold before a document teaching it another
+/// one is refused, where nothing says otherwise.
+const DEFAULT_TOTAL_FIELDS: u64 = 1000;
+
 pub fn write_doc_versioned(
     st: &mut IdxState,
     id: &str,
@@ -207,6 +211,22 @@ fn write_doc_within(
     // on later
     if let Some(why) = crate::search::percolator_complaint(st, &source) {
         return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
+    }
+    // A mapping learned from documents grew without any ceiling at all: one
+    // bulk of documents each naming a field of its own put two hundred
+    // thousand properties into the index's mapping, and the mapping lives in
+    // memory and in the cluster state. The reference bounds it, and says so
+    // in the same words.
+    let most_fields =
+        st.numeric_setting("mapping.total_fields.limit").unwrap_or(DEFAULT_TOTAL_FIELDS) as usize;
+    if st.mapping.field_count() >= most_fields && st.mapping.teaches_anything(&source) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Limit of total fields [{most_fields}] has been exceeded while adding new fields"
+            ),
+        ));
     }
     let mut newly_mapped = st.mapping.learn_dynamic(&source);
     // what a derived object holds is learned the way a dynamic field is, so

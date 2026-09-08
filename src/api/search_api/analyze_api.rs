@@ -308,6 +308,19 @@ pub async fn analyze(
         .or_else(|| p.get("analyzer").map(|s| s.as_str()));
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let st = store.resolve(&expr).into_iter().next().and_then(|n| store.get(&n));
+    // A filter the request describes is built here and nowhere else, so the
+    // bounds the index path applies have to be applied to it too: an ngram
+    // filter spanning a billion widths made every substring of the text, and
+    // nothing refused it.
+    let allowed_span = match &st {
+        Some(s) => crate::analysis::max_ngram_diff(&s.read().settings),
+        None => crate::analysis::MAX_NGRAM_DIFF_DEFAULT,
+    };
+    for spec in body.get("filter").and_then(|f| f.as_array()).into_iter().flatten() {
+        if let Some(why) = crate::analysis::filter_complaint(spec, allowed_span) {
+            return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why);
+        }
+    }
     // a tokenizer only splits; folding case is a filter, and naming one
     // without the other asks for the split alone
     let tokenizer_only =

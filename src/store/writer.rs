@@ -117,9 +117,15 @@ impl IdxState {
         if self.writer.is_none() || self.last_write.elapsed() < idle_for {
             return false;
         }
-        // whatever is queued has to reach the writer first: the copy kept for a
-        // realtime read is cleared below, and it is the only other record of it
-        let _ = self.apply_ops(None);
+        // Whatever is queued has to reach the writer first: the copy kept for
+        // a realtime read is cleared below, and it is the only other record
+        // of it. A queue the writer would not take is a queue that is still
+        // owed -- the failure used to be discarded and the record cleared
+        // anyway, so an acknowledged write read as missing until the next
+        // refresh brought the deferred ops back.
+        if self.apply_ops(None).is_err() {
+            return false;
+        }
         if let Some(mut w) = self.writer.take() {
             if w.commit().is_err() {
                 // could not flush cleanly: keep it rather than lose the writes

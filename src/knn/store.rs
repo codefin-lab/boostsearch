@@ -336,7 +336,10 @@ impl Vectors {
                 }
             }
         }
-        if std::fs::write(path, out).is_ok() {
+        // whole or not at all, and forced: the live file used to be truncated
+        // and rewritten in place, so a crash could leave it ending on a
+        // record boundary -- which loads cleanly and is short of vectors
+        if crate::store::write_atomic(path, &out).is_ok() {
             self.dirty = false;
         }
     }

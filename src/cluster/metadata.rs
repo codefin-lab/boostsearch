@@ -175,15 +175,28 @@ pub fn with_terms(
 
 /// The store as a metadata source, and as the host of the copies the
 /// manager puts on this node.
+/// What names a tombstone: the index and the copy of it that was buried,
+/// which is how one tombstone is told from another for the same name.
+fn buried_key(t: &Value) -> String {
+    let name = t.pointer("/index/index_name").and_then(|n| n.as_str()).unwrap_or("");
+    let uuid = t.pointer("/index/index_uuid").and_then(|u| u.as_str()).unwrap_or("");
+    format!("{name}/{uuid}")
+}
+
 pub struct StoreSource {
     pub store: crate::store::Store,
     /// how many graveyard entries have been handed to the manager
-    tombstones_seen: parking_lot::Mutex<usize>,
+    /// which tombstones have been handed to the manager, by the index they
+    /// bury rather than by how many there were: the graveyard shrinks when a
+    /// buried name is created again, and a count into it then points past the
+    /// end -- so the next deletion was never published at all, and the index
+    /// came back from the copies on the other nodes
+    tombstones_seen: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 impl StoreSource {
     pub fn new(store: crate::store::Store) -> StoreSource {
-        StoreSource { store, tombstones_seen: parking_lot::Mutex::new(0) }
+        StoreSource { store, tombstones_seen: parking_lot::Mutex::new(Default::default()) }
     }
 
     /// Fill a copy from the primary's documents, off this thread; the
@@ -301,14 +314,18 @@ impl MetadataSource for StoreSource {
         let all = self.store.tombstones();
         let all = all.as_array().cloned().unwrap_or_default();
         let mut seen = self.tombstones_seen.lock();
-        let fresh: Vec<Value> = all.iter().skip(*seen).cloned().collect();
-        *seen = all.len();
+        let fresh: Vec<Value> =
+            all.iter().filter(|t| !seen.contains(&buried_key(t))).cloned().collect();
+        // what the graveyard no longer holds is forgotten here too, so a name
+        // buried, brought back and buried again is published both times
+        *seen = all.iter().map(buried_key).collect();
         fresh
     }
 
     fn has_tombstones(&self) -> bool {
-        let n = self.store.tombstones().as_array().map(|a| a.len()).unwrap_or(0);
-        n > *self.tombstones_seen.lock()
+        let all = self.store.tombstones();
+        let seen = self.tombstones_seen.lock();
+        all.as_array().map(|a| a.iter().any(|t| !seen.contains(&buried_key(t)))).unwrap_or(false)
     }
 
     fn customs(&self) -> Value {

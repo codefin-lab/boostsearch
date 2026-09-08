@@ -523,10 +523,21 @@ def main():
     if args.filter:
         files = [f for f in files if args.filter in f]
 
-    try:
-        SESSION.get(args.url, timeout=5)
-    except Exception as e:
-        print(f"cannot reach server at {args.url}: {e}")
+    # A run that follows another one starts while the machine is still
+    # holding that run's sockets in TIME_WAIT, and a single connect with a
+    # five-second bound fails there -- so a suite that would have passed
+    # ended in "cannot reach server" before it had asked anything.
+    last = None
+    for _ in range(30):
+        try:
+            SESSION.get(args.url, timeout=5)
+            last = None
+            break
+        except Exception as e:
+            last = e
+            time.sleep(2)
+    if last is not None:
+        print(f"cannot reach server at {args.url}: {last}")
         sys.exit(2)
 
     total = passed = failed = skipped = 0

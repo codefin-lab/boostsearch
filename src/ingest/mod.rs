@@ -785,6 +785,10 @@ pub struct Outcome {
 }
 
 /// Run a pipeline over a document.
+/// How deep one pipeline may call another. OpenSearch stops at the same
+/// number, and the reason is the stack rather than the sense of it.
+pub(crate) const MOST_NESTED_PIPELINES: usize = 50;
+
 pub fn run_pipeline(
     store: &Store,
     pipeline: &Pipeline,
@@ -796,6 +800,19 @@ pub fn run_pipeline(
         return Err(IngestError::of(
             "illegal_state_exception",
             format!("Cycle detected for pipeline: {}", pipeline.name),
+        ));
+    }
+    // A chain of *different* pipelines is not a cycle, and each link is a
+    // frame on the stack: two thousand of them, which is two thousand
+    // ordinary API calls to set up, overran the thread's stack -- and a
+    // stack overflow is not an error a request can be refused with.
+    if depth.len() >= MOST_NESTED_PIPELINES {
+        return Err(IngestError::of(
+            "illegal_state_exception",
+            format!(
+                "Pipelines are nested more than {MOST_NESTED_PIPELINES} deep, starting at [{}]",
+                depth.first().map(String::as_str).unwrap_or("")
+            ),
         ));
     }
     depth.push(pipeline.name.clone());

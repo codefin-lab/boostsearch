@@ -4462,3 +4462,150 @@ Measured: unit 181/181, phase 1 398/398, the core corpus 1,427/1,427 over all
 acknowledged writes and 54,876 copies checked with none lost, the auth matrix
 at 1,587 answers over 334 routes, and the refusal, restart and fuzz checks
 green.
+
+## The fourth review
+
+Seven readers over the whole tree, and one more over the two commits above.
+They came back with about forty things, which is more than the third review
+found -- and six of them were made by the third review's own fixes. Those
+went first.
+
+### What the last two commits broke
+
+**A deleted index came back.** The graveyard is trimmed when a buried name is
+created again -- which is what a restore does -- and the manager's cursor
+into it was a *count*. Shrinking the list left the count past the end, so the
+next deletion was never handed to the manager at all: acknowledged locally,
+never published, and the copies on the other nodes refilled it. The cursor is
+now what has been buried rather than how much of it there was.
+
+**A rollover opened an alias up.** Keeping the alias on the index that was
+rolled over replaced its whole definition with `is_write_index: false`, and
+an alias with no filter shows everything in the index. A filtered write alias
+over a tenant's data therefore showed every tenant's after its first
+rollover. What the alias meant is kept; only its write-ness is taken away.
+
+**A walk stopped at the node boundary.** The marker that exempts a walk the
+server runs for itself from the result window became a thread-local, and a
+thread-local does not travel: on a cluster of more than one node the remote
+leg refused the walk halfway through, after a by-query had already changed
+some documents. It rides on the transport now, where a caller cannot write
+it.
+
+**A restore that could not read left a phantom index** standing in the way of
+the retry, because the index was created before the documents were read. And
+**the loser of a create race wrote its mapping into the winner's directory**,
+so a restart could reopen the index with the mapping of the create that was
+refused.
+
+### Judged as the wrong thing
+
+The action a REST path stands for is derived from its segments, and six of
+those derivations were wrong in the direction that grants:
+
+- Every ISM route was a *policy write*, so the index each one names was never
+  judged: a caller with the ISM cluster permission and no index permission
+  could attach a policy whose first action is `delete` to `*`.
+- `PUT /_search/pipeline/{name}` begins with `_search`, so writing one was
+  `indices:data/read/search` -- a read-only identity could configure the
+  cluster's search pipelines. The arm written for it was unreachable.
+- `POST /{index}` created an index under the document-write permission.
+- A restore was graded as taking a backup, so a backup operator could
+  restore another tenant's indices under names of their choosing.
+- `GET /_scripts/painless/_execute` compiles and runs what it is given, and
+  was graded as reading a stored script.
+- `/_cat/fielddata` and its neighbours fell through to `cluster:monitor/state`,
+  so a monitoring identity read every index's field names.
+- And `/_plugins/_knn/warmup/{index}` was the plugin's statistics.
+
+**Field-level security had a door in it.** The pass that hides fields and
+masks values looks the caller's view up by the hit's `_index`, and
+`stored_fields: "_none_"` builds the hit without one: every hidden field and
+every masked value came back in the clear, and the read was not audited
+either. The identity is taken off at the end now, after the pass has used it.
+
+**A partial grant was a full grant, per item.** `item_refusal` refused only
+an outright `Denied`, so with `do_not_fail_on_forbidden` set, one `_msearch`
+header naming a granted index and a forbidden one was answered from both.
+
+**And two nodes' worth of coordination was ungated.** `PUBLISH` and `COMMIT`
+were the only coordination requests that did not ask whether the sender is a
+node of this cluster: without transport TLS, anything that could open a
+connection and read the term back out of a refusal could publish a state of
+its own making.
+
+### Crashes and ceilings
+
+A `date` processor sliced `TAI64N` at byte 16 and a timezone at byte 2
+without asking whether either was a character boundary -- a document a caller
+writes, and the node panics. `_split` divided by the source index's shard
+count, which could be zero, because nothing bounded `number_of_shards` at
+all: `1000000000000` was accepted, and `_cat/shards` builds a row per shard.
+Shards and copies are now held to 1,024, and zero is refused.
+
+An ngram token filter had no `max_ngram_diff` (the tokenizer did), so one
+`_analyze` request could ask for every substring of its text; MinHash had no
+bound on its bucket count, which is an allocation the process aborts on. A
+chain of two thousand pipelines, each calling the next, overran the stack --
+a cycle was caught, a chain was not. A mapping learned from documents had no
+`total_fields` ceiling: a bulk of documents each naming a field of its own
+put two hundred thousand properties into the cluster state. And a peer's
+four-byte length header allocated up to half a gigabyte before a byte of the
+frame had been read.
+
+### Held threads
+
+The third review's last finding was a `ureq` call with no timeout. There were
+more of them, and worse: the audit sink's webhook client had none *and* an
+unbounded queue in front of it, so a collector that accepted the connection
+and never answered grew the queue with every audited request until the node
+died. Every LDAP operation after the connect was unbounded, and each
+authentication opens a fresh connection. A TLS handshake had no bound, so a
+half-sent ClientHello held a task and a socket for as long as the peer liked.
+The reindex scroll cleanup was the last bare `ureq::delete` in the tree. And
+taking or restoring a snapshot ran a whole index over the network on a
+runtime thread.
+
+**A reindex could be pointed anywhere.** The allowlist is matched against the
+authority, and the authority was taken as everything up to the first `/` --
+including the user name. With an allowlist entry naming no port,
+`http://allowed.host:1@169.254.169.254` read as host `allowed.host`, port
+`1@169.254.169.254`, matched the port wildcard, and fetched from the address
+after the `@`. What is judged is now where the request will actually go, and
+a port that is not digits is not a port.
+
+### And what this review's own fixes broke
+
+Two of them, found by running the gates rather than by reading:
+
+`stored_fields: []` is not `_none_`. Taking the identity off every hit whose
+`stored_fields` list came out empty took it off those too, and the reference
+still answers them with their index and id. Only the word `_none_`, and only
+when it is the whole of what was asked for, means it.
+
+And `block_in_place` cost more than it saved. Handing a repository's work to
+it moves the worker out of the runtime and waits for a replacement, and on a
+busy machine that left the node not accepting connections for seconds at a
+time -- a worse fault than the one it was meant to fix. It is out again; what
+bounds the damage is that every call now has a timeout on it. Doing that work
+off the runtime properly is a larger change than a review can carry, and is
+written down rather than half-done.
+
+A mapping's `meta` is replaced whole rather than merged, which the deep merge
+had to learn; and `max_ngram_diff` bounds the ngram filter and not the
+edge_ngram one, because edge ngrams grow with the token rather than with the
+square of it. The ngram step now loops over the widths that can fit rather
+than to `max_gram` and testing inside, so a `max_gram` of a billion costs
+nothing.
+
+Two more gates that could not go red: a `--before` script that could not
+register its repositories failed silently, so a suite failed for a reason
+nothing explained -- it retries and says so now; and the runner gave the
+server one five-second connect before giving up, which a machine still
+holding the last run's sockets fails.
+
+Measured: unit 181/181, phase 1 398/398, the core corpus 1,427/1,427 over all
+409 files, the module suite 880/890, the auth matrix 1,587 answers over 334
+routes (one moved: `POST /{index}` now needs the permission to create an
+index), 30 refusals, 10,001 writes through a `kill -9`, 2,000 fuzz probes,
+and a chaos run of 56,418 copies with none lost.

@@ -1440,9 +1440,14 @@ pub fn item_refusal(
         return None;
     }
     let cfg = store.security.config.read();
-    let denied = actions
-        .iter()
-        .any(|a| matches!(cfg.index_verdict(&caller, a, indices), Verdict::Denied { .. }));
+    // An item names the indices it touches, and there is nothing here to
+    // narrow it to: a partial grant is a refusal, not a pass. Letting
+    // `Partial` through unnarrowed meant that with `do_not_fail_on_forbidden`
+    // set, one item of a `_msearch` naming a granted index and a forbidden
+    // one was answered from both -- the opposite of what the same verdict
+    // does one layer up, where the request is cut down to what was granted.
+    let denied =
+        actions.iter().any(|a| !matches!(cfg.index_verdict(&caller, a, indices), Verdict::Allowed));
     if !denied {
         return None;
     }

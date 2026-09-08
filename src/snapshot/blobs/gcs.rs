@@ -99,7 +99,8 @@ impl Gcs {
                 let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).ok()?;
                 let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
                 let assertion = jsonwebtoken::encode(&header, &claims, &key).ok()?;
-                let response = super::web().post(token_uri)
+                let response = super::web()
+                    .post(token_uri)
                     .send_form([
                         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                         ("assertion", assertion.as_str()),

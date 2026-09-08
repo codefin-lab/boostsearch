@@ -449,6 +449,10 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(rd: &mut R) -> anyhow::Resu
     read_frame_within(rd, MAX_FRAME).await
 }
 
+/// How much of a frame is read at a time, so that what is held is what has
+/// arrived rather than what was promised.
+const CHUNK: usize = 64 * 1024;
+
 async fn read_frame_within<R: tokio::io::AsyncRead + Unpin>(
     rd: &mut R,
     most: usize,
@@ -459,8 +463,19 @@ async fn read_frame_within<R: tokio::io::AsyncRead + Unpin>(
     if len > most {
         anyhow::bail!(FrameError::TooLong(len));
     }
-    let mut payload = vec![0u8; len];
-    rd.read_exact(&mut payload).await?;
+    // The buffer grows as the bytes arrive rather than being sized from the
+    // peer's word: four bytes claiming half a gigabyte used to commit half a
+    // gigabyte before a byte of it had been read, so a peer could take the
+    // node's memory with a handful of headers and then stall.
+    let mut payload = Vec::new();
+    let mut left = len;
+    let mut chunk = vec![0u8; CHUNK.min(len.max(1))];
+    while left > 0 {
+        let want = CHUNK.min(left);
+        rd.read_exact(&mut chunk[..want]).await?;
+        payload.extend_from_slice(&chunk[..want]);
+        left -= want;
+    }
     let env = Envelope::decode(&payload)?;
     let _ = Kind::Request;
     Ok(env)

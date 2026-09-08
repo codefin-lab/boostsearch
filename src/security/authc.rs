@@ -1010,6 +1010,16 @@ impl LdapSettings {
         Some(if self.enable_ssl { format!("ldaps://{host}") } else { format!("ldap://{host}") })
     }
 
+    /// How long one directory operation may take.
+    ///
+    /// `set_conn_timeout` bounds only the connect; every search and bind
+    /// after it was unbounded, so a directory that accepted the connection
+    /// and then stalled held the request -- and its socket -- for ever, and
+    /// every Basic-auth request opens a fresh connection.
+    fn op_timeout(&self) -> std::time::Duration {
+        self.connect_timeout.max(std::time::Duration::from_secs(10))
+    }
+
     async fn connect(&self) -> Option<ldap3::Ldap> {
         let url = self.url()?;
         let mut settings = ldap3::LdapConnSettings::new().set_conn_timeout(self.connect_timeout);
@@ -1022,6 +1032,7 @@ impl LdapSettings {
         let (conn, mut ldap) = ldap3::LdapConnAsync::with_settings(settings, &url).await.ok()?;
         ldap3::drive!(conn);
         if let (Some(dn), Some(pw)) = (&self.bind_dn, &self.password) {
+            ldap.with_timeout(self.op_timeout());
             ldap.simple_bind(dn, pw).await.ok()?.success().ok()?;
         }
         Some(ldap)
@@ -1030,6 +1041,7 @@ impl LdapSettings {
     /// The user's entry: its DN and attributes.
     async fn find_user(&self, ldap: &mut ldap3::Ldap, name: &str) -> Option<ldap3::SearchEntry> {
         let filter = fill(&self.usersearch, name, "", "");
+        ldap.with_timeout(self.op_timeout());
         let (rs, _) = ldap
             .search(&self.userbase, ldap3::Scope::Subtree, &filter, vec!["*", "+"])
             .await
@@ -1049,6 +1061,7 @@ impl LdapSettings {
         let entry = self.find_user(&mut ldap, name).await?;
         let dn = entry.dn.clone();
         let mut user_conn = self.connect_unbound().await?;
+        user_conn.with_timeout(self.op_timeout());
         let bound = user_conn.simple_bind(&dn, password).await.ok()?.success().is_ok();
         let _ = user_conn.unbind().await;
         let _ = ldap.unbind().await;
@@ -1139,6 +1152,7 @@ impl LdapSettings {
                 .and_then(|(_, v)| v.first().cloned())
                 .unwrap_or_default();
             let filter = fill(&self.rolesearch, &user_dn, name, &two);
+            ldap.with_timeout(self.op_timeout());
             if let Ok(res) =
                 ldap.search(&self.rolebase, ldap3::Scope::Subtree, &filter, vec!["*"]).await
                 && let Ok((rs, _)) = res.success()
@@ -1163,6 +1177,7 @@ impl LdapSettings {
             for dn in &frontier {
                 if !self.rolename.eq_ignore_ascii_case("dn") && !out.iter().any(|_| false) {
                     // a DN from the user's entry: its name is read from the entry
+                    ldap.with_timeout(self.op_timeout());
                     if let Ok(res) =
                         ldap.search(dn, ldap3::Scope::Base, "(objectClass=*)", vec!["*"]).await
                         && let Ok((rs, _)) = res.success()
@@ -1183,6 +1198,7 @@ impl LdapSettings {
                     // the DNs whose roles are not followed, and it is applied
                     // to what comes back rather than to what is asked for
                     let filter = fill(&self.rolesearch, dn, name, "");
+                    ldap.with_timeout(self.op_timeout());
                     if let Ok(res) =
                         ldap.search(&self.rolebase, ldap3::Scope::Subtree, &filter, vec!["*"]).await
                         && let Ok((rs, _)) = res.success()

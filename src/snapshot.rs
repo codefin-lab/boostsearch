@@ -357,18 +357,20 @@ pub fn restore_index(
         "settings": meta.get("settings").cloned().unwrap_or_else(|| json!({})),
         "aliases": meta.get("aliases").cloned().unwrap_or_else(|| json!({})),
     });
-    store.create(as_name, &body).map_err(|e| e.to_string())?;
-    let Some(st) = store.get(as_name) else {
-        return Err(format!("[{as_name}] could not be created"));
-    };
-    // the documents are written by every snapshot, empty index or not, so
+    // The documents are written by every snapshot, empty index or not, so
     // their absence is a repository that cannot be read rather than an index
     // that held nothing: answering `0` for it is a restore that reports
-    // success and brings nothing back
+    // success and brings nothing back. They are read before the index is
+    // made, so a repository that cannot be read leaves nothing behind -- an
+    // index created and then failed over is one the retry cannot get past.
     let Some(docs) = from.read(&format!("{within}/docs.ndjson")) else {
         return Err(format!(
             "[{snapshot}] holds the mapping of index [{index}] but not its documents"
         ));
+    };
+    store.create(as_name, &body).map_err(|e| e.to_string())?;
+    let Some(st) = store.get(as_name) else {
+        return Err(format!("[{as_name}] could not be created"));
     };
     let mut count = 0usize;
     let mut g = st.write();

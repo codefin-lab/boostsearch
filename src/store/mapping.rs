@@ -144,6 +144,20 @@ impl Mapping {
         self.lenient.get(field).copied()
     }
 
+    /// How many fields this mapping declares, which is what
+    /// `index.mapping.total_fields.limit` bounds.
+    pub fn field_count(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Whether a document would teach this mapping a field it does not know.
+    pub fn teaches_anything(&self, source: &Value) -> bool {
+        source
+            .as_object()
+            .map(|o| o.keys().any(|k| !k.starts_with('_') && !self.types.contains_key(k)))
+            .unwrap_or(false)
+    }
+
     pub fn learn_dynamic(&mut self, source: &Value) -> Vec<String> {
         // a document shaped like one already walked, whose every top-level
         // field is mapped, has nothing new to teach
@@ -659,6 +673,7 @@ impl Mapping {
     /// PUT _mapping is additive: new properties layer onto the old ones, and
     /// top-level knobs like `dynamic` are replaced.
     pub fn merge(&mut self, body: &Value) {
+        // (see `merge_property` for how a field already mapped is amended)
         if !self.raw.is_object() {
             self.raw = serde_json::json!({});
         }
@@ -688,9 +703,20 @@ impl Mapping {
                                         inner.insert(rest.to_string(), v.clone());
                                     }
                                 }
-                                None => {
-                                    existing.insert(k.clone(), v.clone());
-                                }
+                                None => match existing.get_mut(k) {
+                                    // A field that is already mapped is
+                                    // amended, not replaced: re-sending it
+                                    // with one setting used to drop the rest
+                                    // -- its multi-fields, its analyzer, its
+                                    // `copy_to` -- and the documents already
+                                    // indexed under a dropped sub-field went
+                                    // on existing while queries against it
+                                    // answered nothing.
+                                    Some(held) => merge_property(held, v),
+                                    None => {
+                                        existing.insert(k.clone(), v.clone());
+                                    }
+                                },
                             }
                         }
                     }
@@ -743,6 +769,32 @@ pub(crate) fn collect_normalizers(
         if let Some(inner) = def.get("properties").and_then(|p| p.as_object()) {
             collect_normalizers(inner, &path, out);
         }
+    }
+}
+
+/// One field's definition, amended by what an update says about it.
+///
+/// Two objects are merged key by key, so what the update does not mention is
+/// kept; anything else the update replaces. This is what the reference does,
+/// and the reason a mapping update may add a sub-field without taking the
+/// others with it.
+fn merge_property(held: &mut Value, incoming: &Value) {
+    match (held.as_object_mut(), incoming.as_object()) {
+        (Some(held), Some(incoming)) => {
+            for (k, v) in incoming {
+                // `meta` is the field's own bag of labels, and the reference
+                // replaces it whole rather than adding to it: an update that
+                // names one label drops the others, which is what its suite
+                // asserts
+                match held.get_mut(k).filter(|_| k != "meta") {
+                    Some(inner) => merge_property(inner, v),
+                    None => {
+                        held.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        _ => *held = incoming.clone(),
     }
 }
 

@@ -29,6 +29,8 @@ import os
 import pathlib
 import socket
 import time
+import sys
+import urllib.error
 import urllib.request
 
 NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
@@ -86,13 +88,21 @@ def put(path, body):
         data=json.dumps(body).encode(),
         headers={"content-type": "application/json"},
     )
-    try:
-        # a call with no timeout can sit in `connect` for ever, and this
-        # script runs before every section: one of them hanging wedges the
-        # whole gate with nothing said
-        urllib.request.urlopen(request, timeout=20).read()
-    except Exception:
-        pass
+    # A registration that quietly failed is a section that fails for a reason
+    # nothing explains -- the repository is simply not there. The call is
+    # bounded (one that hangs would wedge the gate, since this runs before
+    # every section) and tried again a few times, because a machine busy with
+    # the run before this one refuses a connection now and takes it a moment
+    # later.
+    for attempt in range(5):
+        try:
+            urllib.request.urlopen(request, timeout=20).read()
+            return
+        except urllib.error.HTTPError:
+            return  # the server answered; what it answered is the suite's business
+        except Exception:
+            time.sleep(0.2 * (attempt + 1))
+    print(f"  the fixture could not register {path}", file=sys.stderr)
 
 
 def main():

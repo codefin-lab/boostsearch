@@ -1957,10 +1957,20 @@ impl Coordinator {
                 vec![]
             }
             (PUBLISH, Kind::Request) => {
-                let Ok(s) = serde_json::from_slice::<ClusterState>(&e.body) else { return vec![] };
                 let refuse = |reason: &str, me: &Coordinator| {
                     json!({"term": me.current_term, "reason": reason}).to_string()
                 };
+                // A state is taken only from a node of this cluster. Every
+                // other coordination request is gated this way and these two
+                // were not, so anything that could open a connection and
+                // learn the term could publish a state of its own making --
+                // its own node as manager, any indices it liked, and a
+                // graveyard that buried the rest.
+                if !self.knows(&from) {
+                    let msg = refuse("not a node of this cluster", self);
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
+                let Ok(s) = serde_json::from_slice::<ClusterState>(&e.body) else { return vec![] };
                 if s.term != self.current_term {
                     let msg = refuse("term", self);
                     return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
@@ -2036,6 +2046,12 @@ impl Coordinator {
                 out
             }
             (COMMIT, Kind::Request) => {
+                if !self.knows(&from) {
+                    let msg = json!({"term": self.current_term,
+                        "reason": "not a node of this cluster"})
+                    .to_string();
+                    return vec![self.send(&from, e.error(self.me.id.clone(), &msg))];
+                }
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
                 let term = v.get("term").and_then(|t| t.as_u64()).unwrap_or(0);
                 let version = v.get("version").and_then(|t| t.as_u64()).unwrap_or(0);

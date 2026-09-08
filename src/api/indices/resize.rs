@@ -49,7 +49,9 @@ pub async fn resize_index(
             );
         }
     }
-    let from = src.read().numeric_setting("number_of_shards").unwrap_or(1) as i64;
+    // an index that somehow declares no shards is not a divisor: `to % from`
+    // is a panic, not a refusal
+    let from = src.read().numeric_setting("number_of_shards").unwrap_or(1).max(1) as i64;
     if let Some(to) = num("number_of_shards") {
         if to < 1 {
             return err(
@@ -326,7 +328,17 @@ pub(crate) fn roll_alias(
             .unwrap_or(false);
         match was_write_alias {
             true => {
-                g.aliases.insert(alias.to_string(), json!({"is_write_index": false}));
+                // what the alias meant on this index is kept and only its
+                // write-ness is taken away: replacing the whole definition
+                // dropped the alias's filter and its routing, and an alias
+                // with no filter on an index shows everything in it
+                let kept = g.aliases.get(alias).cloned().unwrap_or_else(|| json!({}));
+                let mut kept = match kept {
+                    Value::Object(o) => o,
+                    _ => serde_json::Map::new(),
+                };
+                kept.insert("is_write_index".into(), json!(false));
+                g.aliases.insert(alias.to_string(), Value::Object(kept));
             }
             false => {
                 g.aliases.remove(alias);

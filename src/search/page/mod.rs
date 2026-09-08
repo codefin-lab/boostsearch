@@ -19,6 +19,21 @@ pub(crate) fn source_of(
     Some((id, src))
 }
 
+/// Whether the request asked for hits with no identity on them.
+///
+/// `_none_` is the word for it, written on its own or in a list of names --
+/// and only when it is the whole of what was asked for. An empty
+/// `stored_fields: []` is not it: the reference still answers those hits
+/// with their index and id, and its suite asserts as much.
+pub(crate) fn asked_for_none(body: &Value, stored: &Option<Vec<String>>) -> bool {
+    let named = match body.get("stored_fields") {
+        Some(Value::Array(a)) => a.iter().any(|x| x == "_none_"),
+        Some(other) => other == "_none_",
+        None => false,
+    };
+    named && stored.as_ref().map(|s| s.is_empty()).unwrap_or(false)
+}
+
 /// Write the page of hits the client reads.
 ///
 /// Everything expensive has happened by now: these are the documents that made
@@ -76,15 +91,17 @@ pub(crate) fn write_page(
                         other => other == "_none_",
                     })
                     .unwrap_or(false);
-            let mut hit = if none {
-                json!({"_score": if keep_score { json!(h.score) } else { Value::Null }})
-            } else {
-                json!({
-                    "_index": h.index,
-                    "_id": h.id,
-                    "_score": if keep_score { json!(h.score) } else { Value::Null },
-                })
-            };
+            // `stored_fields: _none_` asks for a hit with no identity on it,
+            // and the identity is taken off at the end of the search rather
+            // than here: the field-level security pass looks a caller's view
+            // up by `_index`, so building the hit without one handed back
+            // every hidden field and every masked value in the clear.
+            let _ = none;
+            let mut hit = json!({
+                "_index": h.index,
+                "_id": h.id,
+                "_score": if keep_score { json!(h.score) } else { Value::Null },
+            });
             // a selector on the URL is the narrower instruction and wins over
             // one in the body
             let sel = crate::api::source_selector_from_params_pub(p).or_else(|| source_sel.clone());

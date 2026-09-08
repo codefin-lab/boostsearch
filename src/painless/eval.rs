@@ -129,7 +129,10 @@ impl<'a> Interpreter<'a> {
         // the count bounds the work a script may do; the clock bounds what
         // that work may cost. A script runs on a worker of the runtime, and
         // a caller who has gone away does not stop it.
-        if self.steps.is_multiple_of(65_536) && std::time::Instant::now() > self.deadline {
+        // often enough that a step whose cost is large -- a field read on a
+        // big document, a string built from one -- cannot run for minutes
+        // between two glances at the clock
+        if self.steps.is_multiple_of(1_024) && std::time::Instant::now() > self.deadline {
             return Err(Flow::Error(
                 format!(
                     "The script has run for longer than {} seconds and was stopped.",

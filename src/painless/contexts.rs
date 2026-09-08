@@ -159,8 +159,11 @@ impl Runner {
     }
 
     pub fn with_doc(mut self, source: &Json, mapping: &Mapping) -> Runner {
-        self.doc =
-            Some(Value::Native(Rc::new(Doc { source: source.clone(), mapping: mapping.clone() })));
+        self.doc = Some(Value::Native(Rc::new(Doc {
+            source: source.clone(),
+            mapping: mapping.clone(),
+            parsed: Default::default(),
+        })));
         self.source = Some(Value::from_json(source));
         self
     }
@@ -283,6 +286,13 @@ impl Context for Runner {
 pub struct Doc {
     pub source: Json,
     pub mapping: Mapping,
+    /// The source read once rather than once per field access.
+    ///
+    /// Every `doc['x']` used to parse the whole document again, so a script
+    /// touching a field in a loop cost the size of the document per step --
+    /// minutes of wall clock inside one script invocation, on a document a
+    /// caller chose the size of.
+    parsed: std::cell::OnceCell<Value>,
 }
 
 impl NativeObject for Doc {
@@ -296,7 +306,7 @@ impl NativeObject for Doc {
             }
             "containsKey" => {
                 let field = args.first().map(|v| v.as_text()).unwrap_or_default();
-                Some(Ok(Value::Bool(get_path(&Value::from_json(&self.source), &field).is_some())))
+                Some(Ok(Value::Bool(get_path(self.source(), &field).is_some())))
             }
             "__set__" => Some(Err("Unsupported operation: doc values cannot be modified".into())),
             _ => None,
@@ -308,11 +318,15 @@ impl NativeObject for Doc {
 }
 
 impl Doc {
+    /// The document, read once.
+    fn source(&self) -> &Value {
+        self.parsed.get_or_init(|| Value::from_json(&self.source))
+    }
+
     fn field(&self, name: &str) -> Value {
         // a keyword sub-field of a text field holds the text itself
-        let held = get_path(&Value::from_json(&self.source), name).or_else(|| {
-            name.strip_suffix(".keyword")
-                .and_then(|base| get_path(&Value::from_json(&self.source), base))
+        let held = get_path(self.source(), name).or_else(|| {
+            name.strip_suffix(".keyword").and_then(|base| get_path(self.source(), base))
         });
         // a derived field has no doc values: a script reads it as absent
         if self.mapping.is_derived(name) {

@@ -105,6 +105,17 @@ impl IdxState {
             .write(true)
             .truncate(true)
             .open(dir.join(TRANSLOG));
+        // The truncation has to reach the disk before anything relies on it.
+        // The meta written just before this one goes through `write_atomic`,
+        // which forces; this did not, so the two could land out of order and
+        // a record already spent could replay over the commit that replaced
+        // it -- an acknowledged write reverted by its own record.
+        if let Ok(f) = file.as_ref() {
+            let _ = f.sync_all();
+        }
+        if let Ok(d) = std::fs::File::open(&dir) {
+            let _ = d.sync_all();
+        }
         self.translog = file.ok().map(std::io::BufWriter::new);
         self.translog_bytes_since_commit = 0;
     }

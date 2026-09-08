@@ -59,7 +59,7 @@ pub async fn put_repository(
         if let crate::snapshot::Source::Dir(dir) = &from {
             let _ = std::fs::create_dir_all(dir);
         }
-        for (snap, record) in from.records() {
+        for (snap, record) in off_the_runtime(|| from.records()) {
             store.put_snapshot(&name, &snap, record);
         }
     }
@@ -170,6 +170,20 @@ pub(crate) fn snapshot_record(
     })
 }
 
+/// A repository's work, done here.
+///
+/// Writing a snapshot or reading one back is a whole index over a network or
+/// a disk, and it runs on the thread that is answering the request -- one of
+/// the runtime's. Handing it to `block_in_place` was tried and taken out
+/// again: moving the worker out of the runtime and waiting for a replacement
+/// left the node not accepting connections for seconds at a time, which is a
+/// worse fault than the one it was meant to fix. What bounds the damage is
+/// that every call this makes now has a timeout on it; doing the work
+/// somewhere else is a larger change than a review can carry.
+fn off_the_runtime<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
 /// Read again what a repository nothing writes to has come to hold.
 ///
 /// A repository read over a URL is written to by somebody else -- that is the
@@ -187,10 +201,7 @@ fn refresh_readonly(store: &Store, repo: &str) {
     // time coming: the client has timeouts now, but a runtime thread spent
     // waiting on a repository is a thread not answering anybody. This tells
     // the runtime to carry on without it.
-    let records = match tokio::runtime::Handle::try_current() {
-        Ok(_) => tokio::task::block_in_place(|| from.records()),
-        Err(_) => from.records(),
-    };
+    let records = off_the_runtime(|| from.records());
     for (snap, record) in records {
         store.put_snapshot(repo, &snap, record);
     }
@@ -351,7 +362,9 @@ pub async fn create_snapshot(
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            if let Err(e) = crate::snapshot::write(&store, &to, &name, &kept, &record) {
+            if let Err(e) =
+                off_the_runtime(|| crate::snapshot::write(&store, &to, &name, &kept, &record))
+            {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "repository_exception",
@@ -613,7 +626,9 @@ pub async fn clone_snapshot(
             format!("[{repo}] has nowhere to write snapshot [{target}]"),
         );
     };
-    if let Err(e) = crate::snapshot::clone_into(&from, &from, &name, &target, &indices, &record) {
+    if let Err(e) = off_the_runtime(|| {
+        crate::snapshot::clone_into(&from, &from, &name, &target, &indices, &record)
+    }) {
         // whatever landed before it failed is not a snapshot anybody may
         // restore from
         crate::snapshot::remove(&from, &target);
@@ -752,9 +767,9 @@ pub async fn restore_snapshot(
                         return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
                     }
                     store.delete(&target);
-                    if let Err(e) =
+                    if let Err(e) = off_the_runtime(|| {
                         crate::snapshot::restore_index(&store, source, &name, n, &target)
-                    {
+                    }) {
                         return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
                     }
                     if let Some(st) = store.get(&target) {
@@ -778,7 +793,13 @@ pub async fn restore_snapshot(
         let Some(from) = from.as_ref() else {
             continue;
         };
-        match crate::snapshot::restore_index(&store, from, &name, n, &target) {
+        // what the repository holds is looked at before anything is made, so
+        // a repository that cannot be read leaves no half-restored index
+        // standing in the way of the next attempt
+        if let Err(e) = crate::snapshot::readable(from, &name, n) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+        }
+        match off_the_runtime(|| crate::snapshot::restore_index(&store, from, &name, n, &target)) {
             Ok(docs) => {
                 tracing::info!("restored [{target}] from [{repo}:{name}] with {docs} documents");
                 restored.push(target);

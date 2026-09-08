@@ -394,7 +394,19 @@ async fn ask(
     p: Params,
     caller: crate::security::Caller,
 ) -> (NodeId, Reply) {
-    let ask = json!({"expr": expr, "body": body, "params": p, "caller": caller});
+    // A walk the server runs for itself -- a geo aggregation, a by-query --
+    // is not paging for anybody, and is exempt from the result window. The
+    // marker is a thread-local, so it has to be carried across the node
+    // boundary or the remote leg refuses the walk halfway through. It rides
+    // on the transport rather than in the body, where a caller could write
+    // it: the transport is the trust boundary.
+    let ask = json!({
+        "expr": expr,
+        "body": body,
+        "params": p,
+        "caller": caller,
+        "as_the_server": crate::search::is_the_server(),
+    });
     let answer = rt
         .call(
             &node,
@@ -774,9 +786,18 @@ pub fn install(store: Store) {
                     .get("caller")
                     .and_then(|c| serde_json::from_value(c.clone()).ok())
                     .unwrap_or_default();
+                // the coordinator says whether this is a walk it is running
+                // for itself; a client cannot say so, because a client does
+                // not speak this action
+                let for_the_server =
+                    v.get("as_the_server").and_then(|x| x.as_bool()).unwrap_or(false);
                 let result = tokio::task::spawn_blocking(move || {
-                    crate::security::layer::CALLER
-                        .sync_scope(caller, || crate::search::run(&store, &expr, &body, &p))
+                    crate::security::layer::CALLER.sync_scope(caller, || match for_the_server {
+                        true => crate::search::as_the_server(|| {
+                            crate::search::run(&store, &expr, &body, &p)
+                        }),
+                        false => crate::search::run(&store, &expr, &body, &p),
+                    })
                 })
                 .await;
                 match result {

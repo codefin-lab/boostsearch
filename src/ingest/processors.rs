@@ -1680,7 +1680,10 @@ fn zone_offset_ms_at(zone: &str, at_ms: i64) -> i64 {
         let sign = if z.starts_with('-') { -1 } else { 1 };
         let (h, m) = match rest.split_once(':') {
             Some((h, m)) => (h.parse::<i64>().unwrap_or(0), m.parse::<i64>().unwrap_or(0)),
-            None if rest.len() == 4 => {
+            // the length is in bytes and the split has to be on a character:
+            // a four-byte zone made of one multi-byte character and one
+            // ASCII one panicked here, and the zone comes from the document
+            None if rest.len() == 4 && rest.is_char_boundary(2) => {
                 (rest[..2].parse().unwrap_or(0), rest[2..].parse().unwrap_or(0))
             }
             None => (rest.parse::<i64>().unwrap_or(0), 0),
@@ -1701,11 +1704,20 @@ fn parse_with_format(text: &str, format: &str, zone: &str) -> Result<i64, String
             .map_err(|_| "not a unix time".to_string())?,
         "UNIX_MS" => t.parse::<i64>().map_err(|_| "not a unix time in millis".to_string())?,
         "TAI64N" => {
+            // a TAI64N label is hexadecimal, so anything else is not one:
+            // slicing it at byte 16 without asking whether that is a
+            // character boundary panicked on a document a caller wrote
             let hex = t.trim_start_matches('@');
-            let secs = i64::from_str_radix(&hex[..16.min(hex.len())], 16)
-                .map_err(|_| "not a TAI64N".to_string())?;
-            let nanos =
-                if hex.len() > 16 { i64::from_str_radix(&hex[16..], 16).unwrap_or(0) } else { 0 };
+            if !hex.is_ascii() {
+                return Err("not a TAI64N".to_string());
+            }
+            let cut = 16.min(hex.len());
+            let secs =
+                i64::from_str_radix(&hex[..cut], 16).map_err(|_| "not a TAI64N".to_string())?;
+            let nanos = match hex.len() > 16 {
+                true => i64::from_str_radix(&hex[16..], 16).unwrap_or(0),
+                false => 0,
+            };
             (secs - (1i64 << 62) - 10) * 1000 + nanos / 1_000_000
         }
         "ISO8601"
@@ -1783,7 +1795,12 @@ fn format_in_zone(ms: i64, pattern: &str, zone_ms: i64) -> Option<String> {
 
 fn has_zone(t: &str) -> bool {
     t.ends_with('Z') || {
-        let tail = &t[t.len().saturating_sub(6)..];
+        // six bytes from the end need not begin at a character
+        let mut cut = t.len().saturating_sub(6);
+        while cut < t.len() && !t.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let tail = &t[cut..];
         (tail.starts_with('+') || tail.starts_with('-')) && tail.contains(':')
     }
 }

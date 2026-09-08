@@ -403,12 +403,35 @@ pub struct NodeInfo {
     pub host_name: String,
 }
 
+/// How many records may wait for a sink that is behind.
+const AUDIT_QUEUE: usize = 4096;
+
+/// The client every sink that speaks HTTP goes through.
+///
+/// With timeouts: a collector that accepts the connection and never answers
+/// used to hold the sink's one thread for as long as the operating system
+/// would wait, and the queue behind it grew with every audited request.
+fn audit_web(verify: bool) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(5)))
+        .timeout_global(Some(std::time::Duration::from_secs(30)));
+    match verify {
+        true => config.build().into(),
+        false => config
+            .tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build())
+            .build()
+            .into(),
+    }
+}
+
 pub struct AuditLog {
     pub config: RwLock<Arc<AuditConfig>>,
     pub readonly: Vec<String>,
     pub sink: Sink,
     pub node: NodeInfo,
-    tx: std::sync::mpsc::Sender<Value>,
+    tx: std::sync::mpsc::SyncSender<Value>,
+    /// records the queue could not take, because the sink is not keeping up
+    dropped: std::sync::atomic::AtomicU64,
     /// a counter per config type for `audit_compliance_doc_version`
     config_versions: parking_lot::Mutex<HashMap<String, u64>>,
     task_seq: std::sync::atomic::AtomicU64,
@@ -478,7 +501,12 @@ impl AuditLog {
             if enabled { Self::load() } else { AuditConfig::from_json(&embedded_default()) };
         let bound = crate::api::bound_address();
         let host = bound.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or(bound.clone());
-        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        // A queue with no end is a queue that ends in the node running out of
+        // memory: a webhook that accepts the connection and never answers had
+        // one thread waiting on a single delivery while every audited request
+        // added another record behind it. It is bounded, and what will not fit
+        // is dropped and counted.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(AUDIT_QUEUE);
         let log = Arc::new(AuditLog {
             config: RwLock::new(Arc::new(config)),
             readonly,
@@ -494,6 +522,7 @@ impl AuditLog {
                 }
             },
             tx,
+            dropped: std::sync::atomic::AtomicU64::new(0),
             config_versions: parking_lot::Mutex::new(HashMap::new()),
             task_seq: std::sync::atomic::AtomicU64::new(1),
             any_write_watch: std::sync::atomic::AtomicBool::new(false),
@@ -685,7 +714,19 @@ impl AuditLog {
     }
 
     fn send(&self, m: Map<String, Value>) {
-        let _ = self.tx.send(Value::Object(m));
+        // a sink that has stopped taking records must not stop the request
+        // that produced one, nor grow a queue until the node dies
+        if self.tx.try_send(Value::Object(m)).is_err() {
+            let n = self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n == 1 || n.is_multiple_of(1000) {
+                tracing::error!("the audit sink is not keeping up: {n} records have been dropped");
+            }
+        }
+    }
+
+    /// How many records the sink could not be given.
+    pub fn dropped_records(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ---- the categories ------------------------------------------------------------
@@ -1343,14 +1384,7 @@ fn deliver(sink: &Sink, msg: &Value) {
             if url.is_empty() {
                 return;
             }
-            let agent: ureq::Agent = if *verify {
-                ureq::Agent::config_builder().build().into()
-            } else {
-                ureq::Agent::config_builder()
-                    .tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build())
-                    .build()
-                    .into()
-            };
+            let agent = audit_web(*verify);
             let _ = match format.as_str() {
                 "TEXT" => agent
                     .post(url)
@@ -1392,14 +1426,7 @@ fn deliver(sink: &Sink, msg: &Value) {
         Sink::External { endpoints, index_pattern, username, password, verify } => {
             let ts = now_millis() / 1000;
             let index = index_name(index_pattern, ts);
-            let agent: ureq::Agent = if *verify {
-                ureq::Agent::config_builder().build().into()
-            } else {
-                ureq::Agent::config_builder()
-                    .tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build())
-                    .build()
-                    .into()
-            };
+            let agent = audit_web(*verify);
             for ep in endpoints {
                 let base = if ep.contains("://") { ep.clone() } else { format!("http://{ep}") };
                 let mut req = agent

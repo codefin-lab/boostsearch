@@ -1023,10 +1023,15 @@ pub fn run(
     // `post_filter`, a score floor -- decides both the page and the total, so
     // the collection cannot stop at a page's worth
     let narrowed_after = body.get("post_filter").is_some() || body.get("min_score").is_some();
+    // a rescore reorders a window wider than the page: keeping only a page's
+    // worth of candidates meant `window_size` did nothing at all, and a
+    // document the rescore query scores highest could never reach the page
+    let rescored = body.get("rescore").is_some();
     let page_want = if slice.is_some()
         || body.get("collapse").is_some()
         || nested_filtered
         || rescored_later
+        || rescored
         || narrowed_after
     {
         65_536
@@ -1485,6 +1490,19 @@ pub fn run(
                 }
                 std::cmp::Ordering::Equal
             });
+        }
+    }
+
+    // `stored_fields: _none_` asks for hits with no identity on them. The
+    // identity is taken off here, once the security pass above has used it:
+    // a hit built without an `_index` matched no caller's view, and every
+    // hidden field and masked value came back in the clear.
+    if asked_for_none(body, &stored) {
+        for hit in page.iter_mut() {
+            if let Some(o) = hit.as_object_mut() {
+                o.remove("_index");
+                o.remove("_id");
+            }
         }
     }
 
