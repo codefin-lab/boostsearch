@@ -36,8 +36,21 @@ impl Store {
         });
     }
 
+    /// A store for one request: a `derived` search or a percolation builds
+    /// one, uses it and drops it. It starts no background thread, because a
+    /// thread that outlives the store it holds is a thread per request.
+    pub fn scratch() -> Store {
+        Store::without_reaper()
+    }
+
     pub fn new() -> Store {
-        let store = Store {
+        let store = Store::without_reaper();
+        store.start_writer_reaper();
+        store
+    }
+
+    fn without_reaper() -> Store {
+        Store {
             inner: Arc::new(RwLock::new(HashMap::new())),
             data_dir: None,
             executor: shared_executor(),
@@ -62,9 +75,7 @@ impl Store {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             task_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scripts: Arc::new(RwLock::new(HashMap::new())),
-        };
-        store.start_writer_reaper();
-        store
+        }
     }
 
     /// Back indices with mmapped files under `dir`, and reopen whatever is
@@ -427,6 +438,14 @@ impl Store {
         // an index may be asked for by the date it belongs to
         let resolved = resolve_date_math_name(name);
         let name = resolved.as_str();
+        // the graveyard is how a node learns that an index it holds was
+        // deleted elsewhere, and a restore brings back the same name and the
+        // same uuid: without taking the name out of it, the restored index
+        // was deleted again a second later by the very record of its own
+        // deletion
+        self.graveyard
+            .write()
+            .retain(|t| t.pointer("/index/index_name").and_then(|n| n.as_str()) != Some(name));
         let body = &self.apply_templates(name, body);
         if self.exists(name) {
             return Err(anyhow!("resource_already_exists_exception"));
@@ -594,8 +613,19 @@ impl Store {
         // during the write left an index whose meta does not parse, and an
         // index whose meta does not parse is one this node does not open
         st.save_meta();
-        self.inner.write().insert(name.to_string(), Arc::new(RwLock::new(st)));
-        Ok(())
+        // the name is claimed under the same lock that answers whether it is
+        // taken: two creates of one index were both answered "created", the
+        // second replaced the first in the map, and the writes the first had
+        // already acknowledged were left in an index nothing points at
+        match self.inner.write().entry(name.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(anyhow!("resource_already_exists_exception"))
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Arc::new(RwLock::new(st)));
+                Ok(())
+            }
+        }
     }
 
     /// Auto-create on first write, the way OpenSearch does.

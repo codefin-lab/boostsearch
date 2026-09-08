@@ -4243,3 +4243,82 @@ Measured: 10,001 acknowledged writes over five index shapes survive
 report zero. Phase 1 398/398, the core corpus 1100/1100, the module suite
 880/890 three times running, the chaos run with none lost, and the other
 three checks green.
+
+## The third review, part one
+
+Nine readers again, this time over the parts the first two rounds touched
+least and over the four days of fixes themselves. Forty findings. The
+first half of them are fixed here; the rest follow.
+
+**The ceilings had a door in them.** The marker that says "this search is
+one the server runs for itself" -- added last week so a geo aggregation
+could read past the result window -- was a key in the request body, and
+the body is the caller's. One flag in a search turned off the result
+window, the ceiling on script fields, the ceiling on docvalue fields and
+the size guard: twenty thousand script fields answered in a 302 MB body,
+seven gigabytes resident, from one request. The marker is a thread-local
+now, set around the walks the server runs and unreachable from anything a
+caller sends.
+
+**A script could still wedge the node.** The step budget was charged in
+five places, none of them a call: a function that calls itself twice per
+level does two-to-the-depth calls through `if` and `return` and never
+counted one of them. `f(42)` is four trillion calls; fourteen of those
+requests take every worker the runtime has, and a caller who goes away
+does not stop them. Every expression is a step now, and a script has five
+seconds of wall clock whatever it has counted.
+
+**A restored index was deleted a second later by the record of its own
+deletion.** A snapshot carries the index's uuid, so a restore brings back
+the same uuid the graveyard holds a tombstone for; the coordinator matched
+that tombstone by uuid alone and dropped the local copy. The classic
+disaster-recovery flow -- delete, restore -- lost everything, on one node,
+with the default configuration. Creating an index now takes its name out
+of the graveyard, and the match reads the name as well as the uuid.
+
+**Two creates of one index, and the writes to the first one vanish.** The
+existence check and the insert into the map were not one step, so both
+callers were told "created", the second replaced the first, and every
+write already acknowledged against the first went with it. The name is
+claimed under the same lock that answers whether it is taken. Under it lay
+a second fault of the same kind: `write_atomic` used one temporary name
+for every writer of a file, so two of them truncated each other -- which
+also made auto-creating writes fail with `No such file or directory` about
+half the time under load. Each writer has its own temporary file now, and
+sweeps it whatever happens.
+
+**A store for one request left a thread behind.** A `derived` search or a
+percolation builds a scratch store, and every store started a reaper
+thread that holds it for ever: forty requests left nine hundred threads
+and never gave them back. A scratch store starts nothing.
+
+**A retention policy deleted the index being written to.** The rollover
+stamped its timestamp on the *new* index, so `min_rollover_age` was
+for ever false for the old one and immediately true for the new: the policy
+kept what should have expired and deleted what was live. The stamp goes on
+the index that was rolled over. A write-index rollover also keeps the
+alias on that index, no longer as the write index, so everything it holds
+is still read through the name -- a plain alias still swings across, which
+is what the reference does.
+
+**And a policy could delete an index the moment it was written.** An
+`ism_template` adopted every index already there that matched its
+patterns, so writing a retention policy destroyed the history it was
+written to manage; it now claims only indices younger than the policy. A
+`change_policy` restarted the index in the new policy's default state,
+which deletes in most retention policies; it keeps the state it is in
+where the new policy has one of that name. And a rollover action whose
+conditions are not met yet was recorded as a *failure*, spending all three
+retries in the first three ticks and wedging the policy for the life of
+the index; waiting is not failing.
+
+**Three answers that said a thing had happened when it had not.** A
+delete refused by a blocked index was reported in a bulk as
+`"result": "deleted"` with `errors: false`, and counted by
+`_delete_by_query` as deleted. A reindex script may name its own
+destination per document, and only the one in the request had been judged.
+A date field holding a multi-byte character ended the whole bulk request
+with no answer at all.
+
+Measured: phase 1 398/398, the core corpus 1100/1100, the module suite
+880/890, the chaos run with none lost, and the four checks green.

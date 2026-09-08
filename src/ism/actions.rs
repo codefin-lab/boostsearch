@@ -13,6 +13,13 @@ use crate::store::Store;
 ///
 /// An error is a reason, not a panic: the engine writes it down, counts a
 /// retry, and tries again on the next tick.
+/// What an action says when its conditions are not met yet.
+///
+/// It is not a failure: a rollover waits for its conditions most of the time
+/// it is asked, and counting each wait against the retries spent them within
+/// three ticks and left the policy stuck for the life of the index.
+pub const NOT_YET: &str = "__boostsearch_not_yet";
+
 pub fn run(store: &Store, index: &str, kind: &str, spec: &Value) -> Result<String, String> {
     let body = spec.get(kind).cloned().unwrap_or(json!({}));
     match kind {
@@ -135,7 +142,11 @@ fn rollover(store: &Store, index: &str, body: &Value) -> Result<String, String> 
     });
     let met = rollover_conditions_met(store, index, &conditions);
     if !met {
-        return Err(format!("Attempting to roll over index [{index}]"));
+        // the conditions not being met yet is the ordinary state of a
+        // rollover action, not a failure of it: counting it against the
+        // retries spent them in the first three ticks and wedged the policy
+        // for the life of the index
+        return Err(NOT_YET.to_string());
     }
     let next = crate::api::next_rollover_name(index)
         .ok_or_else(|| format!("index name [{index}] does not end in a number to carry on from"))?;

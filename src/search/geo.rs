@@ -418,9 +418,10 @@ fn walk_hits(
             "from": from,
             "size": GEO_PAGE,
             "_source": [field],
-            crate::search::INTERNAL_WALK: true,
         });
-        let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+        let answer = crate::search::as_the_server(|| {
+            run(store, &targets.join(","), &probe, &Params::new())
+        })?;
         let read = answer.hits.len();
         out.extend(answer.hits.iter().cloned());
         if read < GEO_PAGE {

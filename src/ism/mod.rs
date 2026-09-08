@@ -110,6 +110,37 @@ pub fn managed(store: &Store, index: &str) -> Option<Value> {
 }
 
 /// Put an index under a policy.
+/// Put an index under a policy, keeping where it already is.
+///
+/// A change of policy is not a reset: an index sitting in `warm` under one
+/// policy stays in `warm` under the next one that has such a state. It used
+/// to start again at the new policy's `default_state`, and where that state
+/// deletes, the index was deleted on the next tick.
+pub fn change_to(store: &Store, index: &str, policy_id_name: &str) -> Result<(), String> {
+    let now_state = managed(store, index).and_then(|m| {
+        m.pointer("/managed_index/state/name").and_then(|v| v.as_str()).map(String::from)
+    });
+    attach(store, index, policy_id_name)?;
+    let Some(state) = now_state else { return Ok(()) };
+    let Some(record) = managed(store, index) else { return Ok(()) };
+    // the state is kept only where the new policy has one of that name
+    let has_it = record
+        .pointer("/managed_index/policy/states")
+        .and_then(|v| v.as_array())
+        .map(|states| {
+            states.iter().any(|s| s.get("name").and_then(|n| n.as_str()) == Some(state.as_str()))
+        })
+        .unwrap_or(false);
+    if !has_it {
+        return Ok(());
+    }
+    let mut record = record;
+    if let Some(o) = record.pointer_mut("/managed_index/state").and_then(|v| v.as_object_mut()) {
+        o.insert("name".into(), json!(state));
+    }
+    put(store, &managed_id(index), record)
+}
+
 pub fn attach(store: &Store, index: &str, policy_id_name: &str) -> Result<(), String> {
     let Some(policy) = read(store, &policy_id(policy_id_name)) else {
         return Err(format!("Policy with id {policy_id_name} does not exist"));
@@ -156,6 +187,11 @@ pub fn template_for(store: &Store, index: &str) -> Option<String> {
     if index.starts_with('.') {
         return None;
     }
+    // a template applies to indices created after the policy was written.
+    // Without this, writing a retention policy adopted every index already
+    // there that matched its pattern -- and a policy whose first state
+    // deletes then deleted them all.
+    let born = store.get(index).map(|st| st.read().created_ms).unwrap_or(0);
     let mut best: Option<(i64, String)> = None;
     for (id, body) in all(store, "policy") {
         // a policy that names no patterns claims nothing, and is passed over
@@ -176,6 +212,14 @@ pub fn template_for(store: &Store, index: &str) -> Option<String> {
                 .filter_map(|p| p.as_str())
                 .any(|p| p == index || crate::store::glob_match(p, index));
             if !matched {
+                continue;
+            }
+            let written = body
+                .get("policy")
+                .and_then(|p| p.get("last_updated_time"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if (born as i64) < written {
                 continue;
             }
             let priority = template.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);

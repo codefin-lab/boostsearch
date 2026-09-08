@@ -939,6 +939,10 @@ pub async fn reindex(
     // every index a document was written to is refreshed at the end; a
     // script may have sent some elsewhere
     let mut written: Vec<String> = vec![to.clone()];
+    // the destinations already judged for this caller: the one the request
+    // named is judged above, and each one a script names is judged once
+    let mut judged: std::collections::HashSet<String> = std::collections::HashSet::new();
+    judged.insert(to.clone());
     // where a destination names a routing, it decides which shard each
     // document lands on: `=value` writes them all under one, `discard` drops
     // the one the source carried, and `keep` leaves it as it stands
@@ -984,7 +988,26 @@ pub async fn reindex(
                 && let Some(index_now) =
                     crate::painless::value::map_get(m, &crate::painless::Value::str("_index"))
             {
-                to = index_now.as_text();
+                let named = index_now.as_text();
+                // the destination the request named was judged before the
+                // walk began; a script may name another one per document,
+                // and that one is judged too -- once per name, not once per
+                // document
+                if named != to && !judged.contains(&named) {
+                    if let Some(why) = crate::security::item_refusal(
+                        &store,
+                        &["indices:data/write/index"],
+                        &crate::security::layer::indices_for_expr(&store, &named),
+                    ) {
+                        tally.failures.push(json!({
+                            "index": named, "id": seen.id, "status": 403,
+                            "cause": {"type": "security_exception", "reason": why},
+                        }));
+                        continue;
+                    }
+                    judged.insert(named.clone());
+                }
+                to = named;
             }
             match op.as_str() {
                 "noop" => {
@@ -994,8 +1017,21 @@ pub async fn reindex(
                 "delete" => {
                     // the document deleted is the one the script named
                     let target = changed_id.clone().unwrap_or_else(|| id.clone());
+                    let mut done = false;
                     if let Some(st) = store.get(&to) {
-                        let _ = crate::api::doc::delete_doc(&mut st.write(), &target);
+                        let (answer, status) =
+                            crate::api::doc::delete_doc(&mut st.write(), &target);
+                        done = status.is_success();
+                        if !done {
+                            tally.failures.push(json!({
+                                "index": to, "id": target,
+                                "status": status.as_u16(),
+                                "cause": answer.get("error").cloned().unwrap_or(json!({})),
+                            }));
+                        }
+                    }
+                    if !done {
+                        continue;
                     }
                     tally.deleted += 1;
                     continue;

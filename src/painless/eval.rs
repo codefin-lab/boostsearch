@@ -85,12 +85,19 @@ pub struct Interpreter<'a> {
     pub context: &'a mut dyn Context,
     pub steps: u64,
     pub max_steps: u64,
+    /// when this script has had long enough, whatever it has counted
+    deadline: std::time::Instant,
     /// How many calls are open: a function that calls itself without end
     /// is refused before the stack runs out.
     pub depth: usize,
 }
 
 const MAX_CALL_DEPTH: usize = 100;
+
+/// How long one script may run. OpenSearch has no such ceiling because its
+/// scripts are counted by the JVM's own instrumentation; this one counts
+/// steps, and a step is not a unit of time.
+const SCRIPT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl<'a> Interpreter<'a> {
     pub fn run(program: &'a Program, context: &'a mut dyn Context) -> Result<Value, Flow> {
@@ -99,6 +106,7 @@ impl<'a> Interpreter<'a> {
             context,
             steps: 0,
             max_steps: 5_000_000,
+            deadline: std::time::Instant::now() + SCRIPT_DEADLINE,
             depth: 0,
         };
         let mut scope = Scope::new();
@@ -115,6 +123,18 @@ impl<'a> Interpreter<'a> {
             return Err(Flow::Error(
                 "The maximum number of statements that can be executed in a loop has been reached."
                     .into(),
+                at,
+            ));
+        }
+        // the count bounds the work a script may do; the clock bounds what
+        // that work may cost. A script runs on a worker of the runtime, and
+        // a caller who has gone away does not stop it.
+        if self.steps.is_multiple_of(65_536) && std::time::Instant::now() > self.deadline {
+            return Err(Flow::Error(
+                format!(
+                    "The script has run for longer than {} seconds and was stopped.",
+                    SCRIPT_DEADLINE.as_secs()
+                ),
                 at,
             ));
         }
@@ -309,6 +329,7 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn expr(&mut self, e: &Expr, scope: &mut Scope) -> Fallible {
+        self.tick(0)?;
         match e {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),

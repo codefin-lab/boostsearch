@@ -189,7 +189,7 @@ pub async fn change_policy(
         if crate::ism::managed(store, name).is_none() {
             return Err("This index does not have a policy".to_string());
         }
-        crate::ism::attach(store, name, policy)?;
+        crate::ism::change_to(store, name, policy)?;
         if let Some(state) = &state
             && let Some(mut held) = crate::ism::managed(store, name)
         {

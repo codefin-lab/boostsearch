@@ -671,10 +671,19 @@ pub async fn bulk(
                                 "result": "noop", "status": 200
                             }}),
                             "delete" => {
-                                let (body, _) = delete_doc(&mut g, &id);
+                                let (body, status) = delete_doc(&mut g, &id);
                                 let mut b = body;
-                                b["result"] = json!("deleted");
-                                b["status"] = json!(200);
+                                // a refusal is this item's failure, not a
+                                // delete: writing "deleted" over it told a
+                                // retention job the document was gone while
+                                // it was still there
+                                if status.is_success() {
+                                    b["result"] = json!("deleted");
+                                }
+                                b["status"] = json!(status.as_u16());
+                                if !status.is_success() {
+                                    errors = true;
+                                }
                                 json!({"update": b})
                             }
                             _ => match write_doc(&mut g, &id, source, "index") {

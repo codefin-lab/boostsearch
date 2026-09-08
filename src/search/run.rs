@@ -549,9 +549,10 @@ pub fn walk_every_hit(
             "from": from,
             "size": PAGE,
             "track_scores": track_scores,
-            crate::search::INTERNAL_WALK: true,
         });
-        let page = run(store, &targets.join(","), &probe, &Params::new())?;
+        let page = crate::search::as_the_server(|| {
+            run(store, &targets.join(","), &probe, &Params::new())
+        })?;
         let read = page.hits.len();
         match out.as_mut() {
             Some(all) => all.hits.extend(page.hits),
@@ -601,8 +602,6 @@ pub fn run(
         return crate::cluster::search::run_spanning(store, expr, body, p, plan);
     }
     const BODY_KEYS: &[&str] = &[
-        // the marker a walk this server runs for itself carries
-        crate::search::INTERNAL_WALK,
         "derived",
         "query",
         "from",
@@ -722,7 +721,7 @@ pub fn run(
     // the result window is a ceiling on what a caller may page through; a
     // walk this server runs for itself -- a geo aggregation reading every
     // matching document -- is not paging for anyone
-    if !body.get(crate::search::INTERNAL_WALK).and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !crate::search::is_the_server() {
         check_limits(store, &targets, body, p, from, size)?;
     }
     // `ignore_unavailable` says to pass over what cannot be searched rather
@@ -1810,7 +1809,7 @@ fn run_with_derived(
     let Some(first) = targets.first().and_then(|n| store.get(n)) else {
         return run(store, expr, &without_derived(body), p);
     };
-    let scratch = Store::new();
+    let scratch = Store::scratch();
     let Ok(st) = scratch.ensure("_derived") else {
         return run(store, expr, &without_derived(body), p);
     };

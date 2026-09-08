@@ -601,8 +601,21 @@ fn run_body(
                     Some(Value::Array(a)) => {
                         a.iter().map(|v| doc.render(&super::hash::java_text(v))).collect()
                     }
-                    _ => Vec::new(),
+                    other => {
+                        return Err(IngestError::illegal(format!(
+                            "[exclude_field] must be a string or a list of strings, not [{}]",
+                            other.map(|v| v.to_string()).unwrap_or_else(|| "null".into())
+                        )));
+                    }
                 };
+                // a template that renders to nothing names no field, and
+                // "keep nothing" would empty the document: the reference
+                // refuses an empty field name and so does this
+                if keep.iter().any(|k| k.trim().is_empty()) {
+                    return Err(IngestError::illegal(
+                        "[exclude_field] cannot be an empty string".to_string(),
+                    ));
+                }
                 if let Value::Object(o) = &mut doc.source {
                     let names: Vec<String> = o.keys().cloned().collect();
                     for n in names {
@@ -1709,7 +1722,10 @@ fn parse_with_format(text: &str, format: &str, zone: &str) -> Result<i64, String
         | "strict_date_hour_minute_second" => {
             // a zone written without its colon, or a space for the T
             let mut spelled = t.replace(' ', "T");
-            if spelled.len() > 5 {
+            // the tail is five characters, and a character is not a byte: a
+            // date field holding one made the whole bulk request end with no
+            // answer at all
+            if spelled.len() > 5 && spelled.is_char_boundary(spelled.len() - 5) {
                 let tail = &spelled[spelled.len() - 5..];
                 if (tail.starts_with('+') || tail.starts_with('-'))
                     && tail[1..].chars().all(|c| c.is_ascii_digit())

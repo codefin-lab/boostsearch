@@ -152,7 +152,21 @@ pub(crate) fn owner_matches(owner: &Option<String>) -> bool {
 /// is what has to survive.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp");
+    // the temporary file is this writer's own: with one name for all of
+    // them, a second writer truncated the first one's file and the rename
+    // then failed or, worse, put half a file in place
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mark = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.{mark}.tmp", std::process::id()));
+    // whatever happens to this write, the temporary file does not outlive it
+    struct Sweep<'a>(&'a std::path::Path);
+    impl Drop for Sweep<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0);
+        }
+    }
+    let _sweep = Sweep(&tmp);
     {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;

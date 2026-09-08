@@ -805,7 +805,7 @@ fn percolated(store: &Store, targets: &[String], field: &str, documents: &[Value
     }
     // the documents live in a scratch index mapped the way the queries'
     // index is, less the field that holds the queries themselves
-    let scratch = Store::new();
+    let scratch = Store::scratch();
     let Ok(st) = scratch.ensure("_percolate") else { return Vec::new() };
     if let Some(named) = targets.first().and_then(|n| store.get(n)) {
         let mut raw = named.read().mapping.raw.clone();

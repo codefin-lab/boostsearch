@@ -39,9 +39,33 @@ pub fn validate_params(body: &Value, p: &Params) -> std::result::Result<(), Resp
 /// They exist because each one costs memory on the node answering, so the
 /// complaint says which setting to raise rather than only that the request was
 /// refused.
-/// The marker a probe the server runs for itself carries, so the ceilings
-/// meant for a caller's paging do not apply to it.
-pub const INTERNAL_WALK: &str = "__boostsearch_internal_walk";
+/// Whether the search being run is one the server asked for itself.
+///
+/// This was a key in the request body, which meant a caller could write it:
+/// one flag in a search body turned off the result window, the ceiling on
+/// script fields and every other limit `check_limits` applies. It is a
+/// thread-local now, set around the walks this server runs and unreachable
+/// from anything a caller sends.
+mod walking {
+    use std::cell::Cell;
+    thread_local! {
+        static INSIDE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Run `f` as a walk of the server's own, whatever it asks for.
+    pub fn as_the_server<R>(f: impl FnOnce() -> R) -> R {
+        let was = INSIDE.with(|c| c.replace(true));
+        let out = f();
+        INSIDE.with(|c| c.set(was));
+        out
+    }
+
+    pub fn is_the_server() -> bool {
+        INSIDE.with(|c| c.get())
+    }
+}
+
+pub use walking::{as_the_server, is_the_server};
 
 pub(crate) fn check_limits(
     store: &Store,

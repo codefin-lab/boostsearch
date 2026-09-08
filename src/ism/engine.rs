@@ -92,6 +92,19 @@ fn advance(store: &Store, index: &str, body: &Value) -> Option<Value> {
                 object.insert("retry_count".into(), json!(0));
                 object.insert("info".into(), json!({"message": note}));
             }
+            // an action still waiting for its conditions has not failed: it
+            // stays where it is, spends no retry, and is asked again next tick
+            Err(why) if why == actions::NOT_YET => {
+                object.insert(
+                    "action".into(),
+                    json!({"name": kind, "index": next - 1, "start_time": now, "failed": false}),
+                );
+                object.insert("retry_count".into(), json!(0));
+                object.insert(
+                    "info".into(),
+                    json!({"message": format!("Attempting to {kind} index [{index}]")}),
+                );
+            }
             Err(why) => {
                 object.insert(
                     "action".into(),

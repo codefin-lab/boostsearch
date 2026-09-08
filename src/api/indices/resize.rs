@@ -304,16 +304,37 @@ pub(crate) fn roll_alias(
     if let Some(st) = store.get(to) {
         let mut g = st.write();
         g.aliases.insert(alias.to_string(), def);
-        // when it was rolled onto, which is what a policy asks about when it
-        // wants to know how long ago that was
-        if let Some(o) = g.settings.as_object_mut() {
-            o.insert("index.rollover_time".into(), json!(crate::store::now_millis().to_string()));
-        }
         g.save_meta();
     }
     {
+        // Where the alias named the index to write through, it stays on the
+        // one that was rolled over -- no longer as the write index -- so
+        // that everything it holds is still read through that name. Where it
+        // was a plain alias, the rollover swings it, which is what the
+        // reference does and what its suite asserts.
+        //
+        // Either way the stamp goes on the index that *was* rolled over: it
+        // used to go on the new one, so a retention policy asking how long
+        // ago the rollover was deleted the index being written to and kept
+        // the one that was meant to expire.
         let mut g = src.write();
-        g.aliases.remove(alias);
+        let was_write_alias = g
+            .aliases
+            .get(alias)
+            .and_then(|d| d.get("is_write_index"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match was_write_alias {
+            true => {
+                g.aliases.insert(alias.to_string(), json!({"is_write_index": false}));
+            }
+            false => {
+                g.aliases.remove(alias);
+            }
+        }
+        if let Some(o) = g.settings.as_object_mut() {
+            o.insert("index.rollover_time".into(), json!(crate::store::now_millis().to_string()));
+        }
         g.save_meta();
     }
     Ok(())
