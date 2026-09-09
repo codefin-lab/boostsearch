@@ -365,6 +365,22 @@ pub(crate) fn resolve_terms_lookups(
                     ) else {
                         continue;
                     };
+                    // A terms lookup reads a document out of an index the
+                    // caller named, which is not the index being searched:
+                    // the layer judged that one and nothing judged this. The
+                    // values become the terms of a query, so what comes back
+                    // says what the document holds.
+                    if let Some(why) = crate::security::item_refusal(
+                        store,
+                        &["indices:data/read/get"],
+                        &[index.to_string()],
+                    ) {
+                        return Err(crate::api::err(
+                            axum::http::StatusCode::FORBIDDEN,
+                            "security_exception",
+                            why,
+                        ));
+                    }
                     let elsewhere = store.get(index).is_none();
                     if elsewhere {
                         // the index is the cluster's, not this node's: the
@@ -400,7 +416,14 @@ pub(crate) fn resolve_terms_lookups(
                     // says "whatever this group follows"
                     let list: Vec<Value> = if let Some(id) = d.get("id").and_then(|v| v.as_str()) {
                         let g = st.read();
+                        // a document the caller's own filter hides, or a
+                        // field it hides, is not a document this may read
                         let values = crate::api::read_source(&g, id)
+                            .filter(|_| crate::security::doc_visible(store, &g, id))
+                            .map(|mut src| {
+                                crate::security::narrow_source(store, &g.name, &mut src);
+                                src
+                            })
                             .and_then(|src| src.pointer(&pointer).cloned())
                             .unwrap_or(Value::Array(vec![]));
                         match values {
@@ -778,18 +801,33 @@ pub(crate) fn expand_percolate(store: &Store, targets: &[String], node: &mut Val
         (spec.get("index").and_then(|v| v.as_str()), spec.get("id").and_then(|v| v.as_str()))
         && let Some(st) = store.get(index)
     {
-        let g = st.read();
-        let searcher = g.reader.searcher();
-        let probe = boostcore::query::TermQuery::new(
-            boostcore::Term::from_field_text(g.fields.id, id),
-            boostcore::schema::IndexRecordOption::Basic,
-        );
-        if let Ok(hits) =
-            searcher.search(&probe, &boostcore::collector::TopDocs::with_limit(1).order_by_score())
-            && let Some((_, addr)) = hits.first()
-            && let Some((_, source)) = source_of(&searcher, &g, *addr)
+        // The document is read out of an index the caller named, which is not
+        // the index being searched: the layer judged the one on the path and
+        // nothing judged this one. A caller could percolate a document out of
+        // an index they may not read and learn its field values from which
+        // queries matched.
+        if crate::security::item_refusal(store, &["indices:data/read/get"], &[index.to_string()])
+            .is_some()
         {
-            documents.push(source);
+            documents.push(json!({}));
+        } else {
+            let g = st.read();
+            let searcher = g.reader.searcher();
+            let probe = boostcore::query::TermQuery::new(
+                boostcore::Term::from_field_text(g.fields.id, id),
+                boostcore::schema::IndexRecordOption::Basic,
+            );
+            if let Ok(hits) = searcher
+                .search(&probe, &boostcore::collector::TopDocs::with_limit(1).order_by_score())
+                && let Some((_, addr)) = hits.first()
+                && crate::security::doc_visible(store, &g, id)
+                && let Some((_, mut source)) = source_of(&searcher, &g, *addr)
+            {
+                // and what is hidden from the caller cannot be percolated
+                // against either
+                crate::security::narrow_source(store, &g.name, &mut source);
+                documents.push(source);
+            }
         }
     }
     let matched = percolated(store, targets, &field, &documents);

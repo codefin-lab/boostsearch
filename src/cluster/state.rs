@@ -216,6 +216,18 @@ impl RoutingTable {
         self.all().filter(move |c| c.node.as_ref() == Some(node))
     }
 
+    /// The copies a node holds, to be changed.
+    pub fn on_node_mut<'a>(
+        &'a mut self,
+        node: &'a NodeId,
+    ) -> impl Iterator<Item = &'a mut ShardRouting> + 'a {
+        self.indices
+            .values_mut()
+            .flat_map(|s| s.values_mut())
+            .flatten()
+            .filter(move |c| c.node.as_ref() == Some(node))
+    }
+
     pub fn shards_of(&self, index: &str) -> impl Iterator<Item = &ShardRouting> {
         self.indices.get(index).into_iter().flat_map(|s| s.values().flatten())
     }

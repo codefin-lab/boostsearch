@@ -88,7 +88,20 @@ pub fn write_doc_internal(
     raw: Option<String>,
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
-    write_doc_within(st, id, source, op_type, raw, forced, false)
+    write_doc_within(st, id, source, op_type, raw, forced, None, false)
+}
+
+/// A write replayed from the record of it: the version *and* the sequence
+/// number are the ones it was answered with.
+pub fn write_doc_replayed(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    raw: Option<String>,
+    version: u64,
+    seq: Option<u64>,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    write_doc_within(st, id, source, "index", raw, Some(version), seq, false)
 }
 
 /// How many fields an index may hold before a document teaching it another
@@ -103,9 +116,10 @@ pub fn write_doc_versioned(
     raw: Option<String>,
     forced: Option<u64>,
 ) -> std::result::Result<(Value, StatusCode), Response> {
-    write_doc_within(st, id, source, op_type, raw, forced, true)
+    write_doc_within(st, id, source, op_type, raw, forced, None, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_doc_within(
     st: &mut IdxState,
     id: &str,
@@ -113,6 +127,7 @@ fn write_doc_within(
     op_type: &str,
     raw: Option<String>,
     forced: Option<u64>,
+    forced_seq: Option<u64>,
     from_caller: bool,
 ) -> std::result::Result<(Value, StatusCode), Response> {
     // an index held still takes no writes until it is let go -- from a
@@ -280,7 +295,7 @@ fn write_doc_within(
     // be compared against, and wrote an audit record saying a document had
     // been written that never was.
     let (version, seq) = match forced {
-        Some(v) => st.bump_to(id, true, v),
+        Some(v) => st.bump_to_seq(id, true, v, forced_seq),
         None => st.bump(id, true, existed),
     };
     crate::security::audit_document_written(
@@ -298,9 +313,9 @@ fn write_doc_within(
     // document the refused write was meant to replace.
     // A bulk load of new documents queues no delete at all.
     if existed {
-        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+        st.queue_op_for(id, shard, crate::store::PendingOp::Delete(id.to_string()));
     }
-    st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
+    st.queue_op_for(id, shard, crate::store::PendingOp::Add(Box::new(doc)));
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     // recorded before it is answered for: the index has it only after a commit
     let routing = st.routing.get(id).cloned();
@@ -353,7 +368,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     let (version, seq) = st.bump(id, false, existed);
     let shard = st.shard_of_doc(id);
     if existed {
-        st.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+        st.queue_op_for(id, shard, crate::store::PendingOp::Delete(id.to_string()));
         if !st.mapping.vector_fields.is_empty() {
             st.vectors.write().forget(id);
         }
@@ -458,13 +473,14 @@ pub fn recover(store: &Store) {
                             g.routing.remove(id);
                         }
                     }
-                    let _ =
-                        write_doc_internal(&mut g, id, source, "index", Some(raw), Some(version));
+                    let seq = rec.get("seq").and_then(|v| v.as_u64());
+                    let _ = write_doc_replayed(&mut g, id, source, Some(raw), version, seq);
                 }
                 _ => {
-                    let (_, _) = g.bump_to(id, false, version);
+                    let seq = rec.get("seq").and_then(|v| v.as_u64());
+                    let (_, _) = g.bump_to_seq(id, false, version, seq);
                     let shard = g.shard_of_doc(id);
-                    g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+                    g.queue_op_for(id, shard, crate::store::PendingOp::Delete(id.to_string()));
                     g.note_pending(id, None);
                 }
             }
@@ -806,7 +822,7 @@ pub async fn delete_doc_route(
             // document was on, and so which refresh can show the delete
             let shard = g.shard_of_doc(&id);
             if existed {
-                g.queue_op(shard, crate::store::PendingOp::Delete(id.to_string()));
+                g.queue_op_for(&id, shard, crate::store::PendingOp::Delete(id.to_string()));
                 g.log_write(&id, None, version, seq, None);
                 g.note_pending(&id, None);
                 crate::security::audit_document_written(&g.name, &id, version, None, None, true);

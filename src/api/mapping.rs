@@ -120,12 +120,21 @@ pub async fn put_mapping(
     // leaves every document written under the old type unsearchable by the
     // new one, which is why the reference refuses the change rather than
     // taking it
+    // The check and the change are one step, under the write guard. They
+    // used to be two -- read the types, drop the guard, take it again and
+    // merge -- and a field learned dynamically in between slipped through the
+    // very check this is: documents indexed under the type the writes taught
+    // it, a mapping declaring the other. Two mapping updates for the same new
+    // field both passed the same way, and the loser was dropped in silence.
+    let declared = crate::store::declared_types(&body);
+    // every index is asked first, so that one of them refusing does not
+    // leave the others changed
     for n in &targets {
         let Some(st) = store.get(n) else { continue };
         let g = st.read();
-        for (path, ty) in crate::store::declared_types(&body) {
-            let Some(had) = g.mapping.type_of(&path) else { continue };
-            if had != ty {
+        for (path, ty) in &declared {
+            let Some(had) = g.mapping.type_of(path) else { continue };
+            if had != *ty {
                 return err(
                     StatusCode::BAD_REQUEST,
                     "illegal_argument_exception",
@@ -134,12 +143,21 @@ pub async fn put_mapping(
             }
         }
     }
-    for n in targets {
-        if let Some(st) = store.get(&n) {
-            let mut g = st.write();
-            g.mapping.merge(&body);
-            g.apply_analysis();
+    for n in &targets {
+        let Some(st) = store.get(n) else { continue };
+        let mut g = st.write();
+        for (path, ty) in &declared {
+            let Some(had) = g.mapping.type_of(path) else { continue };
+            if had != *ty {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("mapper [{path}] cannot be changed from type [{had}] to [{ty}]"),
+                );
+            }
         }
+        g.mapping.merge(&body);
+        g.apply_analysis();
     }
     axum::Json(json!({"acknowledged": true})).into_response()
 }

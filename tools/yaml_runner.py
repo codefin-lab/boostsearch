@@ -587,7 +587,7 @@ def main():
                 # to hang the run, with no output and nothing to read
                 try:
                     subprocess.run(
-                        [sys.executable, args.before], check=False, timeout=120
+                        [sys.executable, args.before], check=False, timeout=300
                     )
                 except subprocess.TimeoutExpired:
                     print(f"the --before script {args.before} did not finish; giving up")

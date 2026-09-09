@@ -54,6 +54,7 @@ impl IdxState {
             if committed {
                 let _ = self.realtime.reload();
                 self.save_meta();
+                self.save_versions();
                 self.clear_translog();
             }
         }
@@ -150,6 +151,22 @@ impl IdxState {
         }
     }
 
+    /// Queue an operation on a document, under the shard that already holds
+    /// this document's queued work if there is one.
+    ///
+    /// A shard-scoped refresh applies only its own shard's queue, and the
+    /// shard a write is filed under is read from the routing at the moment
+    /// it is queued. Change a document's routing and its `Delete` lands in a
+    /// different queue from the `Add` it was meant to retire: the delete
+    /// runs first against nothing, the old copy is handed over later, and
+    /// one id has two live documents. Everything queued for an id stays in
+    /// one queue, in order, until that queue is handed over.
+    pub fn queue_op_for(&mut self, id: &str, shard: u64, op: PendingOp) {
+        let shard = self.queued_shard.get(id).copied().unwrap_or(shard);
+        self.queued_shard.insert(id.to_string(), shard);
+        self.queue_op(shard, op);
+    }
+
     /// Hand the writer what is queued -- for one shard, or for all of them.
     pub(crate) fn apply_ops(&mut self, only: Option<u64>) -> Result<()> {
         if self.deferred.is_empty() {
@@ -159,6 +176,9 @@ impl IdxState {
             .into_iter()
             .partition(|(shard, _)| only.map(|one| *shard == one).unwrap_or(true));
         self.deferred = keep;
+        if self.deferred.is_empty() {
+            self.queued_shard.clear();
+        }
         let id_field = self.fields.id;
         let w = match self.writer() {
             Ok(w) => w,
@@ -217,6 +237,7 @@ impl IdxState {
             self.pending_seq.remove(&id);
         }
         if self.deferred.is_empty() {
+            self.save_versions();
             self.clear_translog();
         }
         self.pending_bytes = self
@@ -245,6 +266,7 @@ impl IdxState {
         // everything acknowledged is in the index now, and the index is on
         // disk: what the translog was holding for a crash is spent
         if self.deferred.is_empty() {
+            self.save_versions();
             self.clear_translog();
         }
         Ok(())
@@ -271,10 +293,14 @@ impl IdxState {
             if committed {
                 let _ = self.realtime.reload();
                 self.pending.clear();
+                // it goes with `pending`, which it stands beside: leaving it
+                // behind grew it for the length of a bulk and never freed it
+                self.pending_seq.clear();
                 self.pending_bytes = 0;
                 // the sequence numbers go with it, as they do everywhere
                 // else the translog is thrown away
                 self.save_meta();
+                self.save_versions();
                 self.clear_translog();
             }
         }

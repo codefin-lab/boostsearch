@@ -3,6 +3,11 @@
 use super::*;
 use crate::search::*;
 
+/// How many steps a calendar or zoned date_histogram may take, each of which
+/// is a search of its own. Below `search.max_buckets`, deliberately: this
+/// number is about the cost of answering, not about the size of the answer.
+pub(crate) const MOST_STEP_SEARCHES: u64 = 10_000;
+
 /// Write a date histogram's keys the way a date histogram writes them: the key
 /// is a whole number of milliseconds, and it is named beside it.
 pub(crate) fn date_histogram_keys(
@@ -244,7 +249,13 @@ pub(crate) fn run_calendar_histogram(
     // every step of this histogram is a search of its own, so the number of
     // steps is the cost of the request: it is held to the same ceiling the
     // buckets themselves are held to, and refused rather than truncated
-    let ceiling = crate::search::max_buckets(store) as usize;
+    // Two ceilings, because a bucket here costs a search of its own. The
+    // first is the one the reference applies to the buckets themselves; the
+    // second is lower and is about what answering costs -- 65,535 searches
+    // from one request body is an hour of a node's time, and a caller can
+    // ask for it with `calendar_interval: second` and a day of
+    // `extended_bounds`.
+    let ceiling = crate::search::max_buckets(store).min(MOST_STEP_SEARCHES) as usize;
     let mut guard = 0usize;
     while cursor <= last {
         guard += 1;

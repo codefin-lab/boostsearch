@@ -641,8 +641,25 @@ fn install_files(rt: &super::runtime::Runtime, store: &Store, me: &NodeId) {
                         if name == crate::store::TRANSLOG || name.ends_with(".lock") || !is_file {
                             continue;
                         }
-                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        files.push(json!({"name": name, "len": len}));
+                        // The listing is taken at one moment and the files
+                        // are fetched one by one afterwards, with nothing
+                        // holding the commit open in between: a write and a
+                        // refresh in the middle rewrites `_meta.json` and
+                        // replaces segments, and the copy is assembled out of
+                        // two generations -- short of documents, at a
+                        // sequence number the catch-up will never revisit,
+                        // and reported as in sync. What each file looked like
+                        // is carried with it, and a fetch of a file that has
+                        // changed since is refused.
+                        let meta = entry.metadata().ok();
+                        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let stamp = meta
+                            .as_ref()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        files.push(json!({"name": name, "len": len, "stamp": stamp}));
                     }
                     Ok(json!({"files": files, "max_seq": max_seq}))
                 })
@@ -677,7 +694,25 @@ fn install_files(rt: &super::runtime::Runtime, store: &Store, me: &NodeId) {
                         return Err(format!("no index [{index}] on this node"));
                     };
                     let dir = st.read().path.clone().ok_or("the index is not on disk")?;
-                    let mut f = std::fs::File::open(dir.join(&name)).map_err(|e| e.to_string())?;
+                    let at = dir.join(&name);
+                    let held = std::fs::metadata(&at).map_err(|e| e.to_string())?;
+                    let now_stamp = held
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let whole = v.get("whole").and_then(|i| i.as_u64());
+                    let stamp = v.get("stamp").and_then(|i| i.as_u64());
+                    if whole.map(|w| w != held.len()).unwrap_or(false)
+                        || stamp.map(|s| s != now_stamp).unwrap_or(false)
+                    {
+                        return Err(format!(
+                            "[{name}] changed since the listing: the commit moved under the \
+                             recovery"
+                        ));
+                    }
+                    let mut f = std::fs::File::open(&at).map_err(|e| e.to_string())?;
                     f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
                     let mut buf = vec![0u8; len as usize];
                     let mut got = 0;
@@ -721,13 +756,17 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
         return Err(format!("recovery of [{index}]: {why}"));
     }
     let v: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
-    let files: Vec<(String, u64)> = v
+    let files: Vec<(String, u64, u64)> = v
         .get("files")
         .and_then(|f| f.as_array())
         .map(|a| {
             a.iter()
                 .filter_map(|f| {
-                    Some((f.get("name")?.as_str()?.to_string(), f.get("len")?.as_u64()?))
+                    Some((
+                        f.get("name")?.as_str()?.to_string(),
+                        f.get("len")?.as_u64()?,
+                        f.get("stamp").and_then(|s| s.as_u64()).unwrap_or(0),
+                    ))
                 })
                 .collect()
         })
@@ -736,14 +775,21 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
     let tmp = dest.with_extension("recovering");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    for (name, len) in &files {
+    for (name, len, stamp) in &files {
         let mut offset = 0u64;
         let mut out = std::fs::File::create(tmp.join(name)).map_err(|e| e.to_string())?;
         use std::io::Write;
         while offset < *len {
-            let ask = serde_json::to_vec(
-                &json!({"index": index, "name": name, "offset": offset, "len": CHUNK}),
-            )
+            let ask = serde_json::to_vec(&json!({
+                "index": index,
+                "name": name,
+                "offset": offset,
+                "len": CHUNK,
+                // what this file was when it was listed: the far side refuses
+                // to serve it if it is not that any more
+                "whole": len,
+                "stamp": stamp,
+            }))
             .unwrap_or_default();
             let Some(chunk) =
                 rt.call(primary, RECOVERY_FILE, ask, std::time::Duration::from_secs(120)).await

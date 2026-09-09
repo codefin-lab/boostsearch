@@ -488,6 +488,9 @@ impl Store {
         self.finish_open(name, body, index, fields)?;
         if let Some(st) = self.get(name) {
             let mut g = st.write();
+            // the versions come back with the index: without them `_version`
+            // started again from one for every document already written
+            g.versions = crate::store::IdxState::load_versions(&path);
             g.path = Some(path);
             g.open_translog();
         }
@@ -577,6 +580,7 @@ impl Store {
             live_ids: Default::default(),
             pending: HashMap::new(),
             deferred: Vec::new(),
+            queued_shard: HashMap::new(),
             pending_seq: HashMap::new(),
             pending_bytes: 0,
             realtime,

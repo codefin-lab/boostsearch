@@ -510,22 +510,6 @@ fn matches_here(source: &Value, filter: &Value) -> bool {
     }
 }
 
-/// The ids a query matches, for the passes that narrow a page rather than
-/// build one.
-fn matching_ids(
-    store: &Store,
-    targets: &[String],
-    query: &Value,
-) -> std::result::Result<std::collections::HashSet<String>, Response> {
-    let probe = json!({"query": query, "size": 10_000, "_source": false});
-    let found = run(store, &targets.join(","), &probe, &Params::new())?;
-    Ok(found
-        .hits
-        .iter()
-        .filter_map(|hit| hit.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect())
-}
-
 /// Run a search across every resolved index and merge the results.
 /// Every hit a query matches, a page at a time.
 ///
@@ -539,17 +523,98 @@ pub fn walk_every_hit(
     query: &Value,
     track_scores: bool,
 ) -> std::result::Result<Outcome, Response> {
+    walk_every_hit_of(store, targets, query, track_scores, None)
+}
+
+/// Every document a query matches, read in one pass rather than paged.
+///
+/// A page-by-page walk asks for `from + size` each time, so the last pages
+/// collect and prune a million candidates apiece: reading a million documents
+/// cost the square of that. This asks each searcher for the whole set of
+/// matching addresses once and reads the sources from it.
+pub fn every_matching_source(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+    fields: &[String],
+    ceiling: usize,
+) -> std::result::Result<Vec<Value>, Response> {
+    let mut out: Vec<Value> = Vec::new();
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        let searcher = g.reader.searcher();
+        let ctx = crate::query::Ctx {
+            fields: &g.fields,
+            mapping: &g.mapping,
+            analysis: &g.analysis,
+            index: &g.index,
+            max_terms_count: g.max_terms_count(),
+            max_regex_length: g.max_regex_length(),
+            allow_expensive: crate::search::expensive_allowed(store),
+            observed_kinds: &g.observed_kinds,
+            kinds_complete: g.kinds_complete,
+            stats: &g.stats,
+            vectors: &g.vectors,
+        };
+        // the caller's own filter is part of the query, as it is everywhere
+        // a search is run
+        let asked = crate::security::with_dls(store, name, Some(query.clone()))
+            .unwrap_or_else(|| query.clone());
+        let q = crate::query::build(&ctx, &asked)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "query_shard_exception", e.to_string()))?;
+        let found = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+            err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
+        })?;
+        if out.len() + found.len() > ceiling {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "This aggregation reads every matching document, and this one matches more                      than [{ceiling}]. Narrow the query, or aggregate over a filtered subset."
+                ),
+            ));
+        }
+        let view = crate::security::view::view_for(store, name);
+        for addr in found {
+            let Some((id, mut source)) = source_of(&searcher, &g, addr) else { continue };
+            // and what the caller may not see of a document is not read here
+            // either
+            if let Some(view) = &view {
+                view.filter_source(&mut source);
+            }
+            let mut kept = source;
+            if !fields.is_empty() {
+                kept = crate::api::apply_source_selector(&kept, &json!(fields));
+            }
+            out.push(json!({"_index": name, "_id": id, "_source": kept}));
+        }
+    }
+    Ok(out)
+}
+
+/// The same, reading only the fields named.
+pub fn walk_every_hit_of(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+    track_scores: bool,
+    source: Option<Value>,
+) -> std::result::Result<Outcome, Response> {
     const PAGE: usize = 10_000;
     const CEILING: usize = 1_000_000;
     let mut out: Option<Outcome> = None;
     let mut from = 0usize;
     loop {
-        let probe = json!({
+        let mut probe = json!({
             "query": query.clone(),
             "from": from,
             "size": PAGE,
             "track_scores": track_scores,
         });
+        if let Some(fields) = &source {
+            probe["_source"] = fields.clone();
+        }
         let page = crate::search::as_the_server(|| {
             run(store, &targets.join(","), &probe, &Params::new())
         })?;
@@ -1271,12 +1336,43 @@ pub fn run(
     // `post_filter` narrows what comes back without narrowing what the
     // aggregations saw, which is the whole point of asking for it
     if let Some(spec) = body.get("post_filter") {
-        let keep = matching_ids(store, &targets, spec)?;
-        cands.retain(|c| {
-            let (_, searcher, st) = &searchers[c.shard];
+        // The filter is run over each searcher and every document it matches
+        // is collected, so what is kept is what really matches. It used to be
+        // a search of its own for the top ten thousand by *score*, and the
+        // page kept only the ids in that: past ten thousand matches, hits
+        // that do match were dropped and `hits.total` was wrong -- badly so
+        // when the page was sorted by something other than score.
+        let mut keep: Vec<std::collections::HashSet<boostcore::DocAddress>> = Vec::new();
+        for (_, searcher, st) in searchers.iter() {
             let g = st.read();
-            source_of(searcher, &g, c.addr).map(|(id, _)| keep.contains(&id)).unwrap_or(false)
-        });
+            let ctx = crate::query::Ctx {
+                fields: &g.fields,
+                mapping: &g.mapping,
+                analysis: &g.analysis,
+                index: &g.index,
+                max_terms_count: g.max_terms_count(),
+                max_regex_length: g.max_regex_length(),
+                allow_expensive: crate::search::expensive_allowed(store),
+                observed_kinds: &g.observed_kinds,
+                kinds_complete: g.kinds_complete,
+                stats: &g.stats,
+                vectors: &g.vectors,
+            };
+            let found = match crate::query::build(&ctx, spec) {
+                Ok(q) => {
+                    searcher.search(&q, &boostcore::collector::DocSetCollector).unwrap_or_default()
+                }
+                Err(e) => {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "query_shard_exception",
+                        e.to_string(),
+                    ));
+                }
+            };
+            keep.push(found);
+        }
+        cands.retain(|c| keep.get(c.shard).map(|k| k.contains(&c.addr)).unwrap_or(false));
         total = cands.len() as u64;
     }
 

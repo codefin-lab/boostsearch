@@ -389,49 +389,26 @@ pub(crate) fn run_geo_centroid_agg(
 /// first ten thousand and answer as though that were the index -- a wrong
 /// answer with nothing to say it was wrong. It reads all of them now, and
 /// where there are more than it will hold, it says so instead.
-const GEO_PAGE: usize = 10_000;
 const GEO_MAX_DOCS: usize = 1_000_000;
 
-fn too_many_points(found: usize) -> Response {
-    err(
-        StatusCode::BAD_REQUEST,
-        "too_many_buckets_exception",
-        format!(
-            "A geo aggregation reads every matching document, and this one matches more than \
-             [{found}]. Narrow the query, or aggregate over a filtered subset."
-        ),
-    )
-}
-
-/// Every document the query matches, a page at a time, as JSON hits.
+/// Every document the query matches, in one pass, as JSON hits.
 fn walk_hits(
     store: &Store,
     targets: &[String],
     main_query: &Option<Value>,
     field: &str,
 ) -> std::result::Result<Vec<Value>, Response> {
-    let mut out: Vec<Value> = Vec::new();
-    let mut from = 0usize;
-    loop {
-        let probe = json!({
-            "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
-            "from": from,
-            "size": GEO_PAGE,
-            "_source": [field],
-        });
-        let answer = crate::search::as_the_server(|| {
-            run(store, &targets.join(","), &probe, &Params::new())
-        })?;
-        let read = answer.hits.len();
-        out.extend(answer.hits.iter().cloned());
-        if read < GEO_PAGE {
-            return Ok(out);
-        }
-        from += GEO_PAGE;
-        if from >= GEO_MAX_DOCS {
-            return Err(too_many_points(GEO_MAX_DOCS));
-        }
-    }
+    // One pass over the matching documents rather than a hundred searches
+    // each asking for `from + size`: the paged walk collected and pruned a
+    // million candidates on its last pages, so reading a million documents
+    // cost the square of it.
+    crate::search::every_matching_source(
+        store,
+        targets,
+        &main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        &[field.to_string()],
+        GEO_MAX_DOCS,
+    )
 }
 
 fn points_found(

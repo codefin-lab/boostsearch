@@ -23,6 +23,7 @@ because the suite registers a repository there to check that registering one
 works, and never reads from it.
 """
 import functools
+import http.client
 import http.server
 import json
 import os
@@ -81,40 +82,66 @@ def serve():
         os._exit(0)
 
 
-def put(path, body):
-    request = urllib.request.Request(
-        NODE + path,
-        method="PUT",
-        data=json.dumps(body).encode(),
-        headers={"content-type": "application/json"},
-    )
-    # A registration that quietly failed is a section that fails for a reason
-    # nothing explains -- the repository is simply not there. The call is
-    # bounded (one that hangs would wedge the gate, since this runs before
-    # every section) and tried again a few times, because a machine busy with
-    # the run before this one refuses a connection now and takes it a moment
-    # later.
-    for attempt in range(5):
+def register(repositories):
+    """Register them all, over one connection, insisting until they are there.
+
+    This runs before every section of the suite, and it used to open a fresh
+    connection for each repository: nine hundred sections is nearly three
+    thousand connections, which on a busy machine is where the refusals come
+    from. One connection does all three, kept alive.
+
+    A registration that quietly failed is a section that fails for a reason
+    nothing explains -- the repository is simply not there -- so it is tried
+    again, and said out loud if it never lands.
+    """
+    host = NODE.split("://", 1)[-1]
+    left = list(repositories)
+    for attempt in range(20):
+        conn = None
         try:
-            urllib.request.urlopen(request, timeout=20).read()
-            return
-        except urllib.error.HTTPError:
-            return  # the server answered; what it answered is the suite's business
+            conn = http.client.HTTPConnection(host, timeout=10)
+            still = []
+            for path, body in left:
+                try:
+                    conn.request(
+                        "PUT",
+                        path,
+                        json.dumps(body),
+                        {"content-type": "application/json"},
+                    )
+                    conn.getresponse().read()
+                except Exception:
+                    still.append((path, body))
+                    raise
+            left = still
         except Exception:
-            time.sleep(0.2 * (attempt + 1))
-    print(f"  the fixture could not register {path}", file=sys.stderr)
+            time.sleep(min(0.2 * (attempt + 1), 2.0))
+        finally:
+            if conn is not None:
+                conn.close()
+        if not left:
+            return
+    for path, _ in left:
+        print(f"  the fixture could not register {path}", file=sys.stderr)
 
 
 def main():
     SHARED.mkdir(parents=True, exist_ok=True)
     if not serving():
         serve()
-    put("/_snapshot/repository-fs", {"type": "fs", "settings": {"location": str(SHARED)}})
-    put(
-        "/_snapshot/repository-url",
-        {"type": "url", "settings": {"url": f"http://127.0.0.1:{PORT}/"}},
+    register(
+        [
+            ("/_snapshot/repository-fs", {"type": "fs", "settings": {"location": str(SHARED)}}),
+            (
+                "/_snapshot/repository-url",
+                {"type": "url", "settings": {"url": f"http://127.0.0.1:{PORT}/"}},
+            ),
+            (
+                "/_snapshot/repository-file",
+                {"type": "url", "settings": {"url": f"file://{SHARED}/"}},
+            ),
+        ]
     )
-    put("/_snapshot/repository-file", {"type": "url", "settings": {"url": f"file://{SHARED}/"}})
 
 
 if __name__ == "__main__":

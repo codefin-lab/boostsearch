@@ -4609,3 +4609,124 @@ Measured: unit 181/181, phase 1 398/398, the core corpus 1,427/1,427 over all
 routes (one moved: `POST /{index}` now needs the permission to create an
 index), 30 refusals, 10,001 writes through a `kill -9`, 2,000 fuzz probes,
 and a chaos run of 56,418 copies with none lost.
+
+## The fourth review, part two: everything that was left
+
+Fourteen things the fourth review found and the first commit did not fix.
+
+**A document read out of another index was not judged.** `percolate` names an
+index and an id and the document it finds is percolated against the stored
+queries; a `terms` lookup names an index and a path and the values become the
+terms of a query. The layer judges the index on the path, and neither of
+these is on the path: a caller could read a document out of an index they may
+not read and learn its field values from which queries matched. Both go
+through the same door a `GET /{index}/_doc/{id}` does now, and what the
+caller's filter hides or masks is hidden and masked here too.
+
+**One id could have two live documents.** A refresh reaches one shard, and
+the shard a write is filed under is read from the routing when it is queued.
+Change a document's routing and its delete lands in a different queue from
+the add it was meant to retire: the delete runs first against nothing, the
+older copy is handed over later, and the id has two documents -- a count of
+two for one id, both returned by a search, and a GET answering with whichever
+segment it scans first. Everything queued for an id now waits in one queue.
+
+**`_version` started again from one after a restart.** The map lives in
+memory and nothing wrote it down; the translog carries the versions of what
+is not committed, so what a restart lost was the version of every document
+whose record had been spent. A caller holding `?version=10` was told the
+current version is 1. It is written where the translog is thrown away, and
+read back when the index is opened.
+
+**And a replay handed out new sequence numbers.** The record carries the one
+the write was answered with, and only raised the counter with it: the
+document came back at a different number from the one the client was told,
+which a caller driving `if_seq_no` and a replica that already applied it both
+disagree with.
+
+**Every election shrank every in-sync set.** A new manager's first state held
+only the nodes that had voted -- and a data node never votes -- so `reroute`
+read every other node as one that had left and retired its copies. A primary
+that then failed left a complete replica ineligible and the shard red for
+ever. The term begins with the nodes the last state had; the ones that are
+really gone leave on the follower checks.
+
+**A node that restarted kept its copies.** Nothing compared the ephemeral id,
+so a node `kill -9`'d and back inside the follower-check window was still
+holding `Started`, in-sync copies -- whatever survived on its disk was
+trusted, and could be promoted. A changed ephemeral id now means the copies
+went with the process that held them.
+
+**A shard event was answered by the wrong publication.** The answer waited on
+the version at the moment the event arrived, and a publication already in
+flight -- a join, a node leaving -- pushed the version past that without
+carrying the event: the primary was told "committed" for a copy still in the
+in-sync set and acknowledged a write on the strength of it. The answer now
+waits for the state that actually carries the event.
+
+**A recovery could mix two commits.** The primary lists the files and then
+serves them one at a time with nothing holding the commit open, so a write
+and a refresh in the middle replaced segments and rewrote `_meta.json`: the
+copy was assembled from two generations, short of documents, at a sequence
+number the catch-up would never revisit -- and reported as in sync. Each file
+carries what it was when it was listed, and a fetch of one that has changed
+is refused.
+
+**`post_filter` dropped hits.** It ran a search of its own for the top ten
+thousand *by score* and kept the page's ids from that: past ten thousand
+matches, hits that do match were dropped and `hits.total` was wrong, badly so
+when the page was sorted by anything else. The filter is run over each
+searcher and the documents it matches are what is kept.
+
+**Two counts were taken from a sample and presented as exact** -- a composite
+over documents, and the nested `top_hits` total, both over the first ten
+thousand. They read every matching document now, and say so when there are
+more than they will hold.
+
+**A calendar histogram could ask for 65,535 searches**, one per bucket, from
+one request body. The buckets keep the reference's ceiling; the searches have
+a lower one of their own, because that number is what answering costs rather
+than how large the answer is.
+
+**A geo aggregation read a million documents by paging**, and each page asked
+for `from + size`, so the last pages collected and pruned a million
+candidates apiece -- the square of the work. One pass now.
+
+**A mapping's type check and its change were two steps** with the guard
+dropped between them, so a field learned dynamically in the middle slipped
+through the check that exists to catch it.
+
+**And a copy nothing places was kept for ever.** A tombstone ages out of the
+graveyard after five hundred deletions, and then nothing can tell an index
+deleted long ago from one this manager has not heard of yet. It is kept for
+half an hour, which outlasts a partition, and let go after that.
+
+Not fixed, and written down instead: taking or restoring a snapshot runs on a
+thread of the runtime. So does every search and every write -- it is how this
+server is built -- and `block_in_place` was tried here and taken out again
+because it left the node not accepting connections. What bounds the damage is
+that every call it makes has a timeout. Moving the blocking work off the
+runtime is a change to the whole server, not to this path.
+
+### What could be measured, and what could not
+
+Measured on this build: the unit tests 181/181, phase 1 398/398, and the core
+corpus 1,427/1,427 over all 409 of its files.
+
+The module gate could not be measured. Partway through this work the machine
+ran out of ephemeral ports -- 113,000 sockets in `TIME_WAIT` against a range
+of 16,384, and not draining, with ten thousand of them belonging to something
+else on the machine entirely. Every localhost connection then fails at random:
+the module gate returned 880, 875, 877, 874, 843 and 874 on six runs of the
+same binary, the `--before` fixture could not register its repositories, and
+two of the transport's own unit tests began failing with `Can't assign
+requested address (os error 49)` -- which is what finally named the cause.
+
+Every module section that failed was run again on its own and passed: the
+analyzers 40/40, the URL repository 8/8, reindex-from-remote in 35 ms, the
+scripting suite, both rethrottle endpoints. The module suites these changes
+actually touch -- percolator, geo, aggregations, painless, mapper, reindex,
+search pipelines -- ran 457/460, the three being the same transport failure.
+
+The module gate is to be run again on an idle machine before this is called
+measured.

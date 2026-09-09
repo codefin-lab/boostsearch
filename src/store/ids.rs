@@ -13,15 +13,39 @@ impl IdxState {
     /// External versioning hands the index a number kept somewhere else, so
     /// the index follows it rather than counting for itself.
     pub fn bump_to(&mut self, id: &str, live: bool, version: u64) -> (u64, u64) {
+        self.bump_to_seq(id, live, version, None)
+    }
+
+    /// The same, with the sequence number a write was already answered with.
+    ///
+    /// A replay is not a new write: the number the client was told is the
+    /// number the document has to come back with, or a caller driving
+    /// `if_seq_no` off the acknowledged value -- and a replica that already
+    /// applied it -- disagrees with the primary about what happened.
+    pub fn bump_to_seq(
+        &mut self,
+        id: &str,
+        live: bool,
+        version: u64,
+        seq: Option<u64>,
+    ) -> (u64, u64) {
         self.moved_on();
         let fp = id_fingerprint(id);
         self.versions.insert(id.to_string(), DocMeta { version, live });
         if live {
             self.live_ids.insert(fp);
         }
-        let seq = self.seq_no;
-        self.seq_no += 1;
-        (version, seq)
+        match seq {
+            Some(seq) => {
+                self.seq_no = self.seq_no.max(seq + 1);
+                (version, seq)
+            }
+            None => {
+                let seq = self.seq_no;
+                self.seq_no += 1;
+                (version, seq)
+            }
+        }
     }
 
     pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {

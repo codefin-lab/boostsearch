@@ -57,9 +57,9 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
             st.observe(&indexed);
             let doc = crate::store::make_doc(&st.fields, &st.mapping, &op.id, indexed, raw, op.seq);
             if existed {
-                st.queue_op(shard, crate::store::PendingOp::Delete(op.id.clone()));
+                st.queue_op_for(&op.id, shard, crate::store::PendingOp::Delete(op.id.clone()));
             }
-            st.queue_op(shard, crate::store::PendingOp::Add(Box::new(doc)));
+            st.queue_op_for(&op.id, shard, crate::store::PendingOp::Add(Box::new(doc)));
             st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
             st.log_write(&op.id, op.routing.as_deref(), op.version, op.seq, Some(raw));
             st.note_pending(&op.id, Some(raw.clone()));
@@ -67,7 +67,7 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
         }
         None => {
             if existed {
-                st.queue_op(shard, crate::store::PendingOp::Delete(op.id.clone()));
+                st.queue_op_for(&op.id, shard, crate::store::PendingOp::Delete(op.id.clone()));
             }
             st.log_write(&op.id, None, op.version, op.seq, None);
             st.note_pending(&op.id, None);

@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Where the document versions are written down, beside the index.
+const VERSIONS: &str = "_versions.bin";
+
 impl IdxState {
     /// Why this index takes no changes, if it takes none.
     ///
@@ -33,6 +36,31 @@ impl IdxState {
 
     /// Persist the learned field information next to the index so a reopen does
     /// not lose dynamic mappings or the range-narrowing kinds.
+    /// Where a document's version had got to, written down.
+    ///
+    /// The map lives in memory and the translog carries the versions of what
+    /// is not committed yet -- so what a restart loses is the version of
+    /// every document whose record has been spent. `_version` came back as 1
+    /// for a document that had been written ten times, and a caller holding
+    /// `?version=10` was told the current version is 1. It is written where
+    /// the translog is thrown away, which is the moment it stops covering
+    /// them.
+    pub fn save_versions(&self) {
+        let Some(path) = &self.path else { return };
+        let Ok(bytes) = postcard::to_allocvec(&self.versions) else { return };
+        if let Err(e) = write_atomic(&path.join(VERSIONS), &bytes) {
+            tracing::error!("index [{}]: could not write the versions: {e}", self.name);
+        }
+    }
+
+    /// The versions as they were written down, if they were.
+    pub fn load_versions(path: &std::path::Path) -> HashMap<String, DocMeta> {
+        std::fs::read(path.join(VERSIONS))
+            .ok()
+            .and_then(|b| postcard::from_bytes(&b).ok())
+            .unwrap_or_default()
+    }
+
     pub fn save_meta(&self) {
         // mappings, settings and aliases all travel through here, and each of
         // them can change what a search answers
@@ -147,6 +175,7 @@ impl IdxState {
             // away without writing the meta had a restart hand new writes
             // numbers old documents already carry
             self.save_meta();
+            self.save_versions();
             self.clear_translog();
         }
         release_freed_memory();

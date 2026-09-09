@@ -58,6 +58,17 @@ pub const REROUTE: &str = "internal:cluster/reroute";
 /// a node holding an index's primary tells the manager the index's metadata
 pub const METADATA_REPORT: &str = "internal:cluster/metadata/report";
 
+/// A shard event whose answer waits, and which no publication has taken up
+/// yet. It is stamped with the version of the state that carries it as soon
+/// as one is built.
+const NOT_CARRIED: u64 = u64::MAX;
+
+/// How long a copy the manager places nowhere, and that nobody else holds, is
+/// kept before it is let go. Long enough for a partition to heal and for a
+/// manager to hear about the index again; short enough that a disk is not
+/// held for ever by an index the cluster forgot it had.
+const KEEP_UNPLACED_MS: u64 = 30 * 60 * 1000;
+
 /// The term a promoted copy writes under.
 ///
 /// `counted` is what this manager has counted, `carried` what the published
@@ -176,6 +187,8 @@ pub struct Coordinator {
     /// shard events whose reporter is waiting for the state that carries
     /// them to be committed: (the version when it arrived, who, what)
     event_replies: Vec<(u64, NodeId, Envelope)>,
+    /// when a copy that nothing places here was first kept anyway
+    kept_since: BTreeMap<String, u64>,
     /// the primary term this node has already sent its documents out for,
     /// by index and shard
     resynced: BTreeMap<(String, u32), u64>,
@@ -306,6 +319,7 @@ impl Coordinator {
             pending_checks: BTreeMap::new(),
             leader_misses: 0,
             event_replies: Vec::new(),
+            kept_since: BTreeMap::new(),
             resynced: BTreeMap::new(),
             started_here: Default::default(),
             leader_check_outstanding: None,
@@ -792,7 +806,15 @@ impl Coordinator {
         let mut s = self.accepted.next();
         s.cluster_manager = Some(self.me.id.clone());
         s.cluster_uuid_committed = true;
-        s.nodes = std::mem::take(&mut self.join_votes);
+        // The term begins with the nodes the last state had, and the ones
+        // that voted are added to them. Beginning with the voters alone
+        // dropped every node that had not answered yet -- a data node never
+        // votes at all -- and `reroute` reads a node absent from the state as
+        // a node that left: every index's in-sync set shrank to its primary
+        // on every election, and a primary that then failed left a complete
+        // replica ineligible and the shard red for ever. A node that really
+        // is gone leaves on the follower checks that follow.
+        s.nodes.extend(std::mem::take(&mut self.join_votes));
         s.nodes.insert(self.me.id.clone(), self.me.clone());
         for n in s.nodes.keys().filter(|n| **n != self.me.id) {
             self.followers.insert(n.clone(), FollowerHealth::default());
@@ -824,6 +846,19 @@ impl Coordinator {
         let mut reset: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
         // copies whose nodes finished filling them in this round
         let mut started: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+        // The answers waiting on these events belong to the state being
+        // built now. They used to be stamped with the version at the moment
+        // the event arrived, and any publication already in flight -- a
+        // join, a follower leaving -- pushed the version past that without
+        // carrying the event: the primary was told "committed" for a copy
+        // still in the in-sync set, and acknowledged a write on the strength
+        // of it.
+        let carried_at = s.version;
+        for waiting in self.event_replies.iter_mut() {
+            if waiting.0 == NOT_CARRIED {
+                waiting.0 = carried_at;
+            }
+        }
         for ev in std::mem::take(&mut self.shard_events) {
             match ev {
                 ShardEvent::Started { index, shard, allocation_id } => {
@@ -1192,6 +1227,8 @@ impl Coordinator {
             mine.iter().filter_map(|c| c.allocation_id.clone()).collect();
         self.reported.retain(|a| here.contains(a));
         self.started_here.retain(|a| here.contains(a));
+        // a copy that is placed here again was never really unplaced
+        self.kept_since.retain(|a, _| !here.contains(a));
         // a copy this node finished while the manager was changing hands: the
         // report went to a manager that never published it, so it is made
         // again to whoever leads now
@@ -1314,6 +1351,7 @@ impl Coordinator {
             // a copy of keeps its local index
             let holds_other = self.hosted.iter().any(|(a, (i, _))| *i == index && a != &aid);
             if holds_other {
+                self.kept_since.remove(&aid);
                 self.hosted.remove(&aid);
                 self.reported.remove(&aid);
                 continue;
@@ -1337,12 +1375,35 @@ impl Coordinator {
                     )
             });
             if !buried && !elsewhere {
-                // kept, and looked at again at the next publication
+                // Kept, and looked at again at the next publication -- but
+                // not for ever. A tombstone ages out of the graveyard after
+                // five hundred deletions, and then nothing here can tell an
+                // index deleted long ago from one this manager has not heard
+                // of yet: the copy was retained, and its disk with it, with
+                // no end. Time settles it. A manager that has been publishing
+                // states this node is in for this long, and still places
+                // nothing here, is a manager that knows the index is gone.
+                let since = *self.kept_since.entry(aid.clone()).or_insert(self.last_wall);
+                if self.last_wall.saturating_sub(since) < KEEP_UNPLACED_MS {
+                    if self.notes {
+                        out.push(self.note(format!(
+                            "[{index}][{shard}]: no longer placed here, and held nowhere else \
+                             -- the copy here is kept"
+                        )));
+                    }
+                    continue;
+                }
                 if self.notes {
                     out.push(self.note(format!(
-                        "[{index}][{shard}]: no longer placed here, and held nowhere else -- \
-                         the copy here is kept"
+                        "[{index}][{shard}]: unplaced and held nowhere else for long enough -- \
+                         the copy here goes"
                     )));
+                }
+                self.kept_since.remove(&aid);
+                self.hosted.remove(&aid);
+                self.reported.remove(&aid);
+                if let Some(h) = &self.host {
+                    h.remove_shard(&index, shard);
                 }
                 continue;
             }
@@ -1470,7 +1531,7 @@ impl Coordinator {
         let version = self.committed.version;
         let waiting = std::mem::take(&mut self.event_replies);
         for (at, from, e) in waiting {
-            if at < version {
+            if at != NOT_CARRIED && at <= version {
                 out.push(self.send(&from, e.response(self.me.id.clone(), vec![])));
             } else {
                 self.event_replies.push((at, from, e));
@@ -1503,6 +1564,32 @@ impl Coordinator {
             || !self.shard_events.is_empty()
             || self.command_table.is_some();
         for (id, j) in joins {
+            // A node keyed by its persistent id looks the same after a
+            // restart, and its copies were still `Started` and still in the
+            // in-sync set -- so whatever survived on its disk, torn translog
+            // and all, was trusted and could be promoted. The ephemeral id
+            // is what tells one run of a node from the next: when it
+            // changes, the copies it was holding are gone with the process
+            // that held them, and have to be filled again.
+            let restarted =
+                s.nodes.get(&id).map(|held| held.ephemeral_id != j.ephemeral_id).unwrap_or(false);
+            if restarted {
+                for copy in s.routing.on_node_mut(&id) {
+                    copy.state = super::state::ShardState::Unassigned;
+                    copy.node = None;
+                    copy.relocating_node = None;
+                    copy.allocation_id = None;
+                    copy.unassigned = Some(super::allocation::unassigned_info(
+                        "NODE_LEFT",
+                        self.last_wall,
+                        "no_attempt",
+                        0,
+                    ));
+                }
+                if self.notes {
+                    out_note_holder(&mut Vec::new(), "a node came back as a new process");
+                }
+            }
             s.nodes.insert(id, j);
         }
         for r in &removals {
@@ -2244,7 +2331,7 @@ impl Coordinator {
                     // acting on it is what took the real primary out of the
                     // in-sync set, and refusing it would fail a good write.
                     if mine.as_deref() == Some(allocation_id.as_str()) {
-                        self.event_replies.push((self.committed.version, from.clone(), e));
+                        self.event_replies.push((NOT_CARRIED, from.clone(), e));
                         return self.next_publication(durable);
                     }
                     if !holds && primary_on.as_ref() != Some(&from) {
@@ -2285,7 +2372,7 @@ impl Coordinator {
                 // given before the publication would be a promise this node
                 // cannot keep: a manager that loses the term here loses the
                 // event with it, and the copy would walk back into the set.
-                self.event_replies.push((self.committed.version, from.clone(), e));
+                self.event_replies.push((NOT_CARRIED, from.clone(), e));
                 self.next_publication(durable)
             }
             (METADATA_REPORT, Kind::Request) => {

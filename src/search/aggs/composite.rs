@@ -208,7 +208,11 @@ pub(crate) fn run_composite_agg(
         // each step of the window is a search, so the number of steps is the
         // cost of the request: it is held to the bucket ceiling and refused
         // rather than truncated
-        let ceiling = crate::search::max_buckets(store) as usize;
+        // as in the date histogram: each step here is a search, so what
+        // bounds this is what answering costs rather than the size of the
+        // answer
+        let ceiling =
+            crate::search::max_buckets(store).min(super::histogram::MOST_STEP_SEARCHES) as usize;
         let mut guard = 0usize;
         while cursor <= hi {
             guard += 1;
@@ -494,12 +498,18 @@ pub(crate) fn run_composite_over_documents(
         .iter()
         .filter_map(|(_, _, s)| s.get("field").and_then(|f| f.as_str()).map(|s| s.to_string()))
         .collect();
-    let probe = json!({
-        "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
-        "size": 10_000,
-        "_source": fields,
-    });
-    let answer = run(store, &targets.join(","), &probe, &Params::new())?;
+    // Every document the query matches, not the first ten thousand of them:
+    // the bucket counts below are presented as exact, and a count over a
+    // sample presented as exact is a number a reader acts on. The walk has a
+    // ceiling of its own and says so when it is reached, which is an answer
+    // rather than a wrong one.
+    let answer = crate::search::walk_every_hit_of(
+        store,
+        targets,
+        &main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        false,
+        Some(json!(fields)),
+    )?;
 
     // one key per source per document, and the documents holding the same
     // keys counted together

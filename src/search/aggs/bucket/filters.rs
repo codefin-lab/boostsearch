@@ -98,11 +98,15 @@ fn nested_object_count(
     query_json: &Option<Value>,
     path: &str,
 ) -> u64 {
-    let probe = json!({
-        "query": query_json.clone().unwrap_or_else(|| json!({"match_all": {}})),
-        "size": 10_000,
-    });
-    let Ok(answer) = crate::search::run(store, &targets.join(","), &probe, &Params::new()) else {
+    // every matching document, not the first ten thousand: this number is
+    // written into the answer as `"relation": "eq"`, and a count over a
+    // sample presented as exact is worse than no count at all
+    let Ok(answer) = crate::search::walk_every_hit(
+        store,
+        targets,
+        &query_json.clone().unwrap_or_else(|| json!({"match_all": {}})),
+        false,
+    ) else {
         return 0;
     };
     let mut objects: Vec<(String, Value)> = Vec::new();

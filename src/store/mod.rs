@@ -415,7 +415,7 @@ fn observe_kinds(v: &Value, path: &mut String, out: &mut HashMap<String, u8>) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DocMeta {
     pub version: u64,
     pub live: bool,
@@ -480,6 +480,9 @@ pub struct IdxState {
     pub pending: HashMap<String, Option<String>>,
     /// Writes the writer has not been handed yet, by the shard they belong to.
     deferred: Vec<(u64, PendingOp)>,
+    /// which queue each document's work is waiting in, so that a change of
+    /// routing does not split one document's operations across two of them
+    queued_shard: HashMap<String, u64>,
     /// arrival order of the writes not yet visible to the refreshed reader
     pub pending_seq: HashMap<String, u64>,
     pub pending_bytes: usize,

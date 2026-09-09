@@ -1191,7 +1191,12 @@ impl Changes {
     }
 }
 
-fn unassigned_info(reason: &str, at: Millis, status: &str, failed: u64) -> UnassignedInfo {
+pub(crate) fn unassigned_info(
+    reason: &str,
+    at: Millis,
+    status: &str,
+    failed: u64,
+) -> UnassignedInfo {
     UnassignedInfo {
         reason: reason.into(),
         at_millis: at,
