@@ -1209,6 +1209,14 @@ impl Security {
     ///
     /// The caller passes the configuration it holds: this is called from
     /// under the configuration's write lock, which must not be taken again.
+    /// How many times the configuration has changed here.
+    ///
+    /// Anything that remembers an answer worked out under the rules has to
+    /// forget it when the rules change, and this is what says they did.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn touch(&self, cfg: &SecurityConfig) {
         self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.auth_cache.lock().clear();

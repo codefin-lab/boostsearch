@@ -726,9 +726,16 @@ pub async fn get_doc(
         };
     };
     let g = st.read();
-    // a version named on a read is a condition: the document must be at it
+    // A version named on a read is a condition: the document must be at it.
+    // Only for a document this caller may see, though -- the refusal carries
+    // the document's current version in its message, so asking for a version
+    // that is not the one it holds told a caller hidden by a document-level
+    // filter both that the document is there and what version it is at. A
+    // document that is not visible is answered as one that is not there.
     if let Some(want) = p.get("version").and_then(|v| v.parse::<u64>().ok())
         && exists_doc(&g, &id)
+        && crate::security::doc_visible(&store, &g, &id)
+        && routing_matches(&g, &id, &p)
         && g.version_of(&id) != want
     {
         return err(

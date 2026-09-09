@@ -551,6 +551,12 @@ fn found_remote(
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_millis(timeout.max(1.0) as u64)))
             .http_status_as_error(false)
+            // A redirect is a second address, and the allowlist judged the
+            // first. An allowlisted host answering `302 Location:
+            // http://169.254.169.254/...` had this fetch the second address
+            // -- with the credentials the caller gave for the first. The
+            // redirect is not followed; it is answered as what it is.
+            .max_redirects(0)
             .build()
             .into();
         let mut request = agent.post(&url).header("content-type", "application/json");
@@ -570,6 +576,15 @@ fn found_remote(
             }
         }
         match request.send_json(&body) {
+            Ok(answer) if answer.status().is_redirection() => {
+                // said plainly rather than as "the body was not JSON": the
+                // host that was allowed is sending this somewhere else, and
+                // where it points was never judged by the allowlist
+                Err(remote_failure(format!(
+                    "the remote answered {} and pointed elsewhere; a redirect is not followed",
+                    answer.status()
+                )))
+            }
             Ok(mut answer) => {
                 answer.body_mut().read_json::<Value>().map_err(|e| remote_failure(format!("{e}")))
             }
@@ -624,6 +639,7 @@ fn found_remote(
         // as long as the operating system would wait
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_millis(timeout.max(1.0) as u64)))
+            .max_redirects(0)
             .build()
             .into();
         let _ = agent.delete(&format!("{host}/_search/scroll?scroll_id={held}")).call();

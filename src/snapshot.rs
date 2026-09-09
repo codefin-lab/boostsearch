@@ -40,6 +40,12 @@ impl Source {
     }
 
     pub fn read(&self, relative: &str) -> Option<Vec<u8>> {
+        // the same rule the write path has had: a name that climbs out of the
+        // repository is not a file of the repository. A snapshot name is part
+        // of this path, and a caller writes the snapshot name.
+        if climbs(relative) {
+            return None;
+        }
         match self {
             Source::Dir(dir) => std::fs::read(dir.join(relative)).ok(),
             Source::Url(url) => url::fetch(url, relative),

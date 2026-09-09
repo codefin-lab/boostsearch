@@ -337,6 +337,13 @@ pub(crate) fn run_scripted_terms_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let mut buckets = Vec::new();
     let mut shown: u64 = 0;
+    // A bucket carrying sub-aggregations is a search of its own, run once per
+    // bucket. `size` alone bounds the answer, not the work: ten thousand
+    // buckets each running a sub-aggregation is ten thousand searches from
+    // one request body, which is the same cost the histograms are held to.
+    let mut per_bucket = 0usize;
+    let step_ceiling =
+        crate::search::max_buckets(store).min(super::super::histogram::MOST_STEP_SEARCHES) as usize;
     for (key, count, ids) in counts.into_iter().filter(|c| c.1 >= min_doc_count).take(size) {
         shown += count;
         let mut b = json!({"key": key, "doc_count": count});
@@ -345,6 +352,18 @@ pub(crate) fn run_scripted_terms_agg(
                 {"ids": {"values": ids}},
                 query.clone(),
             ]}}));
+            per_bucket += 1;
+            if per_bucket > step_ceiling {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "too_many_buckets_exception",
+                    format!(
+                        "Trying to create too many buckets. Must be less than or equal to: \
+                         [{step_ceiling}] but was more. This limit can be set by changing the \
+                         [search.max_buckets] cluster level setting."
+                    ),
+                ));
+            }
             for (n, d) in subs {
                 b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
             }

@@ -171,10 +171,17 @@ pub fn key(
     // two callers may be allowed to see different documents of the same
     // index, so an answer is only ever handed back to the caller it was
     // worked out for
+    // The roles are what the caller had when the answer was worked out, and
+    // the rules those roles stand for can change under it: narrowing a role's
+    // document-level filter, or taking a role away and giving it back with
+    // less in it, leaves the name and the role list the same. The
+    // configuration's generation is in the key as well, so a change to the
+    // rules is a different question rather than the same one answered from
+    // before.
     let who = crate::security::layer::current_caller()
         .map(|c| format!("{}:{:?}", c.name, c.roles))
         .unwrap_or_default();
-    parts.push(who);
+    parts.push(format!("{who}\u{1}{}", store.security.generation()));
     // the parameters that change an answer rather than how it is printed
     let mut params: Vec<String> = p
         .iter()

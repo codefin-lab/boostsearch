@@ -936,6 +936,9 @@ pub fn run(
             }));
         }
     }
+    // a request that asks for more buckets than may ever be answered is
+    // refused before any of them are built
+    check_asked_sizes(store, body.get("aggs").or_else(|| body.get("aggregations")))?;
     let mut extras = Extras::default();
     if let Some(q) = body.get("query") {
         scan_extras(q, &mut extras);

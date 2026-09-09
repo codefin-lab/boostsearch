@@ -270,6 +270,69 @@ pub(crate) fn max_buckets(store: &Store) -> u64 {
         .unwrap_or(65_535)
 }
 
+/// The bucket counts a request *asks* for, before any of them are built.
+///
+/// `check_max_buckets` reads the answer, which is the right place to catch an
+/// aggregation that turned out large -- and the wrong place to catch one that
+/// said so in the request. A `terms` aggregation with `"size": 2000000000`
+/// over a high-cardinality field builds a bucket per distinct value, and runs
+/// every sub-aggregation once per bucket, before anything counts them: the
+/// node is out of memory long before the ceiling is consulted. A size larger
+/// than the ceiling can never produce an answer that passes it, so it is
+/// refused where it is read.
+pub(crate) fn check_asked_sizes(
+    store: &Store,
+    aggs: Option<&Value>,
+) -> std::result::Result<(), Response> {
+    let Some(aggs) = aggs else { return Ok(()) };
+    let limit = max_buckets(store);
+    // the aggregations whose `size` is a count of buckets; `top_hits` and the
+    // metric aggregations take a `size` that is a count of documents and are
+    // bounded elsewhere
+    const BY_BUCKET: &[&str] = &[
+        "terms",
+        "significant_terms",
+        "significant_text",
+        "multi_terms",
+        "rare_terms",
+        "composite",
+        "geohash_grid",
+        "geotile_grid",
+        "geohex_grid",
+        "variable_width_histogram",
+    ];
+    fn walk(node: &Value, limit: u64, kinds: &[&str]) -> Option<(String, u64)> {
+        match node {
+            Value::Object(o) => {
+                for (name, body) in o {
+                    if kinds.contains(&name.as_str())
+                        && let Some(asked) =
+                            body.get("size").and_then(|v| v.as_u64()).filter(|n| *n > limit)
+                    {
+                        return Some((name.clone(), asked));
+                    }
+                    if let Some(found) = walk(body, limit, kinds) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            Value::Array(a) => a.iter().find_map(|v| walk(v, limit, kinds)),
+            _ => None,
+        }
+    }
+    if let Some((kind, asked)) = walk(aggs, limit, BY_BUCKET) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "too_many_buckets_exception",
+            format!(
+                "Trying to create too many buckets. Must be less than or equal to: [{limit}]                  but was [{asked}] in [{kind}]. This limit can be set by changing the                  [search.max_buckets] cluster level setting."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// `search.max_buckets` caps how many buckets one request may build.
 ///
 /// The limit is counted over the whole answer, sub-buckets included, which is

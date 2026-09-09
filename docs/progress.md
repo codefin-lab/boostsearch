@@ -4844,3 +4844,50 @@ satisfies the other matches, where OpenSearch requires one object to satisfy
 both. Closing this means indexing each nested object as a document of its own
 and joining the blocks at search time, which the storage layer here does not
 do. It is written down at the code and here rather than left to be discovered.
+
+## The sixth review
+
+Six findings, all fixed. Fewer than the fifty of the fifth review, and the
+difference is what was looked at rather than what is there: this round went
+through the paths a request takes into memory and the paths a caller learns
+something from, rather than through everything.
+
+**The bucket ceiling was read after the buckets were built.** `search.max_buckets`
+is counted over the answer, which catches an aggregation that turned out
+large and misses one that said so in the request: a `terms` aggregation with
+`"size": 2000000000` builds a bucket per distinct value of the field, and runs
+every sub-aggregation once per bucket, before anything counts them. A size
+larger than the ceiling can never produce an answer that passes it, so it is
+now refused where it is read, with the words the reference uses.
+
+**A bucket with sub-aggregations is a search of its own.** `size` bounded the
+answer, not the work; ten thousand buckets each carrying a sub-aggregation is
+ten thousand searches from one request body. The histograms were already held
+to `MOST_STEP_SEARCHES` for this reason, and `terms` now is too. What is still
+not bounded is the product across levels -- a terms inside a terms is the two
+ceilings multiplied -- and closing that needs a budget carried through the
+request rather than a count per level.
+
+**Reindex-from-remote followed redirects.** The allowlist judges the host in
+the request; a redirect is a second host that nothing judged. An allowlisted
+host answering `302 Location: http://169.254.169.254/...` had this node fetch
+that address, carrying the credentials the caller gave for the first one.
+Redirects are not followed now, and a redirect is answered as what it is.
+
+**The request cache did not know the rules had changed.** Its key carries the
+caller's name and roles, which stay the same when a role's document-level
+filter is narrowed: an answer worked out under the old filter was still
+handed back afterwards. The security configuration's generation is now part
+of the key.
+
+**A `_get` with `version=` told a caller about a document it could not see.**
+The version was compared before the document-level filter was applied, and
+the refusal carries the current version in its message: asking for the wrong
+version distinguished a document that is hidden from one that is not there,
+and named its version. The filter is applied first, and a document that is
+not visible is answered as one that is not there.
+
+**A snapshot read did not check what a snapshot write checks.** `Source::write`
+and `Source::remove_prefix` refuse a path that climbs out of the repository;
+`Source::read` did not. The API validates snapshot names before they reach
+here, so this is a second lock on the same door rather than an open one.
