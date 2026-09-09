@@ -4987,3 +4987,34 @@ Two checks in `tools/ism_check.py` were wrong rather than the server:
 Measured: unit tests 182/182, phase 1 398/398, the core corpus 1,427/1,427
 over all 409 files, ISM end to end 6 of 6, 1,587 authorisation answers over
 334 routes, 30 refusals.
+
+## The eighth review
+
+Three findings, each of them a wrong answer rather than a crash.
+
+**Highlighting marked the wrong characters.** `mark_pieces` finds the query's
+words in a lowercased copy of the field and then cuts the *original* at those
+offsets. Lowercasing is not a byte-for-byte substitution: `İ` is two bytes and
+lowercases to three, `ẞ` is three and lowercases to two, and a single such
+letter anywhere in the field moves every mark after it -- onto the wrong
+characters, or off a character boundary, where the guard dropped the mark and
+the word was not highlighted at all. The copy is built with a note of where
+each of its bytes came from, and the marks are placed by that.
+
+**A SAML assertion with no `Conditions` was accepted.** They were checked only
+when they were there, so an assertion carrying none had no expiry and no
+audience: one minted for another service provider, or one minted years ago,
+was as good as one minted for this cluster a moment ago. An audience naming
+this service provider is required now, which is what the reference's validator
+requires, and the paragraph in `docs/progress.md` describing this domain was
+already claiming it.
+
+**A term suggester's `offset` was a byte count and its `length` a character
+count.** A client using the two together to mark the misspelled word marked
+the wrong part of any text that was not ASCII. Both are characters now.
+
+Five error messages carried runs of spaces in the middle of them, left by the
+way earlier reviews' edits were applied. They are sentences again.
+
+Measured: unit tests 184/184, phase 1 398/398, the core corpus 1,427/1,427
+over all 409 files, 1,587 authorisation answers over 334 routes, 30 refusals.

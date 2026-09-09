@@ -956,7 +956,8 @@ pub async fn seed_replica(
                 store.drop_local(index);
             }
             tracing::warn!(
-                "filling [{index}] failed ({why}); {parked} writes that waited for it were                  dropped and the copy is reported failed"
+                "filling [{index}] failed ({why}); {parked} writes that waited for it were \
+                 dropped and the copy is reported failed"
             );
             Err(why)
         }

@@ -669,7 +669,9 @@ pub async fn patch_all(
         // explicitly said otherwise, and so does this.
         if !store.security.allow_config_rewrite {
             return bad_request(
-                "Modifying the security configuration through the REST API is not allowed. Set                  plugins.security.unsupported.restapi.allow_securityconfig_modification to true                  to allow it.",
+                "Modifying the security configuration through the REST API is not allowed. \
+                 Set plugins.security.unsupported.restapi.allow_securityconfig_modification \
+                 to true to allow it.",
             );
         }
         let mut current = cfg.document("config");

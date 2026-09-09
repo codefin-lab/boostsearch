@@ -648,8 +648,17 @@ pub fn validate(
     if !any {
         return Err("neither the response nor the assertion is signed".into());
     }
-    // conditions
-    if let Some(cond) = assertion.child("Conditions") {
+    // Conditions, which an assertion has to carry.
+    //
+    // They used to be checked only when they were there: an assertion with no
+    // `Conditions` element had no expiry and no audience, so one minted for
+    // another service provider -- or one minted years ago -- was taken. The
+    // reference's validator requires an audience it is named in, and so does
+    // this.
+    let Some(cond) = assertion.child("Conditions") else {
+        return Err("the assertion carries no Conditions".into());
+    };
+    {
         if let Some(nb) = cond.attr("NotBefore").and_then(parse_instant)
             && now < nb
         {
@@ -668,7 +677,9 @@ pub fn validate(
                     .collect::<Vec<_>>()
             })
             .collect();
-        if !audiences.is_empty() && !audiences.iter().any(|a| a == sp_entity_id) {
+        // an assertion that names no audience names us no more than it names
+        // anybody else
+        if !audiences.iter().any(|a| a == sp_entity_id) {
             return Err(format!("{sp_entity_id} is not a valid audience for this response"));
         }
     }

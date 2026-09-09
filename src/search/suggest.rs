@@ -357,7 +357,11 @@ pub(crate) fn term_suggest(
         options.truncate(size);
         entries.push(json!({
             "text": word,
-            "offset": start,
+            // where the word stands, counted in characters. It used to be
+            // the byte offset while the length beside it was a character
+            // count, so for anything but ASCII the two disagreed and a client
+            // marking the word from them marked the wrong part of the text.
+            "offset": text[..start].chars().count(),
             "length": word.chars().count(),
             "options": options
                 .into_iter()

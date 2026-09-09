@@ -607,7 +607,9 @@ pub fn every_matching_source(
                 StatusCode::BAD_REQUEST,
                 "too_many_buckets_exception",
                 format!(
-                    "This aggregation reads every matching document, and this one matches more                      than [{ceiling}]. Narrow the query, or aggregate over a filtered subset."
+                    "This aggregation reads every matching document, and this one matches more \
+                     than [{ceiling}]. Narrow the query, or aggregate over a filtered \
+                     subset."
                 ),
             ));
         }
@@ -1193,7 +1195,9 @@ pub fn run(
         return Err(err(
             StatusCode::FORBIDDEN,
             "security_exception",
-            "a script reads the whole document, and this caller may not read the whole              document: scripts are not allowed in a search of an index whose fields are              restricted for you",
+            "a script reads the whole document, and this caller may not read the whole \
+             document: scripts are not allowed in a search of an index whose fields are \
+             restricted for you",
         ));
     }
     // the aggregations that run as searches of their own read `query_json`

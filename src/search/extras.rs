@@ -175,7 +175,9 @@ pub(crate) fn placement_complaint(query: &Value) -> Option<String> {
     let placed = walk(query, true, &mut geo, &mut intervals);
     if !placed {
         return Some(
-            "a geo or intervals clause is answered by narrowing the whole result, so it may only              stand where it narrows the whole result: at the top of the query, or under `must`              or `filter`"
+            "a geo or intervals clause is answered by narrowing the whole result, so it may \
+             only stand where it narrows the whole result: at the top of the query, or \
+             under `must` or `filter`"
                 .to_string(),
         );
     }

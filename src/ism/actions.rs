@@ -276,7 +276,8 @@ fn alias(store: &Store, index: &str, body: &Value) -> Result<String, String> {
                     }
                     if store.exists(&name) {
                         return Err(format!(
-                            "Invalid alias name [{name}]: an index or data stream exists with                              the same name as the alias"
+                            "Invalid alias name [{name}]: an index or data stream exists \
+                             with the same name as the alias"
                         ));
                     }
                     g.aliases.insert(name, json!({}));

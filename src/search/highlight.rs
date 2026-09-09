@@ -465,7 +465,26 @@ fn mark_words_containing(
 
 /// Mark every place a query word stands inside the text, whole word or not.
 fn mark_pieces(text: &str, queries: &[(String, bool)], pre: &str, post: &str) -> Option<String> {
-    let lower = text.to_lowercase();
+    // Lowercasing is not a byte-for-byte substitution: `İ` is two bytes and
+    // lowercases to three, `ẞ` is three and lowercases to two. Offsets were
+    // found in the lowercased copy and then used to cut the original, so a
+    // single such letter anywhere in a field moved every mark after it --
+    // onto the wrong characters, or off a character boundary, where the guard
+    // below dropped the mark and the word was not highlighted at all. The
+    // copy is built with a note of where each of its bytes came from.
+    let mut lower = String::with_capacity(text.len());
+    let mut origin: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    for (at, c) in text.char_indices() {
+        let before = lower.len();
+        for part in c.to_lowercase() {
+            lower.push(part);
+        }
+        for _ in before..lower.len() {
+            origin.push(at);
+        }
+    }
+    origin.push(text.len());
+    let back = |i: usize| origin.get(i).copied().unwrap_or(text.len());
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for (q, _) in queries {
         for word in q.split_whitespace() {
@@ -476,8 +495,15 @@ fn mark_pieces(text: &str, queries: &[(String, bool)], pre: &str, post: &str) ->
             let mut from = 0;
             while let Some(at) = lower[from..].find(&word) {
                 let start = from + at;
-                spans.push((start, start + word.len()));
-                from = start + word.len();
+                let end = start + word.len();
+                // where the match began and ended in the text itself; a
+                // match that ends inside one letter's expansion stops before
+                // that letter rather than cutting it in half
+                let (a, b) = (back(start), back(end).max(back(start)));
+                if b > a {
+                    spans.push((a, b));
+                }
+                from = end;
             }
         }
     }
@@ -696,4 +722,27 @@ pub(crate) fn mark_terms(
     }
     out.push_str(rest);
     marked.then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `İ` is two bytes and lowercases to three, so an offset found in the
+    /// lowercased copy is not an offset into the text. Everything after such
+    /// a letter used to be marked in the wrong place, or not at all.
+    #[test]
+    fn a_letter_that_grows_when_lowercased_does_not_move_the_marks() {
+        let text = "İstanbul and the word after";
+        let queries = vec![("after".to_string(), false)];
+        let out = mark_pieces(text, &queries, "<em>", "</em>").expect("a mark");
+        assert_eq!(out, "İstanbul and the word <em>after</em>");
+    }
+
+    #[test]
+    fn plain_text_is_marked_where_it_always_was() {
+        let out = mark_pieces("one two three", &[("two".to_string(), false)], "<em>", "</em>")
+            .expect("a mark");
+        assert_eq!(out, "one <em>two</em> three");
+    }
 }
