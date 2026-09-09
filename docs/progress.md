@@ -4931,3 +4931,59 @@ The 880 in the README was measured with the geoip databases in place. Neither
 number is a code difference; what separates them is what is on the disk. See
 `docs/geoip.md` and `docs/phonetic.md` for where each file is looked for.
 
+
+## The seventh review
+
+Six findings, all in the paths that move data rather than read it: index
+state management, and what an alias means when a write arrives at it.
+
+**A policy that made an index read-only did not.** The `read_only` action
+writes `index.blocks.write` and saves the metadata; what a write is judged
+against is a small struct worked out once and kept beside the index, and the
+`_settings` endpoint refreshes it after every change while this did not. The
+action reported success, the setting was there to read back, and the index
+went on taking writes until the node was restarted -- the one thing the state
+existed to prevent.
+
+**A policy's `delete` reported success when it deleted nothing.** `store.delete`
+answers whether it removed anything, and the answer was dropped: a state whose
+whole purpose had not happened was recorded as done, and the policy moved on.
+
+**A write to an alias with no write index went somewhere.** `write_target`
+answers `None` for an alias over several indices with none of them marked,
+and the caller then fell back to the alias name -- which `get` resolves by
+walking the map and answering with the first backing index it finds. After a
+rollover that is the index that was just rolled out of. Both the document
+endpoint and `_bulk` now refuse it with the reference's words.
+
+**An alias could have two write indices.** Nothing checked: `PUT /{index}`
+with `is_write_index: true` in its aliases, and `_aliases` with an `add`,
+both took a second one. With two, the destination is whichever the resolution
+lists first -- which is the older name, since resolution is sorted. Both paths
+now refuse with `alias [x] has more than one write index [a,b]`.
+
+**A rollover had a window with two write indices of its own.** The new index
+was given the alias definition, write-ness and all, and only afterwards was
+the old one's taken away. For the length of two lock acquisitions both
+claimed it, and a write arriving in that window went into the index that had
+just been rolled out of. The old one loses it first now: for that same window
+the alias has no write index, and a write is refused with a message saying so
+rather than being put in the wrong place.
+
+**A policy could make an alias out of an index's name.** The `alias` action
+inserted whatever it was given; `_aliases` refuses a name an index already
+answers to, and a pattern. The action refuses both now.
+
+Two checks in `tools/ism_check.py` were wrong rather than the server:
+
+- it expected a rolled-over write alias to leave the old index altogether,
+  which is what a *plain* alias does. A write alias stays, read-only, and the
+  reference's own suite asserts that. The check now asserts what the reference
+  does: both indices, the write index moved.
+- it read `consumed_retries` immediately after a retry of an action that fails
+  every time it runs, with the engine ticking every two seconds in between.
+  It now accepts the count being spent once more, and nothing beyond that.
+
+Measured: unit tests 182/182, phase 1 398/398, the core corpus 1,427/1,427
+over all 409 files, ISM end to end 6 of 6, 1,587 authorisation answers over
+334 routes, 30 refusals.

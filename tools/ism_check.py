@@ -172,8 +172,23 @@ def rollover():
         lambda: req("GET", "/rolling-000002/_count").get("error") is None,
         True,
     )
+    # An alias that names a write index keeps naming the index it rolled out
+    # of -- read-only -- and the new index becomes the one written through.
+    # This used to expect the alias to leave the old index altogether, which
+    # is what a *plain* alias does; a write alias does not, here or in the
+    # reference, and the server was right while this check was wrong.
     behind = req("GET", "/rolling/_alias")
-    expect("the alias moved to the new index", list(behind), ["rolling-000002"])
+    expect(
+        "the alias still names both indices",
+        sorted(behind),
+        ["rolling-000001", "rolling-000002"],
+    )
+    write_index = [
+        name
+        for name, body in behind.items()
+        if body.get("aliases", {}).get("rolling", {}).get("is_write_index") is True
+    ]
+    expect("the write index moved to the new index", write_index, ["rolling-000002"])
     req("DELETE", "/rolling-000001,rolling-000002")
     req("DELETE", "/_plugins/_ism/policies/roll-policy")
 
@@ -282,14 +297,17 @@ def retry_after_failure():
         req("POST", "/_plugins/_ism/retry/ism-failing").get("updated_indices"),
         1,
     )
-    expect(
-        "the retry count is back to nothing",
+    # The engine ticks every couple of seconds and this policy's action fails
+    # every time it runs, so between the retry and this read the count may
+    # already have been spent once more. Nothing larger than that is a race:
+    # a retry that did not reset the count leaves it at three.
+    consumed = (
         req("GET", "/_plugins/_ism/explain/ism-failing")
         .get("ism-failing", {})
         .get("retry_info", {})
-        .get("consumed_retries"),
-        0,
+        .get("consumed_retries")
     )
+    expect("the retry count was reset", consumed in (0, 1), True)
     req("DELETE", "/ism-failing")
     req("DELETE", "/_plugins/_ism/policies/failing-policy")
 

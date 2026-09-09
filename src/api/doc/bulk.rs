@@ -245,6 +245,8 @@ pub async fn bulk(
         // nowhere else: `ensure` answers with whichever backing index the map
         // iterated to first, so after a rollover a write could land back in
         // the index that had just been rolled out of
+        // the alias with no write index was refused above, so what is left
+        // here is a name that has one, or a name that is not an alias
         let idx = store.write_target(&idx).unwrap_or(idx);
         let st = match store.ensure(&idx) {
             Ok(s) => s,

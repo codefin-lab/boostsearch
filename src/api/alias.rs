@@ -322,6 +322,9 @@ pub(crate) async fn put_alias_inner(
             o.remove(*k);
         }
     }
+    if let Some(refusal) = two_write_indices(&store, &name, &def, &targets) {
+        return refusal;
+    }
     for n in targets {
         if let Some(st) = store.get(&n) {
             let mut g = st.write();
@@ -330,6 +333,53 @@ pub(crate) async fn put_alias_inner(
         }
     }
     respond(&p, json!({"acknowledged": true}))
+}
+
+/// Whether adding this alias to these indices would leave more than one of
+/// them as its write index.
+///
+/// An alias has one index writes go to, or none: with two the destination is
+/// whichever the resolution happens to list first, which is a write landing
+/// in an index nobody meant. The reference refuses the second one, in these
+/// words, and nothing here did.
+pub(crate) fn two_write_indices(
+    store: &Store,
+    alias: &str,
+    def: &Value,
+    adding_to: &[String],
+) -> Option<Response> {
+    let asked_write = def.get("is_write_index").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !asked_write {
+        return None;
+    }
+    let mut writers: Vec<String> = store
+        .resolve(alias)
+        .into_iter()
+        .filter(|n| !adding_to.contains(n))
+        .filter(|n| {
+            store
+                .get(n)
+                .map(|st| {
+                    st.read()
+                        .aliases
+                        .get(alias)
+                        .and_then(|d| d.get("is_write_index"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    writers.extend(adding_to.iter().cloned());
+    writers.sort();
+    writers.dedup();
+    (writers.len() > 1).then(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("alias [{alias}] has more than one write index [{}]", writers.join(",")),
+        )
+    })
 }
 
 pub async fn put_alias(
@@ -463,6 +513,20 @@ pub async fn update_aliases(
         if indices.is_empty() {
             let want = spec.get("index").and_then(|v| v.as_str()).unwrap_or("");
             return no_such_index(want);
+        }
+        // one write index per alias, checked before any of them is written
+        if verb == "add" {
+            for a in &names {
+                let mut def = spec.clone();
+                if let Some(o) = def.as_object_mut() {
+                    for k in ["index", "indices", "alias", "aliases"] {
+                        o.remove(k);
+                    }
+                }
+                if let Some(refusal) = two_write_indices(&store, a, &def, &indices) {
+                    return refusal;
+                }
+            }
         }
         // a remove that removed nothing is an error, whether or not the caller
         // asked for must_exist -- there was nothing there to act on

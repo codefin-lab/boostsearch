@@ -353,6 +353,15 @@ impl Store {
     /// map happened to iterate first: after a rollover that meant the write
     /// could go back into the index that had just been rolled out of, which
     /// a retention policy then deleted.
+    /// What the reference says when an alias has no one index to write to.
+    pub fn no_write_index(name: &str) -> String {
+        format!(
+            "no write index is defined for alias [{name}]. The write index may be explicitly \
+             disabled using is_write_index=false or the alias points to multiple indices \
+             without one being designated as a write index"
+        )
+    }
+
     pub fn write_target(&self, name: &str) -> Option<String> {
         if !self.is_alias(name) {
             return Some(name.to_string());

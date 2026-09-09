@@ -24,8 +24,14 @@ pub fn run(store: &Store, index: &str, kind: &str, spec: &Value) -> Result<Strin
     let body = spec.get(kind).cloned().unwrap_or(json!({}));
     match kind {
         "delete" => {
-            store.delete(index);
-            Ok(format!("Successfully deleted index [{index}]"))
+            // said truthfully: a delete that removed nothing used to be
+            // reported as done, so the policy moved on from a state whose
+            // whole purpose had not happened
+            if store.delete(index) {
+                Ok(format!("Successfully deleted index [{index}]"))
+            } else {
+                Err(missing(index))
+            }
         }
         "read_only" => setting(store, index, "blocks.write", json!(true), "read only"),
         "read_write" => setting(store, index, "blocks.write", json!(false), "read write"),
@@ -123,6 +129,12 @@ fn setting(
     let mut g = st.write();
     let settings = g.settings.as_object_mut().ok_or("settings are not an object")?;
     settings.insert(format!("index.{key}"), value);
+    // The knobs a write is judged against are worked out once and kept: the
+    // `_settings` endpoint refreshes them after every change, and this did
+    // not. A policy that moved an index to `read_only` wrote the setting,
+    // reported success, and left the index taking writes until the node was
+    // restarted -- the one thing the state existed to stop.
+    g.refresh_knobs();
     g.save_meta();
     Ok(format!("Successfully set {what} on [{index}]"))
 }
@@ -255,6 +267,18 @@ fn alias(store: &Store, index: &str, body: &Value) -> Result<String, String> {
         for name in names {
             match kind.as_str() {
                 "add" => {
+                    // the same two things `_aliases` refuses: an alias is a
+                    // name for indices, so it is neither a pattern nor a name
+                    // an index already answers to. A policy could make one of
+                    // each, and the name then meant two things at once.
+                    if name.contains('*') || name.contains(',') {
+                        return Err(format!("Invalid alias name [{name}]"));
+                    }
+                    if store.exists(&name) {
+                        return Err(format!(
+                            "Invalid alias name [{name}]: an index or data stream exists with                              the same name as the alias"
+                        ));
+                    }
                     g.aliases.insert(name, json!({}));
                 }
                 "remove" => {

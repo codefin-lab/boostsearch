@@ -300,14 +300,23 @@ pub(crate) fn roll_alias(
     create: &Value,
 ) -> Result<(), String> {
     let Some(src) = store.get(from) else { return Err(format!("no such index [{from}]")) };
-    store.create(to, create).map_err(|e| e.to_string())?;
-    // the alias moves; the old index keeps whatever else pointed at it
     let def = { src.read().aliases.get(alias).cloned().unwrap_or_else(|| json!({})) };
-    if let Some(st) = store.get(to) {
-        let mut g = st.write();
-        g.aliases.insert(alias.to_string(), def);
-        g.save_meta();
-    }
+    let was_write_alias = def.get("is_write_index").and_then(|v| v.as_bool()).unwrap_or(false);
+    store.create(to, create).map_err(|e| e.to_string())?;
+    // The index being rolled out of stops being the write index *first*.
+    //
+    // It used to be the other way round -- the new index was given the alias
+    // definition, write-ness and all, and only then was the old one's taken
+    // away -- so for the length of two lock acquisitions two indices both
+    // claimed to be the write index of one alias. `write_target` answers with
+    // the first of them the resolution lists, and resolution is sorted, so
+    // the first is the *older* name: a write arriving in that window went
+    // into the index that had just been rolled out of, which is the index a
+    // retention policy then deletes.
+    //
+    // Nothing is the write index for that same short window now, and a write
+    // arriving in it is refused with a message saying so, which the client
+    // retries. Losing a write is worse than delaying one.
     {
         // Where the alias named the index to write through, it stays on the
         // one that was rolled over -- no longer as the write index -- so
@@ -320,12 +329,6 @@ pub(crate) fn roll_alias(
         // ago the rollover was deleted the index being written to and kept
         // the one that was meant to expire.
         let mut g = src.write();
-        let was_write_alias = g
-            .aliases
-            .get(alias)
-            .and_then(|d| d.get("is_write_index"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         match was_write_alias {
             true => {
                 // what the alias meant on this index is kept and only its
@@ -347,6 +350,12 @@ pub(crate) fn roll_alias(
         if let Some(o) = g.settings.as_object_mut() {
             o.insert("index.rollover_time".into(), json!(crate::store::now_millis().to_string()));
         }
+        g.save_meta();
+    }
+    // the alias moves; the old index keeps whatever else pointed at it
+    if let Some(st) = store.get(to) {
+        let mut g = st.write();
+        g.aliases.insert(alias.to_string(), def);
         g.save_meta();
     }
     Ok(())

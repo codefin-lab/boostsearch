@@ -48,6 +48,23 @@ pub async fn create_index(
             format!("index [{index}] already exists"),
         );
     }
+    // an alias may name one write index, and an index created with an alias
+    // is one more index carrying it: without this, `PUT /a2` with
+    // `is_write_index: true` gave an alias a second write index that
+    // `_aliases` would have refused, and the write then went to whichever
+    // the resolution listed first
+    if let Some(aliases) = body.get("aliases").and_then(|v| v.as_object()) {
+        for (name, def) in aliases {
+            if let Some(refusal) = crate::api::alias::two_write_indices(
+                &store,
+                name,
+                def,
+                std::slice::from_ref(&index),
+            ) {
+                return refusal;
+            }
+        }
+    }
     // a flat_object holds whatever it is given and is not analysed, so the
     // parameters that describe analysis mean nothing to it
     if let Some(props) = body.pointer("/mappings/properties").and_then(|p| p.as_object()) {

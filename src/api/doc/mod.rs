@@ -675,7 +675,20 @@ pub(crate) async fn do_index(
     // index, and to no other: without this it went wherever the map listed
     // first, which after a rollover is as likely to be the index that was
     // just rolled out of
-    let index = store.write_target(&index).unwrap_or(index);
+    let index = match store.write_target(&index) {
+        Some(one) => one,
+        // an alias over several indices with none of them marked is an alias
+        // nothing may be written to. Falling back to the name let the write
+        // reach whichever backing index the map listed first -- the very
+        // thing this is here to stop.
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                crate::store::Store::no_write_index(&index),
+            );
+        }
+    };
     let was_there = store.get(&index).is_some();
     let st = match store.ensure(&index) {
         Ok(s) => s,
