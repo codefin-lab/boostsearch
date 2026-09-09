@@ -4916,3 +4916,18 @@ introduced, and the rest were the machine rather than the code:
   only one installed, which cannot hold for a single binary that answers for
   all of them.
 
+Run again with the reindex fix and the fixture on the port the node was given,
+the gate returns **871 of 890, 15 failed**, and every one of the fifteen is
+data this machine does not have rather than code:
+
+- eight need the GeoLite2 databases (`ingest_geoip/20_geoip_processor.yml`
+  and `20_combine_processors.yml :: Test with date processor`); `/tmp/geoip-db`,
+  which `tools/gate_node.sh` points the node at, is empty here
+- five need dictionaries: three Polish (stempel), two Ukrainian
+- one needs commons-codec's Beider-Morse rule files
+- `analysis-phone/10_basic` asserts that its plugin is the only one installed
+
+The 880 in the README was measured with the geoip databases in place. Neither
+number is a code difference; what separates them is what is on the disk. See
+`docs/geoip.md` and `docs/phonetic.md` for where each file is looked for.
+

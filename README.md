@@ -18,7 +18,7 @@ rather than believed.
 | | | how |
 |---|---|---|
 | OpenSearch's core suite | **1,427 of 1,427** not skipped, over all 409 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
-| its module and plugin suites | **880 of 890**, 4 skipped | `tools/module_gate.py` |
+| its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Polish, Ukrainian and Beider-Morse data in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
 | the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
 | REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
