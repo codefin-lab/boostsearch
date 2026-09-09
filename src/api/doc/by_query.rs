@@ -38,13 +38,21 @@ impl Tally {
     /// index held still. Counting them all as conflicts told the caller the
     /// documents were already as asked -- and with `conflicts=proceed` it
     /// answered 200 with no failures at all, having written nothing.
-    fn note_refusal(&mut self, index: &str, id: &str, refusal: &Response) {
+    fn note_refusal(&mut self, index: &str, id: &str, refusal: &Response, proceeding: bool) {
         let (kind, reason) = match refusal.extensions().get::<crate::api::ErrorKind>() {
             Some(e) => (e.kind.clone(), e.reason.clone()),
             None => ("illegal_state_exception".to_string(), "the write was refused".to_string()),
         };
         if kind == "version_conflict_engine_exception" {
             self.version_conflicts += 1;
+            // `conflicts: proceed` is the caller saying a conflict is not a
+            // failure: it is counted and the walk goes on, and the answer
+            // lists no failure for it. Listing it anyway made the walk answer
+            // 409 for something the caller asked to be told about in the
+            // count instead.
+            if proceeding {
+                return;
+            }
         }
         let status = refusal.status().as_u16();
         self.failures.push(json!({
@@ -887,7 +895,7 @@ pub async fn update_by_query(
                 // the refusal is reported as itself, whether or not the
                 // caller asked to proceed: a document that was not written
                 // is not a document that was already right
-                tally.note_refusal(&seen.index, &seen.id, &refusal);
+                tally.note_refusal(&seen.index, &seen.id, &refusal, proceed);
                 if !proceed {
                     break;
                 }
@@ -1232,7 +1240,7 @@ pub async fn reindex(
                 // was not written is not a copy that was already there, and
                 // a destination held still refused every one of them while
                 // the answer said `version_conflicts` and `failures: []`.
-                tally.note_refusal(&to, &seen.id, &refusal);
+                tally.note_refusal(&to, &seen.id, &refusal, conflicts_proceed);
                 if !conflicts_proceed {
                     break;
                 }
@@ -1425,7 +1433,13 @@ async fn finish(
         return axum::Json(json!({ "task": name })).into_response();
     }
     // a walk that could not write what it found says so in its status
-    let status = if tally.failures.is_empty() { StatusCode::OK } else { StatusCode::CONFLICT };
+    // A walk that could not write what it found says so in its status -- but
+    // 409 is the answer to a version conflict, not to every refusal: a
+    // mapping that would not take a document is a failure listed in the body
+    // with the status the write had, and the walk itself answers 200.
+    let conflicted =
+        tally.failures.iter().any(|f| f.get("status").and_then(|v| v.as_u64()) == Some(409));
+    let status = if conflicted { StatusCode::CONFLICT } else { StatusCode::OK };
     (status, axum::Json(answer)).into_response()
 }
 

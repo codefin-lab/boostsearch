@@ -4891,3 +4891,28 @@ not visible is answered as one that is not there.
 and `Source::remove_prefix` refuse a path that climbs out of the repository;
 `Source::read` did not. The API validates snapshot names before they reach
 here, so this is a second lock on the same door rather than an open one.
+
+### What the module gate caught
+
+The gate was run against the fifth review's build and returned 866 of 890,
+fourteen below the 880 baseline. Three of those were a regression this review
+introduced, and the rest were the machine rather than the code:
+
+- **Three were mine.** `_reindex` with `conflicts: proceed` is the caller
+  saying a version conflict is not a failure -- it is counted, the walk goes
+  on, and the answer lists no failure for it. The fifth review's change made
+  every refusal a listed failure, including those conflicts, so the walk
+  answered 409 for something the caller had asked to be told about in the
+  count. The conflict message had also lost the current version the reference
+  writes into it. Both are fixed; the two reindex files pass 11 of 11.
+- **Two were the way I started the node**: the URL-repository fixture was
+  given one port and the node another, so the repository the suite restores
+  from was not the repository the node was allowed to read. With them matched
+  the URL suite passes 8 of 8.
+- **Ten are the baseline's own ten**: seven geoip sections and one more
+  through `20_combine_processors` need the GeoLite2 databases, one needs
+  commons-codec's Beider-Morse rule files, five need the Polish and Ukrainian
+  dictionaries, and `analysis-phone/10_basic` asserts that its plugin is the
+  only one installed, which cannot hold for a single binary that answers for
+  all of them.
+

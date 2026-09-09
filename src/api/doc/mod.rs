@@ -169,10 +169,14 @@ fn write_doc_within(
         None
     };
     if op_type == "create" && existed {
+        // the version the document is at is part of the message the reference
+        // writes, and a caller reading the refusal is told what it collided
+        // with rather than only that it collided
+        let at = st.version_of(id);
         return Err(err(
             StatusCode::CONFLICT,
             "version_conflict_engine_exception",
-            format!("[{id}]: version conflict, document already exists"),
+            format!("[{id}]: version conflict, document already exists (current version [{at}])"),
         ));
     }
     // the shard a write belongs to decides which refresh will show it
