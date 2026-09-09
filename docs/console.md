@@ -15,6 +15,16 @@ BOOSTSEARCH_ENGINE=http://127.0.0.1:9200                    # BoostSearch, or Op
 ./target/release/console
 ```
 
+The console has no login of its own, and every request it makes to the engine
+goes with the credentials in `BOOSTSEARCH_ENGINE` -- including the Dev Tools
+proxy, which by default forwards any path the page asks for
+(`BOOSTSEARCH_CONSOLE_PROXY_FILTER`, `.*` unless set, the same default the
+Node server has). Against a secured engine that means whoever can reach the
+console can do whatever those credentials can do. The Node server it replaces
+behaves the same way without the security plugin's session handling; the
+answer is the same as there -- keep the console off any network you would not
+give those credentials to, and narrow the proxy filter.
+
 The distribution is the one thing to fetch: the tarball or the Docker image
 of OpenSearch Dashboards 3.1.0, extracted anywhere. The console reads its
 bundles, its assets, its translations and its plugin manifests from it, and

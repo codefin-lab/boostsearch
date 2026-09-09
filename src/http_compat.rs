@@ -84,12 +84,38 @@ impl<S> Lenient<S> {
     }
 }
 
-/// Where one slice sits inside another.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.len() > haystack.len() {
-        return None;
+/// The end of one line, which may be `\r\n` or a bare `\n`.
+///
+/// Netty takes either, and so does the parser behind this one, so a reader
+/// that only knows `\r\n` is stricter than both ends it sits between: a
+/// request written with bare newlines was held here until the head timeout
+/// and never answered at all. Answers `(where the line's bytes end, where the
+/// next line begins)`.
+fn end_of_line(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    let at = buf[from..].iter().position(|b| *b == b'\n')? + from;
+    let ends = if at > from && buf[at - 1] == b'\r' { at - 1 } else { at };
+    Some((ends, at + 1))
+}
+
+/// Where the header block ends: an empty line, in either spelling.
+fn end_of_headers(buf: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while at < buf.len() {
+        let (_, next) = end_of_line(buf, at)?;
+        // the line after this one being empty is what ends the block
+        match buf.get(next) {
+            Some(b'\n') => return Some(next + 1),
+            Some(b'\r') => match buf.get(next + 1) {
+                Some(b'\n') => return Some(next + 2),
+                None => return None,
+                _ => {}
+            },
+            None => return None,
+            _ => {}
+        }
+        at = next;
     }
-    haystack.windows(needle.len()).position(|w| w == needle)
+    None
 }
 
 /// `GET _cat/indices HTTP/1.1` is a request for `/_cat/indices`.
@@ -166,39 +192,49 @@ impl<S> Lenient<S> {
                         self.phase = Phase::Through;
                         continue;
                     }
-                    let Some(at) = find(&self.hold, b"\r\n") else {
+                    let Some((ends, next)) = end_of_line(&self.hold, 0) else {
                         if self.hold.len() > LINE_LIMIT {
                             self.phase = Phase::Through;
                             continue;
                         }
                         return;
                     };
-                    let line: Vec<u8> = self.hold[..at].to_vec();
-                    self.hold.drain(..at + 2);
+                    let line: Vec<u8> = self.hold[..ends].to_vec();
+                    // the line ending is the client's own, put back as it
+                    // was: this reader changes the target and nothing else
+                    let ending: Vec<u8> = self.hold[ends..next].to_vec();
+                    self.hold.drain(..next);
                     match fix_request_line(&line) {
                         Some(fixed) => self.out.extend_from_slice(&fixed),
                         None => self.out.extend_from_slice(&line),
                     }
-                    self.out.extend_from_slice(b"\r\n");
+                    self.out.extend_from_slice(&ending);
                     self.phase = Phase::Headers;
                 }
                 Phase::Headers => {
                     // a message with no headers at all ends the block at once
-                    if self.hold.starts_with(b"\r\n") {
-                        self.out.extend_from_slice(b"\r\n");
-                        self.hold.drain(..2);
+                    let empty = if self.hold.starts_with(b"\r\n") {
+                        Some(2)
+                    } else if self.hold.starts_with(b"\n") {
+                        Some(1)
+                    } else {
+                        None
+                    };
+                    if let Some(n) = empty {
+                        self.out.extend_from_slice(&self.hold[..n]);
+                        self.hold.drain(..n);
                         self.phase = Phase::Line;
                         continue;
                     }
-                    let Some(at) = find(&self.hold, b"\r\n\r\n") else {
+                    let Some(at) = end_of_headers(&self.hold) else {
                         if self.hold.len() > HEADERS_LIMIT {
                             self.phase = Phase::Through;
                             continue;
                         }
                         return;
                     };
-                    let block: Vec<u8> = self.hold[..at + 4].to_vec();
-                    self.hold.drain(..at + 4);
+                    let block: Vec<u8> = self.hold[..at].to_vec();
+                    self.hold.drain(..at);
                     let (len, chunked) = body_length(&block);
                     self.out.extend_from_slice(&block);
                     self.phase = if chunked { Phase::Through } else { Phase::Body(len) };
@@ -388,6 +424,34 @@ mod tests {
         assert_eq!(body_length(block), (42, false));
         let chunked = b"Transfer-Encoding: chunked\r\n\r\n";
         assert_eq!(body_length(chunked), (0, true));
+    }
+
+    #[test]
+    fn a_line_may_end_either_way() {
+        assert_eq!(end_of_line(b"GET / HTTP/1.1\r\nx", 0), Some((14, 16)));
+        assert_eq!(end_of_line(b"GET / HTTP/1.1\nx", 0), Some((14, 15)));
+        assert_eq!(end_of_line(b"no ending yet", 0), None);
+        assert_eq!(end_of_headers(b"Host: x\r\n\r\nbody"), Some(11));
+        assert_eq!(end_of_headers(b"Host: x\n\nbody"), Some(9));
+        assert_eq!(end_of_headers(b"Host: x\r\n"), None);
+        // the block is not over until the empty line is whole
+        assert_eq!(end_of_headers(b"Host: x\n\r"), None);
+    }
+
+    /// Netty answers a request written with bare newlines and so does the
+    /// parser behind this reader; this one used to hold it until the head
+    /// timeout and answer nothing at all.
+    #[tokio::test]
+    async fn bare_newlines_are_read_and_left_as_they_were() {
+        use tokio::io::AsyncReadExt;
+        let raw: &[u8] = b"POST _bulk HTTP/1.1\nHost: x\nContent-Length: 5\n\nhello";
+        let mut s = Lenient::new(std::io::Cursor::new(raw.to_vec()));
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.expect("the cursor reads to its end");
+        assert_eq!(
+            String::from_utf8(out).expect("the fixture is text"),
+            "POST /_bulk HTTP/1.1\nHost: x\nContent-Length: 5\n\nhello"
+        );
     }
 
     #[tokio::test]

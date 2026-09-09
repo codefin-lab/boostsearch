@@ -89,6 +89,10 @@ jobs:
       - name: A refused write leaves the document alone
         run: python3 tools/refusal_check.py
 
+      # a document-level filter is only as good as the least careful path
+      - name: Document- and field-level security, through every reading path
+        run: python3 tools/dls_check.py
+
       - name: Malformed input at everything that parses
         run: python3 tools/fuzz_check.py --rounds 2000
 

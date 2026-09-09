@@ -661,3 +661,32 @@ pub fn indices_for_expr(store: &Store, expr: &str) -> Vec<String> {
     }
     resolve_indices(store, &named)
 }
+
+tokio::task_local! {
+    /// The filter each index of this request carries through the aliases the
+    /// request named. Set once, where the request's expression is known, and
+    /// read wherever a query is built for one index -- which is the only
+    /// place that knows which index it is building for.
+    pub static ALIAS_FILTERS: std::collections::BTreeMap<String, serde_json::Value>;
+}
+
+/// The alias filter this index is under for the request being answered.
+pub fn alias_filter_for(index: &str) -> Option<serde_json::Value> {
+    ALIAS_FILTERS.try_with(|f| f.get(index).cloned()).ok().flatten()
+}
+
+/// Run `f` with the filters the expression's aliases impose.
+///
+/// Nothing set means nothing narrowed: a path that has not been taught about
+/// alias filters answers as it always did rather than silently dropping them.
+pub async fn under_alias_filters<T>(
+    store: &crate::store::Store,
+    expr: &str,
+    f: impl std::future::Future<Output = T>,
+) -> T {
+    let filters = store.alias_filters(expr);
+    if filters.is_empty() {
+        return f.await;
+    }
+    ALIAS_FILTERS.scope(filters, f).await
+}

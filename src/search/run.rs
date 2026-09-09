@@ -684,6 +684,24 @@ pub fn run(
     body: &Value,
     p: &Params,
 ) -> std::result::Result<Outcome, Response> {
+    // An alias may be a narrower view of an index, and the filter that makes
+    // it narrower belongs to the request rather than to the query: it is put
+    // where every path that builds a query for one index can read it, which
+    // is the only place that knows which index it is building for. Nothing
+    // read it before, so a search -- and a `_delete_by_query` -- through a
+    // filtered alias reached the whole index.
+    //
+    // A search already inside such a scope keeps it: a scratch index built
+    // for `derived` fields, or an aggregation running a search of its own,
+    // must not have the filter laid over it a second time under a name the
+    // alias does not cover.
+    if crate::security::layer::ALIAS_FILTERS.try_with(|_| ()).is_err() {
+        let filters = store.alias_filters(expr);
+        if !filters.is_empty() {
+            return crate::security::layer::ALIAS_FILTERS
+                .sync_scope(filters, || run(store, expr, body, p));
+        }
+    }
     // a `derived` section defines fields for this search alone: the
     // documents are copied into a scratch index mapped with them, and the
     // search runs there
@@ -1072,6 +1090,7 @@ pub fn run(
                     nested: None,
                     nested_filter: None,
                     numeric_type: None,
+                    unmapped_type: None,
                     script: None,
                 })
                 .collect();
@@ -1082,6 +1101,49 @@ pub fn run(
         }
     }
     for k in &sort_keys {
+        // A field nothing maps is a sort nothing can answer. It used to sort
+        // every document as `null`, so the answer came back in no order at
+        // all and, worse, `search_after` could not advance: a client paging
+        // through with the sort values it was handed asked the same question
+        // for ever. `unmapped_type` is the caller saying to treat it as a
+        // field with no values, which is the one case where nulls are right.
+        let special = matches!(
+            k.field.as_str(),
+            "_score" | "_doc" | "_seq" | "_script" | "_geo_distance" | "_shard_doc"
+        ) || k.script.is_some();
+        if !special && k.unmapped_type.is_none() {
+            if k.field == "_id" {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    "Fielddata access on the _id field is disallowed, you can re-enable it by                      updating the dynamic cluster setting: indices.id_field_data.enabled",
+                ));
+            }
+            // a multi-field is not in the type table under its own name --
+            // `users.last.keyword` is a way of reading `users.last` -- so a
+            // name whose parent is mapped is a name the index knows
+            let parent = k.field.rsplit_once('.').map(|(head, _)| head.to_string());
+            let mapped = targets.iter().any(|n| {
+                store
+                    .get(n)
+                    .map(|st| {
+                        let g = st.read();
+                        let knows = |name: &str| {
+                            g.mapping.type_of(name).is_some()
+                                || g.all_field_types().iter().any(|(f, _)| f == name)
+                        };
+                        knows(&k.field) || parent.as_deref().map(knows).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            });
+            if !mapped && !targets.is_empty() {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "query_shard_exception",
+                    format!("No mapping found for [{}] in order to sort on", k.field),
+                ));
+            }
+        }
         let mut kinds: Vec<String> = Vec::new();
         for n in &targets {
             if let Some(st) = store.get(n)

@@ -129,6 +129,10 @@ pub(crate) fn search_one_shard(
         stats: &g.stats,
         vectors: &g.vectors,
     };
+    // the filter the alias this request named puts on this index, which is
+    // as much a part of the question as the query the caller wrote
+    let with_alias = crate::security::with_alias_filter(name, query_json.clone());
+    let query_json = &with_alias;
     let q: Box<dyn boostcore::query::Query> = match &query_json {
         Some(qj) => match crate::query::build(&ctx, qj) {
             Ok(q) => q,

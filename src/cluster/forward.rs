@@ -908,6 +908,24 @@ async fn broadcast(
 /// Run the handler here, then copy what it wrote to the replica copies and
 /// say in the answer how many took it.
 async fn run_with_replication(store: &Store, req: Request, next: Next) -> Response {
+    // A node with no cluster manager may not write, and the refusal has to
+    // come *before* the handler does.
+    //
+    // It used to come after: the document was written into this node's own
+    // index, and only then did the replication step notice there was nobody
+    // to copy it to and answer 503. The caller was told the write failed and
+    // the write was there -- a copy cut off from the cluster took twenty
+    // documents that way, and when the partition healed nothing took them
+    // back out or gave them to the other copy, so the two answered the same
+    // search differently for as long as the index lived.
+    if !super::has_manager() && matches!(classify(req.method(), req.uri().path()), Target::Write(_))
+    {
+        return crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_block_exception",
+            "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
+        );
+    }
     let refresh =
         parse_query(req.uri().query().unwrap_or("")).get("refresh").cloned().unwrap_or_default();
     let _ = store;

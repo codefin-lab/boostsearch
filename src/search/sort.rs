@@ -19,6 +19,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                 nested: None,
                 nested_filter: None,
                 numeric_type: None,
+                unmapped_type: None,
                 script: None,
             }),
             Value::Object(o) => {
@@ -59,6 +60,8 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         .get("numeric_type")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_ascii_lowercase());
+                    let unmapped_type =
+                        opts.get("unmapped_type").and_then(|v| v.as_str()).map(|s| s.to_string());
                     // `_script` sorts by what a script makes of each document
                     let script = (field == "_script").then(|| {
                         (
@@ -77,6 +80,7 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                         nested,
                         nested_filter,
                         numeric_type,
+                        unmapped_type,
                         script,
                     });
                 }

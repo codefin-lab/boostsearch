@@ -408,6 +408,70 @@ impl Store {
         self.get(name).map(|st| st.read().closed).unwrap_or(false)
     }
 
+    /// The filter each index reached by this expression carries, through the
+    /// aliases the expression names.
+    ///
+    /// A filtered alias is a narrower view of an index: a search through it
+    /// sees the documents the filter keeps and no others. The filter was
+    /// stored, reported back by `_alias`, and read by nothing, so a search,
+    /// a count and -- worse -- a `_delete_by_query` through such an alias
+    /// reached the whole index.
+    ///
+    /// An index reached by several of the expression's aliases sees the
+    /// union of their filters, which is what the reference does: naming two
+    /// views of an index asks for both. An index also reached by its own
+    /// name, or by a pattern that is not an alias, has no filter at all --
+    /// naming the index is asking for the index.
+    pub fn alias_filters(&self, expr: &str) -> std::collections::BTreeMap<String, Value> {
+        let mut out: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+        let mut unfiltered: std::collections::BTreeSet<String> = Default::default();
+        for part in expr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let part = part.trim_start_matches(['+', '-']);
+            for name in self.resolve(part) {
+                let Some(st) = self.get(&name) else { continue };
+                let filter = {
+                    let g = st.read();
+                    // the alias as it was named, or through a pattern that
+                    // reaches it
+                    let matching = crate::store::wildcard_to_regex(part);
+                    let mut filters: Vec<Value> = Vec::new();
+                    let mut named_without_filter = g.name == part;
+                    for (alias, def) in &g.aliases {
+                        if alias != part && !matching.is_match(alias) {
+                            continue;
+                        }
+                        match def.get("filter") {
+                            Some(f) if !f.is_null() => filters.push(f.clone()),
+                            _ => named_without_filter = true,
+                        }
+                    }
+                    if matching.is_match(&g.name) {
+                        named_without_filter = true;
+                    }
+                    (filters, named_without_filter)
+                };
+                let (filters, named_without_filter) = filter;
+                if named_without_filter || filters.is_empty() {
+                    unfiltered.insert(name.clone());
+                } else {
+                    out.entry(name).or_default().extend(filters);
+                }
+            }
+        }
+        out.retain(|name, _| !unfiltered.contains(name));
+        out.into_iter()
+            .map(|(name, mut filters)| {
+                filters.dedup();
+                let one = if filters.len() == 1 {
+                    filters.remove(0)
+                } else {
+                    serde_json::json!({"bool": {"should": filters, "minimum_should_match": 1}})
+                };
+                (name, one)
+            })
+            .collect()
+    }
+
     /// Every index carrying this alias, in name order.
     pub fn indices_for_alias(&self, alias: &str) -> Vec<String> {
         let mut out: Vec<String> = self

@@ -1459,9 +1459,20 @@ pub fn restrictions_for(store: &crate::store::Store, index: &str) -> Option<Inde
 
 /// A query JSON with the caller's DLS folded in as a filter.
 pub fn with_dls(store: &crate::store::Store, index: &str, query: Option<Value>) -> Option<Value> {
+    // an alias's own filter narrows this index the same way, and for the same
+    // reason: it is part of what the caller asked for rather than part of the
+    // query they wrote
+    let query = with_alias_filter(index, query);
     let Some(dls) = dls_for(store, index) else { return query };
     let base = query.unwrap_or_else(|| json!({"match_all": {}}));
     Some(json!({"bool": {"must": [base], "filter": [dls]}}))
+}
+
+/// The query as this index's alias filter has it.
+pub fn with_alias_filter(index: &str, query: Option<Value>) -> Option<Value> {
+    let Some(filter) = layer::alias_filter_for(index) else { return query };
+    let base = query.unwrap_or_else(|| json!({"match_all": {}}));
+    Some(json!({"bool": {"must": [base], "filter": [filter]}}))
 }
 
 /// Whether one document is inside the caller's view of its index.

@@ -506,6 +506,81 @@ def main():
         merged = [(t + (t0 - load.t0), "FAULT " + what) for t, what in events] + [(t, "routing " + r) for t, r in routing_log]
         for t, what in sorted(merged):
             print(f"    {t:6.1f}s {what}")
+    # Two copies of one shard have to hold the same documents. Only the
+    # acknowledged ones were checked above, and a copy may hold more than was
+    # ever acknowledged -- a write in flight when its node was killed is
+    # applied or not, and either is honest -- but the copies must agree with
+    # each other once the cluster has settled, or the same search answers
+    # differently depending on which copy it reaches. A partitioned node
+    # writing documents it then reported as failures diverged by hundreds of
+    # them this way, and nothing here noticed because nothing compared the
+    # copies.
+    def counts_now():
+        out = {}
+        for n in nodes:
+            if n.name not in holders:
+                continue
+            try:
+                call(f"http://{n.http}/{a.index}/_refresh", "POST", timeout=10)
+                st, c = call(f"http://{n.http}/{a.index}/_count?preference=_local", timeout=10)
+                if st == 200 and isinstance(c.get("count"), int):
+                    out[n.name] = c["count"]
+            except Exception:
+                pass
+        return out
+
+    counts = counts_now()
+    diverged = len(set(counts.values())) > 1
+    if diverged:
+        # a copy still catching up is not a copy that disagrees
+        for _ in range(15):
+            time.sleep(2)
+            counts = counts_now()
+            if len(set(counts.values())) <= 1:
+                diverged = False
+                break
+    if diverged:
+        print(f"  COPIES DISAGREE after settling: {counts}")
+        # which documents, so the next look at this starts from evidence
+        seen = {}
+        for n in nodes:
+            if n.name not in holders:
+                continue
+            ids = set()
+            after = None
+            # a page that adds nothing is a walk that is not moving: without
+            # this the listing spun for ever against a node whose sort the
+            # request did not advance
+            for _ in range(200):
+                body = {"size": 1000, "sort": [{"_id": "asc"}], "_source": False}
+                if after:
+                    body["search_after"] = after
+                st, r = call(
+                    f"http://{n.http}/{a.index}/_search?preference=_local",
+                    "POST",
+                    body,
+                    timeout=20,
+                )
+                hits = (r.get("hits") or {}).get("hits") or []
+                if st != 200 or not hits:
+                    break
+                before = len(ids)
+                ids.update(h["_id"] for h in hits)
+                after = hits[-1].get("sort")
+                if not after or len(ids) == before:
+                    break
+            seen[n.name] = ids
+        names = sorted(seen)
+        for i, one in enumerate(names):
+            for other in names[i + 1 :]:
+                only_here = sorted(seen[one] - seen[other])[:10]
+                only_there = sorted(seen[other] - seen[one])[:10]
+                print(f"    on {one} and not {other}: {len(seen[one] - seen[other])} {only_here}")
+                print(f"    on {other} and not {one}: {len(seen[other] - seen[one])} {only_there}")
+                for doc in only_here[:3] + only_there[:3]:
+                    print(f"      {doc}: acknowledged={doc in load.acked}")
+    elif len(counts) > 1:
+        print(f"  copies agree: {counts}")
     print(f"checked {checked} copies of acknowledged documents: {lost} lost, {wrong} wrong")
     print(
         "RESULT",
@@ -513,13 +588,15 @@ def main():
         "|",
         "every copy has them all" if not behind else f"copies behind: {behind}",
         "|",
+        "COPIES DISAGREE" if diverged else "copies agree",
+        "|",
         "settled" if settled is not None else "NOT settled",
     )
     for n in nodes:
         n.stop_graceful(seconds=10)
     if unread:
         print(f"  {unread} acknowledged writes could not be read back at all; they are not counted as found")
-    return 1 if lost or wrong or settled is None or unread else 0
+    return 1 if lost or wrong or diverged or settled is None or unread else 0
 
 
 if __name__ == "__main__":

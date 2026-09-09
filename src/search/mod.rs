@@ -133,6 +133,10 @@ pub(crate) struct SortKey {
     /// the width the values are read as, where the caller asked for one other
     /// than the field's own
     numeric_type: Option<String>,
+    /// `unmapped_type`: what to treat the field as where an index does not
+    /// map it. Without one, an index that does not map the field is an error
+    /// rather than a document with no value.
+    unmapped_type: Option<String>,
     /// a `_script` sort: the script that makes each document's value, and
     /// whether it is read as a number or as text
     script: Option<(Value, String)>,
@@ -330,7 +334,12 @@ impl SortSegmentCollector {
     fn read_key(&self, i: usize, doc: boostcore::DocId, score: boostcore::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
-            SortSource::Doc => SortValue::I64(doc as i64),
+            // `_doc` is the document's place in the shard, not its place in
+            // one segment of it: two documents in different segments both
+            // read 0, so they sorted equal and `search_after` on `_doc` --
+            // the documented cheap way to walk everything -- could not
+            // advance past them. The segment's ordinal is the high half.
+            SortSource::Doc => SortValue::I64(((self.segment_ord as i64) << 32) | (doc as i64)),
             SortSource::Column { desc, mode, .. } => self.columns[i]
                 .as_ref()
                 .map(|c| c.read(doc, *desc, mode.as_deref()))
@@ -443,6 +452,7 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
                     nested: None,
                     nested_filter: None,
                     numeric_type: None,
+                    unmapped_type: None,
                     script: None,
                 };
                 let ord = cmp_with_missing(&sort[i], marker, &key);

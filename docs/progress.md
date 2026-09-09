@@ -5018,3 +5018,85 @@ way earlier reviews' edits were applied. They are sentences again.
 
 Measured: unit tests 184/184, phase 1 398/398, the core corpus 1,427/1,427
 over all 409 files, 1,587 authorisation answers over 334 routes, 30 refusals.
+
+## The ninth review
+
+Three findings, and a check that should have existed.
+
+**A node cut off from the cluster wrote documents it then reported as
+failures.** The no-cluster-manager block was raised by the replication step,
+which runs *after* the handler: the document was already in this node's index,
+and the caller was told 503. When the partition healed nothing took those
+documents out and nothing gave them to the other copy, so two copies of one
+shard answered the same search differently for as long as the index lived. A
+partitioned primary took twenty documents that way in a three-node test; a
+ninety-second chaos run left one copy 779 documents ahead of the other. The
+block is raised before the handler now: the same test writes nothing, and every
+copy holds the same 5 documents it held before.
+
+**`tools/cluster_chaos.py` printed each copy's count and compared none of
+them.** It checked that every acknowledged write is on every copy -- which is
+the property that matters most -- and never asked whether the copies agree
+about anything else. It does now: the counts are compared after the cluster
+settles, a copy still catching up is given fifteen more tries, and a
+disagreement that survives that is reported with the documents that differ
+and fails the run.
+
+**A request written with bare newlines was never answered.** The lenient HTTP
+reader exists to be *more* forgiving than the parser behind it, and knew only
+`\r\n`: a request ending its lines with `\n` was held until the head timeout
+and then dropped. Netty answers it, and so does the parser this reader feeds.
+Both spellings are read now, and the line ending the client used is passed
+through exactly as it arrived.
+
+**`tools/dls_check.py`** is new. A document-level filter is only as good as the
+least careful path that reads a document, and nothing measured that: the
+security plugin's own suite is not part of the corpus. The check starts a node
+with security on, makes a role that may see one person's documents and may not
+see one field, and asks **24 reading paths** whether they agree -- search,
+count, terms and cardinality aggregations, `top_hits`, get, mget,
+termvectors, field_caps, docvalue_fields, stored_fields, the `_source`
+endpoint, explain, highlighting, sort, scroll, uri search and `_source`
+includes. All 24 hold. It runs in CI.
+
+## The tenth review
+
+**A filtered alias filtered nothing.** The filter was stored, reported back by
+`GET _alias`, and read by no code at all: a search through such an alias saw
+the whole index, a `_count` counted the whole index, an aggregation
+aggregated over it -- and a `_delete_by_query` through the alias deleted every
+document in the index, not the ones the alias covers. An alias with a filter
+is how a shared index is divided between tenants; this made that division
+imaginary.
+
+The filter each index is under is now worked out from the expression the
+caller wrote -- an index named outright is not filtered, an index reached by
+two of the request's aliases sees the union of their filters -- and put where
+every path that builds a query for one index reads it, which is where the
+document-level security filter is already read. Measured: through the alias,
+a search sees 1 of 2, `_count` says 1, a terms aggregation has one bucket, and
+`_delete_by_query` deletes one document and leaves the other.
+
+## The eleventh review
+
+Three findings, all of which made `search_after` -- the documented way to page
+through more than a window's worth -- loop for ever. All three were found
+because a tool of this repository's own hung on them for fifty minutes.
+
+- **Sorting on a field nothing maps** answered `sort: [null]` for every
+  document instead of refusing. A client paging with the sort values it was
+  handed asked the same question for ever. It now answers `No mapping found
+  for [x] in order to sort on`, as the reference does, and `unmapped_type`
+  still means "treat it as a field with no values".
+- **`sort: _id`** did the same silently. The reference refuses it, saying
+  fielddata on `_id` is disallowed; so does this.
+- **`sort: _doc`** answered with the document's place in its *segment*, so
+  every first document of a segment sorted as 0 and `search_after` could not
+  advance past them. It is the document's place in the shard now.
+
+`tools/cluster_chaos.py` also stops listing a copy's documents when a page
+adds nothing, so a walk that cannot advance ends rather than spinning.
+
+Measured across the three reviews: unit tests 186/186, phase 1 398/398, the
+core corpus 1,427/1,427 over all 409 files, 24 document-level security paths,
+1,587 authorisation answers over 334 routes, 30 refusals.
