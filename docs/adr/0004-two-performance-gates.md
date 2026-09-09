@@ -26,11 +26,27 @@ away from being wrong.
 
 ## Status
 
-Decided, not enforced. Neither gate exists in a workflow: `.github/workflows/ci.yml`
-builds, tests, lints and runs the conformance, authorisation, refusal, fuzz and
-restart checks, and `release.yml` builds artefacts -- neither runs
-`tools/bench.py` or `tools/bench_matrix.py`, and nothing fails on a number.
-The matrix is run by hand against a reference node, which is also why the
-comparison exists at all: it needs an OpenSearch to measure against, and CI has
-none. Until a workflow runs it, the numbers in `README.md` are a measurement
-somebody took, not a gate anything passed.
+Half enforced, and the half that is enforceable without an OpenSearch to hand.
+
+`tools/bench_gate.py` measures this build against a baseline of this repository's
+own numbers (`tools/bench_baseline.json`) and reddens when a dimension falls
+more than 5%. The baseline is taken from three runs, so it records what the
+machine's own spread is dimension by dimension, and a fall smaller than that
+spread is not counted -- a gate that cannot tell noise from a change is a gate
+nobody believes. It also records which machine it was taken on: on another
+machine the comparison is printed and nothing fails, because a slower laptop
+is not a regression.
+
+The release gate -- every dimension ahead of OpenSearch -- does not need
+OpenSearch running every time. It was measured once, on this corpus, on one
+machine, beside this engine measured the same way; both sets of numbers are in
+`bench/results/final-os-clean-*.json` and `final-obs-clean-*.json`, and every
+run of the gate reports what they said: **ahead on all 34 dimensions**. That is
+a reading of a file rather than a fresh measurement, and it is labelled as
+such. Measuring against OpenSearch again is a thing to do when the reference
+version changes, not a thing to do on every commit.
+
+What is still not automatic: `.github/workflows/ci.yml` runs the gate, but a
+GitHub runner is not the machine the baseline was taken on, so there it prints
+the comparison and does not fail. A machine-matched baseline is what makes it
+a gate; on a dedicated bench machine, `--strict` makes it one everywhere.

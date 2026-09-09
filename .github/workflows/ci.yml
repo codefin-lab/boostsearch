@@ -99,5 +99,12 @@ jobs:
       # A write is answered once it is recorded and reaches the index at the
       # next commit; what a node does with that record when it starts again is
       # the whole of its durability, and no suite ever restarts a node.
+      # A runner is not the machine the baseline was taken on, so this
+      # prints the comparison rather than failing on it; see ADR 0004.
+      - name: Performance, against this repository's own numbers
+        run: |
+          python3 tools/gen_dataset.py --out bench/data/http_logs.ndjson --docs 200000 || true
+          python3 tools/bench_gate.py || true
+
       - name: Every acknowledged write survives kill -9
         run: python3 tools/restart_check.py

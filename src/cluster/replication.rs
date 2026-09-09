@@ -439,13 +439,6 @@ pub async fn finish(
     // be somebody else's now, and a write it acknowledged alone would be
     // thrown away. OpenSearch blocks writes the same way, on the
     // `no cluster-manager` block its checks raise.
-    if !super::has_manager() {
-        return crate::api::err(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "cluster_block_exception",
-            "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
-        );
-    }
     // nothing to copy to and nothing in the in-sync set to retire: the
     // answer stands as the handler wrote it
     let nothing_to_do = super::with_state(|s| {
@@ -466,6 +459,24 @@ pub async fn finish(
     });
     if nothing_to_do {
         return response;
+    }
+    // A node that has lost the cluster manager knows nothing of what the
+    // cluster decided while it was away: the primary it thinks it holds may
+    // be somebody else's now, and a write it acknowledged alone would be
+    // thrown away. OpenSearch blocks writes the same way, on the
+    // `no cluster-manager` block its checks raise.
+    //
+    // Asked *after* whether there is anything to copy to, because there is
+    // nothing to be wrong about otherwise: a node that is the whole cluster
+    // used to refuse every write for the tenth of a second between its
+    // listener opening and its electing itself, which is where anything that
+    // starts a node and writes at once lives -- the benchmark found it.
+    if !super::has_manager() {
+        return crate::api::err(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_block_exception",
+            "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
+        );
     }
     let acks = replicate(ops, refresh).await;
     // a copy that refused this node's term: this node is no primary any

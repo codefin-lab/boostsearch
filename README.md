@@ -22,6 +22,7 @@ rather than believed.
 | the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
 | REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
+| this build against this repository's own last numbers | 34 dimensions, nothing allowed to fall more than 5% past the machine's own spread; the run also reports the kept OpenSearch measurement (**ahead on 34 of 34**) | `tools/bench_gate.py` |
 | who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths, counted as the check makes them rather than written into it | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |

@@ -918,7 +918,17 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
     // documents that way, and when the partition healed nothing took them
     // back out or gave them to the other copy, so the two answered the same
     // search differently for as long as the index lived.
-    if !super::has_manager() && matches!(classify(req.method(), req.uri().path()), Target::Write(_))
+    //
+    // A node that is the whole cluster is not blocked by this: it has nobody
+    // to diverge from, and `finish` found nothing to replicate for it either.
+    // Blocking it as well refused every write in the moment between the
+    // listener opening and this node electing itself -- which is where a
+    // benchmark, or anything else that starts a node and writes at once,
+    // lives.
+    let in_a_cluster = super::with_state(|s| s.nodes.len() > 1);
+    if in_a_cluster
+        && !super::has_manager()
+        && matches!(classify(req.method(), req.uri().path()), Target::Write(_))
     {
         return crate::api::err(
             StatusCode::SERVICE_UNAVAILABLE,

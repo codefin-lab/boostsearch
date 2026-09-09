@@ -5100,3 +5100,60 @@ adds nothing, so a walk that cannot advance ends rather than spinning.
 Measured across the three reviews: unit tests 186/186, phase 1 398/398, the
 core corpus 1,427/1,427 over all 409 files, 24 document-level security paths,
 1,587 authorisation answers over 334 routes, 30 refusals.
+
+## The twelfth review
+
+Three findings, all in SQL, and the performance gate ADR 0004 asked for.
+
+**`SELECT count(*) FROM t` answered no rows at all.** Counting documents needs
+no aggregation -- a search already says how many it matched -- so the answer
+carries no `aggregations` at all, and the code that reads rows out of them
+found none and returned nothing. Beside another aggregate, or under a `GROUP
+BY`, there was an aggregation to read and it worked, which is why only the
+plainest form of the commonest query was wrong.
+
+**`SELECT max(n) - min(n)` was always zero.** An aggregate inside arithmetic
+was resolved by looking for "the first metric in the bucket whose name starts
+with m", so two different aggregates in one expression both read the first
+one. `sum(a) / count(b)` was wrong the same way. Each call now carries the
+name of the metric it was planned as.
+
+**`ORDER BY` over a computed column sorted nothing.** `price * units AS total
+... ORDER BY total` was sent to the search as a sort on a field called `total`,
+which no index has. Until the eleventh review that sorted every document as
+`null` and the rows came back in whatever order they were read in; after it,
+the search refused outright, which is how `tools/sql_check.py` found it. The
+rows are sorted here now, as they already were for a `GROUP BY`.
+
+### The performance gate
+
+ADR 0004 asked for two gates and had neither. The one that needs OpenSearch
+running does not need it every time: OpenSearch was measured once on this
+corpus beside this engine, both sets of numbers are in `bench/results/`, and
+`tools/bench_gate.py` reports what they said on every run -- ahead on all 34
+dimensions -- as a reading of a file, labelled as one.
+
+What the gate enforces is this build against this repository's own last
+numbers. The baseline is taken from three runs so that it records the
+machine's own spread dimension by dimension: the first version of this gate
+reddened on `0.43ms -> 0.47ms`, which is noise, and a gate that cannot tell
+noise from a change is a gate nobody believes. A fall counts when it is more
+than 5% *and* more than half again the spread the machine was seen to have.
+The baseline records the machine it was taken on; on another machine the
+comparison is printed and nothing fails.
+
+Two things the gate found immediately, both about a node that has just started:
+
+- A node that is the whole cluster refused every write in the tenth of a
+  second between its listener opening and its electing itself its own manager.
+  The no-cluster-manager block was raised before asking whether there was
+  anything to replicate; for a node with nobody to replicate to there is
+  nothing to be wrong about. The block is asked after that question now.
+- The ninth review's fix -- raising that same block *before* the handler
+  writes -- had the same edge, and is now asked only of a node that is in a
+  cluster with others, which is the only place the divergence it prevents can
+  happen.
+
+Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
+over all 409 files, SQL and PPL 8 of 8, the bench gate green against a
+three-run baseline on this machine.

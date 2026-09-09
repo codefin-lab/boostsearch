@@ -47,8 +47,14 @@ pub enum Read {
     Count,
     /// a value that does not depend on the document
     Constant(Value),
-    /// worked out from the row once the rest of it is known
-    Expr(Expr),
+    /// worked out from the row once the rest of it is known.
+    ///
+    /// The map says which metric each aggregate inside it was asked for as:
+    /// `max(n) - min(n)` needs to read two different metrics, and without it
+    /// the evaluator took the first metric it found for both -- so an
+    /// expression over two aggregates answered as though they were one, and
+    /// `max(n) - min(n)` was always zero.
+    Expr(Expr, std::collections::BTreeMap<String, String>),
     /// every field the document has
     All,
 }
@@ -86,7 +92,7 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
                 // anything worked out from the row needs the fields it is
                 // worked out from
                 collect_fields(other, &mut wanted);
-                reads.push(Read::Expr(other.clone()));
+                reads.push(Read::Expr(other.clone(), Default::default()));
             }
         }
     }
@@ -95,13 +101,29 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
     if !reads.iter().any(|r| matches!(r, Read::All)) && !wanted.is_empty() {
         body["_source"] = json!(wanted);
     }
+    // `ORDER BY` names either something the documents hold, which the search
+    // can sort by, or a column this query works out -- `price * units AS
+    // total` -- which it cannot: nothing in the index is called `total`. Such
+    // a name used to be sent to the search anyway, where it sorted every
+    // document as `null` and the rows came back in whatever order they were
+    // read in. The rows are sorted here instead, as they are for a group.
+    let mut order_rows: Vec<(usize, bool)> = Vec::new();
     if !select.order_by.is_empty() {
         let mut sort = Vec::new();
         for (expr, ascending) in &select.order_by {
+            let name = expr.name();
+            let computed =
+                select.columns.iter().position(|c| c.name() == name && c.expr.field().is_none());
+            if let Some(at) = computed {
+                order_rows.push((at, *ascending));
+                continue;
+            }
             let field = expr.field().ok_or_else(|| format!("cannot sort by [{}]", expr.name()))?;
             sort.push(json!({field: {"order": if *ascending { "asc" } else { "desc" }}}));
         }
-        body["sort"] = Value::Array(sort);
+        if !sort.is_empty() {
+            body["sort"] = Value::Array(sort);
+        }
     }
     // SQL counts from the top of the answer; a search counts from the top of
     // the index, so the offset is asked for as well as the limit
@@ -116,7 +138,7 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
         limit: select.limit,
         offset: select.offset,
         having: None,
-        order_rows: Vec::new(),
+        order_rows,
         also_called: vec![None; select.columns.len()],
         distinct: select.distinct,
     })
@@ -167,15 +189,21 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
                 // asked for, and the arithmetic happens on the row
                 let mut found = Vec::new();
                 collect_aggregates(other, &mut found);
+                let mut named: std::collections::BTreeMap<String, String> = Default::default();
                 for (at, call) in found.iter().enumerate() {
                     if let Expr::Call { name, args } = call {
-                        let (metric, _) = metric_for(name, args, position * 100 + at)?;
+                        let (metric, read) = metric_for(name, args, position * 100 + at)?;
                         if let Some((metric_name, spec)) = metric {
                             metrics.insert(metric_name, spec);
                         }
+                        // by the call as it was written, so two of the same
+                        // call share one metric and two different ones do not
+                        if let Read::Metric(m) = read {
+                            named.insert(call.name(), m);
+                        }
                     }
                 }
-                reads.push(Read::Expr(other.clone()));
+                reads.push(Read::Expr(other.clone(), named));
             }
             other => {
                 return Err(format!(

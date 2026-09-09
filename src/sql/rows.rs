@@ -117,7 +117,7 @@ fn from_documents(planned: &Planned, answer: &Value) -> Vec<Vec<Value>> {
                     Read::All => source.clone(),
                     Read::Field(field) => at_path(&source, field),
                     Read::Constant(v) => v.clone(),
-                    Read::Expr(e) => evaluate(e, &source),
+                    Read::Expr(e, _) => evaluate(e, &source),
                     // a document has no groups and no metrics
                     _ => Value::Null,
                 })
@@ -128,7 +128,15 @@ fn from_documents(planned: &Planned, answer: &Value) -> Vec<Vec<Value>> {
 
 /// Walk the buckets, deepest first, and make a row of each leaf.
 fn from_buckets(planned: &Planned, answer: &Value) -> Vec<Vec<Value>> {
-    let Some(aggs) = answer.get("aggregations") else { return Vec::new() };
+    // `SELECT count(*) FROM t` needs no aggregation at all -- a search
+    // already says how many documents it matched -- so the answer carries no
+    // `aggregations` at all, and reading the rows out of them found none:
+    // the query answered with no rows rather than with the count. Beside
+    // another aggregate, or under a `GROUP BY`, there was an aggregation to
+    // read and it worked, which is why only the plainest form of it was
+    // wrong.
+    let empty = Value::Object(Default::default());
+    let aggs = answer.get("aggregations").unwrap_or(&empty);
     let depth = planned
         .reads
         .iter()
@@ -140,6 +148,7 @@ fn from_buckets(planned: &Planned, answer: &Value) -> Vec<Vec<Value>> {
         .unwrap_or(0);
     // with no grouping at all there is one row, out of the metrics themselves
     if depth == 0 && aggs.get("g0").is_none() {
+        // (the total is what `count(*)` reads)
         let total = answer.pointer("/hits/total/value").and_then(|v| v.as_u64()).unwrap_or(0);
         return vec![row_from(planned, &[], aggs, total)];
     }
@@ -183,7 +192,7 @@ fn row_from(planned: &Planned, keys: &[Value], holder: &Value, count: u64) -> Ve
             Read::Count => json!(count),
             Read::Metric(name) => metric(holder, name),
             Read::Constant(v) => v.clone(),
-            Read::Expr(e) => evaluate_over(e, holder, count),
+            Read::Expr(e, named) => evaluate_over(e, holder, count, named),
             _ => Value::Null,
         })
         .collect()
@@ -257,28 +266,37 @@ pub fn evaluate(expr: &Expr, source: &Value) -> Value {
 
 /// The same, over a bucket rather than a document: an aggregate inside
 /// arithmetic reads its own metric.
-fn evaluate_over(expr: &Expr, holder: &Value, count: u64) -> Value {
+fn evaluate_over(
+    expr: &Expr,
+    holder: &Value,
+    count: u64,
+    named: &std::collections::BTreeMap<String, String>,
+) -> Value {
     match expr {
         Expr::Call { name, .. } if name.eq_ignore_ascii_case("count") => json!(count),
         Expr::Call { name, args } if super::plan::is_aggregate(name) => {
             let _ = args;
-            // the metric was named after where its column sat, and finding it
-            // again means looking for the one metric of that kind
-            holder
-                .as_object()
-                .and_then(|o| {
-                    o.iter()
-                        .find(|(k, _)| k.starts_with('m'))
-                        .and_then(|(_, v)| v.get("value").cloned())
-                })
-                .unwrap_or(Value::Null)
+            // the metric this very call was asked for. It used to be
+            // whichever metric came first in the bucket, so `max(n) - min(n)`
+            // read one of them twice and answered zero.
+            match named.get(&expr.name()) {
+                Some(m) => metric(holder, m),
+                None => holder
+                    .as_object()
+                    .and_then(|o| {
+                        o.iter()
+                            .find(|(k, _)| k.starts_with('m'))
+                            .and_then(|(_, v)| v.get("value").cloned())
+                    })
+                    .unwrap_or(Value::Null),
+            }
         }
         Expr::Binary { op, left, right } => arithmetic(
             op,
-            &evaluate_over(left, holder, count),
-            &evaluate_over(right, holder, count),
+            &evaluate_over(left, holder, count, named),
+            &evaluate_over(right, holder, count, named),
         ),
-        Expr::Negate(inner) => match as_number(&evaluate_over(inner, holder, count)) {
+        Expr::Negate(inner) => match as_number(&evaluate_over(inner, holder, count, named)) {
             Some(n) => json!(-n),
             None => Value::Null,
         },
