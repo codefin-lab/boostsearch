@@ -294,6 +294,15 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // lets whole runs of documents be skipped instead of compared one by one.
     let mut subs: Vec<Box<dyn Query>> = Vec::new();
     for t in types.iter().copied() {
+        // A bound this type cannot hold does not make that side of the range
+        // open: the types are tried together and OR-ed, so a `lte: 2.5` that
+        // the unsigned attempt could not represent became "no upper bound at
+        // all" and the whole range matched everything above the lower one.
+        // The attempt that cannot hold a bound it was given is dropped; the
+        // one that can still answers.
+        if !fits(lower.as_ref(), t) || !fits(upper.as_ref(), t) {
+            continue;
+        }
         let lo = bound_term(f, &path, lower.as_ref(), t, true);
         let hi = bound_term(f, &path, upper.as_ref(), t, false);
         if matches!(lo, Bound::Unbounded) && matches!(hi, Bound::Unbounded) {
@@ -415,6 +424,18 @@ pub(crate) fn is_numeric_type(t: Option<&str>) -> bool {
             | Some("scaled_float")
             | Some("unsigned_long")
     )
+}
+
+/// Whether a bound can be held by the type an attempt is being made in.
+///
+/// A bound that is absent fits everything: there is nothing to hold.
+fn fits(b: Option<&(Value, bool)>, ty: Type) -> bool {
+    let Some((v, _)) = b else { return true };
+    match (ty, v) {
+        (Type::I64, Value::Number(n)) => n.as_i64().is_some(),
+        (Type::U64, Value::Number(n)) => n.as_u64().is_some(),
+        _ => true,
+    }
 }
 
 pub(crate) fn bound_term(

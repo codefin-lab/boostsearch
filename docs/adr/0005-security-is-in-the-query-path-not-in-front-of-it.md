@@ -14,6 +14,15 @@ So the identity of the caller is a parameter of a search, threaded from the
 handler to the query builder, and every path that can observe a field asks
 whether this caller may see it.
 
+A filter that cannot be built is not a filter that is skipped. A document-level
+rule is stored as the text of a query, and the text can be one this engine
+cannot read -- a role written against a version that had a query this one does
+not, or a substitution that produced something malformed. That case used to
+drop the filter and answer the search without it, which is the one failure a
+document-level rule cannot have: the caller is shown every document the rule
+existed to hide. It now answers with a filter that matches nothing, and says so
+in the log.
+
 ## Consequences
 
 This is the second decision in this project that cannot be retrofitted -- the

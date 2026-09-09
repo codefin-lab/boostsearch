@@ -632,8 +632,10 @@ pub(crate) async fn do_index(
                 // sent to another index: the request's alias rule applies there,
                 // and an alias stands for the index behind it
                 if store.is_alias(&index)
-                    && let Some(behind) = store.resolve(&index).into_iter().next()
+                    && let Some(behind) = store.write_target(&index)
                 {
+                    // the write index the alias names, not the first index
+                    // the resolution happened to list
                     index = behind;
                 } else if p.get("require_alias").map(|v| v != "false").unwrap_or(false)
                     && !store.is_alias(&index)
@@ -665,6 +667,11 @@ pub(crate) async fn do_index(
     if let Some(refusal) = crate::api::indices::auto_create_refusal(&store, &index) {
         return refusal;
     }
+    // a write to an alias goes to the index the alias marks as the write
+    // index, and to no other: without this it went wherever the map listed
+    // first, which after a rollover is as likely to be the index that was
+    // just rolled out of
+    let index = store.write_target(&index).unwrap_or(index);
     let was_there = store.get(&index).is_some();
     let st = match store.ensure(&index) {
         Ok(s) => s,

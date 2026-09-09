@@ -131,6 +131,62 @@ pub(crate) fn parse_time_amount(s: &str) -> Option<f64> {
     )
 }
 
+/// Whether every geo and `intervals` clause in a query sits where narrowing
+/// the whole answer by it means the same thing.
+///
+/// These two are not built as queries: the query says only that the field is
+/// there, and the real predicate is applied to the candidates afterwards, as
+/// a narrowing of the whole answer. That is only the same thing when the
+/// clause is AND-ed with everything else from the root -- inside `should` it
+/// dropped documents that matched a sibling, and inside `must_not` it dropped
+/// every document instead of the ones inside the shape. Only the first clause
+/// of each kind was applied, too, so a second was ignored outright. Where the
+/// shape does not hold, the request is refused rather than answered wrongly.
+pub(crate) fn placement_complaint(query: &Value) -> Option<String> {
+    fn walk(node: &Value, conjunctive: bool, geo: &mut usize, intervals: &mut usize) -> bool {
+        let Some(o) = node.as_object() else {
+            return match node {
+                Value::Array(a) => a.iter().all(|v| walk(v, conjunctive, geo, intervals)),
+                _ => true,
+            };
+        };
+        if crate::search::geo::is_geo_clause(o) {
+            *geo += 1;
+            return conjunctive;
+        }
+        if o.contains_key("intervals") {
+            *intervals += 1;
+            return conjunctive;
+        }
+        if let Some(inner) = o.get("bool").and_then(|b| b.as_object()) {
+            return inner.iter().all(|(k, v)| {
+                let still = conjunctive && matches!(k.as_str(), "must" | "filter");
+                walk(v, still, geo, intervals)
+            });
+        }
+        if let Some(inner) = o.get("constant_score").and_then(|c| c.get("filter")) {
+            return walk(inner, conjunctive, geo, intervals);
+        }
+        // anywhere else -- a nested query, a function score, a should -- the
+        // clause is no longer a narrowing of the whole answer
+        o.values().all(|v| walk(v, false, geo, intervals))
+    }
+    let (mut geo, mut intervals) = (0usize, 0usize);
+    let placed = walk(query, true, &mut geo, &mut intervals);
+    if !placed {
+        return Some(
+            "a geo or intervals clause is answered by narrowing the whole result, so it may only              stand where it narrows the whole result: at the top of the query, or under `must`              or `filter`"
+                .to_string(),
+        );
+    }
+    if geo > 1 || intervals > 1 {
+        return Some(
+            "only one geo clause and one intervals clause can be answered in a query".to_string(),
+        );
+    }
+    None
+}
+
 pub(crate) fn settle_by_value(
     cands: &mut Vec<Cand>,
     searchers: &Searchers,

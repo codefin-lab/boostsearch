@@ -51,6 +51,10 @@ pub const MODE: Mode = Mode { ack: AckPolicy::AllInSync, read: ReadRouting::AnyA
 pub const REPLICA_WRITE: &str = "indices:data/write/bulk[r]";
 pub const RECOVERY_SCAN: &str = "internal:index/recovery/scan";
 /// the files of the primary's last commit, and one chunk of one of them
+/// The files an index rewrites in place at every commit, each written whole:
+/// they are not segments, and a recovery reads whatever they say now.
+const REWRITTEN_IN_PLACE: &[&str] = &["_meta.json", "_versions.bin"];
+
 pub const RECOVERY_FILES: &str = "internal:index/recovery/files";
 pub const RECOVERY_FILE: &str = "internal:index/recovery/file";
 const CHUNK: u64 = 4 * 1024 * 1024;
@@ -702,10 +706,21 @@ fn install_files(rt: &super::runtime::Runtime, store: &Store, me: &NodeId) {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
+                    // A segment file never changes once it is written, so one
+                    // that has is a commit that moved under the recovery and
+                    // the copy would be assembled out of two generations.
+                    // The index's own bookkeeping is different: `_meta.json`
+                    // and the version map are rewritten in place on every
+                    // commit, and each is written whole and atomically, so
+                    // whatever is there now is consistent by itself. Holding
+                    // those to the listing failed every recovery of an index
+                    // that was taking writes.
+                    let rewritten = REWRITTEN_IN_PLACE.contains(&name.as_str());
                     let whole = v.get("whole").and_then(|i| i.as_u64());
                     let stamp = v.get("stamp").and_then(|i| i.as_u64());
-                    if whole.map(|w| w != held.len()).unwrap_or(false)
-                        || stamp.map(|s| s != now_stamp).unwrap_or(false)
+                    if !rewritten
+                        && (whole.map(|w| w != held.len()).unwrap_or(false)
+                            || stamp.map(|s| s != now_stamp).unwrap_or(false))
                     {
                         return Err(format!(
                             "[{name}] changed since the listing: the commit moved under the \
@@ -775,6 +790,10 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
     let tmp = dest.with_extension("recovering");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    // the files an index rewrites in place go last: the segments they
+    // describe are fetched first, so what these say is true of what is there
+    let mut files = files;
+    files.sort_by_key(|(name, _, _)| REWRITTEN_IN_PLACE.contains(&name.as_str()));
     for (name, len, stamp) in &files {
         let mut offset = 0u64;
         let mut out = std::fs::File::create(tmp.join(name)).map_err(|e| e.to_string())?;
@@ -918,12 +937,27 @@ pub async fn seed_replica(
     }
     arrived().lock().insert(index.to_string(), Vec::new());
     let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+    // whether there was anything here before this recovery: a half-filled copy
+    // this recovery made is not something to leave behind
+    let held_before = store.get(index).is_some();
     let before = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
     let r = seed_replica_inner(store, index, shard, primary).await;
     let r = match r {
         Ok(()) => apply_what_waited(store, index).await,
         Err(why) => {
-            arrived().lock().remove(index);
+            // What the primary sent while this was filling was answered
+            // `applied` and parked; it is dropped here. That is only safe
+            // because a failed copy is reported `Failed` and is no longer
+            // in sync -- but a half-filled index left in the store is read
+            // from like any other, and answers a search with a part of the
+            // documents. It goes with the recovery that made it.
+            let parked = arrived().lock().remove(index).map(|v| v.len()).unwrap_or(0);
+            if !held_before && store.get(index).is_some() {
+                store.drop_local(index);
+            }
+            tracing::warn!(
+                "filling [{index}] failed ({why}); {parked} writes that waited for it were                  dropped and the copy is reported failed"
+            );
             Err(why)
         }
     };

@@ -46,6 +46,10 @@ jobs:
       - name: Install the runner's dependencies
         run: pip install --quiet pyyaml requests
 
+      # what the README claims about endpoints, read rather than remembered
+      - name: REST endpoints routed
+        run: python3 tools/endpoint_gate.py --missing
+
       - name: Run the conformance suite
         run: |
           BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &

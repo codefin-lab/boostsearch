@@ -4730,3 +4730,117 @@ search pipelines -- ran 457/460, the three being the same transport failure.
 
 The module gate is to be run again on an idle machine before this is called
 measured.
+
+## The fifth review
+
+Fifty findings; what follows is what was done about them. The pattern of the
+first four holds -- the rate of finding is not falling, and about one fix in
+six of my own has introduced a defect of its own -- so this section says what
+was fixed, what was left, and what was found to be a claim rather than a
+behaviour.
+
+### Wrong answers
+
+A descending sort returned the documents that had no value. `cmp_sorted`
+reversed the whole comparison for a descending field, and the comparison makes
+`Missing` greater than everything, so reversing it made `Missing` the best
+value there was: the collector filled with documents that had nothing to sort
+by and rejected every document that did. Missing now sorts last in both
+directions, and the reversal applies only where both sides have a value.
+
+A `range` over a type that cannot hold one of the bounds dropped the bound
+rather than the clause: `{"gte": 1, "lte": 2.5}` on an integer field lost the
+upper bound entirely and matched everything from 1 upwards. A bound that does
+not fit now drops the variant, not the limit.
+
+`terms` carrying a bitmap unpacked it before anything looked at
+`index.max_terms_count`. Four bytes of run container stand for 65,536 ids, so
+a request of a few kilobytes became hundreds of millions of `i64`s -- an
+expansion of about 130,000 to one, all of it allocated. The decoders now stop
+at a million values and the clause is refused. A bitmap that could not be read
+used to be left as it arrived and asked for as if the base64 were the term.
+
+### Security
+
+`plugins.security.restapi.endpoints_disabled` was read by nothing. An operator
+who delegated read-only access to the security API delegated every method of
+it: the check was `may_administer`, all or nothing. It is now
+`may_administer_endpoint`, per endpoint and per method, at all ten handlers.
+
+The security configuration was node-local. Each node read the same files at
+startup and each node's API wrote to its own copy, so revoking a role on the
+node that took the request left every other node granting it -- a caller who
+saw the refusal asked another node. Every write now goes to the other nodes as
+well (`src/security/spread.rs`), best-effort, and a node that does not take it
+says so in the log rather than being counted as changed.
+
+`PATCH` skipped what `PUT` checks. An action group could be patched into one
+with no actions; a user could be given a password and a hash in one patch.
+`PATCH` on a whole kind wrote its entries into the live configuration one at a
+time, so a refusal partway left the earlier ones applied in memory and none of
+them saved -- the node then answered by a configuration no file held. The
+entries are written into a copy that replaces the configuration only if every
+one of them is accepted.
+
+A document-level filter that could not be parsed was dropped, and the search
+ran without it: the one failure a document-level rule cannot have. It now
+matches nothing. ADR 0005 says so.
+
+### Cluster and store
+
+An index's directory was removed while other requests still held its handle.
+The name is taken out of the map first, but a request that took a handle before
+that still has one, with a searcher open on those files. The delete now waits,
+briefly, for the other holders to let go.
+
+A write parked for a copy that was still filling was answered `applied` and
+then dropped when the fill failed. The copy is reported failed, so the cluster
+does not count it in sync -- but the half-filled index was left in the store
+and answered searches with part of the documents. It is now dropped with the
+recovery that made it.
+
+`PUT _mapping` over several indices asked them all, let go, and then changed
+them all. A field learned dynamically in one of the later indices between the
+two loops made that index refuse, by which time the earlier ones were merged
+and answered. The guards are now taken first, in one order, and every index is
+checked before any is changed.
+
+### The console
+
+An answer was read into memory whole and gzipped on a runtime thread, with no
+ceiling: a search through the console can answer with hundreds of megabytes,
+and that was two copies of it per request in flight. Only an answer whose
+length is known and under eight megabytes is compressed now, and the
+compressing is done off the runtime.
+
+### What was claimed rather than measured
+
+Eight claims were checked against what the code and the workflows do.
+
+- "156 of 167 REST endpoints answered" was measured by nothing.
+  `tools/endpoint_gate.py` now measures it against OpenSearch's own
+  `rest-api-spec`: **146 of 167** APIs routed on every path and method they
+  name, 8 more on some of them, 13 not routed. It runs in CI.
+- "answered byte for byte identically" -- the comparison scrubs ids and
+  timings, in `--strict` as well. The CHANGELOG says what it does.
+- "30 refusals through five write paths" was 20 counted and a `10` written
+  into the script. It is counted now, and it is 30.
+- ADR 0004 describes two performance gates. Neither exists in any workflow.
+  The ADR now says so under a Status heading rather than describing a process
+  nobody runs.
+- `ingest-attachment` was documented as reading eight formats. It reads three:
+  docx, doc and plain text. The plan says three.
+- `_cat/plugins` and `_nodes` advertised `analysis-kuromoji`, `analysis-nori`
+  and `analysis-smartcn` in a `--no-default-features` build, where those
+  analyzers answer with an error. They are now behind the same feature the
+  dictionaries are.
+
+### What was found and not fixed
+
+A `nested` query matches clauses across different objects of the array: the
+`path` is discarded and the inner query is asked of the whole document, so a
+document where one object satisfies one clause and a different object
+satisfies the other matches, where OpenSearch requires one object to satisfy
+both. Closing this means indexing each nested object as a document of its own
+and joining the blocks at search time, which the storage layer here does not
+do. It is written down at the code and here rather than left to be discovered.

@@ -394,7 +394,22 @@ pub async fn rollover(
                         src.read().bytes.load(std::sync::atomic::Ordering::Relaxed) >= limit
                     })
                     .unwrap_or(false),
-                "max_age" => false,
+                // how long ago the index was made, against the age asked
+                // about. It used to answer `false` always, so an age-based
+                // rollover -- the commonest kind there is -- never fired and
+                // reported `rolled_over: false` for ever, while the policy
+                // engine answered the same question correctly: the two
+                // disagreed about the same index.
+                "max_age" => crate::ism::engine::duration_ms(&json!(text))
+                    .map(|span| {
+                        let made = src
+                            .read()
+                            .setting("creation_date")
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .unwrap_or_else(crate::store::now_millis);
+                        crate::store::now_millis() - made >= span
+                    })
+                    .unwrap_or(false),
                 _ => false,
             };
             met = met || hit;

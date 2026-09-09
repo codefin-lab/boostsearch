@@ -766,7 +766,22 @@ pub async fn restore_snapshot(
                     if let Err(e) = crate::snapshot::readable(source, &name, n) {
                         return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
                     }
-                    store.delete(&target);
+                    // still closed, or the restore does not happen: the
+                    // repository was read in between, and an index opened and
+                    // written to while it was read is not one to delete
+                    if !store.delete_if_closed(&target) {
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            "snapshot_restore_exception",
+                            format!(
+                                "[{repo}:{name}] cannot restore index [{target}] because an open \
+                                 index with same name already exists in the cluster. Either \
+                                 close or delete the existing index or restore the index under a \
+                                 different name by providing a rename pattern and replacement \
+                                 name"
+                            ),
+                        );
+                    }
                     if let Err(e) = off_the_runtime(|| {
                         crate::snapshot::restore_index(&store, source, &name, n, &target)
                     }) {

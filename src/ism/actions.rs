@@ -200,7 +200,19 @@ fn write_alias_of(store: &Store, index: &str) -> Option<String> {
         // an index with one alias and nothing said about writing is the one
         // that is written to
         .or_else(|| {
-            let names: Vec<&String> = g.aliases.keys().collect();
+            // Only where the alias says nothing either way. An alias that
+            // says `is_write_index: false` has already been rolled out of,
+            // and taking it as the write alias because it is the only one
+            // left had the policy roll an index that a rollover had already
+            // finished with -- which either wedged its retries on a name
+            // that exists, or swung the alias onto a new empty index and
+            // left it with no write index at all.
+            let names: Vec<&String> = g
+                .aliases
+                .iter()
+                .filter(|(_, d)| d.get("is_write_index").and_then(|v| v.as_bool()) != Some(false))
+                .map(|(n, _)| n)
+                .collect();
             (names.len() == 1).then(|| names[0].clone())
         })
 }

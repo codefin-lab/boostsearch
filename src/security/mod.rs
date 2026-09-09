@@ -23,6 +23,7 @@ pub mod audit;
 pub mod authc;
 pub mod layer;
 pub mod saml;
+pub mod spread;
 pub mod view;
 
 /// One internal user, as `internal_users.yml` writes it.
@@ -569,10 +570,30 @@ impl SecurityConfig {
         Ok(())
     }
 
+    /// The defaults with these documents laid over them, each document being
+    /// the whole of its kind rather than an addition to it.
+    pub fn from_documents(docs: &[(&str, Value)]) -> SecurityConfig {
+        let mut c = SecurityConfig::defaults();
+        if docs.is_empty() {
+            return c;
+        }
+        for (kind, _) in docs {
+            match *kind {
+                "internalusers" => c.users.clear(),
+                "rolesmapping" => c.mappings.clear(),
+                "roles" => c.roles.retain(|_, r| r.is_static),
+                "actiongroups" => c.action_groups.retain(|_, g| g.is_static),
+                "tenants" => c.tenants.retain(|_, t| t.is_static),
+                _ => {}
+            }
+        }
+        c.merge_documents(docs);
+        c
+    }
+
     /// The configuration on disk laid over the defaults, or the defaults
     /// alone where nothing was written yet.
     pub fn load() -> SecurityConfig {
-        let mut c = SecurityConfig::defaults();
         let dir = security_dir();
         let mut docs = Vec::new();
         for (kind, file) in [
@@ -587,21 +608,8 @@ impl SecurityConfig {
                 docs.push((kind, yaml_to_json(&text)));
             }
         }
-        if !docs.is_empty() {
-            // a file on disk is the whole of its kind, not an addition
-            for (kind, _) in &docs {
-                match *kind {
-                    "internalusers" => c.users.clear(),
-                    "rolesmapping" => c.mappings.clear(),
-                    "roles" => c.roles.retain(|_, r| r.is_static),
-                    "actiongroups" => c.action_groups.retain(|_, g| g.is_static),
-                    "tenants" => c.tenants.retain(|_, t| t.is_static),
-                    _ => {}
-                }
-            }
-            c.merge_documents(&docs);
-        }
-        c
+        // a file on disk is the whole of its kind, not an addition
+        SecurityConfig::from_documents(&docs)
     }
 }
 
@@ -934,8 +942,23 @@ impl IndexRestrictions {
         if self.unfiltered || self.dls.is_empty() {
             return None;
         }
-        let parsed: Vec<Value> =
-            self.dls.iter().filter_map(|q| serde_json::from_str(q).ok()).collect();
+        // A filter that cannot be read is not a filter that does not apply.
+        // Dropping the ones that would not parse, and answering `None` when
+        // none of them did, handed the caller every document in the index --
+        // the restriction disappeared instead of the request being refused.
+        // One that cannot be read now matches nothing.
+        let mut parsed: Vec<Value> = Vec::with_capacity(self.dls.len());
+        for q in &self.dls {
+            match serde_json::from_str(q) {
+                Ok(v) => parsed.push(v),
+                Err(_) => {
+                    tracing::error!(
+                        "a document-level filter could not be read; the caller is shown nothing"
+                    );
+                    return Some(json!({"bool": {"must_not": [{"match_all": {}}]}}));
+                }
+            }
+        }
         if parsed.is_empty() {
             return None;
         }
@@ -1015,6 +1038,16 @@ pub struct Security {
     pub config: RwLock<SecurityConfig>,
     /// the roles that may use the security REST API
     pub restapi_roles: Vec<String>,
+    /// `plugins.security.restapi.endpoints_disabled.<role>.<ENDPOINT>`: the
+    /// methods a role may not use on an endpoint of the security API. It was
+    /// read by nothing at all, so an operator delegating read-only access to
+    /// the API delegated everything.
+    pub endpoints_disabled: HashMap<String, HashMap<String, Vec<String>>>,
+    /// whether `PATCH /_plugins/_security/api/securityconfig` may rewrite the
+    /// authentication chain. Off unless an operator turns it on, as the
+    /// reference has it: the payload *is* the chain, so anyone who may write
+    /// it can add a domain that authenticates a header they choose.
+    pub allow_config_rewrite: bool,
     /// `plugins.security.compliance.salt`, for field masking
     pub salt: String,
 }
@@ -1031,9 +1064,49 @@ impl Security {
                     .filter(|s| !s.is_empty())
                     .collect()
             })
-            .unwrap_or_else(|| {
-                vec!["all_access".to_string(), "security_rest_api_access".to_string()]
-            });
+            // The reference defaults this to nothing at all: with no setting,
+            // only an admin client certificate reaches the security API.
+            // Defaulting it to two roles opened the API on a node whose
+            // configuration never mentions it.
+            .unwrap_or_default();
+        // `<role>.<ENDPOINT>: [methods]`, read out of the settings tree
+        // itself: a list does not survive being read as one string
+        let endpoints_disabled = settings
+            .pointer("/plugins/security/restapi/endpoints_disabled")
+            .or_else(|| settings.pointer("/plugins.security.restapi.endpoints_disabled"))
+            .and_then(|v| v.as_object())
+            .map(|per_role| {
+                per_role
+                    .iter()
+                    .map(|(role, kinds)| {
+                        let kinds = kinds
+                            .as_object()
+                            .map(|o| {
+                                o.iter()
+                                    .map(|(kind, methods)| {
+                                        let methods = methods
+                                            .as_array()
+                                            .map(|a| {
+                                                a.iter()
+                                                    .filter_map(|m| m.as_str())
+                                                    .map(|m| m.to_ascii_uppercase())
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        (kind.to_ascii_uppercase(), methods)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (role.clone(), kinds)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let allow_config_rewrite =
+            get("plugins.security.unsupported.restapi.allow_securityconfig_modification")
+                .map(|v| v == "true")
+                .unwrap_or(false);
         let ttl_minutes = get("plugins.security.cache.ttl_minutes")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(60);
@@ -1066,6 +1139,8 @@ impl Security {
             audit: audit::AuditLog::new(settings, !disabled),
             config: RwLock::new(config),
             restapi_roles,
+            endpoints_disabled,
+            allow_config_rewrite,
             salt: get("plugins.security.compliance.salt")
                 .unwrap_or_else(|| "e1ukloTsQlOgPquJ".into()),
         })
@@ -1204,6 +1279,31 @@ impl Security {
     /// Whether the caller may use the security REST API.
     pub fn may_administer(&self, caller: &Caller) -> bool {
         caller.unrestricted || caller.roles.iter().any(|r| self.restapi_roles.contains(r))
+    }
+
+    /// The same, for one endpoint and one method.
+    ///
+    /// A role named in `endpoints_disabled` may not use the methods listed
+    /// there, whatever `roles_enabled` says. Nothing read that setting, so
+    /// an operator who had delegated read-only access to the security API had
+    /// in fact delegated every method of it.
+    pub fn may_administer_endpoint(&self, caller: &Caller, kind: &str, method: &str) -> bool {
+        if !self.may_administer(caller) {
+            return false;
+        }
+        if caller.unrestricted {
+            return true;
+        }
+        let kind = kind.to_ascii_uppercase();
+        let method = method.to_ascii_uppercase();
+        let refused = |role: &String| {
+            self.endpoints_disabled
+                .get(role)
+                .and_then(|kinds| kinds.get(&kind).or_else(|| kinds.get("*")))
+                .map(|methods| methods.iter().any(|m| m == &method || m == "*"))
+                .unwrap_or(false)
+        };
+        !caller.roles.iter().any(refused)
     }
 }
 
@@ -1587,4 +1687,36 @@ pub fn mapping_change_body(before: &Value, after: &Value) -> String {
         }
     }
     json!({"_doc": {"properties": props}}).to_string()
+}
+
+#[cfg(test)]
+mod restapi_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_role_may_be_barred_from_one_method_of_one_endpoint() {
+        let settings = json!({
+            "plugins": {
+                "security": {
+                    "disabled": "false",
+                    "restapi": {
+                        "roles_enabled": "readers",
+                        "endpoints_disabled": {
+                            "readers": {"internalusers": ["PUT", "DELETE"], "audit": ["*"]}
+                        }
+                    }
+                }
+            }
+        });
+        let security = Security::from_settings(&settings);
+        let caller = Caller { roles: vec!["readers".into()], ..Caller::default() };
+        assert!(security.may_administer(&caller));
+        assert!(security.may_administer_endpoint(&caller, "INTERNALUSERS", "GET"));
+        assert!(!security.may_administer_endpoint(&caller, "INTERNALUSERS", "PUT"));
+        assert!(!security.may_administer_endpoint(&caller, "AUDIT", "GET"));
+        // an admin certificate is not delegated access and is not narrowed
+        assert!(security.may_administer_endpoint(&Caller::unrestricted(), "AUDIT", "GET"));
+    }
 }

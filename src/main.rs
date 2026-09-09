@@ -608,6 +608,11 @@ async fn main() -> anyhow::Result<()> {
         // requests carried to the node they belong on
         cluster::replication::install(store.clone());
         cluster::search::install(store.clone());
+        // the security configuration is the cluster's, not this node's
+        if let Some(rt) = cluster::runtime() {
+            let me = rt.local();
+            security::spread::install(&rt, &store, &me);
+        }
         cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -674,7 +679,12 @@ async fn shutdown_signal(store: Store) {
     }
     for name in store.names() {
         if let Some(st) = store.get(&name) {
-            st.write().flush_translog(true);
+            let mut g = st.write();
+            g.flush_translog(true);
+            // where each document's version had got to, so that a node
+            // started again answers `_version` with the number the documents
+            // really carry rather than beginning at one
+            g.save_versions();
         }
     }
 }

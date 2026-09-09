@@ -42,9 +42,15 @@ impl IdxState {
     /// is not committed yet -- so what a restart loses is the version of
     /// every document whose record has been spent. `_version` came back as 1
     /// for a document that had been written ten times, and a caller holding
-    /// `?version=10` was told the current version is 1. It is written where
-    /// the translog is thrown away, which is the moment it stops covering
-    /// them.
+    /// `?version=10` was told the current version is 1.
+    ///
+    /// It is written when an index goes quiet and when the node stops, and
+    /// not on the write path: this is one entry per document the index has
+    /// ever been given, and writing it on every commit -- which is where it
+    /// was first put -- is the whole map serialised again for each refresh.
+    /// A crash between the last quiet moment and now loses the versions of
+    /// what was committed since, which is where this started rather than
+    /// somewhere worse.
     pub fn save_versions(&self) {
         let Some(path) = &self.path else { return };
         let Ok(bytes) = postcard::to_allocvec(&self.versions) else { return };
@@ -78,6 +84,11 @@ impl IdxState {
             "dynamic_types": self.dynamic_types,
             "observed_kinds": self.observed_kinds,
             "allocation_id": self.allocation_id,
+            // an index an operator closed stays closed across a restart: it
+            // used to come back open and accepting writes, while whatever
+            // closed it -- an operator before a snapshot, a policy's `close`
+            // action -- believed it was still shut
+            "closed": self.closed,
             // where the sequence numbers had got to: a restart that started
             // again from zero would hand new writes numbers old documents
             // already carry, and a recovery pages by sequence number

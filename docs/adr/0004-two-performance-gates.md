@@ -23,3 +23,14 @@ release gate is what forces it to be paid back before anyone else sees it. Only
 dimensions ahead by more than 20% are claimed publicly; between 5% and 20% we
 report parity, because a number that close is one tuning pass on the other side
 away from being wrong.
+
+## Status
+
+Decided, not enforced. Neither gate exists in a workflow: `.github/workflows/ci.yml`
+builds, tests, lints and runs the conformance, authorisation, refusal, fuzz and
+restart checks, and `release.yml` builds artefacts -- neither runs
+`tools/bench.py` or `tools/bench_matrix.py`, and nothing fails on a number.
+The matrix is run by hand against a reference node, which is also why the
+comparison exists at all: it needs an OpenSearch to measure against, and CI has
+none. Until a workflow runs it, the numbers in `README.md` are a measurement
+somebody took, not a gate anything passed.

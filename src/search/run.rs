@@ -526,6 +526,27 @@ pub fn walk_every_hit(
     walk_every_hit_of(store, targets, query, track_scores, None)
 }
 
+/// Whether a request body names a script anywhere in it.
+///
+/// Blunt on purpose: every place a script can appear -- a `script` query, a
+/// `script_score`, a `_script` sort, `script_fields`, a scripted aggregation,
+/// a `function_score` -- writes the word, and a caller whose view of the
+/// index is narrowed may not run any of them.
+fn mentions_a_script(body: &Value) -> bool {
+    match body {
+        Value::Object(o) => {
+            o.iter().any(|(k, v)| k == "script" || k == "_script" || mentions_a_script(v))
+        }
+        Value::Array(a) => a.iter().any(mentions_a_script),
+        _ => false,
+    }
+}
+
+/// How many documents a `post_filter` may be answered over. It is answered by
+/// looking at every document the filter matches, so this is the size of what
+/// one request may ask the node to hold.
+const MOST_POST_FILTERED: usize = 1_000_000;
+
 /// Every document a query matches, read in one pass rather than paged.
 ///
 /// A page-by-page walk asks for `from + size` each time, so the last pages
@@ -563,6 +584,21 @@ pub fn every_matching_source(
             .unwrap_or_else(|| query.clone());
         let q = crate::query::build(&ctx, &asked)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "query_shard_exception", e.to_string()))?;
+        // asked how many before they are collected: refusing once the set is
+        // in memory is refusing after the harm is done
+        let how_many = searcher.search(&q, &boostcore::collector::Count).map_err(|e| {
+            err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
+        })?;
+        if out.len() + how_many > ceiling {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "too_many_buckets_exception",
+                format!(
+                    "This aggregation reads every matching document, and this one matches more \
+                     than [{ceiling}]. Narrow the query, or aggregate over a filtered subset."
+                ),
+            ));
+        }
         let found = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
         })?;
@@ -932,7 +968,7 @@ pub fn run(
     let mut join_inner_hits: Vec<(String, String, Value, Value)> = Vec::new();
     if let Some(q) = query_json.as_mut() {
         resolve_terms_lookups(store, q)?;
-        expand_bitmap_terms(q);
+        expand_bitmap_terms(q)?;
         expand_more_like_this(store, &targets, q);
         // a joining query walks one set of documents to answer about another,
         // which is one of the costs a cluster may have turned off
@@ -1136,7 +1172,27 @@ pub fn run(
     let fanned_out = targets.len() > 1;
     // what the caller may see of each target, worked out here on the
     // request's own task, before any thread that cannot ask
+    // a geo or intervals clause is answered by narrowing the whole result, so
+    // it may only stand where that means the same thing
+    if let Some(q) = body.get("query")
+        && let Some(why) = crate::search::extras::placement_complaint(q)
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
+    }
     let views = crate::security::view::views_for(store, &targets);
+    // A script reads the document's source, all of it: `doc['salary']` in a
+    // `script` query, a `_script` sort or a `script_score` answers from a
+    // field the caller may not read, and a sort even writes the value into
+    // the hit. Field-level rules are applied to what comes back, and a
+    // script is a way round them -- so a caller who has any is not allowed to
+    // run one here.
+    if views.values().any(|v| v.restricts_fields()) && mentions_a_script(body) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "security_exception",
+            "a script reads the whole document, and this caller may not read the whole              document: scripts are not allowed in a search of an index whose fields are              restricted for you",
+        ));
+    }
     // the aggregations that run as searches of their own read `query_json`
     // rather than the shard's query, so where every target is filtered the
     // same way the filter is folded in here once; each shard folds its own
@@ -1358,18 +1414,31 @@ pub fn run(
                 stats: &g.stats,
                 vectors: &g.vectors,
             };
-            let found = match crate::query::build(&ctx, spec) {
-                Ok(q) => {
-                    searcher.search(&q, &boostcore::collector::DocSetCollector).unwrap_or_default()
-                }
-                Err(e) => {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "query_shard_exception",
-                        e.to_string(),
-                    ));
-                }
-            };
+            let q = crate::query::build(&ctx, spec).map_err(|e| {
+                err(StatusCode::BAD_REQUEST, "query_shard_exception", e.to_string())
+            })?;
+            // how many it matches is asked before the set of them is built:
+            // collecting first and refusing afterwards is refusing after the
+            // memory has already been taken
+            let how_many = searcher.search(&q, &boostcore::collector::Count).map_err(|e| {
+                err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
+            })?;
+            if how_many > MOST_POST_FILTERED {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "too_many_buckets_exception",
+                    format!(
+                        "a post_filter is answered by looking at every document it matches, and \
+                         this one matches [{how_many}], more than [{MOST_POST_FILTERED}]. Put \
+                         the narrowing in the query, or narrow the query first."
+                    ),
+                ));
+            }
+            // a search that failed is not a search that matched nothing
+            let found =
+                searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+                    err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
+                })?;
             keep.push(found);
         }
         cands.retain(|c| keep.get(c.shard).map(|k| k.contains(&c.addr)).unwrap_or(false));

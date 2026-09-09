@@ -62,6 +62,29 @@ fn admin(store: &Store, caller: &Caller) -> Result<(), Response> {
     if store.security.may_administer(caller) { Ok(()) } else { Err(api_forbidden(caller)) }
 }
 
+/// The same, for one endpoint of the API and one method of it.
+///
+/// `plugins.security.restapi.endpoints_disabled.<role>.<ENDPOINT>` names the
+/// methods a delegated role may not use. Nothing read it, so a role given
+/// read-only access to the API in fact had every method of it.
+fn admin_for(store: &Store, caller: &Caller, kind: &str, method: &str) -> Result<(), Response> {
+    admin(store, caller)?;
+    if store.security.may_administer_endpoint(caller, &endpoint_name(kind), method) {
+        Ok(())
+    } else {
+        Err(api_forbidden(caller))
+    }
+}
+
+/// The name an endpoint goes by in `endpoints_disabled`, which is not always
+/// the word in the path: `securityconfig` is configured as `CONFIG`.
+fn endpoint_name(kind: &str) -> String {
+    match kind.trim_matches('/').to_ascii_uppercase().as_str() {
+        "SECURITYCONFIG" => "CONFIG".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn disabled() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -332,6 +355,26 @@ fn validate_password(name: &str, password: &str) -> Result<(), Response> {
     Ok(())
 }
 
+/// Whether a patch writes both a password and a hash, which is the one thing
+/// `PUT` refuses about a user and `PATCH` did not.
+fn sets_both_password_and_hash(ops: &Value) -> bool {
+    let touches = |what: &str| {
+        ops.as_array()
+            .map(|a| {
+                a.iter().any(|op| {
+                    op.get("op").and_then(|v| v.as_str()) != Some("remove")
+                        && op
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .map(|p| p.trim_end_matches('/').ends_with(what))
+                            .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+    touches("password") && touches("hash")
+}
+
 fn required_fields(kind: &str, body: &Value) -> Result<(), Response> {
     let needed: &[&str] = match kind {
         "actiongroups" => &["allowed_actions"],
@@ -356,7 +399,7 @@ pub async fn list(
     Extension(caller): Extension<Caller>,
     Path(kind): Path<String>,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "GET") {
         return r;
     }
     let cfg = store.security.config.read();
@@ -379,7 +422,7 @@ pub async fn get_one(
     Extension(caller): Extension<Caller>,
     Path((kind, name)): Path<(String, String)>,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "GET") {
         return r;
     }
     let cfg = store.security.config.read();
@@ -407,13 +450,23 @@ pub async fn put_one(
     Path((kind, name)): Path<(String, String)>,
     body: String,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "PUT") {
         return r;
     }
-    let body = match parse(&body) {
+    let mut body = match parse(&body) {
         Ok(v) => v,
         Err(r) => return r,
     };
+    // These three are the plugin's own bookkeeping, not a caller's to set --
+    // the patch paths already strip them and this one did not. A role written
+    // with `hidden: true` is granted like any other and is left out of every
+    // listing, and `DELETE` answers that it is not there: an administrator
+    // could give themselves an invisible role that nobody can find or remove.
+    if let Some(o) = body.as_object_mut() {
+        o.remove("reserved");
+        o.remove("hidden");
+        o.remove("static");
+    }
     if let Err(r) = reject_unknown(&kind, &body) {
         return r;
     }
@@ -436,6 +489,7 @@ pub async fn put_one(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    super::spread::after_write(&store, &cfg);
     let after = cfg.document(&kind);
     store.security.audit.internal_config_written_with(
         &caller,
@@ -452,7 +506,7 @@ pub async fn delete_one(
     Extension(caller): Extension<Caller>,
     Path((kind, name)): Path<(String, String)>,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "DELETE") {
         return r;
     }
     let mut cfg = store.security.config.write();
@@ -465,6 +519,7 @@ pub async fn delete_one(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    super::spread::after_write(&store, &cfg);
     let after = cfg.document(&kind);
     store.security.audit.internal_config_written_with(
         &caller,
@@ -544,7 +599,7 @@ pub async fn patch_one(
     Path((kind, name)): Path<(String, String)>,
     body: String,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "PATCH") {
         return r;
     }
     let ops: Value = match serde_json::from_str(&body) {
@@ -570,11 +625,23 @@ pub async fn patch_one(
     if let Err(r) = reject_unknown(&kind, &current) {
         return r;
     }
+    // the checks `PUT` makes, which this path skipped: an action group could
+    // be patched into one with no actions, and a user could be given a
+    // password and a hash at once and be left with whichever won
+    if let Err(r) = required_fields(&kind, &current) {
+        return r;
+    }
+    if kind == "internalusers" && sets_both_password_and_hash(&ops) {
+        return bad_request(
+            "Please specify either 'hash' or 'password' when creating a new internal user.",
+        );
+    }
     if let Err(r) = put_entry(&mut cfg, &kind, &name, &current) {
         return r;
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    super::spread::after_write(&store, &cfg);
     store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
     reply(StatusCode::OK, "OK", format!("'{name}' updated."))
 }
@@ -585,7 +652,7 @@ pub async fn patch_all(
     Path(kind): Path<String>,
     body: String,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, &kind, "PATCH") {
         return r;
     }
     let ops: Value = match serde_json::from_str(&body) {
@@ -594,6 +661,17 @@ pub async fn patch_all(
     };
     let mut cfg = store.security.config.write();
     if kind == "securityconfig" {
+        // This document is the authentication chain. A caller who may write
+        // it can add a domain that trusts a header of their choosing -- a
+        // proxy authenticator with `internalProxies: .*` turns an
+        // unauthenticated request carrying `x-proxy-roles: admin` into full
+        // access -- so the reference refuses it unless an operator has
+        // explicitly said otherwise, and so does this.
+        if !store.security.allow_config_rewrite {
+            return bad_request(
+                "Modifying the security configuration through the REST API is not allowed. Set                  plugins.security.unsupported.restapi.allow_securityconfig_modification to true                  to allow it.",
+            );
+        }
         let mut current = cfg.document("config");
         if let Err(e) = apply_patch(&mut current, &ops) {
             return bad_request(e);
@@ -601,6 +679,7 @@ pub async fn patch_all(
         cfg.dynamic = current.get("config").cloned().unwrap_or(Value::Object(Map::new()));
         let _ = cfg.save();
         store.security.touch(&cfg);
+        super::spread::after_write(&store, &cfg);
         return reply(StatusCode::OK, "OK", "Resource updated.");
     }
     let mut current = listing(&cfg, &kind);
@@ -627,6 +706,12 @@ pub async fn patch_all(
     }
     let Some(after) = current.as_object() else { return bad_request("Invalid patch") };
     let before_o = before.as_object().cloned().unwrap_or_default();
+    // Every entry is written into a copy first. The entries used to go into
+    // the live configuration one at a time, and one of them being refused
+    // left the ones before it applied here -- in memory, since the refusal
+    // returned before anything was saved, so the node answered by a
+    // configuration no file held and a restart undid.
+    let mut next = cfg.clone();
     for (n, v) in after {
         if before_o.get(n) != Some(v) {
             let mut v = v.clone();
@@ -638,18 +723,23 @@ pub async fn patch_all(
             if let Err(r) = reject_unknown(&kind, &v) {
                 return r;
             }
-            if let Err(r) = put_entry(&mut cfg, &kind, n, &v) {
+            if let Err(r) = required_fields(&kind, &v) {
+                return r;
+            }
+            if let Err(r) = put_entry(&mut next, &kind, n, &v) {
                 return r;
             }
         }
     }
     for n in before_o.keys() {
         if !after.contains_key(n) {
-            remove_entry(&mut cfg, &kind, n);
+            remove_entry(&mut next, &kind, n);
         }
     }
+    *cfg = next;
     let _ = cfg.save();
     store.security.touch(&cfg);
+    super::spread::after_write(&store, &cfg);
     store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
     reply(StatusCode::OK, "OK", "Resource updated.")
 }
@@ -728,6 +818,7 @@ pub async fn change_password(
     }
     let _ = cfg.save();
     store.security.touch(&cfg);
+    super::spread::after_write(&store, &cfg);
     store.security.audit.internal_config_written(&caller, &caller.remote_address, "internalusers");
     reply(StatusCode::OK, "OK", format!("'{}' updated.", caller.name))
 }
@@ -783,7 +874,7 @@ pub async fn permissions_info(
 
 /// The node's own certificates, as `ssl/certs` describes them.
 pub async fn certs(State(store): State<Store>, Extension(caller): Extension<Caller>) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, "SSL", "GET") {
         return r;
     }
     // the plugin hands certificates only to an admin certificate, never to
@@ -946,7 +1037,7 @@ pub async fn audit_get(
     State(store): State<Store>,
     Extension(caller): Extension<Caller>,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, "AUDIT", "GET") {
         return r;
     }
     store.security.audit.internal_config_read(&caller, &caller.remote_address, "audit");
@@ -959,7 +1050,7 @@ pub async fn audit_put(
     Extension(caller): Extension<Caller>,
     body: String,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, "AUDIT", "PUT") {
         return r;
     }
     let Ok(v) = serde_json::from_str::<Value>(&body) else {
@@ -988,7 +1079,7 @@ pub async fn audit_patch(
     Extension(caller): Extension<Caller>,
     body: String,
 ) -> Response {
-    if let Err(r) = admin(&store, &caller) {
+    if let Err(r) = admin_for(&store, &caller, "AUDIT", "PATCH") {
         return r;
     }
     let Ok(ops) = serde_json::from_str::<Value>(&body) else {

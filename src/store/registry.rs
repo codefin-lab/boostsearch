@@ -126,6 +126,7 @@ impl Store {
             let kept_allocation =
                 meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
             let kept_seq = meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
+            let kept_closed = meta.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
@@ -135,6 +136,9 @@ impl Store {
                             let mut g = st.write();
                             g.allocation_id = kept_allocation.clone();
                             g.seq_no = g.seq_no.max(kept_seq);
+                            // an index closed before the node stopped comes
+                            // back closed
+                            g.closed = kept_closed;
                             if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok())
                             {
                                 g.dynamic_types = v;
@@ -339,6 +343,40 @@ impl Store {
         None
     }
 
+    /// Where a write to this name goes.
+    ///
+    /// A name that is not an alias is itself. An alias goes to the index its
+    /// definition marks as the write index, and to the only index behind it
+    /// where there is just one -- which is how the reference reads it. An
+    /// alias over several indices with none of them marked has no write
+    /// index, and a write to it is refused rather than landing wherever the
+    /// map happened to iterate first: after a rollover that meant the write
+    /// could go back into the index that had just been rolled out of, which
+    /// a retention policy then deleted.
+    pub fn write_target(&self, name: &str) -> Option<String> {
+        if !self.is_alias(name) {
+            return Some(name.to_string());
+        }
+        let behind = self.resolve(name);
+        let marked = behind.iter().find(|n| {
+            self.get(n)
+                .map(|st| {
+                    st.read()
+                        .aliases
+                        .get(name)
+                        .and_then(|d| d.get("is_write_index"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        });
+        match marked {
+            Some(one) => Some(one.clone()),
+            None if behind.len() == 1 => Some(behind[0].clone()),
+            None => None,
+        }
+    }
+
     /// Resolve an index expression (`test`, `test*`, `_all`, `a,b`) to concrete indices.
     /// Which indices a name or pattern addresses.
     ///
@@ -460,14 +498,11 @@ impl Store {
         match self.index_path(name) {
             Some(path) => {
                 std::fs::create_dir_all(&path)?;
-                // written whole or not at all, the way every later write of
-                // this file is: a crash in the middle of it leaves a file
-                // that does not parse, and an index whose state does not
-                // parse is one this node passes over at startup
-                crate::store::write_atomic(
-                    &path.join("_meta.json"),
-                    serde_json::json!({"name": name, "body": body}).to_string().as_bytes(),
-                )?;
+                // The state file is written once the name has been claimed,
+                // by `finish_open`, and not here: two creates of one name
+                // write to the same directory, and the one that loses the
+                // race used to leave its mapping on disk for the winner's
+                // index to be reopened with.
                 self.open_index(name, body, path.clone())?;
                 if let Some(st) = self.get(name) {
                     let mut g = st.write();
@@ -672,6 +707,39 @@ impl Store {
         }));
     }
 
+    /// Delete an index only while it is still closed.
+    ///
+    /// A restore over an existing index refuses unless the index is closed,
+    /// and then reads the repository before deleting it. Between those two
+    /// moments the index can be opened and written to: the refusal that
+    /// exists to stop two sets of documents living under one name was made
+    /// on a fact that had stopped being true, and acknowledged writes went
+    /// with the delete. The decision and the removal happen together here.
+    pub fn delete_if_closed(&self, name: &str) -> bool {
+        let Some(st) = self.get(name) else { return false };
+        {
+            let g = st.read();
+            if !g.closed {
+                return false;
+            }
+        }
+        // the guard is held while the name is taken out of the map, so an
+        // `_open` that is about to flip the flag either got there first --
+        // and the check above saw it -- or waits for this to finish
+        let held = st.write();
+        if !held.closed {
+            return false;
+        }
+        let removed = { self.inner.write().remove(name) };
+        drop(held);
+        drop(removed);
+        self.request_cache.clear_index(name);
+        if let Some(path) = self.index_path(name) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        true
+    }
+
     fn delete_with(&self, name: &str, record: bool) -> bool {
         let targets = self.resolve(name);
         // Dropping an index waits for its writer, and its writer waits for
@@ -704,6 +772,15 @@ impl Store {
                 }));
             }
         }
+        // A request that took a handle before the name was removed still
+        // holds one: its searcher is open on these files and its writer may
+        // still be committing to them. Removing the directory under it left
+        // that request reading and writing files with no directory, which on
+        // one path recreated a part of the index that then looked live. The
+        // handles are waited for -- briefly, since the wait is not under the
+        // map lock and nothing else needs it, and a handle held longer than
+        // this belongs to something stuck.
+        wait_until_unheld(&dropped);
         drop(dropped);
         for t in &targets {
             if let Some(path) = self.index_path(t) {
@@ -712,6 +789,26 @@ impl Store {
         }
         any
     }
+}
+
+/// Wait for every other holder of these handles to let go.
+///
+/// Bounded: a handle still held after this is one whose request is stuck, and
+/// the delete is not held up for it. The files are removed either way, so this
+/// narrows the window rather than closing it.
+fn wait_until_unheld(handles: &[Arc<RwLock<IdxState>>]) {
+    // short on purpose: this runs on a runtime thread, and a delete that
+    // parks one for ten seconds is its own outage
+    const LONGEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+    let until = std::time::Instant::now() + LONGEST_WAIT;
+    while std::time::Instant::now() < until {
+        // one for the entry in this vector, and none anywhere else
+        if handles.iter().all(|h| Arc::strong_count(h) == 1) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    tracing::warn!("an index was deleted while a request still held it");
 }
 
 impl Store {

@@ -120,28 +120,26 @@ pub fn change_to(store: &Store, index: &str, policy_id_name: &str) -> Result<(),
     let now_state = managed(store, index).and_then(|m| {
         m.pointer("/managed_index/state/name").and_then(|v| v.as_str()).map(String::from)
     });
-    attach(store, index, policy_id_name)?;
-    let Some(state) = now_state else { return Ok(()) };
-    let Some(record) = managed(store, index) else { return Ok(()) };
-    // the state is kept only where the new policy has one of that name
-    let has_it = record
-        .pointer("/managed_index/policy/states")
-        .and_then(|v| v.as_array())
-        .map(|states| {
-            states.iter().any(|s| s.get("name").and_then(|n| n.as_str()) == Some(state.as_str()))
-        })
-        .unwrap_or(false);
-    if !has_it {
-        return Ok(());
-    }
-    let mut record = record;
-    if let Some(o) = record.pointer_mut("/managed_index/state").and_then(|v| v.as_object_mut()) {
-        o.insert("name".into(), json!(state));
-    }
-    put(store, &managed_id(index), record)
+    attach_at(store, index, policy_id_name, now_state.as_deref())
 }
 
 pub fn attach(store: &Store, index: &str, policy_id_name: &str) -> Result<(), String> {
+    attach_at(store, index, policy_id_name, None)
+}
+
+/// The same, starting in a named state where the new policy has one.
+///
+/// `change_to` used to attach and then read the record back and write it a
+/// second time to put the state back: a tick landing between the two writes
+/// was overwritten, and the state it had just advanced to was rolled back
+/// with its action index kept -- so the state's actions ran again, twice for
+/// a state that rolls over or deletes. It is one write now.
+pub fn attach_at(
+    store: &Store,
+    index: &str,
+    policy_id_name: &str,
+    keep_state: Option<&str>,
+) -> Result<(), String> {
     let Some(policy) = read(store, &policy_id(policy_id_name)) else {
         return Err(format!("Policy with id {policy_id_name} does not exist"));
     };
@@ -150,6 +148,20 @@ pub fn attach(store: &Store, index: &str, policy_id_name: &str) -> Result<(), St
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    // the state to begin in: the one asked for where this policy has it,
+    // and the policy's own default otherwise
+    let start_state = keep_state
+        .filter(|wanted| {
+            policy
+                .pointer("/policy/states")
+                .and_then(|v| v.as_array())
+                .map(|states| {
+                    states.iter().any(|s| s.get("name").and_then(|n| n.as_str()) == Some(*wanted))
+                })
+                .unwrap_or(false)
+        })
+        .map(|s| s.to_string())
+        .unwrap_or(default_state);
     let now = crate::store::now_millis();
     put(
         store,
@@ -167,7 +179,7 @@ pub fn attach(store: &Store, index: &str, policy_id_name: &str) -> Result<(), St
                 "enabled_time": now,
                 "last_updated_time": now,
                 "state": {
-                    "name": default_state,
+                    "name": start_state,
                     "start_time": now,
                 },
                 "action": Value::Null,

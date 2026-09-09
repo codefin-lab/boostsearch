@@ -257,7 +257,10 @@ pub async fn close_index(
     let mut per = serde_json::Map::new();
     for n in targets {
         if let Some(st) = store.get(&n) {
-            st.write().closed = true;
+            let mut g = st.write();
+            g.closed = true;
+            // written down, so the index is still closed after a restart
+            g.save_meta();
             per.insert(n.clone(), json!({"closed": true}));
         }
     }
@@ -275,7 +278,9 @@ pub async fn open_index(
     }
     for n in &targets {
         if let Some(st) = store.get(n) {
-            st.write().closed = false;
+            let mut g = st.write();
+            g.closed = false;
+            g.save_meta();
         }
     }
     // `wait_for_completion=false` asks for the work to be tracked rather than

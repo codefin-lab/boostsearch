@@ -397,10 +397,17 @@ pub async fn cat_plugins(State(store): State<Store>, Query(p): Query<Params>) ->
     let _ = &store;
     let built_in: &[(&str, &str)] = &[
         ("analysis-icu", "The ICU analysis plugin integrates the Lucene ICU module"),
+        // the three that read a script rather than splitting on spaces are
+        // the dictionaries, and a build without them answers `kuromoji`,
+        // `nori` and `smartcn` with an error: a client told the plugin is
+        // here would be told a falsehood
+        #[cfg(feature = "cjk")]
         ("analysis-kuromoji", "The Japanese (kuromoji) analysis plugin"),
+        #[cfg(feature = "cjk")]
         ("analysis-nori", "The Korean (nori) analysis plugin"),
         ("analysis-phonenumber", "The phone number analysis plugin"),
         ("analysis-phonetic", "The Phonetic Analysis plugin"),
+        #[cfg(feature = "cjk")]
         ("analysis-smartcn", "Smart Chinese analysis plugin"),
         ("analysis-stempel", "The Stempel (Polish) analysis plugin"),
         ("analysis-ukrainian", "The Ukrainian analysis plugin"),

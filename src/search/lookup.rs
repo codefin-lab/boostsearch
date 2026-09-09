@@ -13,6 +13,15 @@ use super::*;
 /// a sorted array of the low bits or as a bitset over them.
 /// The 64-bit form: a count of high words, then each high word followed by an
 /// ordinary 32-bit bitmap of the low half.
+/// The most values a bitmap may be unpacked into.
+///
+/// A roaring bitmap is compact in a way that matters here: four bytes of run
+/// container stand for 65,536 ids, so a request body of a few kilobytes
+/// unpacks into hundreds of millions of `i64`s -- gigabytes of them, built
+/// before anything looked at `index.max_terms_count`. The decoders stop at
+/// this many and answer nothing, and the caller is told the list is too long.
+pub(crate) const MOST_BITMAP_VALUES: usize = 1_048_576;
+
 pub(crate) fn decode_roaring64(bytes: &[u8]) -> Option<Vec<i64>> {
     let u32_at = |i: usize| -> Option<u32> {
         Some(u32::from_le_bytes([
@@ -35,6 +44,9 @@ pub(crate) fn decode_roaring64(bytes: &[u8]) -> Option<Vec<i64>> {
         let (low, used) = decode_roaring_at(bytes, at)?;
         at += used;
         out.extend(low.into_iter().map(|v| high << 32 | v));
+        if out.len() > MOST_BITMAP_VALUES {
+            return None;
+        }
     }
     Some(out)
 }
@@ -98,6 +110,12 @@ pub(crate) fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
         at += count * 4;
     }
     let mut out = Vec::new();
+    // a container may not be unpacked at all if what is already unpacked plus
+    // what this one holds is past the ceiling: the check is before the work,
+    // not after it
+    let room = |so_far: usize, more: usize| -> Option<()> {
+        if so_far + more > MOST_BITMAP_VALUES { None } else { Some(()) }
+    };
     for (i, (key, card)) in keys.iter().enumerate() {
         let high = (*key as i64) << 16;
         if runs[i] {
@@ -107,16 +125,19 @@ pub(crate) fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
                 let start = u16_at(at)? as i64;
                 let len = u16_at(at + 2)? as i64;
                 at += 4;
+                room(out.len(), len as usize + 1)?;
                 for v in start..=start + len {
                     out.push(high | v);
                 }
             }
         } else if *card <= 4096 {
+            room(out.len(), *card as usize)?;
             for _ in 0..*card {
                 out.push(high | u16_at(at)? as i64);
                 at += 2;
             }
         } else {
+            room(out.len(), *card as usize)?;
             for word in 0..1024 {
                 let mut bits = 0u64;
                 for b in 0..8 {
@@ -135,8 +156,8 @@ pub(crate) fn decode_roaring_inner(bytes: &[u8]) -> Option<(Vec<i64>, usize)> {
 }
 
 /// A `terms` clause may carry its list as a bitmap rather than as an array.
-pub(crate) fn expand_bitmap_terms(node: &mut Value) {
-    let Some(o) = node.as_object_mut() else { return };
+pub(crate) fn expand_bitmap_terms(node: &mut Value) -> std::result::Result<(), Response> {
+    let Some(o) = node.as_object_mut() else { return Ok(()) };
     let is_bitmap =
         o.get("terms").and_then(|t| t.get("value_type")).and_then(|v| v.as_str()) == Some("bitmap");
     if is_bitmap && let Some(terms) = o.get_mut("terms").and_then(|t| t.as_object_mut()) {
@@ -149,24 +170,41 @@ pub(crate) fn expand_bitmap_terms(node: &mut Value) {
                 _ => None,
             };
             let Some(encoded) = encoded else { continue };
+            let too_long = || {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!(
+                        "The bitmap in [terms] query for field [{f}] could not be read, or \
+                         holds more than {MOST_BITMAP_VALUES} values."
+                    ),
+                )
+            };
             // the 32-bit form starts with its cookie; the 64-bit form
             // starts with a count of the high words it groups by
             let Some(values) = base64_decode(&encoded)
                 .as_deref()
                 .and_then(|b| decode_roaring(b).or_else(|| decode_roaring64(b)))
             else {
-                continue;
+                // it used to be left as it arrived, and a base64 string was
+                // then asked for as if it were the term itself
+                return Err(too_long());
             };
             terms.insert(f, Value::Array(values.into_iter().map(|v| json!(v)).collect()));
         }
     }
     for (_, v) in o.iter_mut() {
         match v {
-            Value::Object(_) => expand_bitmap_terms(v),
-            Value::Array(a) => a.iter_mut().for_each(expand_bitmap_terms),
+            Value::Object(_) => expand_bitmap_terms(v)?,
+            Value::Array(a) => {
+                for item in a.iter_mut() {
+                    expand_bitmap_terms(item)?;
+                }
+            }
             _ => {}
         }
     }
+    Ok(())
 }
 
 pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {

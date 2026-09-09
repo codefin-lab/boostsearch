@@ -80,6 +80,12 @@ impl View {
         self.hidden(field) || self.masked(field)
     }
 
+    /// Whether this view narrows the *fields* a caller sees -- hidden or
+    /// masked -- as distinct from narrowing which documents they see.
+    pub fn restricts_fields(&self) -> bool {
+        self.has_field_rules()
+    }
+
     fn has_field_rules(&self) -> bool {
         (!self.restr.unrestricted_fields && !self.restr.fls.is_empty())
             || (!self.restr.unmasked && !self.restr.masked.is_empty())

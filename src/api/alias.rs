@@ -499,6 +499,40 @@ pub async fn update_aliases(
             }
         }
         if verb == "remove_index" {
+            // `remove_index` deletes the index a name stands for, and a name
+            // that stands for several is not one of them: the delete endpoint
+            // refuses exactly this, and here it deleted every index behind the
+            // alias -- `{"remove_index": {"index": "*"}}` deleted the cluster.
+            // the name as it was asked for, before it was resolved: the
+            // resolved list is concrete indices, and an alias among them is
+            // exactly what has to be refused
+            let asked: Vec<String> = spec
+                .get("index")
+                .and_then(|v| v.as_str())
+                .map(|s| vec![s.to_string()])
+                .or_else(|| {
+                    spec.get("indices").and_then(|v| v.as_array()).map(|a| {
+                        a.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect()
+                    })
+                })
+                .unwrap_or_default();
+            for one in &asked {
+                // a name that is both -- an index called `test` and, added in
+                // this same request, an alias called `test` -- is the index:
+                // the reference removes it, and refusing it broke
+                // `indices.update_aliases/30_remove_index_and_replace_with_alias`
+                let names_an_index = store.get(one).is_some();
+                if (store.is_alias(one) && !names_an_index) || one.contains('*') {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "The provided expression [{one}] matches an alias or a pattern, \
+                             specify the corresponding concrete indices instead."
+                        ),
+                    );
+                }
+            }
             for i in &indices {
                 store.delete(i);
             }

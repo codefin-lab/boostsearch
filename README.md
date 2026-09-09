@@ -19,11 +19,11 @@ rather than believed.
 |---|---|---|
 | OpenSearch's core suite | **1,427 of 1,427** not skipped, over all 409 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
 | its module and plugin suites | **880 of 890**, 4 skipped | `tools/module_gate.py` |
-| the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response | `tools/compat_audit.py replay` |
-| REST endpoints answered | **156 of 167** | the rest answer 501 rather than pretending |
+| the same answer as OpenSearch 3.1.0 | **160 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
+| REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
 | who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
-| a refused write leaves the document alone | **30 refusals** through five write paths | `tools/refusal_check.py` |
+| a refused write leaves the document alone | **30 refusals** through five write paths, counted as the check makes them rather than written into it | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
 | malformed input at everything that parses | **2,000 probes**, node still answering | `tools/fuzz_check.py` |
 | OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |

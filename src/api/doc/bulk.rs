@@ -241,6 +241,11 @@ pub async fn bulk(
             continue;
         }
         let was_there = store.get(&idx).is_some();
+        // an alias writes to the index it marks as the write index, and to
+        // nowhere else: `ensure` answers with whichever backing index the map
+        // iterated to first, so after a rollover a write could land back in
+        // the index that had just been rolled out of
+        let idx = store.write_target(&idx).unwrap_or(idx);
         let st = match store.ensure(&idx) {
             Ok(s) => s,
             Err(e) => {
@@ -365,6 +370,12 @@ pub async fn bulk(
         let item = match op.as_str() {
             "delete" => {
                 let (body, status) = delete_doc(&mut g, &id);
+                // a delete the index refused is an error in this bulk, and
+                // the flag at the top of the answer is what every client
+                // reads to decide whether the request went through
+                if !status.is_success() {
+                    errors = true;
+                }
                 let mut b = body;
                 b["status"] = json!(status.as_u16());
                 json!({ "delete": b })

@@ -26,6 +26,21 @@ pub fn tick(store: &Store) {
     for (id, body) in super::all(store, "managed_index") {
         let index = id.trim_start_matches("managed:").to_string();
         if let Some(next) = advance(store, &index, &body) {
+            // An action can take minutes -- a force merge, a snapshot -- and
+            // the record was read before it started. Writing the changed
+            // clone back over whatever is there now re-created records an
+            // operator had removed the index from, undid a retry's reset, and
+            // turned `enabled: false` back on. Where somebody else has
+            // written it since, theirs stands and this tick's outcome is
+            // dropped; the next tick starts from what they left.
+            let unchanged =
+                super::read(store, &managed_id(&index)).map(|now| now == body).unwrap_or(false);
+            if !unchanged {
+                tracing::debug!(
+                    "[{index}]: the managed record changed while its action ran; it is left alone"
+                );
+                continue;
+            }
             let _ = put(store, &managed_id(&index), next);
         }
     }

@@ -475,9 +475,21 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             b["type"] = serde_json::json!("cross_fields");
             build_multi_match(ctx, &b)?
         }
-        // documents here are stored whole rather than split into a parent and
+        // Documents here are stored whole rather than split into a parent and
         // its nested children, so a nested query is its inner query asked
-        // against the same document
+        // against the same document -- and `path` is dropped rather than held
+        // to.
+        //
+        // That is a real difference from the reference, not a detail: a
+        // `nested` query with two clauses matches a document where one object
+        // of the array satisfies the first and a *different* object satisfies
+        // the second, where OpenSearch requires one object to satisfy both.
+        // Closing it means indexing each nested object as a document of its
+        // own and joining the blocks at search time, which is the one thing
+        // the storage layer here does not do. It is written down in
+        // `docs/progress.md` and in the compatibility notes rather than
+        // hidden: a caller relying on nested queries to keep two fields of
+        // one object together does not get that here.
         "nested" => {
             let inner =
                 body.get("query").ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;

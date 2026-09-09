@@ -30,6 +30,32 @@ pub(crate) struct Tally {
 
 impl Tally {
     /// A document that was written to since the walk read it.
+    /// What a refused write really was.
+    ///
+    /// These walks pass no version and no `if_seq_no`, so a version conflict
+    /// is not something they can produce: every refusal here is a mapping
+    /// that would not take the document, a field limit, an id too long, or an
+    /// index held still. Counting them all as conflicts told the caller the
+    /// documents were already as asked -- and with `conflicts=proceed` it
+    /// answered 200 with no failures at all, having written nothing.
+    fn note_refusal(&mut self, index: &str, id: &str, refusal: &Response) {
+        let (kind, reason) = match refusal.extensions().get::<crate::api::ErrorKind>() {
+            Some(e) => (e.kind.clone(), e.reason.clone()),
+            None => ("illegal_state_exception".to_string(), "the write was refused".to_string()),
+        };
+        if kind == "version_conflict_engine_exception" {
+            self.version_conflicts += 1;
+        }
+        let status = refusal.status().as_u16();
+        self.failures.push(json!({
+            "index": index, "id": id, "status": status,
+            "cause": {
+                "type": kind, "reason": reason,
+                "index": index, "shard": "0", "index_uuid": "_na_",
+            },
+        }));
+    }
+
     fn note_conflict(&mut self, seen: &Seen) {
         let id = &seen.id;
         let seq = seen.seq_no.unwrap_or(0);
@@ -841,10 +867,12 @@ pub async fn update_by_query(
         }
         match write_doc_raw(&mut g, &seen.id, next, "index", None) {
             Ok(_) => tally.updated += 1,
-            Err(_) => {
-                tally.version_conflicts += 1;
+            Err(refusal) => {
+                // the refusal is reported as itself, whether or not the
+                // caller asked to proceed: a document that was not written
+                // is not a document that was already right
+                tally.note_refusal(&seen.index, &seen.id, &refusal);
                 if !proceed {
-                    tally.note_conflict(&seen);
                     break;
                 }
             }
@@ -925,6 +953,13 @@ pub async fn reindex(
                 "Validation Failed: 1: reindex cannot write into an index its reading from [{to}];"
             ),
         );
+    }
+    // the destination is held still, the same way the by-query walks check
+    // the index they change: without this every copy was refused and counted
+    // as a version conflict, and the caller was told the documents were
+    // already there
+    if let Some(refused) = change_refusal_for(&store, &to) {
+        return refused;
     }
     let wanted = max_docs(&p, &body);
     let hits = match &remote {
@@ -1032,6 +1067,23 @@ pub async fn reindex(
                 // and that one is judged too -- once per name, not once per
                 // document
                 if named != to && !judged.contains(&named) {
+                    // and it may not be the index being read: the request's
+                    // own destination is checked against that before the walk
+                    // begins, and a script naming the source went round it --
+                    // rewriting in place the very thing the check exists for
+                    if remote.is_none() && store.resolve(&from).contains(&named) {
+                        tally.failures.push(json!({
+                            "index": named, "id": seen.id, "status": 400,
+                            "cause": {
+                                "type": "action_request_validation_exception",
+                                "reason": format!(
+                                    "Validation Failed: 1: reindex cannot write into an index \
+                                     its reading from [{named}];"
+                                ),
+                            },
+                        }));
+                        continue;
+                    }
                     if let Some(why) = crate::security::item_refusal(
                         &store,
                         &["indices:data/write/index"],
@@ -1159,22 +1211,13 @@ pub async fn reindex(
         match write_doc_raw(&mut g, &id, document, op, None) {
             Ok(_) if existed => tally.updated += 1,
             Ok(_) => tally.created += 1,
-            Err(_) => {
-                tally.version_conflicts += 1;
+            Err(refusal) => {
+                // what the destination refused, said as itself. A copy that
+                // was not written is not a copy that was already there, and
+                // a destination held still refused every one of them while
+                // the answer said `version_conflicts` and `failures: []`.
+                tally.note_refusal(&to, &seen.id, &refusal);
                 if !conflicts_proceed {
-                    tally.failures.push(json!({
-                        "index": to, "id": seen.id, "status": 409,
-                        "cause": {
-                            "type": "version_conflict_engine_exception",
-                            "reason": format!(
-                                "[{}]: version conflict, document already exists (current \
-                                 version [{}])",
-                                seen.id,
-                                g.version_of(&seen.id)
-                            ),
-                            "index": to, "shard": "0", "index_uuid": "_na_",
-                        },
-                    }));
                     break;
                 }
             }

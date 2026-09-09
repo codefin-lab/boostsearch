@@ -613,8 +613,31 @@ async fn delete_one(
     on_engine(serving, move |s| saved_of(s).delete(&kind, &id)).await
 }
 
+/// How many objects one of these routes may be asked for at a time. Each is
+/// a call to the engine of its own, and an update waits for a refresh: an
+/// array of forty thousand held a thread for hours.
+const MOST_OBJECTS: usize = 1_000;
+
+/// Whether a multi-object request is larger than this server will answer.
+fn too_many(asked: &[Value]) -> Option<Response> {
+    (asked.len() > MOST_OBJECTS).then(|| {
+        let body = serde_json::json!({
+            "statusCode": 400,
+            "error": "Bad Request",
+            "message": format!(
+                "Too many objects in one request: [{}], the most is [{MOST_OBJECTS}]",
+                asked.len()
+            ),
+        });
+        (StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+    })
+}
+
 async fn bulk_get(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
     let asked = body.as_array().cloned().unwrap_or_default();
+    if let Some(r) = too_many(&asked) {
+        return r;
+    }
     on_engine(serving, move |s| saved_of(s).bulk_get(&asked)).await
 }
 
@@ -626,6 +649,9 @@ async fn bulk_create(
 ) -> Response {
     let overwrite = p.get("overwrite").map(|v| v == "true").unwrap_or(false);
     let asked = body.as_array().cloned().unwrap_or_default();
+    if let Some(r) = too_many(&asked) {
+        return r;
+    }
     on_engine(serving, move |s| {
         let saved = saved_of(s);
         let writings: Vec<_> = asked
@@ -664,6 +690,9 @@ async fn bulk_create(
 
 async fn bulk_update(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
     let asked = body.as_array().cloned().unwrap_or_default();
+    if let Some(r) = too_many(&asked) {
+        return r;
+    }
     on_engine(serving, move |s| {
         let saved = saved_of(s);
         let mut out = Vec::new();
@@ -1474,22 +1503,52 @@ async fn compressed(
     {
         return response;
     }
+    // The largest answer this will hold in memory to compress. A search
+    // through the console can answer with hundreds of megabytes, and this
+    // used to read every one of them into a buffer and then build a second
+    // buffer of the compressed copy -- twice the answer, per request in
+    // flight. Anything larger is passed straight through: it costs the
+    // caller bandwidth, not the node its memory.
+    const MOST_TO_COMPRESS: usize = 8 * 1024 * 1024;
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+    // an answer of unknown length is not read into memory to find out. The
+    // length is rarely in a header at this point -- it is added on the way
+    // out -- so the body is asked what it knows about itself, which for the
+    // answers built here (a buffer of bytes) is exact.
+    let known = {
+        use axum::body::HttpBody as _;
+        body.size_hint().exact().map(|n| n as usize).or_else(|| {
+            parts
+                .headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+    };
+    match known {
+        // the server being replaced leaves anything under a kilobyte alone
+        Some(n) if (1024..=MOST_TO_COMPRESS).contains(&n) => {}
+        _ => return Response::from_parts(parts, body),
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, MOST_TO_COMPRESS).await else {
         return refused(Failed::of(500, "the answer could not be read back"));
     };
-    // the server being replaced leaves anything under a kilobyte alone
-    if bytes.len() < 1024 {
-        return Response::from_parts(parts, Body::from(bytes));
-    }
-    use std::io::Write as _;
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    if encoder.write_all(&bytes).is_err() {
-        return Response::from_parts(parts, Body::from(bytes));
-    }
-    let Ok(zipped) = encoder.finish() else {
-        return Response::from_parts(parts, Body::from(bytes));
+    // compressing is work for a processor, and it used to be done on a
+    // runtime thread: eight megabytes of it, while that thread answered
+    // nothing else
+    let zipped = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).ok()?;
+        encoder.finish().ok().map(|zipped| (zipped, bytes))
+    })
+    .await;
+    let Ok(Some((zipped, bytes))) = zipped else {
+        return refused(Failed::of(500, "the answer could not be compressed"));
     };
+    if zipped.len() >= bytes.len() {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     parts.headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));

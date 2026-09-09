@@ -279,9 +279,13 @@ The cluster is the critical path and no number of people shortens it.
 
 ## What is not claimed
 
-`ingest-attachment` reads pdf, html, docx, xlsx, pptx, txt, rtf and doc. Tika
-reaches about fourteen hundred formats through a stack of Java libraries, and
-we do not. Everywhere else in this plan, 100% means 100%.
+`ingest-attachment` reads docx, doc and plain text -- three formats, which is
+what `src/ingest/attachment.rs` implements today. This paragraph used to list
+eight, naming pdf, html, xlsx, pptx and rtf among them; none of those five is
+read, and a file in one of them extracts to an empty `content` with a type of
+`application/octet-stream`. Tika reaches about fourteen hundred formats through
+a stack of Java libraries, and we do not. Everywhere else in this plan, 100%
+means 100%.
 
 ## What is riskiest
 

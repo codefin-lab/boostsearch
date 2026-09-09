@@ -26,9 +26,11 @@ Against OpenSearch 3.1.0, measured rather than asserted:
 
 - **1,427 of 1,427** sections of OpenSearch's core suite that are not skipped
 - **880 of 890** sections of its module and plugin suites
-- **160 of 183** canonical requests answered byte for byte identically
-- **156 of 167** REST endpoints answered; the rest answer 501 rather than
-  pretending
+- **160 of 183** canonical requests answered identically once ids and timings
+  are scrubbed -- not byte for byte, which is what this used to say
+- **146 of 167** REST APIs routed on every path and method their spec names,
+  8 more on some of them; what is not routed answers 404 or 501 rather than
+  pretending (`tools/endpoint_gate.py` counts them)
 - **17 of 18** bench dimensions ahead
 
 The ten sections that do not pass, and the one dimension that is behind, are

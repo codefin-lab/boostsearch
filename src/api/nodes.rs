@@ -421,10 +421,14 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
 fn plugins() -> Value {
     const NAMED: &[&str] = &[
         "analysis-icu",
+        // only where the dictionaries were built in; see `_cat/plugins`
+        #[cfg(feature = "cjk")]
         "analysis-kuromoji",
+        #[cfg(feature = "cjk")]
         "analysis-nori",
         "analysis-phonenumber",
         "analysis-phonetic",
+        #[cfg(feature = "cjk")]
         "analysis-smartcn",
         "analysis-stempel",
         "analysis-ukrainian",

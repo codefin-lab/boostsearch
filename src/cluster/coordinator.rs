@@ -63,12 +63,6 @@ pub const METADATA_REPORT: &str = "internal:cluster/metadata/report";
 /// as one is built.
 const NOT_CARRIED: u64 = u64::MAX;
 
-/// How long a copy the manager places nowhere, and that nobody else holds, is
-/// kept before it is let go. Long enough for a partition to heal and for a
-/// manager to hear about the index again; short enough that a disk is not
-/// held for ever by an index the cluster forgot it had.
-const KEEP_UNPLACED_MS: u64 = 30 * 60 * 1000;
-
 /// The term a promoted copy writes under.
 ///
 /// `counted` is what this manager has counted, `carried` what the published
@@ -187,8 +181,6 @@ pub struct Coordinator {
     /// shard events whose reporter is waiting for the state that carries
     /// them to be committed: (the version when it arrived, who, what)
     event_replies: Vec<(u64, NodeId, Envelope)>,
-    /// when a copy that nothing places here was first kept anyway
-    kept_since: BTreeMap<String, u64>,
     /// the primary term this node has already sent its documents out for,
     /// by index and shard
     resynced: BTreeMap<(String, u32), u64>,
@@ -319,7 +311,6 @@ impl Coordinator {
             pending_checks: BTreeMap::new(),
             leader_misses: 0,
             event_replies: Vec::new(),
-            kept_since: BTreeMap::new(),
             resynced: BTreeMap::new(),
             started_here: Default::default(),
             leader_check_outstanding: None,
@@ -1227,8 +1218,6 @@ impl Coordinator {
             mine.iter().filter_map(|c| c.allocation_id.clone()).collect();
         self.reported.retain(|a| here.contains(a));
         self.started_here.retain(|a| here.contains(a));
-        // a copy that is placed here again was never really unplaced
-        self.kept_since.retain(|a, _| !here.contains(a));
         // a copy this node finished while the manager was changing hands: the
         // report went to a manager that never published it, so it is made
         // again to whoever leads now
@@ -1351,7 +1340,6 @@ impl Coordinator {
             // a copy of keeps its local index
             let holds_other = self.hosted.iter().any(|(a, (i, _))| *i == index && a != &aid);
             if holds_other {
-                self.kept_since.remove(&aid);
                 self.hosted.remove(&aid);
                 self.reported.remove(&aid);
                 continue;
@@ -1375,35 +1363,24 @@ impl Coordinator {
                     )
             });
             if !buried && !elsewhere {
-                // Kept, and looked at again at the next publication -- but
-                // not for ever. A tombstone ages out of the graveyard after
-                // five hundred deletions, and then nothing here can tell an
-                // index deleted long ago from one this manager has not heard
-                // of yet: the copy was retained, and its disk with it, with
-                // no end. Time settles it. A manager that has been publishing
-                // states this node is in for this long, and still places
-                // nothing here, is a manager that knows the index is gone.
-                let since = *self.kept_since.entry(aid.clone()).or_insert(self.last_wall);
-                if self.last_wall.saturating_sub(since) < KEEP_UNPLACED_MS {
-                    if self.notes {
-                        out.push(self.note(format!(
-                            "[{index}][{shard}]: no longer placed here, and held nowhere else \
-                             -- the copy here is kept"
-                        )));
-                    }
-                    continue;
-                }
+                // Kept, and looked at again at the next publication.
+                //
+                // A time limit was tried here and taken out again: this
+                // branch is reached whenever the index is still in the
+                // cluster's metadata and nobody else holds a started copy,
+                // which is exactly what an unassigned shard looks like while
+                // allocation is switched off for a rolling restart, while a
+                // filter or a watermark holds it back, or while it waits for
+                // `retry_failed`. Letting go after half an hour of that
+                // deleted the only copy there was. Disk held for an index
+                // the cluster has forgotten is the lesser fault, and it
+                // needs a tombstone that aged out of a five-hundred-entry
+                // graveyard to happen at all.
                 if self.notes {
                     out.push(self.note(format!(
-                        "[{index}][{shard}]: unplaced and held nowhere else for long enough -- \
-                         the copy here goes"
+                        "[{index}][{shard}]: no longer placed here, and held nowhere else -- \
+                         the copy here is kept"
                     )));
-                }
-                self.kept_since.remove(&aid);
-                self.hosted.remove(&aid);
-                self.reported.remove(&aid);
-                if let Some(h) = &self.host {
-                    h.remove_shard(&index, shard);
                 }
                 continue;
             }
@@ -2331,8 +2308,15 @@ impl Coordinator {
                     // acting on it is what took the real primary out of the
                     // in-sync set, and refusing it would fail a good write.
                     if mine.as_deref() == Some(allocation_id.as_str()) {
-                        self.event_replies.push((NOT_CARRIED, from.clone(), e));
-                        return self.next_publication(durable);
+                        // Nothing is done with this one, so nothing will ever
+                        // carry it: it is answered now. Queueing it behind a
+                        // publication that is never built left the reporting
+                        // primary waiting on its own timeout, holding the
+                        // acknowledgement of a write.
+                        let mut out =
+                            vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
+                        out.extend(self.next_publication(durable));
+                        return out;
                     }
                     if !holds && primary_on.as_ref() != Some(&from) {
                         let msg = json!({"term": self.current_term,

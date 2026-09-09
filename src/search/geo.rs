@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether an object *is* a geo clause, rather than merely containing one.
+pub(crate) fn is_geo_clause(o: &serde_json::Map<String, Value>) -> bool {
+    ["geo_shape", "geo_bounding_box", "geo_distance", "geo_polygon"]
+        .iter()
+        .any(|kind| o.get(*kind).map(|v| v.is_object()).unwrap_or(false))
+}
+
 /// The geo clause of a query: the field it reads and the shape it asks about.
 pub(crate) fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
     match node {

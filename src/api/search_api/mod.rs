@@ -137,6 +137,10 @@ pub async fn search(
     }
 }
 
+/// How many searches one `_msearch` body may ask for. Each is a full search
+/// run one after another on the thread answering the request.
+const MOST_SUB_SEARCHES: usize = 1_000;
+
 pub async fn msearch(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -150,9 +154,45 @@ pub async fn msearch(
     }
     let mut responses = Vec::new();
     let mut lines = body.lines().filter(|l| !l.trim().is_empty());
+    let mut asked = 0usize;
     while let Some(header_line) = lines.next() {
-        let header: Value = serde_json::from_str(header_line).unwrap_or(json!({}));
-        let Some(body_line) = lines.next() else { break };
+        asked += 1;
+        // one search per pair, and a body that has more searches than this
+        // is a body that asks for more work than a request may
+        if asked > MOST_SUB_SEARCHES {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Batch size is too large, size must be less than or equal to: \
+                     [{MOST_SUB_SEARCHES}]"
+                ),
+            );
+        }
+        // A header that is not an object is not a header. Reading it as `{}`
+        // left the search with no index, and no index is every index: a
+        // truncated or misquoted header turned one index's search into the
+        // whole cluster's, and the caller read the hits as that index's.
+        let header: Value = match serde_json::from_str(header_line) {
+            Ok(v @ Value::Object(_)) => v,
+            _ => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "parsing_exception",
+                    format!("Malformed action/metadata line [{asked}], expected an object"),
+                );
+            }
+        };
+        // and a header with no body after it is a request that was cut: the
+        // answer used to come back one shorter than the searches sent, which
+        // a caller pairs by position
+        let Some(body_line) = lines.next() else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "parsing_exception",
+                format!("Validation Failed: 1: no request body for action line [{asked}];"),
+            );
+        };
         let mut req: Value = match serde_json::from_str(body_line) {
             Ok(v) => v,
             Err(e) => {

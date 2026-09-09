@@ -184,10 +184,28 @@ pub(crate) fn reduce_sort_values(vals: &mut [SortValue], mode: &str) -> SortValu
     }
 }
 
+/// The order the collector prunes by, which has to be the order the answer is
+/// finally in.
+///
+/// A missing value sorts last whichever way the sort runs -- `cmp_asc` says
+/// so, and `cmp_with_missing` keeps it so for the final ordering. Reversing
+/// `cmp_asc` wholesale for a descending sort made *missing* the best value
+/// there is: the collector filled its buffer with the documents that have no
+/// value for the field, set its cutoff to `Missing`, and rejected every
+/// document that did have one. A `sort` on `price` descending answered with
+/// the documents that have no price.
 pub(crate) fn cmp_sorted(a: &[SortValue], b: &[SortValue], desc: &[bool]) -> Ordering {
     for (i, d) in desc.iter().enumerate() {
-        let ord = a[i].cmp_asc(&b[i]);
-        let ord = if *d && ord != Ordering::Equal { ord.reverse() } else { ord };
+        let missing = |v: &SortValue| matches!(v, SortValue::Missing);
+        let ord = match (missing(&a[i]), missing(&b[i])) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                let ord = a[i].cmp_asc(&b[i]);
+                if *d && ord != Ordering::Equal { ord.reverse() } else { ord }
+            }
+        };
         if ord != Ordering::Equal {
             return ord;
         }

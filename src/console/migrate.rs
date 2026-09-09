@@ -178,8 +178,13 @@ fn ensure_held(engine: &Engine, mapping: &Value) -> Result<Found, Failed> {
     };
     // the alias moves in one step: a reader is looking at the old index or
     // the new one, never at neither and never at both
-    point_alias(engine, &on, &next)?;
+    let flipped = point_alias(engine, &on, &next);
+    // the block comes off whichever way that went: returning through the `?`
+    // left the alias on an index nothing could write to any more, and every
+    // saved object and every setting after it was refused until somebody
+    // cleared the block by hand
     block_writes(engine, &current, false);
+    flipped?;
     Ok(Found::Migrated { from: current, to: next, documents })
 }
 

@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// How many documents one `_mget` may ask for. Each is a read of its own,
+/// and each answer is larger than the id that asked for it.
+const MOST_ITEMS: usize = 10_000;
+
 pub async fn mget(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -62,6 +66,15 @@ pub async fn mget(
         }
     }
 
+    // one answer per document asked for, and a body asking for more than
+    // this is asking for more work than a request may
+    if requested.len() > MOST_ITEMS {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("Batch size is too large, size must be less than or equal to: [{MOST_ITEMS}]"),
+        );
+    }
     let mut docs = Vec::new();
     for (n, (idx, id, sel)) in requested.into_iter().enumerate() {
         // a routing given on the document is the one it has to be reached by

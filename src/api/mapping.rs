@@ -126,12 +126,21 @@ pub async fn put_mapping(
     // very check this is: documents indexed under the type the writes taught
     // it, a mapping declaring the other. Two mapping updates for the same new
     // field both passed the same way, and the loser was dropped in silence.
+    // Every index is asked first, so that one of them refusing does not leave
+    // the others changed -- and it is asked while the change is held, not
+    // before it. Asking them all, letting go, and then changing them all left
+    // a window: a field learned dynamically in one of the later indices
+    // between the two loops made that index refuse, by which time the earlier
+    // ones had already been merged and answered `acknowledged`.
     let declared = crate::store::declared_types(&body);
-    // every index is asked first, so that one of them refusing does not
-    // leave the others changed
-    for n in &targets {
-        let Some(st) = store.get(n) else { continue };
-        let g = st.read();
+    let mut names: Vec<String> = targets.clone();
+    names.sort();
+    names.dedup();
+    let held: Vec<_> = names.iter().filter_map(|n| store.get(n)).collect();
+    // one order for every caller, so two requests over overlapping sets of
+    // indices cannot each hold what the other is waiting for
+    let mut guards: Vec<_> = held.iter().map(|st| st.write()).collect();
+    for g in &guards {
         for (path, ty) in &declared {
             let Some(had) = g.mapping.type_of(path) else { continue };
             if had != *ty {
@@ -143,19 +152,7 @@ pub async fn put_mapping(
             }
         }
     }
-    for n in &targets {
-        let Some(st) = store.get(n) else { continue };
-        let mut g = st.write();
-        for (path, ty) in &declared {
-            let Some(had) = g.mapping.type_of(path) else { continue };
-            if had != *ty {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "illegal_argument_exception",
-                    format!("mapper [{path}] cannot be changed from type [{had}] to [{ty}]"),
-                );
-            }
-        }
+    for g in guards.iter_mut() {
         g.mapping.merge(&body);
         g.apply_analysis();
     }

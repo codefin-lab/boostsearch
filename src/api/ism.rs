@@ -222,6 +222,15 @@ pub async fn retry_policy(
         if let Some(action) = held.pointer_mut("/managed_index/action")
             && action.is_object()
         {
+            // The engine remembers the last action that *finished* by its
+            // position, and re-runs the failed one only while it is still
+            // marked failed. Clearing the mark on its own told the engine
+            // the failed action had finished, so the retry ran the action
+            // after it -- for a state that snapshots and then deletes, the
+            // retry of the failed snapshot was the delete. The position steps
+            // back with the mark, so the retry is of the action that failed.
+            let done = action.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+            action["index"] = json!(done - 1);
             action["failed"] = json!(false);
         }
         if let Some(state) = &state {

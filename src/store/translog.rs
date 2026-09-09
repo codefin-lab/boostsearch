@@ -54,7 +54,6 @@ impl IdxState {
             if committed {
                 let _ = self.realtime.reload();
                 self.save_meta();
-                self.save_versions();
                 self.clear_translog();
             }
         }
@@ -176,9 +175,17 @@ impl IdxState {
             .into_iter()
             .partition(|(shard, _)| only.map(|one| *shard == one).unwrap_or(true));
         self.deferred = keep;
-        if self.deferred.is_empty() {
-            self.queued_shard.clear();
-        }
+        // What was handed over is no longer waiting anywhere, so the
+        // documents in it are not pinned to that queue any more. Clearing
+        // only when *everything* had drained pinned a document to a shard
+        // for as long as any other shard had work: a later write to it, with
+        // `refresh=true`, was queued under the old shard and the refresh of
+        // the new one did not make it visible.
+        let handed: std::collections::HashSet<u64> = match only {
+            Some(one) => std::iter::once(one).collect(),
+            None => self.queued_shard.values().copied().collect(),
+        };
+        self.queued_shard.retain(|_, shard| !handed.contains(shard));
         let id_field = self.fields.id;
         let w = match self.writer() {
             Ok(w) => w,
@@ -206,6 +213,12 @@ impl IdxState {
                 failure = Some(e);
                 left.extend(rest);
                 break;
+            }
+        }
+        // what the writer refused is queued again, so it is pinned again
+        for (shard, op) in &left {
+            if let crate::store::PendingOp::Delete(id) = op {
+                self.queued_shard.insert(id.clone(), *shard);
             }
         }
         self.deferred.extend(left);
@@ -237,7 +250,6 @@ impl IdxState {
             self.pending_seq.remove(&id);
         }
         if self.deferred.is_empty() {
-            self.save_versions();
             self.clear_translog();
         }
         self.pending_bytes = self
@@ -266,7 +278,6 @@ impl IdxState {
         // everything acknowledged is in the index now, and the index is on
         // disk: what the translog was holding for a crash is spent
         if self.deferred.is_empty() {
-            self.save_versions();
             self.clear_translog();
         }
         Ok(())
@@ -300,7 +311,6 @@ impl IdxState {
                 // the sequence numbers go with it, as they do everywhere
                 // else the translog is thrown away
                 self.save_meta();
-                self.save_versions();
                 self.clear_translog();
             }
         }

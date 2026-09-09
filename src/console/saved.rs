@@ -155,7 +155,15 @@ impl<'a> Saved<'a> {
             for i in which {
                 let p = good(i);
                 let action = if p.overwrite { "index" } else { "create" };
-                lines.push_str(&json!({action: {"_index": INDEX, "_id": p.document}}).to_string());
+                // the id as the document really is, not as a URL spells it:
+                // this is a body, and percent-encoding here stored the object
+                // under a different key from every single-object route --
+                // `overwrite` overwrote nothing, and `get` and `delete`
+                // answered 404 for an object `find` had just listed
+                lines.push_str(
+                    &json!({action: {"_index": INDEX, "_id": raw_document_id(&p.kind, &p.id)}})
+                        .to_string(),
+                );
                 lines.push('\n');
                 lines.push_str(&Value::Object(p.source.clone()).to_string());
                 lines.push('\n');
@@ -382,7 +390,13 @@ impl<'a> Saved<'a> {
 /// The type is part of it so that a dashboard and a search may both be called
 /// `sales` without being the same thing.
 pub fn document_id(kind: &str, id: &str) -> String {
-    encoded(&format!("{kind}:{id}"))
+    encoded(&raw_document_id(kind, id))
+}
+
+/// The document id itself, as it is stored: what `document_id` spells for a
+/// URL, before the spelling.
+pub fn raw_document_id(kind: &str, id: &str) -> String {
+    format!("{kind}:{id}")
 }
 
 /// A document id as a URL path segment.

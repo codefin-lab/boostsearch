@@ -241,7 +241,17 @@ pub async fn mtermvectors(
             Value::String(s) => s.clone(),
             other => other.to_string(),
         });
-        let Some(id) = id else { continue };
+        // A document with no id is not a document to skip: the answers are
+        // paired with the requests by position, and dropping one shifted
+        // every answer after it onto the wrong request. It is refused, the
+        // way `_mget` refuses the same thing.
+        let Some(id) = id else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                "Validation Failed: 1: id is missing;",
+            );
+        };
         if let Some(why) = crate::security::item_refusal(
             &store,
             &["indices:data/read/tv"],

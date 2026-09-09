@@ -179,8 +179,13 @@ def probe(url, index, name, mapping, settings, document, path):
 
 
 def held_still(url):
-    """The states an operator holds an index in: nothing may change them."""
-    bad = []
+    """The states an operator holds an index in: nothing may change them.
+
+    Answers what it checked as well as what was wrong: the count used to be a
+    10 written into `main`, so the number the README printed was a claim about
+    this function rather than a reading of it.
+    """
+    bad, checked = [], 0
     for name, settings, closed in [
         ("index.blocks.write", {"index.blocks.write": True}, False),
         ("index.blocks.read_only", {"index.blocks.read_only": True}, False),
@@ -199,6 +204,7 @@ def held_still(url):
             ("a delete by query", "POST", f"/{index}/_delete_by_query", {"query": {"match_all": {}}}),
         ]:
             status, _ = call(url, method, path, body)
+            checked += 1
             if status < 400:
                 bad.append(f"{name}: {what} was accepted ({status})")
         if closed:
@@ -213,7 +219,7 @@ def held_still(url):
         after = held(url, index)
         if after != before:
             bad.append(f"{name}: the document changed while the index was held: {before} -> {after}")
-    return bad
+    return bad, checked
 
 
 def truncated_bulk(url):
@@ -229,7 +235,7 @@ def truncated_bulk(url):
         bad.append(f"a bulk with no document line was accepted ({status}): {answer}")
     if after != before:
         bad.append(f"a bulk with no document line changed the document: {before} -> {after}")
-    return bad
+    return bad, 1
 
 
 def main():
@@ -252,9 +258,9 @@ def main():
             for path in ["_doc", "_bulk", "_update", "_update_by_query", "_reindex"]:
                 bad += probe(url, "refusal", name, mapping, settings, document, path)
                 checked += 1
-        bad += held_still(url)
-        bad += truncated_bulk(url)
-        checked += 10
+        for rows, n in (held_still(url), truncated_bulk(url)):
+            bad += rows
+            checked += n
         print(f"  {checked} refusals checked through the paths that write")
         for row in bad:
             print(f"    {row}")
