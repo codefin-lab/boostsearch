@@ -169,7 +169,7 @@ pub(crate) fn cat_render_cols(
             .iter()
             .map(|r| Value::Object(r.iter().map(|(k, v)| (k.to_string(), json!(v))).collect()))
             .collect();
-        return axum::Json(arr).into_response();
+        return respond(p, json!(arr));
     }
     // plain text: the format `cat` is named for. Cells are padded to the width
     // of their column so the values line up down the page.

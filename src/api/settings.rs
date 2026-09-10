@@ -135,7 +135,10 @@ pub(crate) fn settings_response(
         }
         out.insert(n.clone(), entry);
     }
-    axum::Json(Value::Object(out)).into_response()
+    // through `respond`, like every other answer: returned as bare JSON, it
+    // skipped the one place `filter_path` is applied, and
+    // `?filter_path=**.refresh_interval` answered with every setting
+    respond(&p, Value::Object(out))
 }
 
 pub async fn put_settings(

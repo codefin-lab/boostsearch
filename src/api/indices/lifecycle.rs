@@ -10,12 +10,12 @@ use super::*;
 pub async fn flush(
     State(store): State<Store>,
     index: Option<Path<String>>,
-    Query(_p): Query<Params>,
+    Query(p): Query<Params>,
 ) -> Response {
     // a forced flush has to be allowed to wait for one already running, or it
     // would have to refuse to do the thing it was asked for
-    if _p.get("force").map(|v| v != "false").unwrap_or(false)
-        && _p.get("wait_if_ongoing").map(|v| v == "false").unwrap_or(false)
+    if p.get("force").map(|v| v != "false").unwrap_or(false)
+        && p.get("wait_if_ongoing").map(|v| v == "false").unwrap_or(false)
     {
         return err(
             StatusCode::BAD_REQUEST,
@@ -41,20 +41,24 @@ pub async fn flush(
             g.flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    axum::Json(json!({"_shards": tally})).into_response()
+    respond(&p, json!({"_shards": tally}))
 }
 
-pub async fn refresh_all(State(store): State<Store>) -> Response {
+pub async fn refresh_all(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let names = store.names();
     for n in &names {
         if let Some(st) = store.get(n) {
             let _ = st.write().refresh();
         }
     }
-    axum::Json(json!({"_shards": shards_over(&store, &names)})).into_response()
+    respond(&p, json!({"_shards": shards_over(&store, &names)}))
 }
 
-pub async fn refresh_index(State(store): State<Store>, Path(index): Path<String>) -> Response {
+pub async fn refresh_index(
+    State(store): State<Store>,
+    Path(index): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
     let targets = store.resolve(&index);
     // a pattern that reaches nothing has nothing to refresh, which is not an
     // error; a name given outright must be there
@@ -67,7 +71,7 @@ pub async fn refresh_index(State(store): State<Store>, Path(index): Path<String>
             let _ = st.write().refresh();
         }
     }
-    axum::Json(json!({"_shards": tally})).into_response()
+    respond(&p, json!({"_shards": tally}))
 }
 
 /// Defaults a type carries even when the request did not spell them out.

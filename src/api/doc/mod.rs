@@ -815,11 +815,11 @@ pub async fn get_doc(
                     && !p.contains_key("_source_includes")
                     && !wants_source_via_stored_fields(&p)
                 {
-                    return axum::Json(body).into_response();
+                    return respond(&p, body);
                 }
             }
             body["_source"] = filter_source_params(&src, &p);
-            axum::Json(body).into_response()
+            respond(&p, body)
         }
         None => (
             StatusCode::NOT_FOUND,

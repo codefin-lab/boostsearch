@@ -5238,7 +5238,8 @@ claim in a document, a second lock on a door that is already locked.
 | 15 | 1 | 4 | 2 | 7 |
 | 16 | 7 | 2 | 9 | 18 |
 | 17 | 0 | 5 | 8 | 13 |
-| **6-17** | **20** | **28** | **26** | **74** |
+| 18 | 1 | 6 | 8 | 15 |
+| **6-18** | **21** | **34** | **34** | **89** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5516,4 +5517,80 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 190/190, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
 paths), cross-cluster suite 24/24. Against OpenSearch 3.1.0: ingest and
 aliases 55/59, SQL 31/37, data streams 21/27.
+
+## The eighteenth review
+
+What the seventeenth left first. A pipeline refused for parameters its
+processors do not take now names every such processor: the first as the
+error, the rest under it as `suppressed`, in the shape the reference gives.
+
+Then snapshots and restores, held to the reference:
+`tools/corpora/snapshot.ndjson`, 53 requests, against OpenSearch 3.1.0 with
+an `fs` repository under `path.repo` on both. Before this
+review 28 of the 53 answers were the same; after it, 40. Of the thirteen
+left, eight are the engine's version id and the node id `_verify` names, one
+is the order of two indices in a restore's answer, two are the snapshot uuid
+inside a reason, and one is the `_status` breakdown noted below.
+
+The security API was meant to be the second new surface, against the
+security-enabled reference. It is not in this review: comparing needs the
+reference's admin credentials, and those are not something this review
+logs in with. The comparison is the owner's to run.
+
+**P0 -- a restore with `include_aliases: false` restored the aliases.** A
+snapshot restored beside its original under a new name brought the original's
+alias with it, so the alias stood over both, and every search through it
+counted each document twice.
+
+**P1 -- a restore renamed to an upper-case name was taken.** It created an
+index no other request could have made. Refused, as the reference refuses
+it.
+
+**P1 -- `index_settings` asking for a different `number_of_shards` was
+ignored.** A shard count is what the documents were routed by; the reference
+refuses to change it on restore, and so does this now, with the other
+settings fixed at creation.
+
+**P1 -- `index_settings` and `ignore_index_settings` were not applied.** A
+`refresh_interval` asked for on restore was not the one the index came back
+with.
+
+**P1 -- restoring an index the snapshot does not hold answered 200.** With
+nothing restored. It is 404 now, unless `ignore_unavailable` says otherwise.
+
+**P1 -- restoring over a closed index left it unreadable.** `_cat` said open,
+a search said `index_closed_exception`. It took three passes to find why. The
+index a restore makes took its settings from the snapshot, and the snapshot's
+settings carry the uuid of the index it was taken from, so the restored index
+had the closed one's identity. The state the cluster had published for the
+closed index -- `close` -- was then applied to it by name, and searches read
+that state by name as well. A restored index now gets a uuid of its own, and
+published state is applied to, and read for, the index whose uuid it names:
+in the metadata sync, in the single-node search and in the distributed one.
+The cluster chaos check ran after the change: no acknowledged write lost,
+copies agree.
+
+**P1 -- a repository of a type that does not exist was registered.** Listed
+among the repositories, and failing only at the first snapshot.
+
+**P2** -- deleting snapshots in a repository that is not there was
+acknowledged; a repository's settings read back as JSON values where the
+reference answers text; a location outside `path.repo` was refused as 400 in
+words of its own, where the reference answers 500 with the cause; a
+snapshot's record lacked `remote_store_index_shallow_copy`; the conflict with
+an open index was 400 without the snapshot's uuid, and a restore of a missing
+snapshot 400, where the reference answers 500 for both; `_status` gives no
+per-shard file counts (left: nothing here keeps them); and `filter_path` was
+not applied to `GET _settings`, `GET _mapping`, a refresh, a flush, `GET
+{index}/_doc/{id}`, `GET {index}/_source/{id}`, `_cat` in JSON or an index
+delete -- ten answers returned as bare JSON past the one place the filter is
+applied, so `?filter_path=**.refresh_interval` answered with every setting.
+All of them now go through it.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+190/190, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths), and the three-node chaos check -- run because the metadata sync
+changed -- with no acknowledged write lost and the copies agreeing. Against
+OpenSearch 3.1.0: snapshots 40/53, ingest and aliases 56/59 (the three left
+are `_simulate` timestamps).
 

@@ -1,0 +1,53 @@
+{"method": "DELETE", "path": "/r18*", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18/*", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18", "body": null}
+{"method": "PUT", "path": "/r18-a", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"k": {"type": "keyword"}, "n": {"type": "long"}}}, "aliases": {"r18-alias": {}}}}
+{"method": "PUT", "path": "/r18-b", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}}}
+{"method": "PUT", "path": "/r18-a/_doc/0?refresh=true", "body": {"k": "v0", "n": 0}}
+{"method": "PUT", "path": "/r18-a/_doc/1?refresh=true", "body": {"k": "v1", "n": 1}}
+{"method": "PUT", "path": "/r18-a/_doc/2?refresh=true", "body": {"k": "v0", "n": 2}}
+{"method": "PUT", "path": "/r18-a/_doc/3?refresh=true", "body": {"k": "v1", "n": 3}}
+{"method": "PUT", "path": "/r18-b/_doc/1?refresh=true", "body": {"x": 1}}
+{"method": "PUT", "path": "/_snapshot/r18", "body": {"type": "fs", "settings": {"location": "/tmp/snaprepo/r18", "compress": true}}}
+{"method": "GET", "path": "/_snapshot/r18", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/_verify", "body": null}
+{"method": "PUT", "path": "/_snapshot/r18-bad", "body": {"type": "fs", "settings": {"location": "/etc/nowhere"}}}
+{"method": "PUT", "path": "/_snapshot/r18-none", "body": {"type": "nosuchtype", "settings": {}}}
+{"method": "GET", "path": "/_cat/repositories?format=json&h=id,type", "body": null}
+{"method": "PUT", "path": "/_snapshot/r18/s1?wait_for_completion=true", "body": {"indices": "r18-a,r18-b", "include_global_state": false}}
+{"method": "PUT", "path": "/_snapshot/r18/s1?wait_for_completion=true", "body": {"indices": "r18-a"}}
+{"method": "PUT", "path": "/_snapshot/r18/s2?wait_for_completion=true", "body": {"indices": "r18-a", "include_global_state": false, "metadata": {"who": "r18"}}}
+{"method": "PUT", "path": "/_snapshot/r18/s3?wait_for_completion=true", "body": {"indices": "r18-missing", "include_global_state": false}}
+{"method": "PUT", "path": "/_snapshot/r18/s4?wait_for_completion=true", "body": {"indices": "r18-missing", "ignore_unavailable": true, "include_global_state": false}}
+{"method": "GET", "path": "/_snapshot/r18/s1", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/s2", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/_all", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/s*", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/nosuch", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/s1/_status", "body": null}
+{"method": "GET", "path": "/_cat/snapshots/r18?format=json&h=id,status,indices,successful_shards,failed_shards,total_shards", "body": null}
+{"method": "POST", "path": "/r18-a/_close", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/s1/_restore?wait_for_completion=true", "body": {"indices": "r18-a"}}
+{"method": "GET", "path": "/r18-a/_count", "body": null}
+{"method": "GET", "path": "/r18-a/_alias", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/s1/_restore?wait_for_completion=true", "body": {"indices": "r18-a"}}
+{"method": "POST", "path": "/_snapshot/r18/s1/_restore?wait_for_completion=true", "body": {"indices": "r18-*", "rename_pattern": "r18-(.+)", "rename_replacement": "r18-restored-$1", "include_aliases": false}}
+{"method": "GET", "path": "/r18-restored-a/_count", "body": null}
+{"method": "GET", "path": "/r18-restored-b/_doc/1", "body": null}
+{"method": "GET", "path": "/r18-restored-a/_alias", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/s2/_restore?wait_for_completion=true", "body": {"indices": "r18-a", "rename_pattern": "r18-a", "rename_replacement": "r18-set", "index_settings": {"index.number_of_replicas": 0, "index.refresh_interval": "7s"}, "ignore_index_settings": ["index.blocks.write"]}}
+{"method": "GET", "path": "/r18-set/_settings?filter_path=**.refresh_interval,**.number_of_replicas", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/s2/_restore?wait_for_completion=true", "body": {"indices": "r18-b"}}
+{"method": "POST", "path": "/_snapshot/r18/nosuch/_restore", "body": {}}
+{"method": "POST", "path": "/_snapshot/r18/s1/_restore?wait_for_completion=true", "body": {"indices": "r18-a", "rename_pattern": "r18-a", "rename_replacement": "UPPER"}}
+{"method": "POST", "path": "/_snapshot/r18/s2/_restore?wait_for_completion=true", "body": {"indices": "r18-a", "rename_pattern": "r18-a", "rename_replacement": "r18-set2", "index_settings": {"index.number_of_shards": 3}}}
+{"method": "DELETE", "path": "/_snapshot/r18/s2", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18/s2", "body": null}
+{"method": "GET", "path": "/_snapshot/r18/_all", "body": null}
+{"method": "POST", "path": "/_snapshot/r18/_cleanup", "body": null}
+{"method": "DELETE", "path": "/r18*", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18/*", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18-bad", "body": null}
+{"method": "DELETE", "path": "/_snapshot/r18-none", "body": null}
+{"method": "GET", "path": "/_snapshot/r18", "body": null}

@@ -335,6 +335,14 @@ impl MetadataSource for StoreSource {
     fn apply_index_metadata(&self, meta: &IndexMetadata) {
         let Some(st) = self.store.get(&meta.name) else { return };
         let mut g = st.write();
+        // Metadata is for one index, not for a name: an index deleted and
+        // made again under the same name -- which is what a restore over a
+        // closed index does -- is a different index, and the state published
+        // for the one before it is not its state. It was applied by name, so
+        // the restored index was closed again a moment after it opened.
+        if !meta.uuid.is_empty() && !g.uuid.is_empty() && meta.uuid != g.uuid {
+            return;
+        }
         if g.settings != meta.settings {
             g.settings = meta.settings.clone();
             g.refresh_knobs();

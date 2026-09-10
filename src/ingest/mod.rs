@@ -464,6 +464,10 @@ pub struct IngestError {
     /// a failure inside a pipeline a `pipeline` processor ran, already
     /// reported as that pipeline's own step
     pub nested: bool,
+    /// the other failures found at the same time, which the reference lists
+    /// under the first rather than dropping: a pipeline with two processors
+    /// given parameters they do not take is refused naming both
+    pub suppressed: Vec<Value>,
 }
 
 impl IngestError {
@@ -477,6 +481,7 @@ impl IngestError {
             pipeline: None,
             doc_back: None,
             nested: false,
+            suppressed: Vec::new(),
         }
     }
 
@@ -495,6 +500,7 @@ impl IngestError {
             pipeline: None,
             doc_back: None,
             nested: false,
+            suppressed: Vec::new(),
         }
     }
 
@@ -514,6 +520,9 @@ impl IngestError {
         }
         if let Some(p) = &self.property_name {
             c["property_name"] = json!(p);
+        }
+        if !self.suppressed.is_empty() {
+            c["suppressed"] = json!(self.suppressed);
         }
         c
     }
@@ -728,8 +737,18 @@ fn allowed_parameters(kind: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// The first processor, anywhere in a list, given parameters it does not take.
+/// Every processor, anywhere in a list, given parameters it does not take:
+/// the first as the error, the rest under it as `suppressed`.
 fn stray_parameters(list: &[Value]) -> Option<IngestError> {
+    let mut found = Vec::new();
+    collect_stray(list, &mut found);
+    let mut first = found.into_iter();
+    let mut error = first.next()?;
+    error.suppressed = first.map(|e| e.cause_json()).collect();
+    Some(error)
+}
+
+fn collect_stray(list: &[Value], found: &mut Vec<IngestError>) {
     const EVERY: &[&str] = &["tag", "description", "if", "ignore_failure", "on_failure"];
     for item in list {
         let Some((kind, config)) = item.as_object().and_then(|o| o.iter().next()) else { continue };
@@ -742,7 +761,7 @@ fn stray_parameters(list: &[Value]) -> Option<IngestError> {
                 .collect();
             if !stray.is_empty() {
                 let tag = config.get("tag").and_then(|t| t.as_str());
-                return Some(IngestError::parse(
+                found.push(IngestError::parse(
                     format!(
                         "processor [{kind}] doesn't support one or more provided configuration \
                          parameters [{}]",
@@ -754,20 +773,13 @@ fn stray_parameters(list: &[Value]) -> Option<IngestError> {
                 ));
             }
         }
-        for nested in ["on_failure"] {
-            if let Some(Value::Array(inner)) = config.get(nested)
-                && let Some(e) = stray_parameters(inner)
-            {
-                return Some(e);
-            }
+        if let Some(Value::Array(inner)) = config.get("on_failure") {
+            collect_stray(inner, found);
         }
-        if let Some(inner) = config.get("processor")
-            && let Some(e) = stray_parameters(std::slice::from_ref(inner))
-        {
-            return Some(e);
+        if let Some(inner) = config.get("processor") {
+            collect_stray(std::slice::from_ref(inner), found);
         }
     }
-    None
 }
 
 fn parse_processors(list: &[Value]) -> Result<Vec<ProcessorSpec>, IngestError> {

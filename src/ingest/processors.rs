@@ -351,6 +351,7 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                     pipeline: None,
                     doc_back: None,
                     nested: false,
+                    suppressed: Vec::new(),
                 })?;
             }
         }

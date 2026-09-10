@@ -19,20 +19,37 @@ pub async fn put_repository(
             format!("[{name}] missing repository type"),
         );
     }
+    // a type nothing here can read is refused when it is registered, not at
+    // the first snapshot: it was stored and listed as though it were a
+    // repository
+    let kind = body.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(kind, "fs" | "url" | "s3" | "gcs" | "azure") {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!("[{name}] repository type [{kind}] does not exist"),
+        );
+    }
     // a location is a name under the root repositories live in; one that tries
     // to climb out of it is refused rather than quietly ignored
     if body.get("type").and_then(|t| t.as_str()) == Some("fs")
         && body.pointer("/settings/location").and_then(|v| v.as_str()).is_some()
         && crate::snapshot::location(&body).is_none()
     {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "repository_exception",
-            format!(
-                "[{name}] location must sit under [{}]",
-                crate::snapshot::repo_root().display()
-            ),
-        );
+        // in the reference's words and shape: the registration failed, and
+        // why is the cause
+        let location = body.pointer("/settings/location").and_then(|v| v.as_str()).unwrap_or("");
+        let why = json!({"type": "repository_exception", "reason": format!(
+            "[{name}] location [{location}] doesn't match any of the locations specified by path.repo"
+        )});
+        let error = json!({"root_cause": [why.clone()], "type": "repository_exception",
+                           "reason": format!("[{name}] failed to create repository"),
+                           "caused_by": why});
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": error, "status": 500})),
+        )
+            .into_response();
     }
     // A repository read over a URL is one nothing writes to, and a cluster
     // will not read from anywhere it was not told it may: a `file://` URL has
@@ -90,6 +107,18 @@ pub async fn get_repository(
             "repository_missing_exception",
             format!("[{want}] missing"),
         );
+    }
+    // the reference keeps a repository's settings as text and answers them
+    // that way: `"compress": "true"`, not `true`
+    let mut picked = picked;
+    for repo in picked.values_mut() {
+        if let Some(settings) = repo.get_mut("settings").and_then(|s| s.as_object_mut()) {
+            for v in settings.values_mut() {
+                if matches!(v, Value::Bool(_) | Value::Number(_)) {
+                    *v = json!(v.to_string());
+                }
+            }
+        }
     }
     respond(&p, Value::Object(picked))
 }
@@ -156,6 +185,8 @@ pub(crate) fn snapshot_record(
         "uuid": crate::store::index_uuid(name),
         "version_id": 136_217_827,
         "version": "3.0.0",
+        // this server keeps no remote store, so no snapshot of it is shallow
+        "remote_store_index_shallow_copy": false,
         "indices": indices,
         "data_streams": [],
         "include_global_state": global,
@@ -475,6 +506,15 @@ pub async fn delete_snapshot(
     if let Some(refused) = bad_snapshot_lookup(&repo, &name) {
         return refused;
     }
+    // a repository that is not there has no snapshots to delete, and says
+    // it is missing rather than acknowledging a delete of nothing
+    if !store.repositories().contains_key(&repo) {
+        return err(
+            StatusCode::NOT_FOUND,
+            "repository_missing_exception",
+            format!("[{repo}] missing"),
+        );
+    }
     refresh_readonly(&store, &repo);
     // a snapshot that was never there is missing whoever asked: only one that
     // is really held runs into the repository being read-only
@@ -657,7 +697,7 @@ pub async fn restore_snapshot(
     // which is not the same as a request that merely asked after it
     let Some(source) = held.get(&name) else {
         return err(
-            StatusCode::BAD_REQUEST,
+            StatusCode::INTERNAL_SERVER_ERROR,
             "snapshot_restore_exception",
             format!("[{repo}:{name}] snapshot does not exist"),
         );
@@ -687,6 +727,52 @@ pub async fn restore_snapshot(
         }
         _ => held_indices.clone(),
     };
+    let uuid = source.get("uuid").and_then(|v| v.as_str()).unwrap_or("_na_").to_string();
+    // An index named outright that the snapshot does not hold is missing: it
+    // was answered 200 with nothing restored, which reads as a restore that
+    // worked. A pattern that matches none is not an error, and neither is a
+    // name the caller said may be unavailable.
+    let lenient = body.get("ignore_unavailable").and_then(|v| v.as_bool()).unwrap_or(false)
+        || p.get("ignore_unavailable").map(|v| v == "true").unwrap_or(false);
+    if !lenient
+        && let Some(missing) =
+            wanted.iter().find(|w| !w.contains('*') && !held_indices.iter().any(|h| h == *w))
+    {
+        // in the restore action's shape, which names the index and its uuid
+        // but not the resource the other 404s carry
+        let reason = format!("no such index [{missing}]");
+        let cause = json!({"type": "index_not_found_exception", "reason": reason,
+                           "index": missing, "index_uuid": "_na_"});
+        let mut error = cause.clone();
+        error["root_cause"] = json!([cause]);
+        return (StatusCode::NOT_FOUND, axum::Json(json!({"error": error, "status": 404})))
+            .into_response();
+    }
+    // How many shards an index has is what its documents were routed by; a
+    // restore that changed it would put every document where no lookup by id
+    // finds it. The reference refuses it, and so do the settings it lists as
+    // fixed at creation. It used to be taken and quietly ignored.
+    if let Some(Value::Object(asked)) = body.get("index_settings") {
+        let fixed = ["number_of_shards", "uuid", "version.created", "creation_date"];
+        let named = |key: &str| key.strip_prefix("index.").unwrap_or(key).to_string();
+        let mut keys: Vec<String> = Vec::new();
+        for (k, v) in asked {
+            match (k.as_str(), v) {
+                ("index", Value::Object(inner)) => keys.extend(inner.keys().cloned()),
+                _ => keys.push(named(k)),
+            }
+        }
+        if let Some(bad) = keys.iter().find(|k| fixed.contains(&String::as_str(k))) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot_restore_exception",
+                format!(
+                    "[{repo}:{name}/{uuid}] cannot modify UnmodifiableOnRestore setting \
+                     [index.{bad}] on restore"
+                ),
+            );
+        }
+    }
     // a name may be given back changed, which is how a snapshot is restored
     // beside the index it was taken from
     let rename = |n: &str| -> String {
@@ -726,6 +812,17 @@ pub async fn restore_snapshot(
         {
             return refused;
         }
+        // a rename made up an upper-case name and the restore created it: no
+        // index can be made under it any other way
+        if target != target.to_lowercase() {
+            let reason = format!("Invalid index name [{target}], must be lowercase");
+            let cause = json!({"type": "invalid_index_name_exception", "reason": reason,
+                               "index": target, "index_uuid": "_na_"});
+            let mut error = cause.clone();
+            error["root_cause"] = json!([cause]);
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": error, "status": 400})))
+                .into_response();
+        }
         // a name that stands for several indices is not a name a restore
         // may write to: `store.get` answers for an alias with one of the
         // indices behind it, while deleting that name deletes all of them
@@ -745,10 +842,10 @@ pub async fn restore_snapshot(
             // refuses it and names the two ways out
             if !st.read().closed {
                 return err(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     "snapshot_restore_exception",
                     format!(
-                        "[{repo}:{name}] cannot restore index [{target}] because an open index \
+                        "[{repo}:{name}/{uuid}] cannot restore index [{target}] because an open index \
                          with same name already exists in the cluster. Either close or delete the \
                          existing index or restore the index under a different name by providing \
                          a rename pattern and replacement name"
@@ -771,10 +868,10 @@ pub async fn restore_snapshot(
                     // written to while it was read is not one to delete
                     if !store.delete_if_closed(&target) {
                         return err(
-                            StatusCode::BAD_REQUEST,
+                            StatusCode::INTERNAL_SERVER_ERROR,
                             "snapshot_restore_exception",
                             format!(
-                                "[{repo}:{name}] cannot restore index [{target}] because an open \
+                                "[{repo}:{name}/{uuid}] cannot restore index [{target}] because an open \
                                  index with same name already exists in the cluster. Either \
                                  close or delete the existing index or restore the index under a \
                                  different name by providing a rename pattern and replacement \
@@ -783,12 +880,16 @@ pub async fn restore_snapshot(
                         );
                     }
                     if let Err(e) = off_the_runtime(|| {
-                        crate::snapshot::restore_index(&store, source, &name, n, &target)
+                        crate::snapshot::restore_index(&store, source, &name, n, &target, &body)
                     }) {
                         return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
                     }
+                    // and open: the index put in its place kept the closed
+                    // mark of the one it replaced, so `_cat` said open and a
+                    // search said `index_closed_exception`
                     if let Some(st) = store.get(&target) {
                         let mut g = st.write();
+                        g.closed = false;
                         g.restored = true;
                         g.save_meta();
                     }
@@ -814,7 +915,9 @@ pub async fn restore_snapshot(
         if let Err(e) = crate::snapshot::readable(from, &name, n) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
         }
-        match off_the_runtime(|| crate::snapshot::restore_index(&store, from, &name, n, &target)) {
+        match off_the_runtime(|| {
+            crate::snapshot::restore_index(&store, from, &name, n, &target, &body)
+        }) {
             Ok(docs) => {
                 tracing::info!("restored [{target}] from [{repo}:{name}] with {docs} documents");
                 restored.push(target);

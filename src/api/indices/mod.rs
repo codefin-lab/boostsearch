@@ -374,7 +374,7 @@ pub async fn delete_index(
     for n in &targets {
         store.delete(n);
     }
-    axum::Json(json!({"acknowledged": true})).into_response()
+    respond(&p, json!({"acknowledged": true}))
 }
 
 pub async fn index_exists(State(store): State<Store>, Path(index): Path<String>) -> Response {

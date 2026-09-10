@@ -855,10 +855,23 @@ pub fn run(
         .map(|v| v.split(',').any(|w| matches!(w.trim(), "closed" | "all")))
         .unwrap_or(false);
     // a closed index is closed cluster-wide: this node may hold no copy of it
+    // The published state speaks for the index it was published for: an
+    // index deleted and made again under the same name -- a restore over a
+    // closed one -- read as closed until the next publish caught up, because
+    // the state was looked up by name alone.
     let closed_in_cluster = |name: &str| -> bool {
         store.is_closed(name)
             || crate::cluster::with_state(|s| {
-                s.indices.get(name).map(|m| m.state == "close").unwrap_or(false)
+                s.indices
+                    .get(name)
+                    .map(|m| {
+                        m.state == "close"
+                            && store
+                                .get(name)
+                                .map(|st| m.uuid.is_empty() || st.read().uuid == m.uuid)
+                                .unwrap_or(true)
+                    })
+                    .unwrap_or(false)
             })
     };
     if wants_closed && !lenient {

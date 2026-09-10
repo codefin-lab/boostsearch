@@ -80,12 +80,13 @@ pub async fn get_mapping(
     if out.is_empty() && !allow_none {
         return no_such_index(&expr);
     }
-    axum::Json(Value::Object(out)).into_response()
+    respond(&p, Value::Object(out))
 }
 
 pub async fn put_mapping(
     State(store): State<Store>,
     Path(index): Path<String>,
+    Query(p): Query<Params>,
     body: String,
 ) -> Response {
     let body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
@@ -156,7 +157,7 @@ pub async fn put_mapping(
         g.mapping.merge(&body);
         g.apply_analysis();
     }
-    axum::Json(json!({"acknowledged": true})).into_response()
+    respond(&p, json!({"acknowledged": true}))
 }
 
 pub async fn get_field_mapping(

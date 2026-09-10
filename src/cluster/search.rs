@@ -447,7 +447,21 @@ pub fn run_spanning(
         let closed: Option<String> = super::with_state(|s| {
             plan.all
                 .iter()
-                .find(|n| s.indices.get(*n).map(|m| m.state == "close").unwrap_or(false))
+                // the state published for this index, not for an earlier one
+                // of the same name: a restore over a closed index made a new
+                // one, and it read as closed until the next publish
+                .find(|n| {
+                    s.indices
+                        .get(*n)
+                        .map(|m| {
+                            m.state == "close"
+                                && store
+                                    .get(n)
+                                    .map(|st| m.uuid.is_empty() || st.read().uuid == m.uuid)
+                                    .unwrap_or(true)
+                        })
+                        .unwrap_or(false)
+                })
                 .cloned()
         });
         if let Some(name) = closed {

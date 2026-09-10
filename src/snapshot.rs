@@ -352,16 +352,72 @@ pub fn restore_index(
     snapshot: &str,
     index: &str,
     as_name: &str,
+    request: &Value,
 ) -> Result<usize, String> {
     let within = format!("{snapshot}/{}", crate::store::dir_name(index));
     let meta: Value = from
         .read(&format!("{within}/meta.json"))
         .and_then(|raw| serde_json::from_slice(&raw).ok())
         .ok_or_else(|| format!("[{snapshot}] holds nothing for index [{index}]"))?;
+    // What the request says about the index as it comes back: without its
+    // aliases, where `include_aliases` is false -- an alias restored onto a
+    // renamed copy stood over the original and the copy both, and every
+    // search through it counted each document twice -- and with the
+    // settings it names changed or left out.
+    let aliases = if request.get("include_aliases").and_then(|v| v.as_bool()) == Some(false) {
+        json!({})
+    } else {
+        meta.get("aliases").cloned().unwrap_or_else(|| json!({}))
+    };
+    let mut settings = meta.get("settings").cloned().unwrap_or_else(|| json!({}));
+    let short = |key: &str| key.strip_prefix("index.").unwrap_or(key).to_string();
+    let forget = |settings: &mut Value, key: &str| {
+        let key = short(key);
+        if let Some(o) = settings.as_object_mut() {
+            o.remove(&key);
+            o.remove(&format!("index.{key}"));
+            if let Some(inner) = o.get_mut("index").and_then(|i| i.as_object_mut()) {
+                inner.remove(&key);
+            }
+        }
+    };
+    let ignored: Vec<String> = match request.get("ignore_index_settings") {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).collect(),
+        _ => Vec::new(),
+    };
+    for key in &ignored {
+        forget(&mut settings, key);
+    }
+    // A restored index is a new index, with an identity of its own: the
+    // snapshot's settings carry the uuid of the one it was taken from, and
+    // the index made from them took it. Everything that tells two incarnations
+    // of a name apart by uuid then took the restored index for the closed one
+    // it replaced, and it answered `index_closed_exception` until the next
+    // publish. The reference gives a restored index a fresh uuid.
+    forget(&mut settings, "uuid");
+    if let Some(Value::Object(asked)) = request.get("index_settings") {
+        let mut flat: Vec<(String, Value)> = Vec::new();
+        for (k, v) in asked {
+            match (k.as_str(), v) {
+                ("index", Value::Object(inner)) => {
+                    flat.extend(inner.iter().map(|(k, v)| (k.clone(), v.clone())))
+                }
+                _ => flat.push((short(k), v.clone())),
+            }
+        }
+        for (k, v) in flat {
+            forget(&mut settings, &k);
+            if !settings.is_object() {
+                settings = json!({});
+            }
+            settings[format!("index.{k}")] = v;
+        }
+    }
     let body = json!({
         "mappings": meta.get("mappings").cloned().unwrap_or_else(|| json!({})),
-        "settings": meta.get("settings").cloned().unwrap_or_else(|| json!({})),
-        "aliases": meta.get("aliases").cloned().unwrap_or_else(|| json!({})),
+        "settings": settings,
+        "aliases": aliases,
     });
     // The documents are written by every snapshot, empty index or not, so
     // their absence is a repository that cannot be read rather than an index
