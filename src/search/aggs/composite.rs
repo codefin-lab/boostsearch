@@ -93,12 +93,31 @@ pub(crate) fn run_composite_agg(
                     .and_then(parse_offset)
                     .map(|d| d.whole_milliseconds() as f64)
                     .filter(|d| *d > 0.0);
-                let Some(step) = step else {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        "[composite] only supports fixed-length date intervals",
-                    ));
+                // A calendar unit -- a week, a month -- is not a fixed number
+                // of milliseconds, so it is carried by name and stepped on the
+                // calendar. It was refused outright, so a composite over
+                // `calendar_interval: week` answered 400.
+                let calendar = source
+                    .get("calendar_interval")
+                    .and_then(|v| v.as_str())
+                    .filter(|c| crate::search::calendar::CalendarUnit::parse(c).is_some())
+                    .map(String::from);
+                // a length the fixed grid can step -- `1d`, `12h` -- stays on it,
+                // with its offset; only a unit no fixed length stands for is
+                // walked on the calendar. `1d` with `offset: +4h` was walked
+                // on the calendar, the offset lost, and OpenSearch's own test
+                // of it failed.
+                let fixed_len = step.is_some();
+                let step = match (step, &calendar) {
+                    (Some(step), _) => step,
+                    (None, Some(_)) => 1.0,
+                    (None, None) => {
+                        return Err(err(
+                            StatusCode::BAD_REQUEST,
+                            "illegal_argument_exception",
+                            "[composite] only supports fixed-length date intervals",
+                        ));
+                    }
                 };
                 let offset = source
                     .get("offset")
@@ -118,7 +137,12 @@ pub(crate) fn run_composite_agg(
                 // a day in a zone begins where that zone's midnight falls in
                 // UTC, which is as far the other way as the zone sits from it
                 let shift = (offset - zone).rem_euclid(step);
-                (json!({"histogram": {"field": field, "interval": step, "offset": shift}}), true)
+                let mut node =
+                    json!({"histogram": {"field": field, "interval": step, "offset": shift}});
+                if !fixed_len && let Some(c) = &calendar {
+                    node["histogram"]["calendar"] = json!(c);
+                }
+                (node, true)
             }
             other => {
                 return Err(err(
@@ -148,7 +172,11 @@ pub(crate) fn run_composite_agg(
                 .filter_map(|n| store.get(n))
                 .any(|st| st.read().mapping.type_of(&field) == Some("ip")),
             missing_bucket: source.get("missing_bucket").and_then(|v| v.as_bool()).unwrap_or(false),
-            missing_last: source.get("missing_order").and_then(|v| v.as_str()) != Some("first"),
+            // the documents without a value come first unless told to come
+            // last, which is the reference's default for an ascending source;
+            // this put them last unless told otherwise, and the pages of a
+            // composite with `missing_bucket` came out in another order
+            missing_last: source.get("missing_order").and_then(|v| v.as_str()) == Some("last"),
             field: field.clone(),
         });
     }
@@ -194,7 +222,27 @@ pub(crate) fn run_composite_agg(
             })
             .unwrap_or(1.0);
         let (lo, hi) = (lo / per, hi / per);
-        let first = ((lo - shift) / step).floor() * step + shift;
+        // a calendar unit is walked on the calendar, in the source's zone
+        let calendar = source
+            .node
+            .pointer("/histogram/calendar")
+            .and_then(|v| v.as_str())
+            .and_then(crate::search::calendar::CalendarUnit::parse);
+        let zone_ns = source.zone_ms as i128 * 1_000_000;
+        let on_calendar = |ms: f64, advance: bool| -> f64 {
+            let Some(unit) = calendar else { return ms };
+            let local = (ms as i128) * 1_000_000 + zone_ns;
+            let Ok(dt) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(local) else {
+                return ms;
+            };
+            let moved = if advance { unit.advance(dt) } else { unit.floor(dt) };
+            ((moved.unix_timestamp_nanos() - zone_ns) / 1_000_000) as f64
+        };
+        let first = if calendar.is_some() {
+            on_calendar(lo, false)
+        } else {
+            ((lo - shift) / step).floor() * step + shift
+        };
         // the rest of the sources are a composite of their own, run once
         // inside each step
         let rest: Vec<Value> = spec
@@ -227,7 +275,7 @@ pub(crate) fn run_composite_agg(
                     ),
                 ));
             }
-            let next = cursor + step;
+            let next = if calendar.is_some() { on_calendar(cursor, true) } else { cursor + step };
             let window = json!({"range": {field: {
                 "gte": crate::store::format_millis(cursor as i64, "iso8601"),
                 "lt": crate::store::format_millis(next as i64, "iso8601"),

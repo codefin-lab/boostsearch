@@ -31,9 +31,12 @@ pub(crate) fn run_date_range_agg(
 
     // a bound is the number the index holds, and the date it stands for
     let millis = |v: &Value| crate::store::date_number(v, format.as_deref(), false);
-    let iso = |v: &Value| {
-        millis(v).and_then(|ms| crate::store::format_millis(ms, "strict_date_optional_time"))
-    };
+    // A bound is shown in the format the request or the mapping names, as
+    // the reference shows it; it was always written in ISO form, so a
+    // `format: yyyy-MM-dd` range was keyed `*-2026-03-10T00:00:00.000Z`
+    // where the reference keys it `*-2026-03-10`.
+    let shown_format = format.clone().unwrap_or_else(|| "strict_date_optional_time".to_string());
+    let iso = |v: &Value| millis(v).and_then(|ms| crate::store::format_millis(ms, &shown_format));
     // a bound is named in the key the way it is reported beside it, not the
     // way the request happened to spell it
     let shown = |v: &Option<Value>| match v {
@@ -110,7 +113,8 @@ pub(crate) fn run_date_range_agg(
         if let Some(f) = from.as_ref()
             && let Some(ms) = millis(f)
         {
-            b["from"] = json!(ms);
+            // the reference reports a bound as a double
+            b["from"] = json!(ms as f64);
             if let Some(s) = iso(f) {
                 b["from_as_string"] = json!(s);
             }
@@ -118,7 +122,7 @@ pub(crate) fn run_date_range_agg(
         if let Some(t) = to.as_ref()
             && let Some(ms) = millis(t)
         {
-            b["to"] = json!(ms);
+            b["to"] = json!(ms as f64);
             if let Some(s) = iso(t) {
                 b["to_as_string"] = json!(s);
             }
@@ -129,6 +133,10 @@ pub(crate) fn run_date_range_agg(
             }
         }
         if keyed {
+            // keyed, the name is the key: a bucket does not carry it again
+            if let Some(bo) = b.as_object_mut() {
+                bo.remove("key");
+            }
             keyed_out.insert(key, b);
         } else {
             buckets.push(b);

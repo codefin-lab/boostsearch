@@ -5240,7 +5240,8 @@ claim in a document, a second lock on a door that is already locked.
 | 17 | 0 | 5 | 8 | 13 |
 | 18 | 1 | 6 | 8 | 15 |
 | 19 | 0 | 3 | 5 | 8 |
-| **6-19** | **21** | **37** | **39** | **97** |
+| 20 | 1 | 5 | 9 | 15 |
+| **6-20** | **22** | **42** | **48** | **112** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5652,4 +5653,80 @@ read that way first.
 Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 191/191, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
 paths). Against OpenSearch 3.1.0: the analysis and document corpus 55/60.
+
+## The twentieth review
+
+Aggregations over real data, held to the reference:
+`tools/corpora/aggs.ndjson`, 43 requests over sixty documents with dates,
+numbers, keywords, a geo point and a nested list -- date histograms with
+zones, offsets, bounds and `keyed`; composite paging and date sources;
+percentiles and their ranks; significant, rare and multi terms; ranges of
+numbers, dates and distances; geohash grids; nested and reverse nested;
+bucket pipelines of every kind. Before this
+review 25 of the 43 answers were the same; after it, 35. Of the eight left,
+three are the approximations noted below, one is the position a refusal
+quotes from the request body (`[1:91]`), and four are findings below that
+this review left: `significant_terms`, the geohash order, `sampler` and
+`extended_bounds`.
+
+**P0 -- `stats_bucket` over `_count` answered `null`.** The path to the
+values named each bucket's count, and the count was looked up as a key inside
+the bucket, found nothing, and the pipeline reported that there were no
+values -- where there was a count for every bucket.
+
+**P1 -- a date histogram with a zone ignored `keyed`.** The buckets came
+back as a list where the request asked for them by name.
+
+**P1 -- a date histogram with a zone began its days an hour late after a
+change to summer time.** Each boundary was placed with the offset of the one
+before it, so from the change on every day in New York began at
+`01:00-04:00`, where the reference begins it at midnight, and a document near
+midnight was counted in the wrong day. The replay found it only once `keyed`
+was answered, because the keys are where the boundaries show.
+
+**P1 -- a composite over `calendar_interval` was refused.** Only fixed
+lengths were stepped; a week or a month is now stepped on the calendar. The
+first version of this walked every calendar interval on the calendar,
+including `1d`, which the fixed grid already stepped with its `offset` -- and
+the conformance corpus caught it at once: OpenSearch's own test of a
+composite with `calendar_interval: 1d` and `offset: +4h` failed, the offset
+lost. Only a unit no fixed length stands for is walked on the calendar now.
+
+**P1 -- `percentiles_bucket` was not understood, nor was
+`extended_stats_bucket`.** Both are now worked out from the sibling buckets,
+the percentiles by the reference's own rule -- the value at the rounded rank,
+no interpolation.
+
+**P1 -- `significant_terms` scores differ.** The reference counts the hidden
+documents a `nested` field makes as part of the background, so its
+background is three times the index here and every score moves with it.
+Found, and left: matching it means counting documents no search can see.
+
+**P2** -- a terms result without `doc_count_error_upper_bound`, when ordered
+by key or by a sub-aggregation, and without it on each bucket under
+`show_term_doc_count_error`; a composite with `missing_bucket` putting the
+documents without a value last, where the reference's default puts them
+first; a regex `include` beside a list `exclude`
+accepted where the reference refuses it; keyed numeric ranges named `*-3`
+where the reference writes `*-3.0`, with a `key` inside and last range
+first; a `date_range` shown in ISO whatever `format` it asked for, and its
+bounds as whole numbers; geohash cells of equal count in the other order;
+`extended_bounds` in a form `format` cannot read accepted; `sampler` taking
+its sample across the index where the reference takes it per shard. The
+first five of these are fixed; the geohash order, `extended_bounds` and
+`sampler` are left for the next review. And an
+id routed to a different shard than the reference routes it to: the hash is
+the same, the fold is not -- the reference folds by 1,024 routing shards and
+divides, this folds by the shard count. Left, for now: changing it would
+move every document of every existing index with more than one shard, and it
+has to be done for new indices only, with the routing shard count kept in
+their settings as the reference keeps it.
+
+Percentiles, percentile ranks, a weighted average's last digit and a
+cardinality under a precision threshold differ as well, and are not counted:
+both engines answer them approximately, by different approximations.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+191/191, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths). Against OpenSearch 3.1.0: the aggregations corpus 35/43.
 

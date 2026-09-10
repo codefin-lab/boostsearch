@@ -211,6 +211,20 @@ pub(crate) fn check_agg_node(
             }
         }
         if name == "terms" {
+            // One side a pattern and the other a list of values is two ways of
+            // filtering that the reference cannot combine, and it refuses the
+            // request. Both were taken here, and the answer depended on which
+            // of the two was applied last.
+            let regex = |v: Option<&Value>| matches!(v, Some(Value::String(_)));
+            let set = |v: Option<&Value>| matches!(v, Some(Value::Array(_)));
+            let (inc, exc) = (def.get("include"), def.get("exclude"));
+            if (regex(inc) && set(exc)) || (set(inc) && regex(exc)) {
+                return Err(crate::api::err_caused_by(
+                    "x_content_parse_exception",
+                    "[terms] failed to parse field [exclude]",
+                    "Cannot mix a regex-based include with a set-based method",
+                ));
+            }
             for pass in ["include", "exclude"] {
                 if !matches!(def.get(pass), Some(Value::String(_))) {
                     continue;

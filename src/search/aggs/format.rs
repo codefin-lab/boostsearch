@@ -358,6 +358,25 @@ pub(crate) fn format_terms_keys(
         let Some(defo) = def.as_object() else { continue };
         let Some(node) = result.get_mut(name) else { continue };
 
+        // A `terms` result says how far its counts may be off, and with
+        // `show_term_doc_count_error` so does each bucket. Some of the paths
+        // that answer a terms aggregation -- ordered by key, by a
+        // sub-aggregation -- left the bound out, and a client reading it
+        // found nothing there.
+        if let Some(terms) = defo.get("terms")
+            && let Some(o) = node.as_object_mut()
+            && o.contains_key("buckets")
+        {
+            o.entry("doc_count_error_upper_bound").or_insert(json!(0));
+            if terms.get("show_term_doc_count_error").and_then(|v| v.as_bool()) == Some(true)
+                && let Some(Value::Array(buckets)) = o.get_mut("buckets")
+            {
+                for b in buckets.iter_mut().filter_map(|b| b.as_object_mut()) {
+                    b.entry("doc_count_error_upper_bound").or_insert(json!(0));
+                }
+            }
+        }
+
         if defo.contains_key("terms") {
             let field = defo
                 .get("terms")
@@ -463,6 +482,62 @@ pub(crate) fn normalize_range_keys(node: &mut Value) {
                     };
                     let key = format!("{}-{}", show(b.get("from")), show(b.get("to")));
                     b["key"] = json!(key);
+                }
+            }
+            // Keyed, the buckets are an object named by the same key, with no
+            // key inside each, in the order of the ranges. Only the list form
+            // was put right, so a keyed range was named `*-3` where the
+            // reference names it `*-3.0`, carried a `key` it does not, and
+            // came back last range first.
+            if let Some(Value::Object(keyed)) = o.get("buckets") {
+                let numeric = keyed.values().any(|b| {
+                    b.get("from").map(|v| v.is_number()).unwrap_or(false)
+                        || b.get("to").map(|v| v.is_number()).unwrap_or(false)
+                });
+                if numeric {
+                    let show = |v: Option<&Value>| match v.and_then(|x| x.as_f64()) {
+                        Some(n) if n.is_finite() => {
+                            if n.fract() == 0.0 && n.abs() < 1e15 {
+                                format!("{n:.1}")
+                            } else {
+                                format!("{n}")
+                            }
+                        }
+                        _ => "*".to_string(),
+                    };
+                    let edge = |b: &Value, k: &str, open: f64| {
+                        b.get(k).and_then(|v| v.as_f64()).unwrap_or(open)
+                    };
+                    let mut entries: Vec<(String, Value)> =
+                        keyed.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    entries.sort_by(|(_, a), (_, b)| {
+                        edge(a, "from", f64::NEG_INFINITY)
+                            .total_cmp(&edge(b, "from", f64::NEG_INFINITY))
+                            .then_with(|| {
+                                edge(a, "to", f64::INFINITY).total_cmp(&edge(
+                                    b,
+                                    "to",
+                                    f64::INFINITY,
+                                ))
+                            })
+                    });
+                    let mut rebuilt = serde_json::Map::new();
+                    for (name, mut b) in entries {
+                        // a key the caller gave a range is kept as they wrote it
+                        let generated = b.get("key").and_then(|k| k.as_str())
+                            == Some(name.as_str())
+                            && name.contains('-');
+                        let named = if generated {
+                            format!("{}-{}", show(b.get("from")), show(b.get("to")))
+                        } else {
+                            name
+                        };
+                        if let Some(bo) = b.as_object_mut() {
+                            bo.remove("key");
+                        }
+                        rebuilt.insert(named, b);
+                    }
+                    o.insert("buckets".into(), Value::Object(rebuilt));
                 }
             }
             for (_, v) in o.iter_mut() {

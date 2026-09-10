@@ -627,8 +627,15 @@ const BUCKET_PIPELINES: &[&str] = &[
     "bucket_script",
 ];
 
-const PIPELINES: &[&str] =
-    &["avg_bucket", "sum_bucket", "min_bucket", "max_bucket", "stats_bucket"];
+const PIPELINES: &[&str] = &[
+    "avg_bucket",
+    "sum_bucket",
+    "min_bucket",
+    "max_bucket",
+    "stats_bucket",
+    "extended_stats_bucket",
+    "percentiles_bucket",
+];
 
 /// One source of a composite aggregation: what to bucket by, and how the key
 /// it produces should be read back.

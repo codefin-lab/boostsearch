@@ -318,6 +318,64 @@ pub(crate) fn run_pipeline_agg(aggs: &Value, def: &Value) -> std::result::Result
                 "sum": sum,
             }));
         }
+        // `stats_bucket` with the spread of the values, as `extended_stats`
+        // gives it for documents
+        "extended_stats_bucket" => {
+            let sigma = spec.get("sigma").and_then(|v| v.as_f64()).unwrap_or(2.0);
+            let avg = sum / n;
+            let squares: f64 = values.iter().map(|v| v * v).sum();
+            let population = (squares / n - avg * avg).max(0.0);
+            let sampling = if n > 1.0 { population * n / (n - 1.0) } else { f64::NAN };
+            let (sd, sd_s) = (population.sqrt(), sampling.sqrt());
+            let num = |x: f64| if x.is_finite() { json!(x) } else { Value::Null };
+            return Ok(json!({
+                "count": values.len(),
+                "min": values.iter().copied().fold(f64::INFINITY, f64::min),
+                "max": values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                "avg": avg,
+                "sum": sum,
+                "sum_of_squares": squares,
+                "variance": population,
+                "variance_population": population,
+                "variance_sampling": num(sampling),
+                "std_deviation": sd,
+                "std_deviation_population": sd,
+                "std_deviation_sampling": num(sd_s),
+                "std_deviation_bounds": {
+                    "upper": avg + sigma * sd,
+                    "lower": avg - sigma * sd,
+                    "upper_population": avg + sigma * sd,
+                    "lower_population": avg - sigma * sd,
+                    "upper_sampling": num(avg + sigma * sd_s),
+                    "lower_sampling": num(avg - sigma * sd_s),
+                },
+            }));
+        }
+        // Percentiles of the values, by the reference's rule: the sorted
+        // value at `round(percent / 100 * (n - 1))`, no interpolation.
+        "percentiles_bucket" => {
+            let mut sorted = values.clone();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let percents: Vec<f64> = spec
+                .get("percents")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+                .unwrap_or_else(|| vec![1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0]);
+            let at = |p: f64| {
+                let i = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+                sorted[i.min(sorted.len() - 1)]
+            };
+            let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
+            let label = |p: f64| if p.fract() == 0.0 { format!("{p:.1}") } else { p.to_string() };
+            if keyed {
+                let values: serde_json::Map<String, Value> =
+                    percents.iter().map(|p| (label(*p), json!(at(*p)))).collect();
+                return Ok(json!({"values": values}));
+            }
+            let values: Vec<Value> =
+                percents.iter().map(|p| json!({"key": p, "value": at(*p)})).collect();
+            return Ok(json!({"values": values}));
+        }
         _ => return Ok(json!({"value": Value::Null})),
     };
     Ok(json!({"value": value}))
@@ -438,6 +496,13 @@ pub(crate) fn resolve_buckets_path(aggs: &Value, path: &str) -> Vec<f64> {
         // default gap policy asks for
         .filter(|b| b.get("doc_count").and_then(|c| c.as_u64()).map(|c| c > 0).unwrap_or(true))
         .filter_map(|b| {
+            // `_count` is how many documents the bucket holds. It was looked
+            // up as a key inside the bucket, found nothing, and a
+            // `stats_bucket` over `terms>_count` answered `null` for stats
+            // there was every number for.
+            if rest.as_slice() == ["_count"] {
+                return b.get("doc_count").and_then(|v| v.as_f64());
+            }
             let mut cur = b;
             for seg in &rest {
                 cur = cur.get(seg)?;

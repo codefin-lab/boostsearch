@@ -271,9 +271,19 @@ pub(crate) fn run_calendar_histogram(
             ));
         }
         let o = zone_at(cursor);
+        // The next boundary is the next local midnight, month or year, placed
+        // with the offset in force *there*. It was placed with the offset of
+        // the boundary before it, so across a change to summer time every
+        // later day began an hour late -- `01:00-04:00` where the reference
+        // begins it at `00:00-04:00` -- and a document near midnight counted
+        // in the wrong day.
         let next = match fixed {
             Some(step) => cursor + step,
-            None => (unit.advance((cursor + o) - offset) + offset) - o,
+            None => {
+                let local = unit.advance((cursor + o) - offset) + offset;
+                let guess = local - o;
+                local - zone_at(guess)
+            }
         };
         let mut spec = json!({
             "gte": iso_millis(cursor),
@@ -327,6 +337,23 @@ pub(crate) fn run_calendar_histogram(
         }
     }
     let _ = Duration::seconds(0);
+    // `keyed` asks for the buckets by name rather than in a list: a histogram
+    // with a zone came through here and ignored it, so a client reading the
+    // buckets as an object found an array
+    if spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let keyed: serde_json::Map<String, Value> = buckets
+            .into_iter()
+            .map(|b| {
+                let name = b
+                    .get("key_as_string")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| b["key"].to_string());
+                (name, b)
+            })
+            .collect();
+        return Ok(json!({"buckets": keyed}));
+    }
     Ok(json!({"buckets": buckets}))
 }
 
