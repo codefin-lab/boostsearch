@@ -129,6 +129,17 @@ pub(crate) fn search_one_shard(
         stats: &g.stats,
         vectors: &g.vectors,
     };
+    // `_index` is a field every document of this index has, holding this
+    // index's name: a query on it is answered here, where the name is known,
+    // rather than by an index that does not store it -- where every such
+    // query matched nothing, whatever it asked
+    // an alias of this index is a name its documents answer to as well
+    let also_called: Vec<String> = st.read().aliases.keys().cloned().collect();
+    let by_name = query_json.clone().map(|mut q| {
+        answer_index_name(&mut q, name, &also_called);
+        q
+    });
+    let query_json = &by_name;
     // the filter the alias this request named puts on this index, which is
     // as much a part of the question as the query the caller wrote
     let with_alias = crate::security::with_alias_filter(name, query_json.clone());
@@ -542,4 +553,50 @@ fn phase_failure_of(e: Response, index: &str) -> Response {
         "status": 400,
     });
     axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(wrapped)))
+}
+
+/// Replace every clause that asks after `_index` with the answer for this
+/// index: all of its documents, or none of them.
+pub(crate) fn answer_index_name(query: &mut Value, index: &str, aliases: &[String]) {
+    use serde_json::json;
+    let everything = json!({"match_all": {}});
+    let nothing = json!({"bool": {"must_not": [{"match_all": {}}]}});
+    let named = |value: &Value| -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(o) => o.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            _ => None,
+        }
+    };
+    let Some(o) = query.as_object_mut() else {
+        if let Some(a) = query.as_array_mut() {
+            a.iter_mut().for_each(|q| answer_index_name(q, index, aliases));
+        }
+        return;
+    };
+    let is_me = |want: &str| want == index || aliases.iter().any(|a| a == want);
+    let decided = if let Some(v) = o.get("term").and_then(|t| t.get("_index")) {
+        named(v).map(|want| is_me(&want))
+    } else if let Some(Value::Array(list)) = o.get("terms").and_then(|t| t.get("_index")) {
+        Some(list.iter().filter_map(|v| v.as_str()).any(is_me))
+    } else if let Some(v) = o.get("prefix").and_then(|t| t.get("_index")) {
+        // the alias names count here as they do for `term`: a prefix of an
+        // alias of this index reaches its documents
+        named(v)
+            .map(|want| index.starts_with(&want) || aliases.iter().any(|a| a.starts_with(&want)))
+    } else if let Some(v) = o.get("wildcard").and_then(|t| t.get("_index")) {
+        named(v).map(|want| {
+            crate::store::glob_match(&want, index)
+                || aliases.iter().any(|a| crate::store::glob_match(&want, a))
+        })
+    } else {
+        None
+    };
+    if let Some(hit) = decided {
+        *query = if hit { everything } else { nothing };
+        return;
+    }
+    for (_, v) in o.iter_mut() {
+        answer_index_name(v, index, aliases);
+    }
 }

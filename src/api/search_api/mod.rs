@@ -24,6 +24,14 @@ pub async fn search(
         return err(StatusCode::BAD_REQUEST, "parsing_exception", "body must be an object");
     }
     fold_params_into_body(&mut body, &p);
+    // A name with a cluster in front of it -- `remote:index` -- is another
+    // cluster's to answer. Each cluster reduces its own shards and this one
+    // puts the answers together, which is the coordinating half of a
+    // cross-cluster search.
+    let split = crate::api::split_expression(&store, &expr);
+    if !split.remote.is_empty() {
+        return across_clusters(&store, split, &expr, body, &p).await;
+    }
     // `stats: [name]` tags the query so _stats can report per-group counts
     if let Some(groups) = body.get("stats").and_then(|v| v.as_array()) {
         let names: Vec<String> =
@@ -480,4 +488,131 @@ pub(crate) fn strip_sort(env: &mut Value) {
             }
         }
     }
+}
+
+/// A search that names another cluster: ask each of them, and put the answers
+/// together.
+async fn across_clusters(
+    store: &Store,
+    split: crate::api::Split,
+    asked: &str,
+    body: Value,
+    p: &Params,
+) -> Response {
+    let known = crate::api::remotes(store);
+    let size = body.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let from = body.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    // each cluster answers the whole question, so each is asked for enough
+    // hits to be able to supply the whole page on its own
+    let mut asked_body = body.clone();
+    asked_body["size"] = json!(size + from);
+    asked_body["from"] = json!(0);
+    // An average of averages is not an average: each cluster is asked for the
+    // sum and the count behind its `avg`, and the average is worked out once
+    // the counts are together. The answer used to keep the first cluster's
+    // average and report it for both.
+    let avg_aggs = crate::api::averages_as_stats(&mut asked_body);
+    // an aggregation over `_index` keys its buckets by index name, and a
+    // remote's index names carry the cluster in front of them
+    let index_aggs = crate::api::aggs_on_index(&asked_body);
+    let pipelines = crate::api::bucket_pipelines(&asked_body);
+    let mut answers: Vec<(String, Value)> = Vec::new();
+    let mut skipped = 0usize;
+    let mut successful = 0usize;
+
+    // this cluster's own share, where the expression named any of it
+    if split.local.is_empty() {
+        answers.push((
+            String::new(),
+            json!({"took": 0, "timed_out": false,
+                   "_shards": {"total": 0, "successful": 0, "skipped": 0, "failed": 0},
+                   "hits": {"total": {"value": 0, "relation": "eq"},
+                            "max_score": Value::Null, "hits": []}}),
+        ));
+    } else {
+        match crate::search::run(store, &split.local, &asked_body, p) {
+            Ok(out) => {
+                successful += 1;
+                answers.push((String::new(), crate::search::envelope(out, &asked_body, p)));
+            }
+            Err(r) => return r,
+        }
+    }
+
+    let query = p
+        .iter()
+        .filter(|(k, _)| {
+            matches!(
+                k.as_str(),
+                Some("rest_total_hits_as_int") | Some("typed_keys") | Some("ignore_unavailable")
+            )
+        })
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    for (name, indices) in split.remote {
+        let Some(remote) = known.get(&name) else { continue };
+        let path = format!("/{indices}/_search");
+        // A remote's documents are `<cluster>:<index>` to the caller and
+        // `<index>` to the remote itself: a clause on `_index` naming
+        // `remote:x` is `x` there, and one naming a bare `x` names an index of
+        // this cluster, which no document over there is in.
+        let mut theirs = asked_body.clone();
+        if let Some(q) = theirs.get_mut("query") {
+            crate::api::localize_index_clauses(q, &name);
+        }
+        let answered = tokio::task::block_in_place(|| {
+            crate::api::ask(remote, "POST", &path, &query, Some(&theirs))
+        });
+        match answered {
+            Ok((status, value)) if status < 300 => {
+                successful += 1;
+                answers.push((name, value));
+            }
+            // a cluster that answers with a refusal answers for itself: the
+            // caller is told, unless they said to skip it
+            Ok((status, value)) => {
+                if remote.skip_unavailable {
+                    skipped += 1;
+                    continue;
+                }
+                let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                let mut body = value;
+                if let Some(reason) = body.pointer("/error/reason").and_then(|v| v.as_str()) {
+                    let reason = format!("{name}:{reason}");
+                    body["error"]["reason"] = json!(reason);
+                }
+                return (code, axum::Json(body)).into_response();
+            }
+            Err(why) => {
+                if remote.skip_unavailable {
+                    skipped += 1;
+                    continue;
+                }
+                return err(StatusCode::BAD_GATEWAY, "connect_transport_exception", why);
+            }
+        }
+    }
+    let total_clusters = successful + skipped;
+    let mut merged =
+        crate::api::merge_answers(answers, size, from, &index_aggs, &avg_aggs, &pipelines);
+    merged["_clusters"] = json!({
+        "total": total_clusters, "successful": successful, "skipped": skipped,
+    });
+    // every cluster reduced its own shards and this reduction joined them --
+    // a phase that only exists when there was more than one to join
+    // with `ccs_minimize_roundtrips: false` the coordinator reduces the
+    // shards itself in one phase, and there is no per-cluster phase to count
+    let minimized = p.get("ccs_minimize_roundtrips").map(|v| v != "false").unwrap_or(true);
+    if total_clusters > 1 && minimized {
+        merged["num_reduce_phases"] = json!(total_clusters + 1);
+    }
+    // the total in the form the caller asked for it
+    if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false)
+        && let Some(v) = merged.pointer("/hits/total/value").cloned()
+    {
+        merged["hits"]["total"] = v;
+    }
+    let _ = asked;
+    respond(p, merged)
 }

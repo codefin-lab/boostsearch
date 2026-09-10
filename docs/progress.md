@@ -5235,7 +5235,8 @@ claim in a document, a second lock on a door that is already locked.
 | 12 | 1 | 4 | 1 | 6 |
 | 13 | 1 | 1 | 1 | 3 |
 | 14 | 1 | 3 | 1 | 5 |
-| **6-14** | **12** | **17** | **7** | **36** |
+| 15 | 1 | 4 | 2 | 7 |
+| **6-15** | **13** | **21** | **9** | **43** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5308,3 +5309,54 @@ shape of `_explain`.
 Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
 over all 409 files, SQL and PPL 8 of 8, ISM 6 of 6, 30 refusals, 24
 document-level security paths.
+
+## The fifteenth review
+
+This one brought in OpenSearch's cross-cluster search suite: the eleven YAML
+files under `qa/multi-cluster-search`, run against two nodes -- a remote,
+filled by `tools/ccs_remote_manifest.json`, and a local node told about it by
+`BOOSTSEARCH_CLUSTER_REMOTE` or `cluster.remote.<name>.*`, which runs
+`tools/ccs_local_manifest.json`. Cross-cluster search did not exist before;
+it does now (`src/api/cluster/remote.rs`): `cluster:index` expressions are
+split, each remote is asked over HTTP with a timeout, and the answers are
+merged -- hits by sort values or score, totals, shards, aggregations joined by
+key, averages carried as stats so they merge exactly, bucket pipelines
+recomputed after the merge. `_remote/info`, `skip_unavailable`, `_clusters`,
+and `_field_caps` across clusters are answered.
+
+The suite passes 20 of 24 sections. The four left: three in
+`70_skip_shards` (the pre-filter that skips shards a range cannot match --
+the answer is right, `_shards.skipped` is 0 where the reference says 1) and
+one in `40_scroll` (a scroll across clusters). Both are deferred.
+
+Running it found seven defects in the local engine, none of them specific to
+cross-cluster search:
+
+**P0 -- a filtered alias lost its filter on a multi-index search.** The alias
+filters are task-local and the shards run on rayon threads, which do not
+inherit them; a search naming the alias and another index returned documents
+the alias hides. This was the tenth review's fix, and it was only right for
+one index. The filters are now carried onto every shard thread.
+
+**P1 -- a missing index in a list was ignored.** `GET /a,missing/_search`
+answered from `a`; the reference answers 404 unless `ignore_unavailable`.
+
+**P1 -- `term` on `_index` matched nothing.** It is now answered per shard
+against the index's name and its aliases.
+
+**P1 -- a sibling pipeline under a bucket aggregation was refused.** A
+`max_bucket` inside a `terms` bucket is run per bucket.
+
+**P1 -- Painless refused `for (x in xs)`.** The untyped for-each is valid
+Painless and is how the suite's reduce script is written.
+
+**P2 -- a pattern that matched no index answered with one phantom shard.**
+It is now 0.
+
+**P2 -- `PUT _cluster/settings` echoed a `null` it had been asked to remove
+in the nested form.** It is dropped, as the reference drops it.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+187/187, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean,
+cross-cluster 20/24.
+

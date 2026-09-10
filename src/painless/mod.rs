@@ -298,6 +298,21 @@ mod tests {
         assert_eq!(run("100.0 / 1000.0").as_text(), "0.1");
     }
 
+    /// `for (x in xs)` is a for-each with no type written; Painless takes it,
+    /// and a reduce script in OpenSearch's own cross-cluster suite is written
+    /// that way. The typed form is unchanged beside it.
+    #[test]
+    fn a_for_each_may_leave_its_type_out() {
+        assert_eq!(
+            run("long sum = 0; for (s in [1, 2, 3]) { sum += s; } return sum").as_text(),
+            "6"
+        );
+        assert_eq!(
+            run("long sum = 0; for (def s : [4, 5]) { sum += s; } return sum").as_text(),
+            "9"
+        );
+    }
+
     #[test]
     fn statements_and_functions() {
         assert_eq!(

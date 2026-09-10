@@ -16,7 +16,19 @@ pub(crate) fn strip_bucket_pipelines(
             .and_then(|d| d.as_object())
             .map(|d| d.keys().any(|k| BUCKET_PIPELINES.contains(&k.as_str())))
             .unwrap_or(false);
-        if is_bucket_pipeline {
+        // A sibling pipeline -- `avg_bucket` and its family -- written *inside*
+        // a bucketing aggregation summarises the sub-buckets of each of that
+        // aggregation's buckets. The core parser knows none of them, and one
+        // at the top is taken out elsewhere; one further down reached the
+        // parser and the whole request was refused as an unknown variant. It
+        // is taken out here with where it was, and worked out per bucket once
+        // the buckets exist.
+        let is_nested_sibling = !at.is_empty()
+            && o.get(&name)
+                .and_then(|d| d.as_object())
+                .map(|d| d.keys().any(|k| PIPELINES.contains(&k.as_str())))
+                .unwrap_or(false);
+        if is_bucket_pipeline || is_nested_sibling {
             if let Some(def) = o.remove(&name) {
                 out.push((at.clone(), name, def));
             }
@@ -55,6 +67,14 @@ pub(crate) fn strip_bucket_pipelines(
 /// The aggregation may sit under others, and each of those has buckets of its
 /// own, so the walk down is a walk across every bucket at each step.
 pub(crate) fn apply_bucket_pipeline(aggs: &mut Value, at: &[String], name: &str, def: &Value) {
+    // a sibling pipeline taken out of a bucketing aggregation: each bucket of
+    // that aggregation gets the pipeline's answer about its own sub-buckets
+    let sibling =
+        def.as_object().map(|o| o.keys().any(|k| PIPELINES.contains(&k.as_str()))).unwrap_or(false);
+    if sibling {
+        apply_nested_sibling(aggs, at, name, def);
+        return;
+    }
     let Some((parent, above)) = at.split_last() else { return };
     if !above.is_empty() {
         let step = &above[0];
@@ -460,4 +480,29 @@ fn value_at_path(bucket: &Value, path: &str) -> Option<f64> {
         }
     }
     node.get("value").and_then(|v| v.as_f64()).or_else(|| node.as_f64())
+}
+
+/// Walk down to the aggregation a sibling pipeline was written under, and give
+/// each of its buckets the pipeline's value over that bucket's own sub-aggs.
+fn apply_nested_sibling(aggs: &mut Value, at: &[String], name: &str, def: &Value) {
+    let Some((first, rest)) = at.split_first() else { return };
+    let Some(node) = aggs.get_mut(first) else { return };
+    let each = |b: &mut Value| {
+        if rest.is_empty() {
+            // the pipeline reads paths relative to the bucket it sits in
+            if let Ok(value) = run_pipeline_agg(b, def)
+                && !value.is_null()
+            {
+                b[name] = value;
+            }
+        } else {
+            apply_nested_sibling(b, rest, name, def);
+        }
+    };
+    match node.get_mut("buckets") {
+        Some(Value::Array(list)) => list.iter_mut().for_each(each),
+        Some(Value::Object(named)) => named.values_mut().for_each(each),
+        // a single-bucket aggregation (`filter`, `nested`) is its own bucket
+        _ => each(node),
+    }
 }

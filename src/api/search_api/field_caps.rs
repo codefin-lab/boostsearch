@@ -17,12 +17,19 @@ pub async fn field_caps(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
-    let expr = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
+    let asked = index.map(|Path(i)| i).unwrap_or_else(|| "_all".into());
     let body: Value = parse_body(&body).unwrap_or(json!({}));
+    // names with a cluster in front are another cluster's to describe; the
+    // rest are this one's, and a request that names only remotes asks this
+    // cluster about nothing
+    let split = crate::api::split_expression(&store, &asked);
+    let remote_parts = split.remote.clone();
+    let expr = if remote_parts.is_empty() { asked.clone() } else { split.local.clone() };
     // every index the cluster holds: a field's capabilities belong to the
     // index, wherever its copies are
-    let targets = crate::api::cluster_resolve(&store, &expr);
-    if targets.is_empty() && !expr.contains('*') && expr != "_all" {
+    let targets =
+        if expr.is_empty() { Vec::new() } else { crate::api::cluster_resolve(&store, &expr) };
+    if targets.is_empty() && !expr.is_empty() && !expr.contains('*') && expr != "_all" {
         return no_such_index(&expr);
     }
     let patterns: Vec<String> = p
@@ -179,6 +186,113 @@ pub async fn field_caps(
                 let indices = entry_of(slot, "__indices", || json!([]));
                 if let Some(a) = indices.as_array_mut() {
                     a.push(json!(n));
+                }
+            }
+        }
+    }
+
+    // Another cluster's indices, one at a time: a cluster's own answer only
+    // says which of its indices hold a type when they disagree, and folding
+    // two clusters together needs to know it for every index. Each is asked
+    // about one index, so the answer is unambiguous, and folded in under its
+    // cluster's name -- after which the passes below treat it as any other.
+    if !remote_parts.is_empty() {
+        let known = crate::api::remotes(&store);
+        let field_list = patterns.join(",");
+        for (cluster, part) in &remote_parts {
+            let Some(remote) = known.get(cluster) else { continue };
+            let listed = tokio::task::block_in_place(|| {
+                crate::api::ask(
+                    remote,
+                    "GET",
+                    &format!("/_cat/indices/{part}"),
+                    "format=json&h=index",
+                    None,
+                )
+            });
+            // A remote that has no such index describes no fields: the
+            // reference answers `fields: {}` rather than refusing, since the
+            // question was about another cluster's names and that cluster
+            // simply has nothing by that one.
+            let names: Vec<String> = match listed {
+                Ok((200, Value::Array(rows))) => rows
+                    .iter()
+                    .filter_map(|r| r.get("index").and_then(|v| v.as_str()).map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for name in names {
+                let query = format!("fields={field_list}");
+                let filter = index_filter.as_ref().map(|f| json!({"index_filter": f}));
+                let answered = tokio::task::block_in_place(|| {
+                    crate::api::ask(
+                        remote,
+                        if filter.is_some() { "POST" } else { "GET" },
+                        &format!("/{name}/_field_caps"),
+                        &query,
+                        filter.as_ref(),
+                    )
+                });
+                let Ok((200, answer)) = answered else { continue };
+                // an index an `index_filter` dropped is not in the answer
+                let present = answer
+                    .get("indices")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !present {
+                    continue;
+                }
+                let full = format!("{cluster}:{name}");
+                kept.push(full.clone());
+                let Some(theirs) = answer.get("fields").and_then(|v| v.as_object()) else {
+                    continue;
+                };
+                for (field, per_type) in theirs {
+                    for (kind, caps) in per_type.as_object().into_iter().flatten() {
+                        let entry = fields.entry(field.clone()).or_insert_with(|| json!({}));
+                        let slot = entry.as_object_mut().map(|o| {
+                            o.entry(kind.clone()).or_insert_with(
+                                || json!({"type": kind, "searchable": true, "aggregatable": true}),
+                            )
+                        });
+                        let Some(slot) = slot else { continue };
+                        if !slot.get("__indices").map(|v| v.is_array()).unwrap_or(false) {
+                            slot["__indices"] = json!([]);
+                        }
+                        if let Some(a) = slot["__indices"].as_array_mut() {
+                            a.push(json!(full));
+                        }
+                        for (flag_name, list) in
+                            [("searchable", "__unsearchable"), ("aggregatable", "__unaggregatable")]
+                        {
+                            if caps.get(flag_name).and_then(|v| v.as_bool()) == Some(false) {
+                                // a slot that is already false with no list is
+                                // false for every index folded so far: they go
+                                // on the list with this one, so that "false
+                                // everywhere" is still recognised as that and
+                                // not reported index by index
+                                if !slot.get(list).map(|v| v.is_array()).unwrap_or(false) {
+                                    let all_false = slot.get(flag_name).and_then(|v| v.as_bool())
+                                        == Some(false);
+                                    let before: Vec<Value> = slot
+                                        .get("__indices")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter(|x| x.as_str() != Some(&full))
+                                                .cloned()
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    slot[list] = if all_false { json!(before) } else { json!([]) };
+                                }
+                                if let Some(a) = slot[list].as_array_mut() {
+                                    a.push(json!(full));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

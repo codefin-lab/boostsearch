@@ -257,6 +257,11 @@ pub async fn cluster_settings_get(State(store): State<Store>, Query(p): Query<Pa
                 defaults[key] = json!(v);
             }
         }
+        // the remotes this node was started knowing about: the suite reads
+        // one out of the defaults and registers it again under another name
+        for (key, value) in super::configured_defaults() {
+            defaults[key] = value;
+        }
         if !flat {
             defaults = nest_settings(&defaults);
         }
@@ -300,6 +305,14 @@ pub async fn cluster_settings_put(
         }
         body[scope] = Value::Object(flat);
     }
+    // A remote cluster is reached one of two ways, and each has settings of
+    // its own: `seeds` and `node_connections` belong to sniffing, a
+    // `proxy_address` and its socket count to a proxy. Naming the other
+    // mode's settings is a mistake the reference refuses, in these words;
+    // this took them and connected by whichever it looked at first.
+    if let Some(refusal) = remote_mode_complaint(&store, &body) {
+        return refusal;
+    }
     store.merge_cluster_settings(&body);
     // the answer is shaped the way the request asked to see settings
     let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
@@ -310,7 +323,13 @@ pub async fn cluster_settings_put(
             o.retain(|_, val| !val.is_null());
             Value::Object(o)
         }
-        Some(v) => nest_settings(v),
+        // the same in the nested shape: a removal is not echoed back as a
+        // key holding null, which is what `transient: {}` asserts after one
+        Some(v) => {
+            let mut o = v.as_object().cloned().unwrap_or_default();
+            o.retain(|_, val| !val.is_null());
+            nest_settings(&Value::Object(o))
+        }
         None => json!({}),
     };
     respond(
@@ -377,4 +396,84 @@ pub async fn chaos(State(_store): State<Store>, body: String) -> Response {
     t.cut(&ids);
     (StatusCode::OK, axum::Json(json!({"cut": ids.iter().map(|i| i.as_str()).collect::<Vec<_>>()})))
         .into_response()
+}
+
+/// A remote cluster's settings that do not belong to the mode it is in.
+fn remote_mode_complaint(store: &Store, body: &Value) -> Option<Response> {
+    const SNIFF_ONLY: &[&str] = &["seeds", "node_connections"];
+    const PROXY_ONLY: &[&str] = &["proxy_address", "proxy_socket_connections", "server_name"];
+    let stored = store.cluster_settings();
+    for scope in ["persistent", "transient"] {
+        let Some(asked) = body.get(scope).and_then(|v| v.as_object()) else { continue };
+        // the keys flat, however they were written
+        let mut asked_flat = serde_json::Map::new();
+        crate::api::settings::flatten_settings(&Value::Object(asked.clone()), "", &mut asked_flat);
+        // What the remote will have once this is applied: what is stored for
+        // it already, with this request laid over it -- a null in the request
+        // takes a stored key away. Switching an existing sniff cluster to
+        // proxy while its seeds are still set is the same mistake as naming
+        // both at once, and was only caught when both were in one request.
+        let mut flat = serde_json::Map::new();
+        for sc in ["persistent", "transient"] {
+            if let Some(o) = stored.get(sc).and_then(|v| v.as_object()) {
+                let mut f = serde_json::Map::new();
+                crate::api::settings::flatten_settings(&Value::Object(o.clone()), "", &mut f);
+                for (k, v) in f {
+                    if k.starts_with("cluster.remote.") {
+                        flat.insert(k, v);
+                    }
+                }
+            }
+        }
+        for (k, v) in &asked_flat {
+            if v.is_null() {
+                flat.remove(k);
+            } else {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        let mut names: Vec<String> = asked_flat
+            .keys()
+            .filter_map(|k| k.strip_prefix("cluster.remote."))
+            .filter_map(|rest| rest.rsplit_once('.').map(|(n, _)| n.to_string()))
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            let key = |leaf: &str| format!("cluster.remote.{name}.{leaf}");
+            // the mode it will be in: what this request says, else what it is
+            let mode = flat
+                .get(&key("mode"))
+                .and_then(|v| v.as_str())
+                .map(|m| m.to_ascii_lowercase())
+                .or_else(|| {
+                    ["transient", "persistent"].iter().find_map(|sc| {
+                        stored
+                            .get(*sc)
+                            .and_then(|v| v.get(key("mode")))
+                            .and_then(|v| v.as_str())
+                            .map(|m| m.to_ascii_lowercase())
+                    })
+                })
+                .unwrap_or_else(|| "sniff".to_string());
+            let (wrong, required) =
+                if mode == "proxy" { (SNIFF_ONLY, "SNIFF") } else { (PROXY_ONLY, "PROXY") };
+            for leaf in wrong {
+                let k = key(leaf);
+                if flat.get(&k).map(|v| !v.is_null()).unwrap_or(false) {
+                    return Some(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "Setting \"{k}\" cannot be used with the configured \"{}\" \
+                             [required={required}, configured={}]",
+                            key("mode"),
+                            mode.to_ascii_uppercase()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    None
 }

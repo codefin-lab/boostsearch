@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod remote;
+pub use remote::*;
 mod settings;
 pub use settings::*;
 mod state;
@@ -100,12 +102,6 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
             },
         }),
     )
-}
-
-/// `_remote/info` -- the clusters this one is connected to, of which there
-/// are none.
-pub async fn remote_info(Query(p): Query<Params>) -> Response {
-    respond(&p, json!({}))
 }
 
 /// `_cluster/pending_tasks` -- work the cluster manager has queued, of which

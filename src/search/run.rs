@@ -902,6 +902,22 @@ pub fn run(
             ));
         }
     }
+    // Every name in a list is asked for, not only the first: `present,missing`
+    // searched `present` and said nothing about `missing`, so a typo in one
+    // index of several was answered as though it had been spelled right. The
+    // reference refuses it, naming the index it could not find.
+    if !lenient && expr != "_all" {
+        for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
+            if part.contains('*') || part.starts_with('-') || part.contains(':') {
+                continue;
+            }
+            if store.resolve_open(part).is_empty()
+                && crate::api::cluster_resolve(store, part).is_empty()
+            {
+                return Err(no_such_index(&crate::store::resolve_date_math_name(part)));
+            }
+        }
+    }
     if targets.is_empty() && !expr.contains('*') && expr != "_all" && !expr.is_empty() && !lenient {
         // a date-math name is reported as the index it stands for, since that
         // is the one that was not there
@@ -1278,23 +1294,36 @@ pub fn run(
             }
             _ => query_json,
         };
+    // The filters a request's aliases put on each index are carried in a
+    // task-local, and a task-local belongs to the thread that set it: the
+    // shards of a search over several indices are searched on other threads,
+    // where it was not there. A filtered alias named beside another index lost
+    // its filter -- `aliased,other` answered with every document the alias
+    // was meant to hide. The map is taken here and set again on each thread.
+    let alias_filters = crate::security::layer::ALIAS_FILTERS.try_with(|f| f.clone()).ok();
     let run_shard =
         |shard_idx: usize, name: &String| -> std::result::Result<Option<ShardOut>, Response> {
-            search_one_shard(
-                store,
-                shard_idx,
-                name,
-                body,
-                &query_json,
-                &sort_keys,
-                &search_after,
-                &pit_ceiling,
-                &agg_json,
-                &filters_aggs,
-                page_want,
-                fanned_out,
-                &views,
-            )
+            let search = || {
+                search_one_shard(
+                    store,
+                    shard_idx,
+                    name,
+                    body,
+                    &query_json,
+                    &sort_keys,
+                    &search_after,
+                    &pit_ceiling,
+                    &agg_json,
+                    &filters_aggs,
+                    page_want,
+                    fanned_out,
+                    &views,
+                )
+            };
+            match &alias_filters {
+                Some(f) => crate::security::layer::ALIAS_FILTERS.sync_scope(f.clone(), search),
+                None => search(),
+            }
         };
 
     let outs: Vec<std::result::Result<Option<ShardOut>, Response>> = if targets.len() > 1 {
@@ -1752,7 +1781,9 @@ pub fn run(
         return Ok(Outcome {
             took_ms: started.elapsed().as_millis() as u64,
             skipped: 0,
-            shards: shards.max(1),
+            // a search that reached no index searched no shard: a pattern
+            // matching nothing reported one that did not exist
+            shards: if targets.is_empty() { 0 } else { shards.max(1) },
             total,
             hits: page,
             max_score,
@@ -2036,7 +2067,8 @@ pub(crate) fn finish_search(
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,
-        shards: shards.max(1),
+        // a search that reached no index searched no shard
+        shards: if targets.is_empty() { 0 } else { shards.max(1) },
         total,
         hits: page,
         max_score,

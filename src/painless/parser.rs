@@ -327,6 +327,20 @@ impl Parser {
                         let body = self.body()?;
                         return Ok(Stmt::ForEach { name, over, body });
                     }
+                    // `for (x in xs)` is the same walk with no type written:
+                    // Painless takes it, and a reduce script written that way
+                    // -- the one OpenSearch's own cross-cluster suite uses --
+                    // was refused as a compile error
+                    let untyped = matches!(self.peek_at(0), Tok::Ident(_))
+                        && matches!(self.peek_at(1), Tok::Ident(w) if w == "in");
+                    if untyped {
+                        let name = self.ident()?;
+                        self.next();
+                        let over = self.expr()?;
+                        self.expect_op(")")?;
+                        let body = self.body()?;
+                        return Ok(Stmt::ForEach { name, over, body });
+                    }
                     let init = if self.is_op(";") {
                         None
                     } else if self.is_declaration_start() {
