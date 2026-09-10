@@ -677,6 +677,7 @@ async fn shutdown_signal(store: Store) {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    cluster::replication::flush_trace();
     for name in store.names() {
         if let Some(st) = store.get(&name) {
             let mut g = st.write();

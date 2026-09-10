@@ -30,6 +30,11 @@ pub struct Shared {
     /// not answer them on what it knew before it stopped
     pub manager_at: std::sync::atomic::AtomicU64,
     pub lease: std::sync::atomic::AtomicU64,
+    /// how many nodes the committed state holds: a node that is the whole
+    /// cluster has no checks to run, so nothing moves its loop while it sits
+    /// idle, and its answer would go stale for no reason. It has nobody to
+    /// have been replaced by, either.
+    pub nodes: std::sync::atomic::AtomicUsize,
 }
 
 /// Answers awaited by callers on this node, by request id -- and by the node
@@ -180,6 +185,7 @@ impl Runtime {
             manager: std::sync::atomic::AtomicBool::new(logic.manager_here()),
             manager_at: std::sync::atomic::AtomicU64::new(super::clock().wall()),
             lease: std::sync::atomic::AtomicU64::new(logic.lease()),
+            nodes: std::sync::atomic::AtomicUsize::new(logic.state().nodes.len()),
         });
         let rt = Arc::new(Runtime {
             inputs: tx.clone(),
@@ -267,6 +273,9 @@ impl Runtime {
                         .manager_at
                         .store(super::clock().wall(), std::sync::atomic::Ordering::Relaxed);
                     shared.lease.store(logic.lease(), std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .nodes
+                        .store(logic.state().nodes.len(), std::sync::atomic::Ordering::Relaxed);
                 }
                 for o in outputs {
                     // everything but a timer either promises something or
@@ -420,7 +429,11 @@ impl Runtime {
         use std::sync::atomic::Ordering::Relaxed;
         let at = self.shared.manager_at.load(Relaxed);
         let lease = self.shared.lease.load(Relaxed);
-        self.shared.manager.load(Relaxed) && super::clock().wall().saturating_sub(at) <= lease
+        let flag = self.shared.manager.load(Relaxed);
+        if self.shared.nodes.load(Relaxed) <= 1 {
+            return flag;
+        }
+        flag && super::clock().wall().saturating_sub(at) <= lease
     }
 }
 

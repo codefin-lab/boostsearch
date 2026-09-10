@@ -145,6 +145,40 @@ fn trace_writes() -> bool {
     *ON.get_or_init(|| std::env::var("BOOSTSEARCH_TRACE_WRITES").is_ok())
 }
 
+/// Where traced lines wait for the disk. A line written straight to stderr
+/// per document slowed every node enough that the fault being traced -- a
+/// matter of a tenth of a second -- stopped happening: twelve traced runs
+/// lost nothing where four in twenty-six untraced ones had. Lines are
+/// buffered and flushed every half second, and at shutdown.
+static TRACE_OUT: std::sync::OnceLock<parking_lot::Mutex<std::io::BufWriter<std::io::Stderr>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn trace_line(line: String) {
+    use std::io::Write;
+    let out = TRACE_OUT.get_or_init(|| {
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                flush_trace();
+            }
+        });
+        parking_lot::Mutex::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stderr()))
+    });
+    let _ = writeln!(out.lock(), "{} {line}", super::clock().wall());
+}
+
+/// Push out whatever traced lines are waiting.
+pub fn flush_trace() {
+    use std::io::Write;
+    if let Some(out) = TRACE_OUT.get() {
+        let _ = out.lock().flush();
+    }
+}
+
+macro_rules! trace {
+    ($($arg:tt)*) => { trace_line(format!($($arg)*)) };
+}
+
 /// Note a write the primary made, if a request is being handled.
 pub fn record(op: ReplicaOp) {
     let _ = WRITES.try_with(|w| w.borrow_mut().push(op));
@@ -372,7 +406,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                 .get(&op.index)
                 .map(|v| v.iter().map(|n| n.as_str()).collect())
                 .unwrap_or_default();
-            eprintln!(
+            trace!(
                 "TRACE primary {} {}/{} seq={} term={} copies_took={:?} manager_unreachable={}",
                 me.as_str(),
                 op.index,
@@ -455,6 +489,40 @@ fn here_id(state: &ClusterState, me: &NodeId, index: &str) -> Option<String> {
 }
 
 /// After a handler wrote: copy out, then say so in the answer.
+/// Whether this node may still answer for these writes, asked at the moment
+/// it answers: it has a manager whose word is current, it is the primary of
+/// each shard the state now names, and the term it wrote under is that
+/// shard's term. A request let through before the node was stopped, and
+/// finished after it was let go on, was asked this only on the way in.
+fn may_still_answer(written: &[(String, u32, u64)]) -> bool {
+    if !super::has_manager() {
+        return false;
+    }
+    let Some(me) = super::runtime().map(|r| r.local()) else { return true };
+    super::with_state(|s| {
+        written.iter().all(|(index, shard, term)| {
+            let primary_here = s
+                .routing
+                .primary(index, *shard)
+                .and_then(|p| p.node.as_ref())
+                .map(|n| *n == me)
+                .unwrap_or(false);
+            let current =
+                s.indices.get(index).and_then(|m| m.primary_terms.get(shard).copied()).unwrap_or(1);
+            primary_here && *term >= current
+        })
+    })
+}
+
+fn no_longer_primary() -> axum::response::Response {
+    crate::api::err(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable_shards_exception",
+        "this node is no longer the primary for this write, or cannot say that it is; not \
+         acknowledged, retry",
+    )
+}
+
 pub async fn finish(
     response: axum::response::Response,
     ops: Vec<ReplicaOp>,
@@ -483,10 +551,26 @@ pub async fn finish(
                     .unwrap_or(true)
         })
     });
+    let written: Vec<(String, u32, u64)> =
+        ops.iter().map(|o| (o.index.clone(), o.shard, o.term)).collect();
     if nothing_to_do {
+        // a node that is the whole cluster answers for itself; one that is
+        // not asks again now, as it answers
+        let in_a_cluster = super::with_state(|s| s.nodes.len() > 1);
+        if in_a_cluster && !may_still_answer(&written) {
+            if trace_writes() {
+                for op in &ops {
+                    trace!(
+                        "TRACE answer {}/{} seq={} term={} refused no-longer-primary",
+                        op.index, op.id, op.seq, op.term
+                    );
+                }
+            }
+            return no_longer_primary();
+        }
         if trace_writes() {
             for op in &ops {
-                eprintln!(
+                trace!(
                     "TRACE answer {}/{} seq={} term={} alone status={}",
                     op.index,
                     op.id,
@@ -534,7 +618,7 @@ pub async fn finish(
     });
     if stale {
         for t in &traced {
-            eprintln!("TRACE answer {t} refused stale-term");
+            trace!("TRACE answer {t} refused stale-term");
         }
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -544,7 +628,7 @@ pub async fn finish(
     }
     if acks.values().any(|a| a.manager_unreachable) {
         for t in &traced {
-            eprintln!("TRACE answer {t} refused manager-unreachable");
+            trace!("TRACE answer {t} refused manager-unreachable");
         }
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -552,8 +636,14 @@ pub async fn finish(
             "a copy did not take this write and the cluster manager could not be told; not acknowledged, retry",
         );
     }
+    if !may_still_answer(&written) {
+        for t in &traced {
+            trace!("TRACE answer {t} refused no-longer-primary");
+        }
+        return no_longer_primary();
+    }
     for t in &traced {
-        eprintln!("TRACE answer {t} status={}", response.status().as_u16());
+        trace!("TRACE answer {t} status={}", response.status().as_u16());
     }
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
@@ -600,7 +690,7 @@ pub fn install(store: Store) {
                 if trace_writes() {
                     let refused = ops.iter().any(|op| op.term < known_term);
                     for op in &ops {
-                        eprintln!(
+                        trace!(
                             "TRACE replica {} {index}/{} seq={} term={} known_term={known_term} {}",
                             from.as_str(),
                             op.id,
@@ -623,7 +713,7 @@ pub fn install(store: Store) {
                 if park(&index, &ops) {
                     if trace_writes() {
                         for op in &ops {
-                            eprintln!("TRACE replica parked {index}/{} seq={}", op.id, op.seq);
+                            trace!("TRACE replica parked {index}/{} seq={}", op.id, op.seq);
                         }
                     }
                     let body =
@@ -1267,7 +1357,7 @@ pub async fn catch_up_by_scan(
             let mut g = st.write();
             for op in &ops {
                 if trace_writes() {
-                    eprintln!(
+                    trace!(
                         "TRACE recovered {name}/{} seq={} term={} overwrite={overwrite}",
                         op.id, op.seq, op.term
                     );

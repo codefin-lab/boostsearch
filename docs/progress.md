@@ -6250,3 +6250,52 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 198/198, the model's storms over twenty further seeds (40 to 59) clean,
 sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29 paths);
 chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.
+
+## The twenty-eighth review
+
+**P0 -- a write is now asked, at the moment it is answered, whether this
+node may still answer for it.** The twenty-seventh review's lease made a
+stopped manager stop trusting its old quorum, and still one copy came up a
+write short, acknowledged a tenth of a second after the node that had been
+stopped was let go on. A request is let through on the way in; one let
+through just before the node was stopped finished after it was let go on,
+and was never asked again. Before a write is acknowledged the node now asks
+three things of the state as it is at that moment: that it has a manager
+whose word is current, that it is still the primary of every shard it wrote
+to, and that it wrote under that shard's current term. If any fails, the
+answer is 503 and the write is not acknowledged. A node that is the whole
+cluster answers for itself as before.
+
+**The write trace is cheap enough to leave on.** Written straight to stderr
+a line at a time, it slowed each node enough that the fault it was meant to
+catch stopped happening. Lines are now buffered, stamped with the node's
+clock, flushed every half second and at shutdown. Twelve runs with every write traced
+this way, and none lost a write or left a copy short -- nor did ten more
+untraced, where four in twenty-six had before the ack was asked again; so
+the trace still has not caught the fault, because the fault has not come.
+
+**A regression this review made, and the corpus caught.** The lease the
+twenty-seventh review put on the HTTP side's manager answer went stale on a
+node that is the whole cluster: it runs no checks, so nothing moves its loop
+while it sits idle, and three seconds of quiet made every write that went
+by the replication path answer 503. One bulk in OpenSearch's own
+`240_date_nanos` test met it, and passed on each of three runs by itself.
+The lease now applies only to a cluster of more than one node; a node alone
+has nobody to have been replaced by. 
+
+Six chaos runs on the final binary, and none lost a write or left a copy
+short: with the twenty-two before the lease was narrowed, twenty-eight in a
+row. Before the ack was asked again, four in twenty-six had. That is not
+proof -- the fault came about once in seven runs -- so the P0 is marked
+fixed and waiting on a longer run to close.
+
+Open at the end of this review: P0 1 (fixed, not yet closed: twenty-eight clean chaos
+runs since the ack is asked again), P1 1 (no resync after a change of
+primary), P2 12.
+
+Gates on the final binary: core corpus 1,427/1,427 (an earlier run of it failed
+`get_source/40_routing` once, waiting for green, and that file passed three
+times by itself and the whole corpus passed again), phase1 398/398, unit
+198/198, the model's storms over seeds 60 to 79 clean, sql_check 8/8,
+ism_check 6/6, refusal and DLS checks clean (29 paths); chaos as above.
+Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.
