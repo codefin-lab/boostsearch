@@ -563,7 +563,14 @@ pub(crate) fn run_geo_grid_agg(
     }
     // the fullest cells first, and cells holding the same number by their key
     let mut cells: Vec<(String, usize)> = counts.into_iter().collect();
-    cells.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    // cells of one count come in the reference's order: a geohash's higher
+    // cells first, which for a geohash string is its characters from the
+    // top of the alphabet down
+    if kind == "geotile_grid" {
+        cells.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    } else {
+        cells.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+    }
     cells.truncate(size);
     Ok(json!({
         "buckets": cells

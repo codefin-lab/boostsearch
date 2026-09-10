@@ -287,6 +287,21 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "exists" => {
             let field = body.get("field").and_then(|f| f.as_str()).unwrap_or_default();
+            // A field inside a `nested` object belongs to the hidden documents
+            // the nested objects are, not to the document that holds them: at
+            // the top of a query it exists in none of them, and only a
+            // `nested` query asks after it. It was answered for the parent,
+            // so `exists: authors.name` matched every document with an author.
+            let parts: Vec<&str> = field.split('.').collect();
+            let under_nested = (1..parts.len())
+                .any(|n| ctx.mapping.type_of(&parts[..n].join(".")) == Some("nested"));
+            // only at the top of a query: inside a `nested` query the same
+            // field is the nested object's own, and OpenSearch's own test of
+            // `exists` there failed when this answered nothing for it too
+            let at_top = NESTED_DEPTH.with(|d| d.get()) == 0;
+            if under_nested && at_top {
+                return Ok(Box::new(EmptyQuery));
+            }
             // every document has an id and belongs to an index, so asking
             // whether one exists is asking for all of them
             // `_source` is not a field to ask after: it is the document
@@ -493,7 +508,12 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "nested" => {
             let inner =
                 body.get("query").ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;
-            build(ctx, inner)?
+            // inside a `nested` query the nested objects' fields are the
+            // documents' own, and `exists` on one of them is a real question
+            NESTED_DEPTH.with(|d| d.set(d.get() + 1));
+            let built = build(ctx, inner);
+            NESTED_DEPTH.with(|d| d.set(d.get() - 1));
+            built?
         }
         // an `intervals` query is a little language of rules over one field.
         // Positions are not compared here; each rule is built as the query it
@@ -525,11 +545,32 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                 .collect();
             // without a count to read, every term is required
             let mut inner = serde_json::json!({"bool": {"should": clauses}});
-            if spec.get("minimum_should_match_field").is_some()
-                || spec.get("minimum_should_match_script").is_some()
+            if let Some(count_field) =
+                spec.get("minimum_should_match_field").and_then(|v| v.as_str())
             {
-                // how many are needed is a property of each document, which
-                // this engine cannot ask of a scorer; one is the floor
+                // How many terms a document needs is written in the document.
+                // The count cannot be read by a scorer, but it takes one of
+                // only as many values as there are terms: a document whose
+                // count is k needs k of them, which is one clause per k. The
+                // floor of one used to stand for every count, so a document
+                // asking for three matched on one.
+                let mut per_count: Vec<Value> = (1..=terms.len())
+                    .map(|k| {
+                        serde_json::json!({"bool": {
+                            "filter": [{"term": {count_field: k}}],
+                            "must": [{"bool": {"should": clauses, "minimum_should_match": k}}],
+                        }})
+                    })
+                    .collect();
+                // a count of none or less asks for any one of the terms
+                per_count.push(serde_json::json!({"bool": {
+                    "filter": [{"range": {count_field: {"lte": 0}}}],
+                    "must": [{"bool": {"should": clauses, "minimum_should_match": 1}}],
+                }}));
+                inner =
+                    serde_json::json!({"bool": {"should": per_count, "minimum_should_match": 1}});
+            } else if spec.get("minimum_should_match_script").is_some() {
+                // a script's count is not read here; one is the floor
                 inner["bool"]["minimum_should_match"] = serde_json::json!(1);
             } else if let Some(n) = spec.get("minimum_should_match") {
                 inner["bool"]["minimum_should_match"] = n.clone();
@@ -744,4 +785,9 @@ fn ids_matching(ctx: &Ctx, filter: &Value) -> Result<std::collections::HashSet<S
         }
     }
     Ok(out)
+}
+
+thread_local! {
+    /// How many `nested` queries the query being built sits inside.
+    static NESTED_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }

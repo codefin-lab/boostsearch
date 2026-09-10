@@ -297,6 +297,10 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let mut should_count = 0usize;
     let mut pending_not = false;
     let mut pending_occur: Option<Occur> = None;
+    // whether the last clause is required only because the default operator
+    // is `and`: an `OR` after it makes it optional again, where one required
+    // by `+` or `AND` stays required
+    let mut last_by_default = false;
 
     for tok in split_query_string(text) {
         match tok.to_ascii_uppercase().as_str() {
@@ -312,6 +316,16 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 continue;
             }
             "OR" | "||" | "|" => {
+                // `quick | dog` is either word, whatever the default: with
+                // `default_operator: and` the word before the bar had been
+                // made required, and a document with only `dog` was lost
+                if last_by_default
+                    && let Some(last) = clauses.last_mut()
+                    && last.0 == Occur::Must
+                {
+                    last.0 = Occur::Should;
+                    should_count += 1;
+                }
                 pending_occur = Some(Occur::Should);
                 continue;
             }
@@ -347,10 +361,14 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         };
         let targets: Vec<String> =
             field_part.map(|f| vec![f]).unwrap_or_else(|| default_fields.clone());
-        let value = if value.starts_with('[') || value.starts_with('{') {
-            value
-        } else {
-            value.trim_matches('"').to_string()
+        // A value in quotes is a phrase, and `~N` after it is how far apart
+        // its words may stand. The quotes were only stripped, so `"brown
+        // fox"` looked for either word anywhere and `+ -lazy` beside it found
+        // documents the reference does not.
+        let (value, phrase_slop) = match quoted_phrase(&value) {
+            Some((inner, slop)) => (inner, Some(slop)),
+            None if value.starts_with('[') || value.starts_with('{') => (value, None),
+            None => (value.trim_matches('"').to_string(), None),
         };
         if value.is_empty() {
             continue;
@@ -369,8 +387,8 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 ));
             }
         }
-        // `field:[a TO b]` is a range, not a term
-        if let Some(spec) = parse_range_token(&value) {
+        // `field:[a TO b]` is a range, not a term, and so is `field:>5`
+        if let Some(spec) = parse_range_token(&value).or_else(|| comparison_range(&value)) {
             let mut per_field: Vec<Box<dyn Query>> = Vec::new();
             for name in &targets {
                 let clause = serde_json::json!({"range": { name.clone(): spec.clone() }});
@@ -384,6 +402,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                     1 => per_field.remove(0),
                     _ => Box::new(BooleanQuery::union(per_field)),
                 };
+                let explicit = pending_occur.is_some();
                 let occur = if pending_not {
                     Occur::MustNot
                 } else {
@@ -393,6 +412,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                         Occur::Should
                     })
                 };
+                last_by_default = !pending_not && !explicit && occur == Occur::Must;
                 pending_not = false;
                 if occur == Occur::Should {
                     should_count += 1;
@@ -417,7 +437,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 }
                 continue;
             }
-            if value.contains('*') || value.contains('?') {
+            if phrase_slop.is_none() && (value.contains('*') || value.contains('?')) {
                 let pat = if view == View::Dyn { value.to_lowercase() } else { value.clone() };
                 if let Ok(q) = regex_query(f, &path, &wildcard_to_regex(&pat)) {
                     per_field.push(q);
@@ -426,13 +446,19 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             }
             // the query may be cut with an analyzer of its own rather than
             // the one the field was written with
-            let clause = match body.get("analyzer").and_then(|v| v.as_str()) {
-                Some(named) => serde_json::json!({
-                    name.clone(): {"query": value.clone(), "analyzer": named}
-                }),
-                None => serde_json::json!({ name.clone(): value.clone() }),
+            let mut inner = serde_json::json!({"query": value.clone()});
+            if let Some(named) = body.get("analyzer").and_then(|v| v.as_str()) {
+                inner["analyzer"] = serde_json::json!(named);
+            }
+            let kind = match phrase_slop {
+                Some(slop) => {
+                    inner["slop"] = serde_json::json!(slop);
+                    "match_phrase"
+                }
+                None => "match",
             };
-            if let Ok(q) = build_match(ctx, "match", &clause) {
+            let clause = serde_json::json!({ name.clone(): inner });
+            if let Ok(q) = build_match(ctx, kind, &clause) {
                 // a word looked for in a field that is not analysed is either
                 // there or not, and scores one either way
                 per_field.push(match view {
@@ -449,6 +475,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             1 => per_field.remove(0),
             _ => Box::new(BooleanQuery::union(per_field)),
         };
+        let explicit = pending_occur.is_some();
         let occur = if pending_not {
             Occur::MustNot
         } else {
@@ -458,6 +485,7 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 Occur::Should
             })
         };
+        last_by_default = !pending_not && !explicit && occur == Occur::Must;
         pending_not = false;
         if occur == Occur::Should {
             should_count += 1;
@@ -936,4 +964,30 @@ fn wildcard_to_regex_source(pat: &str) -> String {
         }
     }
     out
+}
+
+/// `>5`, `>=5`, `<5` and `<=5`, which the query string writes for an open
+/// range. They were cut into words like any other value, so `price:>5`
+/// looked for the word `5` and found nothing.
+fn comparison_range(value: &str) -> Option<serde_json::Value> {
+    let (op, rest) = [(">=", "gte"), ("<=", "lte"), (">", "gt"), ("<", "lt")]
+        .iter()
+        .find_map(|(sym, op)| value.strip_prefix(sym).map(|rest| (*op, rest)))?;
+    let rest = rest.trim().trim_matches('"');
+    if rest.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ op: rest }))
+}
+
+/// `"a phrase"` or `"a phrase"~2`: the words, and how far apart they may be.
+fn quoted_phrase(value: &str) -> Option<(String, u64)> {
+    let rest = value.strip_prefix('"')?;
+    let end = rest.rfind('"')?;
+    let (inner, after) = (&rest[..end], &rest[end + 1..]);
+    let slop = match after {
+        "" => 0,
+        tail => tail.strip_prefix('~')?.parse().ok()?,
+    };
+    Some((inner.to_string(), slop))
 }

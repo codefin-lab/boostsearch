@@ -1451,6 +1451,30 @@ pub fn run(
     if let Some(spec) = body.pointer("/query/function_score") {
         rescore_by_functions(&searchers, &mut cands, spec)?;
     }
+    // `boosting` keeps what `positive` finds and lowers, by `negative_boost`,
+    // the score of whatever `negative` also matches. The query was answered
+    // as `positive` alone, so the documents it was written to push down came
+    // back in the same places.
+    if let Some(spec) = body.pointer("/query/boosting")
+        && let Some(negative) = spec.get("negative")
+    {
+        let factor = spec.get("negative_boost").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+        let lowered: std::collections::HashSet<String> =
+            crate::search::lookup::matching_ids_here(store, &targets, negative)
+                .into_iter()
+                .collect();
+        if !lowered.is_empty() {
+            for c in cands.iter_mut() {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                if let Some((id, _)) = source_of(searcher, &g, c.addr)
+                    && lowered.contains(&id)
+                {
+                    c.score *= factor;
+                }
+            }
+        }
+    }
     // `script_score` hands each candidate's score to a script and keeps what
     // it returns; a `min_score` drops those the script rated too low
     if let Some(spec) = body.pointer("/query/script_score") {

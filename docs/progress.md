@@ -5241,7 +5241,8 @@ claim in a document, a second lock on a door that is already locked.
 | 18 | 1 | 6 | 8 | 15 |
 | 19 | 0 | 3 | 5 | 8 |
 | 20 | 1 | 5 | 9 | 15 |
-| **6-20** | **22** | **42** | **48** | **112** |
+| 21 | 8 | 6 | 2 | 16 |
+| **6-21** | **30** | **48** | **50** | **128** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5729,4 +5730,96 @@ both engines answer them approximately, by different approximations.
 Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 191/191, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
 paths). Against OpenSearch 3.1.0: the aggregations corpus 35/43.
+
+## The twenty-first review
+
+The query language, held to the reference: `tools/corpora/query_dsl.ndjson`,
+59 requests over six documents with text, keywords, numbers, dates, a geo
+point and a nested list -- `bool` and `minimum_should_match`, `match` in all
+its options, every `multi_match` type, `query_string` and
+`simple_query_string` with their operators, fuzzy, regexp, wildcard and
+prefix, `terms_set`, `exists`, ranges with zones and date maths, `dis_max`,
+`constant_score`, `boosting`, `function_score` and `script_score`, spans,
+intervals, `nested` with inner hits, geo distance and boxes,
+`more_like_this`, and sorts by score, field and distance. Before this
+review 42 of the 59 answers were the same; after it, 50. The nine left are
+the six orderings noted below as P1, the edge of a bounding box and
+`combined_fields` -- and in every one of the nine the documents found are the
+same; only where they come, or whether the request is taken at all, differs.
+The aggregations corpus of the twentieth review moved from 35 of 43 to 36,
+with the geohash order put right -- and reads 35 on some runs, when the last
+digit of a weighted average comes out the other way: the sum is taken in the
+order the segments are read, and that order is not fixed.
+
+Eight P0s -- every one a correct request answered with the wrong documents,
+and none of them reachable by the conformance corpus, which is why it has
+passed throughout.
+
+**P0 -- `fuzziness` on a `match` was ignored.** `quikc` with `fuzziness:
+AUTO` found nothing. The other fuzzy queries read it; `match` did not. It
+now allows the edits `AUTO` gives a word of that length -- none below three
+letters, one below six, two from there -- or the number written.
+
+**P0 -- `slop` on a `match_phrase` was ignored.** `quick fox` with `slop: 2`
+did not find "quick brown fox".
+
+**P0 -- `field:>5` in a query string found nothing.** The open ranges
+`>`, `>=`, `<` and `<=` were cut into words like any other value.
+
+**P0 -- a quoted value in a query string was not a phrase.** The quotes
+were stripped and the words looked for anywhere, so `"brown fox" + -lazy`
+found documents the reference does not. A quoted value is a phrase now, and
+`~N` after it is its slop.
+
+**P0 -- `a | b` with `default_operator: and` required `a`.** The word before
+the bar had been made required by the default, and the bar did not make it
+optional again, so a document with only `b` was lost.
+
+**P0 -- `terms_set` with `minimum_should_match_field` asked for one term.**
+The count is a property of each document, which a scorer cannot read, so
+one had stood for every count. It is now one clause per possible count --
+a document whose count is k needs k of the terms -- which is exact.
+
+**P0 -- `exists` on a field inside a `nested` object matched the parents.**
+At the top of a query such a field exists in no document; only a `nested`
+query asks after it. The first version of this answered nothing for the
+field inside a `nested` query as well -- the inner query is built by the same
+code -- and the conformance corpus caught it: OpenSearch's own test of
+`exists` under `nested` found no documents. The query now knows how many
+`nested` queries it sits inside, and only at the top is the field absent.
+
+**P0 -- a `_geo_distance` sort was not carried out.** The documents came
+back in the order they were found, with no distance beside them. They are
+placed by the distance of their point from the one asked about, on the
+reference's sphere, in the unit asked for, nearest or farthest by `mode`.
+
+**P1 -- `boosting` ignored `negative`.** It was answered as `positive` alone,
+so the documents it was written to push down stayed where they were. Those
+the negative query also matches now have their score multiplied by
+`negative_boost`.
+
+**P1 -- five queries score differently from the reference, and put the same
+documents in another order.** A `multi_match` of type `best_fields` with a
+`tie_breaker`, a `fuzzy` query and a fuzzy `match`, a `function_score` with a
+`gauss` decay beside a weighted filter, `intervals`, and a `query_string`
+over a grouped field. The documents are right in each; the scores are not
+the reference's, and each is a formula of its own to take apart -- how a
+fuzzy term is weighed against the exact one, where a decay's midpoint falls,
+how an interval's width counts. Left for the next review, one at a time,
+against the reference's `explain`.
+
+**P2** -- a point lying exactly on the edge of a `geo_bounding_box` counted
+as inside, where the reference's encoding of the edge leaves it out (left:
+it is the reference's quantisation of latitude, and matching it means
+matching that encoding); and `combined_fields`, which OpenSearch 3.1 does
+not know and refuses, is answered here (left as it is: it is a query later
+versions have).
+
+The twentieth review's geohash order is put right here as well: cells of one
+count now come in the reference's order.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+191/191, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths). Against OpenSearch 3.1.0: the query corpus 50/59, the aggregations
+corpus 35-36/43.
 

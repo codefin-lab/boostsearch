@@ -63,15 +63,23 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                     let unmapped_type =
                         opts.get("unmapped_type").and_then(|v| v.as_str()).map(|s| s.to_string());
                     // `_script` sorts by what a script makes of each document
-                    let script = (field == "_script").then(|| {
-                        (
-                            opts.get("script").cloned().unwrap_or(Value::Null),
-                            opts.get("type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("number")
-                                .to_string(),
-                        )
-                    });
+                    let script = (field == "_script")
+                        .then(|| {
+                            (
+                                opts.get("script").cloned().unwrap_or(Value::Null),
+                                opts.get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("number")
+                                    .to_string(),
+                            )
+                        })
+                        // and `_geo_distance` by how far each document is from
+                        // a point: worked out from the document the same way,
+                        // so it rides the same slot under a kind of its own
+                        .or_else(|| {
+                            (field == "_geo_distance")
+                                .then(|| (opts.clone(), "geo_distance".to_string()))
+                        });
                     out.push(SortKey {
                         field,
                         desc,
@@ -416,6 +424,76 @@ pub(crate) fn sort_by_script(
 ) -> std::result::Result<(), Response> {
     for (i, key) in sort_keys.iter().enumerate() {
         let Some((spec, kind)) = key.script.as_ref() else { continue };
+        // A `_geo_distance` sort was named and never carried out: the
+        // documents came back in whatever order they were found, with no
+        // distance beside them. Each is placed by how far its point lies
+        // from the one asked about, on the reference's sphere.
+        if kind == "geo_distance" {
+            let Some(spec) = spec.as_object() else { continue };
+            const OPTIONS: &[&str] = &[
+                "order",
+                "unit",
+                "mode",
+                "distance_type",
+                "ignore_unmapped",
+                "validation_method",
+                "nested",
+            ];
+            let Some((field, origin)) =
+                spec.iter().find(|(k, _)| !OPTIONS.contains(&String::as_str(k)))
+            else {
+                continue;
+            };
+            let origin = match origin {
+                Value::Array(a) if a.first().map(|x| !x.is_number()).unwrap_or(false) => {
+                    a.first().and_then(crate::search::geo::read_point)
+                }
+                other => crate::search::geo::read_point(other),
+            };
+            let Some((olat, olon)) = origin else { continue };
+            let per_metre = match spec.get("unit").and_then(|v| v.as_str()).unwrap_or("m") {
+                "km" | "kilometers" => 1000.0,
+                "mi" | "miles" => 1609.344,
+                "yd" | "yards" => 0.9144,
+                "ft" | "feet" => 0.3048,
+                "in" | "inch" => 0.0254,
+                "cm" | "centimeters" => 0.01,
+                "mm" | "millimeters" => 0.001,
+                "nmi" | "NM" | "nauticalmiles" => 1852.0,
+                _ => 1.0,
+            };
+            let farthest = spec.get("mode").and_then(|v| v.as_str()) == Some("max");
+            let arc = |lat: f64, lon: f64| -> f64 {
+                const R: f64 = 6_371_008.771_4;
+                let (p1, p2) = (olat.to_radians(), lat.to_radians());
+                let (dp, dl) = ((lat - olat).to_radians(), (lon - olon).to_radians());
+                let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+                2.0 * R * h.sqrt().min(1.0).asin()
+            };
+            for c in cands.iter_mut() {
+                let (_, searcher, st) = &searchers[c.shard];
+                let g = st.read();
+                let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
+                let points: Vec<(f64, f64)> = match crate::api::flat_lookup(&src, field) {
+                    // a list of points, or one point written as a pair
+                    Some(Value::Array(a)) if a.first().map(|x| !x.is_number()).unwrap_or(false) => {
+                        a.iter().filter_map(crate::search::geo::read_point).collect()
+                    }
+                    Some(one) => crate::search::geo::read_point(&one).into_iter().collect(),
+                    None => Vec::new(),
+                };
+                let distances = points.iter().map(|(lat, lon)| arc(*lat, *lon) / per_metre);
+                let picked = if farthest {
+                    distances.fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))))
+                } else {
+                    distances.fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.min(d))))
+                };
+                if let Some(slot) = c.sort.get_mut(i) {
+                    *slot = picked.map(SortValue::F64).unwrap_or(SortValue::Missing);
+                }
+            }
+            continue;
+        }
         for c in cands.iter_mut() {
             let (name, searcher, st) = &searchers[c.shard];
             let g = st.read();

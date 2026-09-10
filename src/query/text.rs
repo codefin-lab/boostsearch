@@ -236,7 +236,12 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                 return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
             }
         }
-        return Ok(Box::new(PhraseQuery::new(terms)));
+        // `slop` lets the words stand that many moves apart. It was read by
+        // `span_near` and nowhere here, so `match_phrase: {query: "quick
+        // fox", slop: 2}` found nothing in "quick brown fox".
+        let mut phrase = PhraseQuery::new(terms);
+        phrase.set_slop(opts.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32);
+        return Ok(Box::new(phrase));
     }
 
     // a field holding text holds the number as text: `1234` written into a
@@ -302,10 +307,24 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                     match walked.len() {
                         1 if flat => Box::new(crate::query::SpanUnion::flat(walked.remove(0)))
                             as Box<dyn Query>,
-                        1 => {
-                            Box::new(TermQuery::new(walked.remove(0), IndexRecordOption::WithFreqs))
-                                as Box<dyn Query>
-                        }
+                        // `fuzziness` lets a word stand for the words that
+                        // many edits away from it. It was read by other
+                        // queries and not by `match`, so `quikc` with
+                        // `fuzziness: AUTO` found nothing at all.
+                        1 => match fuzzy_edits(opts.get("fuzziness"), &way[0]) {
+                            Some(d) if d > 0 => {
+                                let transpositions = opts
+                                    .get("fuzzy_transpositions")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                Box::new(FuzzyTermQuery::new(walked.remove(0), d, transpositions))
+                                    as Box<dyn Query>
+                            }
+                            _ => Box::new(TermQuery::new(
+                                walked.remove(0),
+                                IndexRecordOption::WithFreqs,
+                            )) as Box<dyn Query>,
+                        },
                         _ if as_phrase => Box::new(PhraseQuery::new(walked)),
                         _ => Box::new(BooleanQuery::new(
                             walked
@@ -867,5 +886,37 @@ pub(crate) fn build_common(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             };
             Box::new(BooleanQuery::new(vec![(want, rare_query), (Occur::Should, common_query)]))
         }
+    })
+}
+
+/// How many edits `fuzziness` allows for one word: a number as written,
+/// or `AUTO` -- none below three letters, one below six, two from there --
+/// with `AUTO:lo,hi` moving the two thresholds.
+pub(crate) fn fuzzy_edits(spec: Option<&Value>, word: &str) -> Option<u8> {
+    let spec = spec?;
+    let len = word.chars().count();
+    let auto = |lo: usize, hi: usize| {
+        if len < lo {
+            0
+        } else if len < hi {
+            1
+        } else {
+            2
+        }
+    };
+    Some(match spec {
+        Value::Number(n) => n.as_u64()?.min(2) as u8,
+        Value::String(s) => {
+            let s = s.trim();
+            if let Some(rest) = s.strip_prefix("AUTO") {
+                match rest.strip_prefix(':').and_then(|r| r.split_once(',')) {
+                    Some((lo, hi)) => auto(lo.trim().parse().ok()?, hi.trim().parse().ok()?),
+                    None => auto(3, 6),
+                }
+            } else {
+                s.parse::<f64>().ok()?.min(2.0) as u8
+            }
+        }
+        _ => return None,
     })
 }
