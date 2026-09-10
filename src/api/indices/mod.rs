@@ -278,6 +278,26 @@ pub async fn delete_index(
             );
         }
     }
+    // A backing index belongs to its data stream, not to whoever names it:
+    // deleting the one a stream is writing to takes the stream's documents
+    // out from under it, and the stream goes on naming an index that is not
+    // there. The reference refuses it, and says which stream it belongs to.
+    for part in index.split(',').map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if part.contains('*') || lenient {
+            continue;
+        }
+        if let Some(stream) = store.stream_behind(part)
+            && store.backing_indices(&stream).last().map(|n| n == part).unwrap_or(false)
+        {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "index [{part}] is the write index for data stream [{stream}] and cannot be                      deleted"
+                ),
+            );
+        }
+    }
     // a pattern reaches for indices, not for the aliases that stand in front
     // of them, so it is matched against the real names only
     let mut targets: Vec<String> = Vec::new();

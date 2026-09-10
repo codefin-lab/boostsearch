@@ -5180,3 +5180,36 @@ from 17.7 MB to 8.7 MB, and the comparison is:
 
 Ahead on all 34 dimensions, against numbers measured once and kept.
 
+
+## The thirteenth review
+
+Three findings, and what they were about is what a caller is promised versus
+what they get.
+
+**P0 -- a data stream held nothing.** A stream was bookkeeping and no more: a
+write to `logs-app` made an ordinary index called `logs-app` and put the
+documents there, while the `.ds-logs-app-000001` the stream named stayed
+empty and `GET _data_stream` went on naming it. Nothing outside the
+`_data_stream` endpoints knew a stream existed -- not the write path, not
+name resolution, not the delete. A write goes to the newest backing index
+now, the answer names it, a stream's name and a pattern over it resolve to
+its backing indices, and the write index of a stream cannot be deleted out
+from under it (the reference's words).
+
+**P1 -- a composable template that lost still shaped the index.** Every
+matching template was layered by priority, which is what the *older* templates
+mean; a composable one is meant to have a single winner. An index made under a
+priority 9 template came out carrying the refresh interval and the fields of
+the priority 1 template -- and the server disagreed with its own
+`_simulate_index`, which had the rule right all along. Legacy templates still
+layer, because that is what they are.
+
+**P2 -- two composable templates may share a priority and a pattern.** The
+reference refuses identical patterns at one priority, since nothing then says
+which of them makes the index; ours takes both and picks by name. Left as it
+is for now: OpenSearch 3.6 relaxed this check for patterns that do not
+practically overlap, and the corpus asserts the relaxed form, so the rule to
+implement is narrower than "refuse an overlap" and is not worth guessing at.
+
+Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
+over all 409 files.

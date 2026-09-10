@@ -363,6 +363,11 @@ impl Store {
     }
 
     pub fn write_target(&self, name: &str) -> Option<String> {
+        // a data stream is a name in front of its backing indices, and the
+        // newest of them is where a write goes
+        if let Some(newest) = self.backing_indices(name).pop() {
+            return Some(newest);
+        }
         if !self.is_alias(name) {
             return Some(name.to_string());
         }
@@ -511,18 +516,34 @@ impl Store {
                 let re = wildcard_to_regex(part);
                 // a pattern reaches an index by its own name or by any alias
                 // standing in front of it
+                // the stream names a pattern reaches, so that `logs-*`
+                // finds what was written to `logs-app`
+                let streams: Vec<String> = self
+                    .data_streams()
+                    .keys()
+                    .filter(|s| re.is_match(s))
+                    .flat_map(|s| self.backing_indices(s))
+                    .collect();
                 for n in open_only(self.names()) {
                     let by_alias = self
                         .get(&n)
                         .map(|st| st.read().aliases.keys().any(|a| re.is_match(a)))
                         .unwrap_or(false);
-                    if (re.is_match(&n) || by_alias) && !out.contains(&n) {
+                    if (re.is_match(&n) || by_alias || streams.contains(&n)) && !out.contains(&n) {
                         out.push(n);
                     }
                 }
             } else if self.exists(part) {
                 if !out.contains(&part.to_string()) {
                     out.push(part.to_string());
+                }
+            } else if !self.backing_indices(part).is_empty() {
+                // a data stream names its backing indices and holds nothing
+                // itself
+                for n in open_only(self.backing_indices(part)) {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
                 }
             } else {
                 // an alias may stand in front of several indices, and names

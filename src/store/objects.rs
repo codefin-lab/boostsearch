@@ -159,6 +159,32 @@ impl Store {
         self.data_streams.read().clone()
     }
 
+    /// The backing indices of a data stream, oldest first.
+    ///
+    /// A stream is a name in front of `.ds-<name>-NNNNNN` indices, and the
+    /// newest of them is the one writes go to. Nothing outside the
+    /// `_data_stream` endpoints knew that, so a write to the stream made an
+    /// ordinary index of the stream's own name and put the documents there
+    /// while the backing index stayed empty -- `GET _data_stream` named an
+    /// index that never received anything.
+    pub fn backing_indices(&self, stream: &str) -> Vec<String> {
+        if !self.data_streams.read().contains_key(stream) {
+            return Vec::new();
+        }
+        let prefix = format!(".ds-{stream}-");
+        let mut out: Vec<String> =
+            self.inner.read().keys().filter(|n| n.starts_with(&prefix)).cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// The stream a backing index belongs to, if it belongs to one.
+    pub fn stream_behind(&self, index: &str) -> Option<String> {
+        let rest = index.strip_prefix(".ds-")?;
+        let (name, _) = rest.rsplit_once('-')?;
+        self.data_streams.read().contains_key(name).then(|| name.to_string())
+    }
+
     pub fn add_data_stream(&self, name: &str, template: &str) {
         self.data_streams.write().insert(name.to_string(), template.to_string());
     }
@@ -198,23 +224,39 @@ impl Store {
     /// index picks up the mappings and settings it was meant to be born with.
     pub(crate) fn apply_templates(&self, index: &str, body: &Value) -> Value {
         let templates = self.templates.read();
-        let mut matched: Vec<(i64, &Value)> = templates
-            .values()
-            .filter(|t| {
+        let mut matched: Vec<(i64, &String, &Value)> = templates
+            .iter()
+            .filter(|(_, t)| {
                 let pats =
                     t.get("index_patterns").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                 pats.iter()
                     .filter_map(|p| p.as_str())
                     .any(|p| p == index || wildcard_to_regex(p).is_match(index))
             })
-            .map(|t| (t.get("order").and_then(|o| o.as_i64()).unwrap_or(0), t))
+            .map(|(n, t)| (t.get("order").and_then(|o| o.as_i64()).unwrap_or(0), n, t))
             .collect();
-        matched.sort_by_key(|(o, _)| *o);
+        matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+        // A composable template is not layered with the others: the one with
+        // the highest priority makes the index and the rest do not, which is
+        // what `_simulate_index` has always answered. Layering them the way
+        // the older templates are layered meant a template that lost still
+        // put its settings and its mappings into the index -- an index made
+        // under a priority 9 template came out with the refresh interval and
+        // the fields of the priority 1 template beside it, and the server
+        // disagreed with its own simulation about what it had just made.
+        let composable: Vec<_> =
+            matched.iter().filter(|(_, _, t)| t.get("__composable").is_some()).cloned().collect();
+        let matched = if composable.is_empty() {
+            matched
+        } else {
+            // the last of them is the highest priority, ties by name
+            composable.into_iter().rev().take(1).collect()
+        };
         if matched.is_empty() {
             return body.clone();
         }
         let mut merged = serde_json::json!({});
-        for (_, t) in matched {
+        for (_, _, t) in matched {
             for key in ["settings", "mappings", "aliases"] {
                 if let Some(v) = t.get(key) {
                     let Some(into) = merged.as_object_mut() else { continue };
