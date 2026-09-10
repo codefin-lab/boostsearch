@@ -5213,3 +5213,38 @@ implement is narrower than "refuse an overlap" and is not worth guessing at.
 
 Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
 over all 409 files.
+
+## The tally, by round
+
+What each review found, by how much it costs a caller. **P0**: a wrong answer
+to a correct request, data lost, a rule not enforced, a node that stops
+answering. **P1**: wrong under narrower conditions, refused when it should not
+be, or exhaustible by a hostile request. **P2**: a wrong number in a tool, a
+claim in a document, a second lock on a door that is already locked.
+
+| review | P0 | P1 | P2 | total |
+|---|---|---|---|---|
+| 1-4 | not classified at the time | | | ~133 |
+| 5 | not classified at the time | | | 50 |
+| 6 | 2 | 3 | 1 | 6 |
+| 7 | 4 | 2 | 0 | 6 |
+| 8 | 1 | 1 | 1 | 3 |
+| 9 | 1 | 1 | 1 | 3 |
+| 10 | 1 | 0 | 0 | 1 |
+| 11 | 0 | 2 | 1 | 3 |
+| 12 | 1 | 4 | 1 | 6 |
+| 13 | 1 | 1 | 1 | 3 |
+| **6-13** | **11** | **14** | **6** | **31** |
+
+The number that matters is the first column, and it is not zero. Thirteen
+reviews in, every round but one has found something that gives a caller a
+wrong answer or loses their data. The rate has fallen -- four P0s in the
+seventh review, one in each of the last four -- but a rate of one per review
+is not the rate of a finished thing.
+
+Where they were found matters more than how many. Every P0 from the tenth
+review onwards was in surface the conformance corpus does not cover: filtered
+aliases, data streams, SQL, the write index of a rollover. The corpus passes
+1,427 of 1,427 and has passed it throughout; it says nothing about the parts
+OpenSearch keeps in plugins with their own suites, and that is exactly where
+the defects have been.
