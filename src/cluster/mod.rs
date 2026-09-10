@@ -185,5 +185,6 @@ pub fn discovery_node() -> state::DiscoveryNode {
             .iter()
             .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
             .collect(),
+        http_address: me.http_address.clone(),
     }
 }

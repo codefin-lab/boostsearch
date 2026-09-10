@@ -103,7 +103,16 @@ pub(crate) async fn cat_by_name(
                     ("ram.current", "0b".into()),
                     ("ram.percent", "0".into()),
                     ("ram.max", "0b".into()),
-                    ("http", format!("{ip}:9200")),
+                    // the address the node answers HTTP on, which it says
+                    // when it joins; every node was reported at port 9200
+                    (
+                        "http",
+                        if n.http_address.is_empty() {
+                            format!("{ip}:9200")
+                        } else {
+                            n.http_address.clone()
+                        },
+                    ),
                     ("cpu", "0".into()),
                     ("load_1m", "0.00".into()),
                     ("load_5m", "0.00".into()),

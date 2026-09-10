@@ -2490,6 +2490,7 @@ mod tests {
             transport_address: format!("127.0.0.1:{name}"),
             roles: vec!["cluster_manager".into(), "data".into()],
             attributes: BTreeMap::new(),
+            http_address: String::new(),
         }
     }
 

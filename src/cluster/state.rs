@@ -22,6 +22,9 @@ pub struct DiscoveryNode {
     pub transport_address: String,
     pub roles: Vec<String>,
     pub attributes: BTreeMap<String, String>,
+    /// where the node answers HTTP; a node from before this carries none
+    #[serde(default)]
+    pub http_address: String,
 }
 
 impl DiscoveryNode {

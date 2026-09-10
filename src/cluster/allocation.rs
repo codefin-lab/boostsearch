@@ -2314,6 +2314,7 @@ mod tests {
             transport_address: format!("10.0.0.{}:9300", name.len()),
             roles: vec!["cluster_manager".into(), "data".into()],
             attributes: attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            http_address: String::new(),
         }
     }
 

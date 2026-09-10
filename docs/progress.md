@@ -6090,3 +6090,51 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 paths); chaos as above. Against OpenSearch 3.1.0: the query corpus 59/61,
 the second query corpus 45/45, the aggregations corpus 35/43 (the
 `weighted_avg` digit).
+
+## The twenty-fifth review
+
+**The P0 still open -- a copy missing one acknowledged write -- came back,
+and this time it can be read.** Ten chaos runs alone on the twenty-fourth
+review's binary found no copy behind; four on this review's found two, each
+one write short. With the eight runs of the twenty-fourth review that is
+three in twenty-two since that change, against two in six before it. The
+timeline the twenty-fourth review added to the chaos test places both of
+this review's in the same few seconds of the fault schedule: the primary's
+node is stopped at 62.1s, a new primary is placed at 66.6s, the old one is
+let go on at 69.8s -- and the writes missed were acknowledged at 64.9s and
+69.9s. A primary that was paused, and a write acknowledged around its pause
+or the moment after it resumes, before it has heard it is no longer the
+primary: that is where the next review starts.
+
+**P2 -- `_cat/nodes` gave every node's HTTP address as port 9200.** A node
+now carries the address it answers HTTP on in its description, which it
+hands the manager when it joins, and `_cat/nodes` reports that; a node from
+before this carries none and is reported as before. In a cluster of three,
+`_cat/nodes` read through each node gives 127.0.0.1:9370, :9371 and :9372;
+a single node gives its own.
+
+**Not a defect -- every primary of an index on one node.** The twenty-third
+review counted this as a P2: a three-shard index put its primaries on one
+node and its replicas on another, and left the third empty, where the
+reference spreads shards. It is how this server holds an index -- whole, on
+each node that holds any of it, with shards a logical division (ADR 0003)
+-- and the balancer weighs copies of indices, not shards, on purpose. It is
+taken off the open list and recorded here as a difference by design.
+
+**The resync after a change of primary (P1) is left for now, on purpose.**
+The reference throws away what a replica holds beyond the global checkpoint
+when a new primary takes over. Doing that here while a copy can still, in
+rare runs, be missing an acknowledged write would turn a copy that is behind
+into a write that is lost; it follows the P0.
+
+Open at the end of this review: P0 1 (a copy missing an acknowledged write, three runs
+in twenty-two), P1 1 (no resync after a change of primary), P2 12 (the
+aggregations corpus's seven, the `weighted_avg` digit, the edge of a bounding
+box, `combined_fields`, `rel#question`, intervals found more than once).
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+197/197, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths); four chaos runs, all settled, no node silent, no acknowledged write
+lost, two with a copy one write short (above). Against OpenSearch 3.1.0:
+the query corpus 59/61, the second query corpus 45/45, the aggregations
+corpus 36/43.

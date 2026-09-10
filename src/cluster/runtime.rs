@@ -319,6 +319,7 @@ impl Runtime {
                                         transport_address: h.transport_address,
                                         roles: h.roles,
                                         attributes: BTreeMap::new(),
+                                        http_address: String::new(),
                                     }));
                                 }
                                 dialling.lock().remove(&address);

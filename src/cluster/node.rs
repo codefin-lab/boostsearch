@@ -21,6 +21,8 @@ pub struct NodeIdentity {
     pub transport_address: String,
     /// the address the transport listener binds
     pub transport_bind: String,
+    /// the address HTTP is answered on, as `_cat/nodes` reports it
+    pub http_address: String,
     pub host: String,
     pub attributes: serde_json::Map<String, Value>,
     /// `cluster.name`
@@ -125,6 +127,7 @@ impl NodeIdentity {
             roles,
             transport_address: format!("{publish_host}:{port}"),
             transport_bind: format!("{bind_host}:{port}"),
+            http_address: http_addr.to_string(),
             host,
             attributes,
             cluster_name: setting(settings, "cluster.name").unwrap_or_else(|| "boostsearch".into()),
