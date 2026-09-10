@@ -56,4 +56,6 @@
 {"method": "POST", "path": "/r21-q/_search", "body": {"query": {"match_all": {}}, "size": 10, "sort": [{"_geo_distance": {"loc": {"lat": 13.7, "lon": 100.5}, "order": "asc", "unit": "km"}}]}}
 {"method": "POST", "path": "/r21-q/_search", "body": {"query": {"match": {"body": "fox"}}, "size": 10, "min_score": 0.5}}
 {"method": "POST", "path": "/r21-q/_search", "body": {"query": {"bool": {"should": [{"match": {"title": "fox"}}], "minimum_should_match": 0, "boost": 2.0}}, "size": 10, "explain": false}}
+{"method": "POST", "path": "/r21-q/_search", "body": {"size": 3, "sort": [{"_id": "asc"}], "_source": false}}
+{"method": "POST", "path": "/r21-q/_search", "body": {"size": 3, "sort": [{"_id": "desc"}], "search_after": ["4"], "_source": false}}
 {"method": "DELETE", "path": "/r21*", "body": null}

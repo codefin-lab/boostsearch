@@ -580,7 +580,7 @@ pub struct Outcome {
 /// in a field the words fell, how far a value is from an origin. The query put
 /// to BoostCore matches more widely than that, and the candidates it found are
 /// read back here and judged properly.
-type Searchers = [(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)];
+type Searchers = [(String, Searcher, std::sync::Arc<crate::store::IdxLock>)];
 
 /// The aggregations a request asks for, sorted into who answers them.
 ///

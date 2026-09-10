@@ -317,8 +317,26 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                                     .get("fuzzy_transpositions")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true);
-                                Box::new(FuzzyTermQuery::new(walked.remove(0), d, transpositions))
-                                    as Box<dyn Query>
+                                Box::new(
+                                    crate::query::ScoredFuzzy::new(
+                                        walked.remove(0),
+                                        &way[0],
+                                        d,
+                                        transpositions,
+                                    )
+                                    .prefix_length(
+                                        opts.get("prefix_length")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as usize,
+                                    )
+                                    .max_expansions(
+                                        opts.get("max_expansions")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(50)
+                                            as usize,
+                                    ),
+                                ) as Box<dyn Query>
                             }
                             _ => Box::new(TermQuery::new(
                                 walked.remove(0),

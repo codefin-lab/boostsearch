@@ -88,6 +88,8 @@ pub fn scan_replicated(
     size: usize,
 ) -> (Vec<ReplicaOp>, Option<u64>) {
     use std::collections::BTreeMap;
+    // a page of nothing would never move on
+    let size = size.max(1);
     let term = crate::cluster::primary_term(&st.name, shard);
     // (seq, id) -> op; the pending table wins over the index for the same id.
     // Two documents may carry one sequence number -- a copy filled from a
@@ -138,14 +140,24 @@ pub fn scan_replicated(
         }
     }
     picked.sort_unstable();
-    let mut more = false;
-    let mut taken = 0usize;
-    // a page ends on a sequence number, never inside one: the caller asks for
-    // what comes after the last number it was given
-    let mut last_seq: Option<u64> = None;
+    // A page is the `size` smallest sequence numbers from both places at
+    // once, cut on a number. The pending table was put in whole and the
+    // reader was then read only until the page looked full, so a primary
+    // holding more pending writes than a page -- one just back from
+    // replaying its translog -- filled the page with those, and the next page
+    // began past them: every document the reader held below them was never
+    // sent. A copy was filled with two thousand of thirty-eight thousand
+    // documents that way, and counted in sync.
+    let mut numbers: Vec<u64> =
+        found.keys().map(|(seq, _)| *seq).chain(picked.iter().map(|(seq, _, _)| *seq)).collect();
+    numbers.sort_unstable();
+    let cut = (numbers.len() > size).then(|| numbers[size - 1]);
+    let more = cut.map(|c| numbers.last().is_some_and(|last| *last > c)).unwrap_or(false);
+    if let Some(cut) = cut {
+        found.retain(|(seq, _), _| *seq <= cut);
+    }
     for (seq, ord, doc_id) in picked {
-        if found.len() >= size && Some(seq) != last_seq {
-            more = true;
+        if cut.is_some_and(|c| seq > c) {
             break;
         }
         let Ok(store_reader) = searcher.segment_readers()[ord].get_store_reader(1) else {
@@ -157,7 +169,6 @@ pub fn scan_replicated(
             continue;
         }
         let Some(raw) = doc.get_first(st.fields.source).and_then(|v| v.as_str()) else { continue };
-        last_seq = Some(seq);
         found.insert(
             (seq, id.to_string()),
             ReplicaOp {
@@ -171,17 +182,55 @@ pub fn scan_replicated(
                 source: Some(raw.to_string()),
             },
         );
-        taken += 1;
     }
-    let _ = taken;
-    let mut ops: Vec<ReplicaOp> = found.into_values().collect();
-    // cut on a sequence number, so nothing between pages is skipped
-    if ops.len() > size {
-        let cut = ops[size - 1].seq;
-        let end = ops.iter().position(|o| o.seq > cut).unwrap_or(ops.len());
-        ops.truncate(end);
-        more = true;
-    }
-    let next = if more { ops.last().map(|o| o.seq + 1) } else { None };
+    let ops: Vec<ReplicaOp> = found.into_values().collect();
+    let next = if more { cut.map(|c| c + 1) } else { None };
     (ops, next)
+}
+
+#[cfg(test)]
+mod scan_paging_tests {
+    use super::scan_replicated;
+
+    #[test]
+    fn pages_reach_every_document_when_more_are_pending_than_a_page_holds() {
+        let store = crate::store::Store::scratch();
+        let st = store.ensure("paged").expect("an index");
+        let mut g = st.write();
+        for i in 0..30 {
+            assert!(
+                crate::api::doc::write_doc(
+                    &mut g,
+                    &format!("r{i}"),
+                    serde_json::json!({"n": i}),
+                    "index"
+                )
+                .is_ok()
+            );
+        }
+        g.refresh().expect("a refresh");
+        // more writes waiting for a refresh than a page holds
+        for i in 0..25 {
+            assert!(
+                crate::api::doc::write_doc(
+                    &mut g,
+                    &format!("p{i}"),
+                    serde_json::json!({"n": i}),
+                    "index"
+                )
+                .is_ok()
+            );
+        }
+        let mut from = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..100 {
+            let (ops, next) = scan_replicated(&g, u32::MAX, from, 10);
+            seen.extend(ops.into_iter().map(|o| o.id));
+            match next {
+                Some(n) if n > from => from = n,
+                _ => break,
+            }
+        }
+        assert_eq!(seen.len(), 55, "every document is sent, pending or not");
+    }
 }

@@ -605,7 +605,7 @@ pub type IngestTally = (u64, u64, u64);
 
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<RwLock<HashMap<String, Arc<RwLock<IdxState>>>>>,
+    inner: Arc<RwLock<HashMap<String, Arc<IdxLock>>>>,
     /// where index data lives; `None` keeps everything in RAM
     data_dir: Option<PathBuf>,
     /// index templates by name
@@ -1052,4 +1052,53 @@ pub(crate) fn entry_of<'a>(
         .expect("replaced with an object just above")
         .entry(key.to_string())
         .or_insert_with(make)
+}
+
+/// The lock over one index.
+///
+/// A read taken by a thread that already holds one is granted even while a
+/// writer waits. parking_lot's plain `read` queues behind a waiting writer,
+/// and a search that read the index twice -- once for the shard, once for its
+/// aliases -- waited on a bulk write that was waiting on the search: the
+/// node's runtime threads filled with such waits and it stopped answering,
+/// which is how one node of the chaos test fell silent while its cluster
+/// thread went on committing.
+pub struct IdxLock<T = IdxState>(RwLock<T>);
+
+impl<T> IdxLock<T> {
+    pub fn new(value: T) -> Self {
+        IdxLock(RwLock::new(value))
+    }
+
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, T> {
+        self.0.read_recursive()
+    }
+
+    pub fn write(&self) -> parking_lot::RwLockWriteGuard<'_, T> {
+        self.0.write()
+    }
+}
+
+#[cfg(test)]
+mod idx_lock_tests {
+    use super::IdxLock;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_second_read_is_granted_while_a_writer_waits() {
+        let lock = Arc::new(IdxLock::new(1u32));
+        let first = lock.read();
+        let writer = {
+            let lock = lock.clone();
+            std::thread::spawn(move || *lock.write() += 1)
+        };
+        // give the writer time to queue behind the first read
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let second = lock.read();
+        assert_eq!(*first + *second, 2);
+        drop(second);
+        drop(first);
+        writer.join().unwrap();
+        assert_eq!(*lock.read(), 2);
+    }
 }

@@ -280,7 +280,7 @@ pub(crate) fn sort_value_from_json(v: &Value, date: Option<bool>) -> SortValue {
 /// by now the field is only read for the handful of candidates that survived.
 pub(crate) fn fill_seq(
     cands: &mut [Cand],
-    searchers: &[(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    searchers: &[(String, Searcher, std::sync::Arc<crate::store::IdxLock>)],
 ) {
     let mut cols: std::collections::HashMap<
         (usize, u32),

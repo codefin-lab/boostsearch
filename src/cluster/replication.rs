@@ -603,6 +603,12 @@ pub fn install(store: Store) {
                 let shard = v.get("shard").and_then(|s| s.as_u64()).unwrap_or(0) as u32;
                 let from_seq = v.get("from_seq").and_then(|s| s.as_u64()).unwrap_or(0);
                 let size = v.get("size").and_then(|s| s.as_u64()).unwrap_or(1000) as usize;
+                // whether this node's writes go to the copy asking: until they
+                // do, a page that ends the scan is not the end of what it needs
+                let routes_here = v.get("for_node").and_then(|n| n.as_str()).map(|asking| {
+                    let state = super::current_state();
+                    targets(&state, &from, &index, shard).iter().any(|(n, _)| n.as_str() == asking)
+                });
                 let result = tokio::task::spawn_blocking(move || {
                     let Some(st) = store.get(&index) else {
                         return Err(format!("no index [{index}] on this node"));
@@ -615,8 +621,10 @@ pub fn install(store: Store) {
                 match result {
                     Ok((ops, next)) => e.response(
                         from,
-                        serde_json::to_vec(&json!({"ops": ops, "next_seq": next}))
-                            .unwrap_or_default(),
+                        serde_json::to_vec(
+                            &json!({"ops": ops, "next_seq": next, "routes_here": routes_here}),
+                        )
+                        .unwrap_or_default(),
                     ),
                     Err(msg) => e.error(from, &msg),
                 }
@@ -1145,10 +1153,20 @@ pub async fn catch_up_by_scan(
     let primary = primary.clone();
     let mut from_seq = from;
     let mut tries = 0;
+    // A copy the manager has just placed is known to the primary only once
+    // the primary has taken the publication that placed it; a write it took
+    // before then went to the copies it knew, not to this one, and if the
+    // scan had already passed where that write stands the copy never had it.
+    // One chaos run left a freshly filled copy twenty acknowledged documents
+    // short this way. The scan ends only on a page answered by a primary that
+    // already sends its writes here: everything it took before that is in the
+    // page, and everything after comes as a write.
+    let waiting_since = std::time::Instant::now();
     loop {
-        let body = serde_json::to_vec(
-            &json!({"index": index, "shard": u32::MAX, "from_seq": from_seq, "size": 2000}),
-        )
+        let body = serde_json::to_vec(&json!({
+            "index": index, "shard": u32::MAX, "from_seq": from_seq, "size": 2000,
+            "for_node": me.as_str(),
+        }))
         .unwrap_or_default();
         let answer =
             rt.call(&primary, RECOVERY_SCAN, body, std::time::Duration::from_secs(60)).await;
@@ -1168,6 +1186,8 @@ pub async fn catch_up_by_scan(
         let ops: Vec<ReplicaOp> =
             v.get("ops").and_then(|o| serde_json::from_value(o.clone()).ok()).unwrap_or_default();
         let next = v.get("next_seq").and_then(|n| n.as_u64());
+        // a primary from before this was asked answers without it
+        let routes_here = v.get("routes_here").and_then(|r| r.as_bool()).unwrap_or(true);
         let store = store.clone();
         let name = index.to_string();
         let applied = tokio::task::spawn_blocking(move || {
@@ -1190,7 +1210,15 @@ pub async fn catch_up_by_scan(
         applied?;
         match next {
             Some(n) if n > from_seq => from_seq = n,
-            _ => break,
+            _ if routes_here => break,
+            _ if waiting_since.elapsed() > std::time::Duration::from_secs(30) => {
+                tracing::warn!(
+                    "the primary of [{index}] did not start sending its writes here within \
+                     thirty seconds of the scan ending; the copy is taken as filled"
+                );
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
         }
     }
     // what came in is searchable on the copy once it is refreshed

@@ -433,34 +433,33 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "fuzzy" => {
             let (field, val, opts) = field_and_value(&body)?;
             let (f, path, _) = ctx.resolve(&field, true);
-            let d = opts.get("fuzziness").and_then(|v| v.as_u64()).unwrap_or(2).min(2) as u8;
             let want = val.as_str().unwrap_or_default().to_lowercase();
+            // AUTO unless a number is written: the reach grows with the word
+            let auto = Value::String("AUTO".into());
+            let d = crate::query::text::fuzzy_edits(
+                Some(opts.get("fuzziness").unwrap_or(&auto)),
+                &want,
+            )
+            .unwrap_or(0)
+            .min(2);
             let mut t = Term::from_field_json_path(f, &path, true);
             t.append_type_and_str(&want);
             if d == 0 {
-                Box::new(FuzzyTermQuery::new(t, 0, true))
+                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
             } else {
-                // A word one edit away is a better answer than a word two
-                // away, and the score has to say so. Each distance is asked
-                // for on its own and weighed by how far it is: a word at one
-                // edit matches every clause from its distance outwards, so
-                // the nearer word scores higher without the terms having to
-                // be enumerated.
-                let len = want.chars().count().max(1) as f32;
-                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-                for k in 0..=d {
-                    let mut term = Term::from_field_json_path(f, &path, true);
-                    term.append_type_and_str(&want);
-                    let boost = (1.0 - k as f32 / len).max(0.01);
-                    clauses.push((
-                        Occur::Should,
-                        Box::new(BoostQuery::new(
-                            Box::new(FuzzyTermQuery::new(term, k, true)),
-                            boost,
-                        )),
-                    ));
-                }
-                Box::new(BooleanQuery::new(clauses))
+                let transpositions =
+                    opts.get("transpositions").and_then(|v| v.as_bool()).unwrap_or(true);
+                Box::new(
+                    crate::query::ScoredFuzzy::new(t, &want, d, transpositions)
+                        .prefix_length(
+                            opts.get("prefix_length").and_then(|v| v.as_u64()).unwrap_or(0)
+                                as usize,
+                        )
+                        .max_expansions(
+                            opts.get("max_expansions").and_then(|v| v.as_u64()).unwrap_or(50)
+                                as usize,
+                        ),
+                )
             }
         }
         "range" => build_range(ctx, &body)?,
@@ -543,7 +542,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     "Cannot create intervals over field [{field}] with no positions indexed"
                 ));
             }
-            build_interval_rule(ctx, field, rule)?
+            // the reference scores an interval by how often it is found,
+            // saturated: w * S / (S + 1). One sighting, which is what nearly
+            // every document has, is a half; the word statistics BM25 reads
+            // are no part of it.
+            Box::new(ConstScore::new(build_interval_rule(ctx, field, rule)?, 0.5))
         }
         // `terms_set` asks for a number of the listed terms rather than all
         // of them, and how many is read from a field of the document itself

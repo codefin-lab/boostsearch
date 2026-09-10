@@ -366,7 +366,7 @@ pub(crate) fn dotted_only_field(v: &Value) -> Option<String> {
     }
 }
 
-pub(crate) fn g_has_writer(st: &std::sync::Arc<parking_lot::RwLock<IdxState>>) -> bool {
+pub(crate) fn g_has_writer(st: &std::sync::Arc<crate::store::IdxLock>) -> bool {
     st.read().has_writer()
 }
 

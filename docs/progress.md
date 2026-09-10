@@ -5916,3 +5916,121 @@ binary, run the same way twice, did both worse things: once two copies
 disagreed by twenty documents, once a node stopped answering. Neither is a
 write lost; both are P1s that were here before, and are left for a review of
 their own.
+
+## The twenty-third review
+
+The three the twenty-second review left: the two ways the chaos test failed
+that were older than it, routing in a cluster of three, and the fuzzy and
+interval scores against the reference's `explain`.
+
+**P1 -- a node could stop answering HTTP for good.** Its cluster thread went
+on committing; its runtime threads were all waiting on one index's lock. A
+search read the index once for the shard and again for the index's aliases
+while the first read was still held, and parking_lot queues a new read
+behind a waiting writer -- a bulk write, or the thread that closes idle
+writers -- which was waiting on the first read. `sample` of a node that had
+fallen silent in the chaos test showed exactly that: two searches and the
+coordinator's metadata snapshot waiting to read, a bulk write and the writer
+reaper waiting to write, and nothing running. The second read is gone, and
+the index's lock is now a type of its own whose read is recursive, because a
+scan of the source found thirty-odd places that take the lock of an index
+while holding the lock of the same or another index, any of which can be the
+same one. A unit test holds a read, lets a writer queue, and reads again.
+Before this, two chaos runs in five ended with a node that did not answer;
+since it, eight in eight settled, with a watcher ready to sample any node
+that fell silent and nothing to sample.
+
+**P0 -- a sort by `_id` gave every hit a null sort value.** The `_id`
+column was looked for through the JSON views, where no document has it, so
+hits came back in index order with `sort: [null]`, and `search_after` with
+that null handed back the same page again: walking 2,800 documents a
+thousand at a time returned the first thousand twenty times over. `_id` is
+now read from its own column, as `_seq` is. This is also why the chaos test,
+which lists each copy's documents by walking them in `_id` order, reported
+338 documents on each side of one pair of copies that the per-document
+check found on both.
+
+**P1 -- a fuzzy query scored every word within reach the same.** OpenSearch
+expands the term into the indexed words within its edits, keeps the nearest
+fifty, and scores each as a plain term, weighed by one less the edits over
+the shorter word, with the document frequencies blended to the largest
+among them: `brwn` finds `brown` at 0.75 and `quikc` finds `quick` at 0.8.
+The words are now read from the term dictionary and scored that way, for
+`fuzzy` and for a `match` with `fuzziness`; `fuzzy` without a `fuzziness`
+now reaches as `AUTO` does, not two edits, and `prefix_length` and
+`max_expansions` are read.
+
+**P1 -- an `intervals` query scored by BM25.** The reference saturates the
+number of times the interval is found, `S / (S + 1)`, which is a half for a
+document where it is found once. It is a half here; a document where it is
+found twice or more scores higher there and not here (left: that needs the
+count of intervals, which the rules built here do not give back).
+
+**Routing in a cluster of three.** An index made through a node that is not
+the manager carries the same routing shards on every node (768 for three
+shards, 640 for five); sixty documents written through all three nodes were
+each found through all three.
+
+**P2** -- `_cat/nodes` gives every node's `http` as port 9200 (left: the
+published state does not carry the HTTP addresses of other nodes); every
+primary of a three-shard index went to one node and every replica to
+another, leaving the third empty, where the reference spreads them (left:
+allocation balance is its own piece of work).
+
+**P0 -- a copy filled by a scan could be counted in sync holding a
+fraction of the index.** A chaos run after the `_id` sort was put right
+left one copy with 6,089 of 38,396 acknowledged documents; its fill had
+ended at 2,042. The primary answers a scan a page at a time, the page cut on
+a sequence number: it put its whole pending table in first, then read the
+index only until the page looked full. A primary just back from replaying
+its translog holds more pending writes than a page, so the page was all
+pending writes, and the next began past the last of them -- past every
+document the index held below it. The page is now the smallest sequence
+numbers of both at once, cut on a number, and the next page begins after
+the cut. The logs of earlier chaos runs, back before this review, show the
+same short fills after a file recovery fell back to a scan (0 to 3,730, 0
+to 14,836). A unit test holds more pending writes than a page and walks the
+pages to the end. A page of size nought, which would never move on, is
+taken as one.
+
+**P0 -- a copy filled from the primary could miss acknowledged writes.** One
+chaos run in seven, on the twenty-first review's binary, left two copies
+that each lacked an acknowledged document the other had, the newly filled
+one twenty short. A copy the manager places is filled by a scan of the
+primary, page by page by sequence number, and writes that reach it while it
+fills wait and are applied at the end. But a write reaches it only once the
+primary has taken the publication that placed it: a write the primary took
+before then went to the copies it knew, and if the scan had already passed
+where that write stands, the new copy never had it -- and was then counted
+in sync. The scan now tells the primary which node is asking, the primary
+says whether its writes already go there, and the scan ends only on a page
+from a primary that says they do: whatever it took before is in that page,
+and whatever after arrives as a write. A primary from before this is not
+asked and is taken at its word; one that has not caught up in thirty
+seconds is waited for no longer, and says so. That each copy also held one
+the other lacked points at a change of primary as well, which this does not
+touch: the chaos runs below are the evidence either way.
+Five chaos runs with this in place: in every one each copy held every
+acknowledged document. In one, the two copies still differed by three
+documents that were never acknowledged -- a write a primary took and could
+not finish before it stopped being the primary -- which is the change of
+primary above, and is left as a P1 of its own: the reference resyncs a
+replica to its new primary, throwing away what the old one held beyond the
+global checkpoint, and nothing here does that yet.
+
+**Still open, P0 -- a copy can still end short of acknowledged writes.** On
+the final binary, two chaos runs in six left one copy without acknowledged
+writes the other copy had: ninety, all written in a fifth of a second while
+the primary had been restarted and a promoted copy and a filling one were
+both taking writes; and one. No run lost a write outright, and the short
+fills are gone; the copy that ended short had been filled once, empty, at
+the start, and there is no fill of it in its log after. How it came back
+into the in-sync set without one is the first thing the next review
+follows.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+197/197, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths); cluster chaos six runs, every one settled, no node silent, the
+copies' counts agreeing, no acknowledged write lost, two with a copy short
+as above. Against OpenSearch 3.1.0: the query corpus 59/61 (two added for
+`_id` sorts), the second query corpus 45/45, the aggregations corpus 36/43.

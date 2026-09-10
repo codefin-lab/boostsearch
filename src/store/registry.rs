@@ -321,7 +321,7 @@ impl Store {
         self.inner.read().values().any(|st| st.read().aliases.contains_key(name))
     }
 
-    pub fn get(&self, name: &str) -> Option<Arc<RwLock<IdxState>>> {
+    pub fn get(&self, name: &str) -> Option<Arc<crate::store::IdxLock>> {
         if let Some(s) = self.inner.read().get(name) {
             return Some(s.clone());
         }
@@ -777,7 +777,7 @@ impl Store {
                     return Err(anyhow!("resource_already_exists_exception"));
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(Arc::new(RwLock::new(st)));
+                    slot.insert(Arc::new(crate::store::IdxLock::new(st)));
                 }
             }
         }
@@ -794,7 +794,7 @@ impl Store {
     }
 
     /// Auto-create on first write, the way OpenSearch does.
-    pub fn ensure(&self, name: &str) -> Result<Arc<RwLock<IdxState>>> {
+    pub fn ensure(&self, name: &str) -> Result<Arc<crate::store::IdxLock>> {
         if let Some(s) = self.get(name) {
             return Ok(s);
         }
@@ -914,7 +914,7 @@ impl Store {
 /// Bounded: a handle still held after this is one whose request is stuck, and
 /// the delete is not held up for it. The files are removed either way, so this
 /// narrows the window rather than closing it.
-fn wait_until_unheld(handles: &[Arc<RwLock<IdxState>>]) {
+fn wait_until_unheld(handles: &[Arc<crate::store::IdxLock>]) {
     // short on purpose: this runs on a runtime thread, and a delete that
     // parks one for ten seconds is its own outage
     const LONGEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);

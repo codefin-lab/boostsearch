@@ -25,7 +25,7 @@ fn collect_rank_features(node: &Value, out: &mut Vec<Value>) {
 /// link to it, how short its address is -- and the curve says how quickly that
 /// worth stops mattering.
 fn rescore_by_rank_features(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut [Cand],
     features: &[Value],
 ) {
@@ -269,7 +269,7 @@ fn term_stats_for(
 /// `script_score`: the score is what the script says, given the query's
 /// score and the document.
 fn rescore_by_script(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut Vec<Cand>,
     spec: &Value,
 ) -> std::result::Result<(), Response> {
@@ -322,7 +322,7 @@ fn rescore_by_script(
 }
 
 fn rescore_by_functions(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)],
+    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut [Cand],
     spec: &Value,
 ) -> std::result::Result<(), Response> {
@@ -1268,8 +1268,7 @@ pub fn run(
         from + size
     };
     let mut cands: Vec<Cand> = Vec::new();
-    let mut searchers: Vec<(String, Searcher, std::sync::Arc<parking_lot::RwLock<IdxState>>)> =
-        Vec::new();
+    let mut searchers: Vec<(String, Searcher, std::sync::Arc<crate::store::IdxLock>)> = Vec::new();
     let mut total: u64 = 0;
     let mut shards: u64 = 0;
     let mut empty_shards: u64 = 0;

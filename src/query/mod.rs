@@ -33,7 +33,9 @@ mod spans;
 pub(crate) use spans::*;
 mod graph;
 pub(crate) use graph::*;
+mod fuzzy;
 mod text;
+pub(crate) use fuzzy::ScoredFuzzy;
 pub(crate) use text::*;
 
 pub struct Ctx<'a> {

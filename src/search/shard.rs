@@ -46,7 +46,7 @@ pub(crate) fn search_shard<C: boostcore::collector::Collector>(
 pub(crate) struct ShardOut {
     pub(crate) name: String,
     pub(crate) searcher: Searcher,
-    pub(crate) st: std::sync::Arc<parking_lot::RwLock<IdxState>>,
+    pub(crate) st: std::sync::Arc<crate::store::IdxLock>,
     pub(crate) shards: u64,
     pub(crate) count: usize,
     pub(crate) cands: Vec<Cand>,
@@ -134,7 +134,7 @@ pub(crate) fn search_one_shard(
     // rather than by an index that does not store it -- where every such
     // query matched nothing, whatever it asked
     // an alias of this index is a name its documents answer to as well
-    let also_called: Vec<String> = st.read().aliases.keys().cloned().collect();
+    let also_called: Vec<String> = g.aliases.keys().cloned().collect();
     let by_name = query_json.clone().map(|mut q| {
         answer_index_name(&mut q, name, &also_called);
         q
@@ -330,6 +330,16 @@ pub(crate) fn search_one_shard(
                 // inside either JSON view, so it is named as it is
                 "_seq" => SortSource::Column {
                     name: "_seq".to_string(),
+                    desc: k.desc,
+                    mode: k.mode.clone(),
+                },
+                // `_id` is a column of its own as well: named through the
+                // JSON views it read a column no document has, every hit's
+                // sort value was null, and `search_after` handed back the
+                // same page for ever -- a client paging a whole index by id
+                // saw the first thousand documents again and again
+                "_id" => SortSource::Column {
+                    name: "_id".to_string(),
                     desc: k.desc,
                     mode: k.mode.clone(),
                 },
