@@ -5234,7 +5234,13 @@ claim in a document, a second lock on a door that is already locked.
 | 11 | 0 | 2 | 1 | 3 |
 | 12 | 1 | 4 | 1 | 6 |
 | 13 | 1 | 1 | 1 | 3 |
-| **6-13** | **11** | **14** | **6** | **31** |
+| 14 | 1 | 3 | 1 | 5 |
+| **6-14** | **12** | **17** | **7** | **36** |
+
+The fourteenth is the first review measured against a running OpenSearch
+rather than read out of the code, and it found a P0 in the first twenty
+requests: a rollover that does not roll. That is the argument for asking the
+reference rather than reasoning about it.
 
 The number that matters is the first column, and it is not zero. Thirteen
 reviews in, every round but one has found something that gives a caller a
