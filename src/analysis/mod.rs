@@ -111,6 +111,8 @@ enum Source {
         min: usize,
         max: usize,
         edges: bool,
+        /// the kinds of character a gram may be made of; empty is every kind
+        chars: Vec<String>,
     },
 }
 
@@ -761,10 +763,12 @@ impl Chain {
                 Ok(t) => TextAnalyzer::builder(t).dynamic(),
                 Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
             },
-            Source::Ngram { min, max, edges } => match NgramTokenizer::new(*min, *max, *edges) {
-                Ok(t) => TextAnalyzer::builder(t).dynamic(),
-                Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
-            },
+            Source::Ngram { min, max, edges, .. } => {
+                match NgramTokenizer::new(*min, *max, *edges) {
+                    Ok(t) => TextAnalyzer::builder(t).dynamic(),
+                    Err(_) => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+                }
+            }
         };
         // a token longer than a term may be is dropped, as it is upstream
         base.filter_dynamic(RemoveLongFilter::limit(255)).build()
@@ -795,6 +799,33 @@ impl Chain {
     /// The tokens of a text the char filters have already been through.
     fn cut_prepared(&self, text: &str) -> Vec<Token> {
         match &self.source {
+            // Grams are made only within runs of the characters the tokenizer
+            // was told to keep. `token_chars` was read and ignored, so
+            // `ab1cd` with `["letter"]` made `ab1`, `b1c` and `1cd` -- grams
+            // across a digit the tokenizer was set up to break on -- and a
+            // field built that way matched text it should not.
+            Source::Ngram { min, max, edges, chars } if !chars.is_empty() => {
+                let keep = |c: char| gram_char_allowed(c, chars);
+                let mut out = Vec::new();
+                let mut position = 0usize;
+                for (run, _, start, _, _) in runs(text, keep) {
+                    let at: Vec<(usize, char)> = run.char_indices().collect();
+                    let n = at.len();
+                    let byte = |i: usize| if i < n { at[i].0 } else { run.len() };
+                    let firsts: Vec<usize> = if *edges { vec![0] } else { (0..n).collect() };
+                    for first in firsts {
+                        for len in *min..=*max {
+                            if len == 0 || first + len > n {
+                                continue;
+                            }
+                            let (a, b) = (byte(first), byte(first + len));
+                            out.push((run[a..b].to_string(), position, start + a, start + b, 1));
+                            position += 1;
+                        }
+                    }
+                }
+                out
+            }
             Source::PatternSplit(pattern) => split_on(text, pattern),
             Source::CharGroup(chars) => {
                 let ends: Vec<char> = chars.clone();
@@ -1151,6 +1182,12 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
             // an analyzer stems its language lightly, where OpenSearch does;
             // the filter named `<language>_stem` runs the full algorithm
             match lang.to_ascii_lowercase().as_str() {
+                // English has two light stemmers in the reference, and neither
+                // is Porter: `light_english` is KStem, and `minimal_english`
+                // only takes plurals off. Both ran the full Porter algorithm
+                // here, so `flies` became `fli` where it stays `flies`.
+                "light_english" => return word_by_word(&kstem::stem),
+                "minimal_english" => return word_by_word(&minimal_english),
                 "french_light" | "light_french" => return word_by_word(&stem::french_light),
                 "portuguese_light" | "light_portuguese" => {
                     return word_by_word(&stem::portuguese_light);
@@ -3046,10 +3083,18 @@ fn source_of_spec(spec: &Value) -> Source {
             delimiter: one("delimiter", '/'),
             replacement: one("replacement", one("delimiter", '/')),
         },
-        "ngram" => Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: false },
-        "edge_ngram" => {
-            Source::Ngram { min: num("min_gram", 1), max: num("max_gram", 2), edges: true }
-        }
+        "ngram" => Source::Ngram {
+            min: num("min_gram", 1),
+            max: num("max_gram", 2),
+            edges: false,
+            chars: token_chars(spec),
+        },
+        "edge_ngram" => Source::Ngram {
+            min: num("min_gram", 1),
+            max: num("max_gram", 2),
+            edges: true,
+            chars: token_chars(spec),
+        },
         other => source_of_name(other),
     }
 }
@@ -3092,8 +3137,8 @@ fn source_of_name(name: &str) -> Source {
             Source::PathHierarchy { delimiter: '/', replacement: '/' }
         }
         "pattern" => Source::PatternSplit(r"[^a-zA-Z0-9_]+".into()),
-        "ngram" => Source::Ngram { min: 1, max: 2, edges: false },
-        "edge_ngram" => Source::Ngram { min: 1, max: 2, edges: true },
+        "ngram" => Source::Ngram { min: 1, max: 2, edges: false, chars: Vec::new() },
+        "edge_ngram" => Source::Ngram { min: 1, max: 2, edges: true, chars: Vec::new() },
         _ => Source::Standard,
     }
 }
@@ -3984,5 +4029,88 @@ pub fn reported_offsets(text: &str, tokens: &mut [Token]) {
     for token in tokens.iter_mut() {
         token.2 = at(token.2);
         token.3 = at(token.3);
+    }
+}
+
+/// English plurals taken off and nothing else: Lucene's `EnglishMinimalStemmer`,
+/// which is what the reference runs for `minimal_english`.
+fn minimal_english(word: &str) -> String {
+    let s: Vec<char> = word.chars().collect();
+    let n = s.len();
+    if n < 3 || s[n - 1] != 's' {
+        return word.to_string();
+    }
+    let cut = |len: usize| s[..len].iter().collect::<String>();
+    match s[n - 2] {
+        'u' | 's' => word.to_string(),
+        'e' => {
+            if n > 3 && s[n - 3] == 'i' && s[n - 4] != 'a' && s[n - 4] != 'e' {
+                return format!("{}y", cut(n - 3));
+            }
+            if matches!(s[n - 3], 'i' | 'a' | 'o' | 'e') {
+                return word.to_string();
+            }
+            cut(n - 1)
+        }
+        _ => cut(n - 1),
+    }
+}
+
+/// `token_chars` as a tokenizer's spec lists them.
+fn token_chars(spec: &Value) -> Vec<String> {
+    match spec.get("token_chars") {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(Value::String(one)) => one.split(',').map(|s| s.trim().to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a character is one of the kinds a gram may be made of.
+fn gram_char_allowed(c: char, kinds: &[String]) -> bool {
+    kinds.iter().any(|k| match k.as_str() {
+        "letter" => c.is_alphabetic(),
+        "digit" => c.is_numeric(),
+        "whitespace" => c.is_whitespace(),
+        "punctuation" => c.is_ascii_punctuation() && !"$+<=>^`|~".contains(c),
+        "symbol" => {
+            "$+<=>^`|~".contains(c)
+                || (!c.is_alphanumeric() && !c.is_whitespace() && !c.is_ascii_punctuation())
+        }
+        _ => false,
+    })
+}
+
+/// Whether a tokenizer of this name exists, built in.
+pub fn knows_tokenizer(name: &str) -> bool {
+    name == "standard" || !matches!(source_of_name(name), Source::Standard)
+}
+
+/// Whether a token filter of this name exists, built in or defined by the
+/// index whose `analysis.filter` settings are given.
+pub fn knows_filter(name: &str, defined: &Value) -> bool {
+    token_filter(name, defined).is_some()
+}
+
+#[cfg(test)]
+mod english_light_tests {
+    use super::minimal_english;
+
+    /// The table the reference answers for `minimal_english`.
+    #[test]
+    fn minimal_english_takes_plurals_off_and_nothing_else() {
+        let cases = [
+            ("flies", "fly"),
+            ("flying", "flying"),
+            ("boxes", "boxe"),
+            ("studies", "study"),
+            ("agreed", "agreed"),
+            ("ponies", "pony"),
+            ("caresses", "caresse"),
+            ("cats", "cat"),
+            ("happiness", "happiness"),
+        ];
+        for (word, want) in cases {
+            assert_eq!(minimal_english(word), want, "{word}");
+        }
     }
 }

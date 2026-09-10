@@ -173,10 +173,13 @@ fn write_doc_within(
         // writes, and a caller reading the refusal is told what it collided
         // with rather than only that it collided
         let at = st.version_of(id);
-        return Err(err(
+        return Err(crate::api::shared::doc_err(
             StatusCode::CONFLICT,
             "version_conflict_engine_exception",
             format!("[{id}]: version conflict, document already exists (current version [{at}])"),
+            &st.name,
+            &st.uuid,
+            st.shard_of_doc(id),
         ));
     }
     // the shard a write belongs to decides which refresh will show it
@@ -789,7 +792,11 @@ pub async fn get_doc(
         Some(mut src) => {
             crate::security::audit_document_read(&g.name, &id, &src);
             crate::security::narrow_source(&store, &g.name, &mut src);
-            let fields = stored_fields(&src, &p);
+            // only what the mapping stores: a field kept in `_source` alone is
+            // not a stored field, and was answered as one
+            let fields = crate::api::source::stored_fields_mapped(&src, &p, |name| {
+                g.mapping.field_option(name, "store").and_then(|v| v.as_bool()).unwrap_or(false)
+            });
             let mut body = json!({
                 "_index": g.name, "_id": id,
                 "_version": g.version_of(&id),
@@ -808,15 +815,19 @@ pub async fn get_doc(
             if asked_size && g.mapping.raw.pointer("/_size/enabled") == Some(&json!(true)) {
                 body["_size"] = json!(src.to_string().len());
             }
+            // `stored_fields` without `_source` asks for no source at all,
+            // whether or not any of the fields named is stored: the answer
+            // left it out only when a stored field was found, so a field kept
+            // in `_source` alone brought the whole source back
+            let only_stored = p.contains_key("stored_fields")
+                && !p.contains_key("_source")
+                && !p.contains_key("_source_includes")
+                && !wants_source_via_stored_fields(&p);
             if let Some(f) = fields {
                 body["fields"] = f;
-                // OpenSearch omits _source when only stored_fields were asked for
-                if !p.contains_key("_source")
-                    && !p.contains_key("_source_includes")
-                    && !wants_source_via_stored_fields(&p)
-                {
-                    return respond(&p, body);
-                }
+            }
+            if only_stored {
+                return respond(&p, body);
             }
             body["_source"] = filter_source_params(&src, &p);
             respond(&p, body)

@@ -742,6 +742,18 @@ pub async fn bulk(
             g.sync_translog();
         }
     }
+    // a bulk asked to refresh says so of every item that wrote something, as
+    // a single write does; a noop and a failure wrote nothing to show
+    if matches!(p.get("refresh").map(|s| s.as_str()), Some("true") | Some("")) {
+        for item in items.iter_mut() {
+            if let Some(o) = item.as_object_mut().and_then(|o| o.values_mut().next())
+                && o.get("error").is_none()
+                && o.get("result").and_then(|r| r.as_str()).is_some_and(|r| r != "noop")
+            {
+                o["forced_refresh"] = json!(true);
+            }
+        }
+    }
     let mut out = json!({
         // a write that took less than a millisecond still took some time:
         // OpenSearch's own clock never reports a bulk as instantaneous, and a
@@ -763,11 +775,19 @@ pub async fn bulk(
 /// conflict; the error travels beside the response it was written into.
 fn failed_item(op: &str, index: &str, id: &str, e: Response) -> Value {
     match e.extensions().get::<crate::api::shared::ErrorKind>() {
-        Some(k) => json!({ op: {
-            "_index": index, "_id": id, "status": e.status().as_u16(),
-            "error": {"type": k.kind, "reason": k.reason,
-                      "root_cause": [{"type": k.kind, "reason": k.reason}]}
-        }}),
+        // an item's error is the cause itself, with where it happened, as
+        // the reference writes it: no `root_cause` list inside an item
+        Some(k) => {
+            let mut error = json!({"type": k.kind, "reason": k.reason});
+            if let Some(w) = e.extensions().get::<crate::api::shared::DocWhere>() {
+                error["index"] = json!(w.index);
+                error["shard"] = json!(w.shard.to_string());
+                error["index_uuid"] = json!(w.uuid);
+            }
+            json!({ op: {
+                "_index": index, "_id": id, "status": e.status().as_u16(), "error": error
+            }})
+        }
         None => json!({ op: {
             "_index": index, "_id": id, "status": 409,
             "error": {"type": "version_conflict_engine_exception",

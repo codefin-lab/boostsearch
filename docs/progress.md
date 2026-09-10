@@ -5239,7 +5239,8 @@ claim in a document, a second lock on a door that is already locked.
 | 16 | 7 | 2 | 9 | 18 |
 | 17 | 0 | 5 | 8 | 13 |
 | 18 | 1 | 6 | 8 | 15 |
-| **6-18** | **21** | **34** | **34** | **89** |
+| 19 | 0 | 3 | 5 | 8 |
+| **6-19** | **21** | **37** | **39** | **97** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5593,4 +5594,62 @@ paths), and the three-node chaos check -- run because the metadata sync
 changed -- with no acknowledged write lost and the copies agreeing. Against
 OpenSearch 3.1.0: snapshots 40/53, ingest and aliases 56/59 (the three left
 are `_simulate` timestamps).
+
+## The nineteenth review
+
+The analysis API and the edges of the document API, held to the reference:
+`tools/corpora/docs_analyze.ndjson`, 60 requests -- `_analyze` over every
+built-in analyzer, tokenizers and filters written inline, char filters,
+`explain`, an index's own analyzer; and a bulk with every kind of failure in
+it, updates by script, by document, upserted and turned into noops or
+deletes, the three kinds of version, `if_seq_no`, `mget` and `stored_fields`.
+Before this
+review 47 of the 60 answers were the same; after it, 55. Of the five left,
+all are a refusal's `index_uuid` and shard -- the uuids are two different
+indices', and the shard differs because an id is routed to a different shard
+here than in the reference, which the twentieth review takes up -- and one
+of them also carries the `_seq_no` noted below.
+
+One of this review's own changes was caught before it was committed: the
+change that stopped `stored_fields` answering fields the mapping does not
+store also stopped the answer leaving `_source` out when none was found, and
+the replay showed the source coming back.
+
+No P0.
+
+**P1 -- an `ngram` or `edge_ngram` tokenizer ignored `token_chars`.** Told to
+make grams of letters only, it made them across digits: `ab1cd` gave `ab1`,
+`b1c` and `1cd` where the reference gives `ab` and `cd`, and a field built
+that way matched text its mapping said it should not. The text is now cut
+into runs of the characters asked for, and grams made within each.
+
+**P1 -- `_analyze` answered for analyzers, tokenizers and filters that do not
+exist.** With the standard one's tokens. A mistyped name in a mapping being
+tried out looked as though it worked. It is refused now, in the reference's
+words, which say `global` when no index was named.
+
+**P1 -- `light_english` and `minimal_english` ran the Porter stemmer.** The
+reference runs KStem for the first and only takes plurals off for the second:
+`flies` stays `flies` under `light_english` and becomes `fly` under
+`minimal_english`, where both made it `fli`. Measured word by word against
+the reference before it was changed.
+
+**P2** -- a bulk item's error carried a `root_cause` list the reference does
+not put inside an item, and neither it nor the single-document refusals --
+version conflicts, a missing document -- said which index, uuid and shard
+they were about; a bulk asked to refresh did not say so of its items, and an
+update that was a noop said it had forced a refresh; `stored_fields` answered
+fields the mapping does not store, from `_source`; and a noop or a refused
+write moves `_seq_no` on, where the reference's does not (left: it is how the
+writer numbers operations, and nothing reads the numbers across engines).
+
+A unit test of the transport -- three nodes dialling each other at once on
+fixed ports -- failed once while the machine was running a build and a
+replay beside it, and passed every time alone and in the next full run. It
+is timing, not this review's code, and is noted so the next failure of it is
+read that way first.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+191/191, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths). Against OpenSearch 3.1.0: the analysis and document corpus 55/60.
 

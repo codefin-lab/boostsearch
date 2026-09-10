@@ -334,6 +334,49 @@ pub async fn analyze(
         Some(s) => s.read().analysis.clone(),
         None => crate::analysis::Registry::default(),
     };
+    // A name nothing defines is refused, in the reference's words -- which
+    // say `global` when no index was named. An analyzer or filter that did
+    // not exist was answered with tokens, as though it had been the standard
+    // one, and a typo in a mapping being tried out looked like it worked.
+    let global = if st.is_none() { "global " } else { "" };
+    let missing = |what: &str, name: &str, under: bool| {
+        let under = if under { "under " } else { "" };
+        err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("failed to find {global}{what} {under}[{name}]"),
+        )
+    };
+    if let Some(name) = analyzer
+        && registry.get(name).is_none()
+    {
+        return missing("analyzer", name, false);
+    }
+    let defined = |kind: &str| -> Value {
+        st.as_ref()
+            .and_then(|s| {
+                let g = s.read();
+                g.settings
+                    .pointer(&format!("/index/analysis/{kind}"))
+                    .or_else(|| g.settings.pointer(&format!("/analysis/{kind}")))
+                    .cloned()
+            })
+            .unwrap_or_else(|| json!({}))
+    };
+    if let Some(Value::String(name)) = body.get("tokenizer")
+        && !crate::analysis::knows_tokenizer(name)
+        && defined("tokenizer").get(name.as_str()).is_none()
+    {
+        return missing("tokenizer", name, true);
+    }
+    let filters = defined("filter");
+    for named in body.get("filter").and_then(|f| f.as_array()).into_iter().flatten() {
+        if let Value::String(name) = named
+            && !crate::analysis::knows_filter(name, &filters)
+        {
+            return missing("filter", name, true);
+        }
+    }
     let chain = {
         let g = st.as_ref().map(|s| s.read());
         let g = g.as_deref();

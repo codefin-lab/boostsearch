@@ -182,7 +182,13 @@ pub async fn mget(
                 if let Some(spec) = &stored_spec {
                     let mut sub = Params::new();
                     sub.insert("stored_fields".into(), spec.clone());
-                    if let Some(f) = stored_fields(&src, &sub) {
+                    // only what the mapping stores, as for a single get
+                    if let Some(f) = crate::api::source::stored_fields_mapped(&src, &sub, |name| {
+                        g.mapping
+                            .field_option(name, "store")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    }) {
                         d["fields"] = f;
                     }
                     wants_source =

@@ -26,13 +26,16 @@ pub(crate) fn version_check(
     let existed = exists_doc(st, id);
     let have = st.version_of(id);
     let conflict = |have: u64| {
-        Err(err(
+        Err(crate::api::shared::doc_err(
             StatusCode::CONFLICT,
             "version_conflict_engine_exception",
             format!(
                 "[{id}]: version conflict, current version [{have}] is higher or equal to \
                  the one provided [{want}]"
             ),
+            &st.name,
+            &st.uuid,
+            st.shard_of_doc(id),
         ))
     };
     match ty {
@@ -50,13 +53,16 @@ pub(crate) fn version_check(
         }
         _ => {
             if !existed || want != have {
-                return Err(err(
+                return Err(crate::api::shared::doc_err(
                     StatusCode::CONFLICT,
                     "version_conflict_engine_exception",
                     format!(
                         "[{id}]: version conflict, required version [{want}] is different \
                          to the one in the index [{have}]"
                     ),
+                    &st.name,
+                    &st.uuid,
+                    st.shard_of_doc(id),
                 ));
             }
             Ok(None)

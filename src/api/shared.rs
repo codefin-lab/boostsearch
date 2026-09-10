@@ -66,6 +66,39 @@ pub fn err(status: StatusCode, kind: &str, reason: impl Into<String>) -> Respons
     r
 }
 
+/// Where a document's refusal happened: the index, its uuid and the shard.
+#[derive(Clone, Debug)]
+pub struct DocWhere {
+    pub index: String,
+    pub uuid: String,
+    pub shard: u64,
+}
+
+/// A refusal about one document, in the shape the reference gives it: the
+/// index, its uuid and the shard beside the type and reason, at the top and
+/// in the cause. A version conflict or a missing document said only what and
+/// why, not where. The place travels with the response too, so a bulk item
+/// built from it can say the same.
+pub fn doc_err(
+    status: StatusCode,
+    kind: &str,
+    reason: impl Into<String>,
+    index: &str,
+    uuid: &str,
+    shard: u64,
+) -> Response {
+    let reason = reason.into();
+    let cause = json!({"type": kind, "reason": reason, "index": index,
+                       "shard": shard.to_string(), "index_uuid": uuid});
+    let mut error = cause.clone();
+    error["root_cause"] = json!([cause]);
+    let mut r =
+        (status, axum::Json(json!({"error": error, "status": status.as_u16()}))).into_response();
+    r.extensions_mut().insert(ErrorKind { kind: kind.to_string(), reason });
+    r.extensions_mut().insert(DocWhere { index: index.to_string(), uuid: uuid.to_string(), shard });
+    r
+}
+
 /// What an error response says, kept beside its body.
 #[derive(Clone, Debug)]
 pub struct ErrorKind {

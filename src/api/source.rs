@@ -191,6 +191,22 @@ pub(crate) fn stored_fields(src: &Value, p: &Params) -> Option<Value> {
     if out.is_empty() { None } else { Some(Value::Object(out)) }
 }
 
+/// `stored_fields`, of the fields the mapping actually stores.
+pub(crate) fn stored_fields_mapped(
+    src: &Value,
+    p: &Params,
+    stored: impl Fn(&str) -> bool,
+) -> Option<Value> {
+    let mut all = stored_fields(src, p)?;
+    if let Some(o) = all.as_object_mut() {
+        o.retain(|name, _| stored(name));
+        if o.is_empty() {
+            return None;
+        }
+    }
+    Some(all)
+}
+
 pub(crate) fn flat_lookup(v: &Value, path: &str) -> Option<Value> {
     let mut cur = v;
     for seg in path.split('.') {

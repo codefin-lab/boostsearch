@@ -1,0 +1,60 @@
+{"method": "DELETE", "path": "/r19*", "body": null}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "The Quick-Brown fox's 2 jumps, e-mail a@b.co"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "simple", "text": "Hello WORLD 42 x-y"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "whitespace", "text": "Hello  WORLD\tx-y"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "stop", "text": "the quick and the dead"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "keyword", "text": "Keep Me Whole"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "english", "text": "running runners ran easily"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "standard", "filter": ["lowercase", "asciifolding"], "text": "Caf\u00e9 Cr\u00e8me Br\u00fbl\u00e9e"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "ngram", "text": "abc"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": {"type": "ngram", "min_gram": 2, "max_gram": 3, "token_chars": ["letter"]}, "text": "ab1cd"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": {"type": "edge_ngram", "min_gram": 1, "max_gram": 3}, "text": "search"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "keyword", "filter": [{"type": "pattern_replace", "pattern": "[0-9]", "replacement": "#"}], "text": "a1b22"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "standard", "filter": [{"type": "synonym", "synonyms": ["quick, fast"]}], "text": "quick fox"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "standard", "filter": [{"type": "shingle", "min_shingle_size": 2, "max_shingle_size": 2}], "text": "a b c"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "standard", "filter": ["lowercase", {"type": "stop", "stopwords": ["b"]}], "text": "A B C"}}
+{"method": "POST", "path": "/_analyze", "body": {"char_filter": ["html_strip"], "tokenizer": "standard", "text": "<p>Hello <b>there</b></p>"}}
+{"method": "POST", "path": "/_analyze", "body": {"char_filter": [{"type": "mapping", "mappings": ["ph => f"]}], "tokenizer": "standard", "text": "phone"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "pattern", "text": "a,b;;c"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": {"type": "pattern", "pattern": ";"}, "text": "a,b;;c"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "uax_url_email", "text": "mail me@x.io at https://x.io/a"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "path_hierarchy", "text": "/a/b/c"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "letter", "text": "it's 2 o'clock"}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": ["one two", "three"]}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "standard", "text": "explain me", "explain": true}}
+{"method": "POST", "path": "/_analyze", "body": {"analyzer": "nosuch", "text": "x"}}
+{"method": "POST", "path": "/_analyze", "body": {"tokenizer": "standard", "filter": ["nosuchfilter"], "text": "x"}}
+{"method": "PUT", "path": "/r19-an", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0, "analysis": {"analyzer": {"my": {"type": "custom", "tokenizer": "standard", "filter": ["lowercase", "my_stem"]}}, "filter": {"my_stem": {"type": "stemmer", "language": "light_english"}}}}, "mappings": {"properties": {"t": {"type": "text", "analyzer": "my"}}}}}
+{"method": "POST", "path": "/r19-an/_analyze", "body": {"analyzer": "my", "text": "Flies FLYING flew"}}
+{"method": "POST", "path": "/r19-an/_analyze", "body": {"field": "t", "text": "Boxes BOXING"}}
+{"method": "POST", "path": "/r19-an/_analyze", "body": {"field": "nosuchfield", "text": "x"}}
+{"method": "PUT", "path": "/r19-d", "body": {"settings": {"number_of_shards": 2, "number_of_replicas": 0}, "mappings": {"properties": {"n": {"type": "long"}, "k": {"type": "keyword"}, "tags": {"type": "keyword"}}}}}
+{"method": "POST", "path": "/_bulk?refresh=true", "body": "{\"index\": {\"_index\": \"r19-d\", \"_id\": \"1\"}}\n{\"n\": 1, \"k\": \"a\"}\n{\"create\": {\"_index\": \"r19-d\", \"_id\": \"1\"}}\n{\"n\": 9}\n{\"update\": {\"_index\": \"r19-d\", \"_id\": \"nope\"}}\n{\"doc\": {\"n\": 2}}\n{\"index\": {\"_index\": \"r19-d\", \"_id\": \"2\", \"routing\": \"r1\"}}\n{\"n\": 2, \"k\": \"b\"}\n{\"delete\": {\"_index\": \"r19-d\", \"_id\": \"missing\"}}\n{\"index\": {\"_index\": \"r19-d\", \"_id\": \"3\"}}\n{\"n\": \"not-a-number\"}\n{\"index\": {\"_index\": \"r19-d\", \"_id\": \"4\"}}\n{\"n\": 4, \"tags\": [\"x\", \"y\"]}\n"}
+{"method": "GET", "path": "/r19-d/_doc/2", "body": null}
+{"method": "GET", "path": "/r19-d/_doc/2?routing=r1", "body": null}
+{"method": "POST", "path": "/r19-d/_update/1?refresh=true", "body": {"script": {"source": "ctx._source.n += params.d", "params": {"d": 10}}}}
+{"method": "POST", "path": "/r19-d/_update/1?refresh=true", "body": {"doc": {"n": 11}, "detect_noop": true}}
+{"method": "POST", "path": "/r19-d/_update/1?refresh=true", "body": {"doc": {"n": 11}, "detect_noop": false}}
+{"method": "POST", "path": "/r19-d/_update/5?refresh=true", "body": {"doc": {"n": 5}, "doc_as_upsert": true}}
+{"method": "POST", "path": "/r19-d/_update/6?refresh=true", "body": {"script": {"source": "ctx._source.n = 1"}, "upsert": {"n": 60}}}
+{"method": "POST", "path": "/r19-d/_update/6?refresh=true", "body": {"script": {"source": "ctx.op = 'noop'"}}}
+{"method": "POST", "path": "/r19-d/_update/6?refresh=true", "body": {"script": {"source": "ctx.op = 'delete'"}}}
+{"method": "POST", "path": "/r19-d/_update/7", "body": {"doc": {"n": 7}}}
+{"method": "POST", "path": "/r19-d/_update/4?refresh=true", "body": {"script": {"source": "ctx._source.tags.add(params.t)", "params": {"t": "z"}}}}
+{"method": "GET", "path": "/r19-d/_doc/4?_source_includes=tags", "body": null}
+{"method": "PUT", "path": "/r19-d/_doc/1?if_seq_no=0&if_primary_term=1", "body": {"n": 100}}
+{"method": "PUT", "path": "/r19-d/_doc/1?op_type=create", "body": {"n": 100}}
+{"method": "PUT", "path": "/r19-d/_doc/8?version=5&version_type=external", "body": {"n": 8}}
+{"method": "PUT", "path": "/r19-d/_doc/8?version=3&version_type=external", "body": {"n": 8}}
+{"method": "PUT", "path": "/r19-d/_doc/8?version=5&version_type=external_gte", "body": {"n": 88}}
+{"method": "POST", "path": "/_mget", "body": {"docs": [{"_index": "r19-d", "_id": "1", "_source": ["n"]}, {"_index": "r19-d", "_id": "missing"}, {"_index": "r19-nope", "_id": "1"}, {"_index": "r19-d", "_id": "2", "routing": "r1"}]}}
+{"method": "POST", "path": "/r19-d/_mget", "body": {"ids": ["4", "5", "zz"]}}
+{"method": "POST", "path": "/r19-d/_mget?_source=false", "body": {"ids": ["4"]}}
+{"method": "GET", "path": "/r19-d/_count", "body": null}
+{"method": "POST", "path": "/r19-d/_search", "body": {"query": {"match_all": {}}, "sort": [{"n": "asc"}], "size": 20, "_source": ["n", "k", "tags"]}}
+{"method": "DELETE", "path": "/r19-d/_doc/missing", "body": null}
+{"method": "DELETE", "path": "/r19-d/_doc/5?refresh=true", "body": null}
+{"method": "HEAD", "path": "/r19-d/_doc/5", "body": null}
+{"method": "HEAD", "path": "/r19-d/_doc/4", "body": null}
+{"method": "GET", "path": "/r19-d/_doc/4?stored_fields=tags", "body": null}
+{"method": "DELETE", "path": "/r19*", "body": null}

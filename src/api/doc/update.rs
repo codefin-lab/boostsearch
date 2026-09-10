@@ -110,10 +110,13 @@ pub async fn update_doc(
                     (Value::Null, true)
                 }
                 (None, None) => {
-                    return err(
+                    return crate::api::shared::doc_err(
                         StatusCode::NOT_FOUND,
                         "document_missing_exception",
                         format!("[{id}]: document missing"),
+                        &g.name,
+                        &g.uuid,
+                        g.shard_of_doc(&id),
                     );
                 }
             };
@@ -205,10 +208,13 @@ pub async fn update_doc(
                 match ups {
                     Some(u) => (u, "created"),
                     None => {
-                        return err(
+                        return crate::api::shared::doc_err(
                             StatusCode::NOT_FOUND,
                             "document_missing_exception",
                             format!("[{id}]: document missing"),
+                            &g.name,
+                            &g.uuid,
+                            g.shard_of_doc(&id),
                         );
                     }
                 }
@@ -287,7 +293,10 @@ pub async fn update_doc(
     }
     let shard = g.shard_of_doc(&id);
     maybe_refresh(&mut g, &p, Some(shard));
-    note_forced_refresh(&mut body_out, &p);
+    // a noop wrote nothing, so there was nothing for a refresh to show
+    if result != "noop" {
+        note_forced_refresh(&mut body_out, &p);
+    }
     let status = if result == "created" { StatusCode::CREATED } else { StatusCode::OK };
     (status, axum::Json(body_out)).into_response()
 }
