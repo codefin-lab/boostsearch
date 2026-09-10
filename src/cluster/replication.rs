@@ -137,6 +137,14 @@ tokio::task_local! {
     pub static WRITES: std::cell::RefCell<Vec<ReplicaOp>>;
 }
 
+/// `BOOSTSEARCH_TRACE_WRITES`: every write, on every node, as it is copied,
+/// taken, refused or answered for -- for following one document through a
+/// chaos run, where the copies end up disagreeing about it.
+fn trace_writes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOOSTSEARCH_TRACE_WRITES").is_ok())
+}
+
 /// Note a write the primary made, if a request is being handled.
 pub fn record(op: ReplicaOp) {
     let _ = WRITES.try_with(|w| w.borrow_mut().push(op));
@@ -358,6 +366,24 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
             }
         }
     }
+    if trace_writes() {
+        for op in &ops {
+            let took: Vec<&str> = acked_nodes
+                .get(&op.index)
+                .map(|v| v.iter().map(|n| n.as_str()).collect())
+                .unwrap_or_default();
+            eprintln!(
+                "TRACE primary {} {}/{} seq={} term={} copies_took={:?} manager_unreachable={}",
+                me.as_str(),
+                op.index,
+                op.id,
+                op.seq,
+                op.term,
+                took,
+                manager_unreachable
+            );
+        }
+    }
     // successful copies of a shard: the primary and the in-sync replica
     // copies of that shard whose node answered; over a request that wrote
     // to several shards, the fewest
@@ -458,6 +484,18 @@ pub async fn finish(
         })
     });
     if nothing_to_do {
+        if trace_writes() {
+            for op in &ops {
+                eprintln!(
+                    "TRACE answer {}/{} seq={} term={} alone status={}",
+                    op.index,
+                    op.id,
+                    op.seq,
+                    op.term,
+                    response.status().as_u16()
+                );
+            }
+        }
         return response;
     }
     // A node that has lost the cluster manager knows nothing of what the
@@ -478,6 +516,11 @@ pub async fn finish(
             "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
         );
     }
+    let traced: Vec<String> = if trace_writes() {
+        ops.iter().map(|o| format!("{}/{} seq={} term={}", o.index, o.id, o.seq, o.term)).collect()
+    } else {
+        Vec::new()
+    };
     let acks = replicate(ops, refresh).await;
     // a copy that refused this node's term: this node is no primary any
     // more, and the write did not happen as far as the cluster is concerned
@@ -490,6 +533,9 @@ pub async fn finish(
         })
     });
     if stale {
+        for t in &traced {
+            eprintln!("TRACE answer {t} refused stale-term");
+        }
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "unavailable_shards_exception",
@@ -497,11 +543,17 @@ pub async fn finish(
         );
     }
     if acks.values().any(|a| a.manager_unreachable) {
+        for t in &traced {
+            eprintln!("TRACE answer {t} refused manager-unreachable");
+        }
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "unavailable_shards_exception",
             "a copy did not take this write and the cluster manager could not be told; not acknowledged, retry",
         );
+    }
+    for t in &traced {
+        eprintln!("TRACE answer {t} status={}", response.status().as_u16());
     }
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
@@ -545,6 +597,19 @@ pub fn install(store: Store) {
                 }
                 // a primary of an older term is no primary: its writes are refused
                 let known_term = super::primary_term(&index, 0);
+                if trace_writes() {
+                    let refused = ops.iter().any(|op| op.term < known_term);
+                    for op in &ops {
+                        eprintln!(
+                            "TRACE replica {} {index}/{} seq={} term={} known_term={known_term} {}",
+                            from.as_str(),
+                            op.id,
+                            op.seq,
+                            op.term,
+                            if refused { "refused" } else { "taken" }
+                        );
+                    }
+                }
                 if ops.iter().any(|op| op.term < known_term) {
                     return e.error(
                         from,
@@ -556,6 +621,11 @@ pub fn install(store: Store) {
                 }
                 // a copy being filled takes the write when the seed is done
                 if park(&index, &ops) {
+                    if trace_writes() {
+                        for op in &ops {
+                            eprintln!("TRACE replica parked {index}/{} seq={}", op.id, op.seq);
+                        }
+                    }
                     let body =
                         serde_json::to_vec(&json!({"applied": ops.len()})).unwrap_or_default();
                     return e.response(from, body);
@@ -1196,6 +1266,12 @@ pub async fn catch_up_by_scan(
             };
             let mut g = st.write();
             for op in &ops {
+                if trace_writes() {
+                    eprintln!(
+                        "TRACE recovered {name}/{} seq={} term={} overwrite={overwrite}",
+                        op.id, op.seq, op.term
+                    );
+                }
                 if overwrite {
                     crate::api::doc::apply_recovered(&mut g, op);
                 } else {

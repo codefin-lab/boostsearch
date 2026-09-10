@@ -25,6 +25,11 @@ pub struct Shared {
     pub mode: RwLock<String>,
     /// whether the node is under a cluster manager whose word counts
     pub manager: std::sync::atomic::AtomicBool,
+    /// when that was last worked out, and for how long it holds: a node that
+    /// was stopped answers requests before its loop has run again, and must
+    /// not answer them on what it knew before it stopped
+    pub manager_at: std::sync::atomic::AtomicU64,
+    pub lease: std::sync::atomic::AtomicU64,
 }
 
 /// Answers awaited by callers on this node, by request id -- and by the node
@@ -173,6 +178,8 @@ impl Runtime {
             state: RwLock::new(logic.state().clone()),
             mode: RwLock::new(format!("{:?}", logic.mode)),
             manager: std::sync::atomic::AtomicBool::new(logic.manager_here()),
+            manager_at: std::sync::atomic::AtomicU64::new(super::clock().wall()),
+            lease: std::sync::atomic::AtomicU64::new(logic.lease()),
         });
         let rt = Arc::new(Runtime {
             inputs: tx.clone(),
@@ -256,6 +263,10 @@ impl Runtime {
                     shared
                         .manager
                         .store(logic.manager_here(), std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .manager_at
+                        .store(super::clock().wall(), std::sync::atomic::Ordering::Relaxed);
+                    shared.lease.store(logic.lease(), std::sync::atomic::Ordering::Relaxed);
                 }
                 for o in outputs {
                     // everything but a timer either promises something or
@@ -406,7 +417,10 @@ impl Runtime {
     /// enough for the checks to miss -- knows nothing of what the cluster
     /// has decided since.
     pub fn has_manager(&self) -> bool {
-        self.shared.manager.load(std::sync::atomic::Ordering::Relaxed)
+        use std::sync::atomic::Ordering::Relaxed;
+        let at = self.shared.manager_at.load(Relaxed);
+        let lease = self.shared.lease.load(Relaxed);
+        self.shared.manager.load(Relaxed) && super::clock().wall().saturating_sub(at) <= lease
     }
 }
 

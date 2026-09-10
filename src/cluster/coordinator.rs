@@ -178,6 +178,8 @@ pub struct Coordinator {
     /// unanswered follower checks, by request id
     pending_checks: BTreeMap<u64, NodeId>,
     leader_misses: u32,
+    /// when the leader last answered this node, on this node's clock
+    last_leader_ok: Millis,
     /// shard events whose reporter is waiting for the state that carries
     /// them to be committed: (the version when it arrived, who, what)
     event_replies: Vec<(u64, NodeId, Envelope)>,
@@ -237,6 +239,8 @@ enum ShardEvent {
 #[derive(Clone, Debug, Default)]
 struct FollowerHealth {
     misses: u32,
+    /// when this node last answered a check, on the manager's clock
+    last_ok: Millis,
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +314,7 @@ impl Coordinator {
             next_request: 1,
             pending_checks: BTreeMap::new(),
             leader_misses: 0,
+            last_leader_ok: 0,
             event_replies: Vec::new(),
             resynced: BTreeMap::new(),
             started_here: Default::default(),
@@ -349,13 +354,29 @@ impl Coordinator {
     /// others is a leader of nothing, and the cluster is electing another. A
     /// write it took alone would be thrown away, so it takes none -- what
     /// OpenSearch's `no cluster-manager` block does.
+    /// How long an answer counts: the retries a check is given, at the
+    /// interval it is sent.
+    pub fn lease(&self) -> Millis {
+        self.timings.follower_check_interval.max(self.timings.leader_check_interval)
+            * Millis::from(self.timings.follower_check_retries.max(1))
+    }
+
     pub fn manager_here(&self) -> bool {
         match &self.mode {
             // a follower whose checks of the leader are going unanswered is
             // out of touch: what it knows of the cluster is as old as the
             // last check that came back, and the primary it thinks it holds
             // may have been given to somebody else since
-            Mode::Follower(_) => self.leader_misses == 0,
+            //
+            // Heard from *recently*, not merely not yet missed: a node that was
+            // stopped -- a pause, a stall, a SIGSTOP -- missed nothing while it
+            // was stopped, because nothing ran, and came back sure of a manager
+            // the cluster had replaced. A leader stopped that way came back and
+            // acknowledged twenty writes the new primary never had.
+            Mode::Follower(_) => {
+                self.leader_misses == 0
+                    && self.last_wall.saturating_sub(self.last_leader_ok) <= self.lease()
+            }
             Mode::Candidate => false,
             Mode::Leader => {
                 let config = &self.committed.last_committed_config;
@@ -370,7 +391,14 @@ impl Coordinator {
                         // following another manager already, and a write this
                         // node takes alone would be thrown away with its term
                         **n == self.me.id
-                            || self.followers.get(*n).map(|h| h.misses == 0).unwrap_or(false)
+                            || self
+                                .followers
+                                .get(*n)
+                                .map(|h| {
+                                    h.misses == 0
+                                        && self.last_wall.saturating_sub(h.last_ok) <= self.lease()
+                                })
+                                .unwrap_or(false)
                     })
                     .count();
                 answering * 2 > config.len()
@@ -496,6 +524,7 @@ impl Coordinator {
         self.pending_checks.clear();
         self.leader_check_outstanding = None;
         self.leader_misses = 0;
+        self.last_leader_ok = self.last_wall;
         self.election_attempt = 0;
         self.election_scheduled = false;
         self.leader_hint = None;
@@ -744,7 +773,12 @@ impl Coordinator {
                 if *from == self.me.id {
                     return out;
                 }
-                self.followers.entry(node.id.clone()).or_default().misses = 0;
+                {
+                    let now = self.last_wall;
+                    let h = self.followers.entry(node.id.clone()).or_default();
+                    h.misses = 0;
+                    h.last_ok = now;
+                }
                 self.pending_removals.remove(&node.id);
                 if self.committed.nodes.get(&node.id) == Some(&node)
                     && !self.lagging.contains(&node.id)
@@ -788,6 +822,11 @@ impl Coordinator {
         self.election_scheduled = false;
         self.election_attempt = 0;
         self.followers.clear();
+        // a node that has just voted for this term has just been heard from
+        let now = self.last_wall;
+        for voter in self.join_votes.keys() {
+            self.followers.insert(voter.clone(), FollowerHealth { misses: 0, last_ok: now });
+        }
         self.lagging.clear();
         let mut out = Vec::new();
         if self.notes {
@@ -2024,6 +2063,7 @@ impl Coordinator {
                     let mut out = self.apply_shards();
                     if was == Mode::Candidate {
                         self.leader_misses = 0;
+                        self.last_leader_ok = self.last_wall;
                         self.leader_check_outstanding = None;
                         out.push(Output::Timer {
                             id: T_LEADER_CHECK,
@@ -2070,11 +2110,14 @@ impl Coordinator {
                 self.persist_accepted(durable);
                 let was_following = self.mode == Mode::Follower(leader.clone());
                 self.mode = Mode::Follower(leader.clone());
+                // a publication from the leader is word from it
+                self.last_leader_ok = self.last_wall;
                 self.leader_hint = Some(leader);
                 self.election_scheduled = false;
                 let mut out = vec![self.send(&from, e.response(self.me.id.clone(), body))];
                 if !was_following {
                     self.leader_misses = 0;
+                    self.last_leader_ok = self.last_wall;
                     self.leader_check_outstanding = None;
                     out.push(Output::Timer {
                         id: T_LEADER_CHECK,
@@ -2139,6 +2182,7 @@ impl Coordinator {
                 {
                     let a = self.accepted.clone();
                     self.apply_committed(a, durable);
+                    self.last_leader_ok = self.last_wall;
                     let mut out = vec![self.send(&from, e.response(self.me.id.clone(), vec![]))];
                     out.extend(self.apply_shards());
                     if self.notes {
@@ -2182,6 +2226,7 @@ impl Coordinator {
                         self.leader_hint = Some(from.clone());
                         self.election_scheduled = false;
                         self.leader_misses = 0;
+                        self.last_leader_ok = self.last_wall;
                         self.leader_check_outstanding = None;
                         out.push(self.send(&from, e.response(self.me.id.clone(), vec![])));
                         out.push(Output::Timer {
@@ -2202,6 +2247,7 @@ impl Coordinator {
                     && let Some(h) = self.followers.get_mut(&n)
                 {
                     h.misses = 0;
+                    h.last_ok = self.last_wall;
                 }
                 vec![]
             }
@@ -2231,6 +2277,7 @@ impl Coordinator {
                 if self.leader_check_outstanding == Some(e.request_id) {
                     self.leader_check_outstanding = None;
                     self.leader_misses = 0;
+                    self.last_leader_ok = self.last_wall;
                 }
                 vec![]
             }

@@ -6194,3 +6194,59 @@ chaos runs), P1 1 (no resync after a change of primary), P2 12.
 Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 198/198, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
 paths); chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.
+
+## The twenty-seventh review
+
+**P0 -- a manager that was stopped came back sure it still was one, and
+acknowledged writes the cluster had given to another primary.** A leader
+counts a node as answering while its last check has not been missed, and a
+follower counts its leader the same way. Missing a check takes a clock that
+runs; a process that is stopped -- SIGSTOP, a long pause, a stall -- misses
+nothing, because nothing runs, and comes back with every count at zero.
+The node that was both manager and primary in the chaos runs was stopped for
+about eight seconds; in that time the others elected a manager of a new term
+and put the primary elsewhere; the stopped node was let go on, took itself
+for the manager of a full quorum, and answered writes before its first check
+told it otherwise. Twenty of them were on no copy by the end of one run; in
+three others a copy was one write short.
+
+A node now counts an answer only while it is recent: the manager holds a
+quorum while enough of its nodes have answered within the checks' retries at
+their interval (three seconds by default), and a follower holds its manager
+the same way; the nodes that voted for a new term count as just heard from.
+The node's HTTP side reads the same answer with the time it was worked out,
+and stops trusting it when that is older than the lease, so a request that
+arrives before the loop has run again after a stop is refused rather than
+answered on what the node knew before it stopped. The trace below did not catch it
+first: twelve chaos runs on the binary before the change, with every write
+traced, lost none and left no copy short -- against four in twenty-six
+without the trace. Logging each write slows every node enough to move the
+timing the fault depends on; what these runs say is only that the trace does
+not reproduce it, and the case for the change rests on the timelines of the
+four and on what the code did with a stopped clock.
+
+Every write can now be followed through a run with `BOOSTSEARCH_TRACE_WRITES`:
+each node logs, per document, what the primary copied and to whom, what it
+answered, what a copy took or refused and under which term, what waited for
+a fill, and what a fill brought.
+
+Ten chaos runs on the changed binary: none lost a write outright, and in
+nine each copy held every acknowledged write. In one, a copy was one write
+short again, and in the same place: the primary's node stopped at 57.1s, a
+new primary placed at 62.4s, the stopped node let go on at 64.8s, the write
+missed acknowledged at 64.9s -- held by the replica, not by the new primary.
+The lease is right and not enough. A request that had already been let
+through before the node was stopped, and finished after it was let go on,
+never asked again; and how the replica came to hold a write the new primary
+does not is not yet explained. The next review traces it with a trace cheap
+enough not to hide it, and asks whether the node may still acknowledge at
+the moment it acknowledges, not only at the moment the request came in.
+
+Open at the end of this review: P0 1 (a write acknowledged around a stopped node's
+return: one copy short in ten runs since the lease, none lost), P1 1 (no
+resync after a change of primary), P2 12.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, the model's storms over twenty further seeds (40 to 59) clean,
+sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29 paths);
+chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.
