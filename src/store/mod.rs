@@ -741,8 +741,20 @@ impl Store {
         self.components.read().clone()
     }
 
+    /// Every component the name or pattern names, deleted; whether there
+    /// was one. A pattern was looked up as a name, so `DELETE
+    /// _component_template/logs-*` deleted nothing and said so.
     pub fn delete_component(&self, name: &str) -> bool {
-        self.components.write().remove(name).is_some()
+        let mut all = self.components.write();
+        let named: Vec<String> = all
+            .keys()
+            .filter(|k| k.as_str() == name || wildcard_to_regex(name).is_match(k))
+            .cloned()
+            .collect();
+        for n in &named {
+            all.remove(n);
+        }
+        !named.is_empty()
     }
 
     pub fn add_voting_exclusions(&self, entries: Vec<Value>) {

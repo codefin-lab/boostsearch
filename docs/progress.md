@@ -5237,7 +5237,8 @@ claim in a document, a second lock on a door that is already locked.
 | 14 | 1 | 3 | 1 | 5 |
 | 15 | 1 | 4 | 2 | 7 |
 | 16 | 7 | 2 | 9 | 18 |
-| **6-16** | **20** | **23** | **18** | **61** |
+| 17 | 0 | 5 | 8 | 13 |
+| **6-17** | **20** | **28** | **26** | **74** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5444,4 +5445,75 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 paths), cross-cluster suite 23/24. Against OpenSearch 3.1.0: cross-cluster
 28/35, data streams 21/27, SQL 27/37 -- what is left in each is listed
 above or is an id, a uuid or a size the two engines cannot share.
+
+## The seventeenth review
+
+First what the sixteenth left, then a new surface held to the reference.
+
+What the sixteenth left is done. A scroll over a remote cluster's indices is
+kept by that cluster and asked of it batch by batch; the cross-cluster suite
+now passes 24 of 24. SQL groups come back in key order, as the reference's
+composite aggregation returns them. The `min`, `max` and `sum` of a
+whole-number field are typed by its mapping, and an expression with a double
+on either side stays a double. A scroll over this cluster and another at
+once is refused rather than answered as a scroll over one of them.
+
+The new surface is ingest pipelines, aliases, templates and the by-query
+walks: `tools/corpora/ingest_alias.ndjson`, 59 requests, replayed against
+OpenSearch 3.1.0. Before this
+review 44 of the 59 answers were the same; after it, 55, and of the four
+left three differ only in the instant `_simulate` stamped on a document and
+one in the `suppressed` list noted below. The SQL corpus went from 27 of 37
+to 31, and the data stream corpus stands at 21 of 27, the rest being uuids,
+sizes, generated ids and a health colour a one-node reference reports as
+yellow.
+
+No P0 this time: nothing found answered a correct request wrongly or lost a
+document.
+
+**P1 -- a processor given a parameter it does not take was accepted.**
+`ignore_missing` on a `json`, which the reference refuses, was stored and
+ignored, so a pipeline that could never have been stored there ran here,
+doing less than it said. Each processor's parameters are now checked, in a
+stored pipeline and in one sent to `_simulate`.
+
+**P1 -- sorting on `_id` was refused.** `indices.id_field_data.enabled` is
+true by default in the reference; it is honoured now, and only a cluster
+that turned it off refuses.
+
+**P1 -- a component template in use could be deleted.** The index template
+made from it went on creating indices without the mappings it was written to
+give them. It is refused, naming the templates that use it.
+
+**P1 -- two templates of one priority with overlapping patterns were both
+accepted.** Which one an index was made from was left to chance. The second
+is refused, as the reference refuses it -- by the reference's own rule, read
+out of its source: a pattern with its wildcards taken out is the least name
+it could match, and two patterns overlap when either's least name matches
+the other. The first attempt here compared the text before the first `*`,
+and the conformance corpus caught it at once: OpenSearch's own test takes
+`app-test-*-some-*` and `app-test-*-some_other-*` at the same priority, and
+this refused the second. The same rule now decides what `_simulate_index`
+calls overlapping.
+
+**P1 -- deleting component templates by pattern deleted nothing.** A pattern
+was looked up as a name.
+
+**P2** -- deleting index templates by a pattern that matches none answered
+200 where the reference answers 404; a `fail` processor's error named the
+processor, which the reference does not; `aliases [x] missing` lacked the
+resource it names; update-by-query reported `created`; `_simulate_index`
+showed an empty `mappings` and listed as overlapping only the templates that
+claimed the one name, where the reference lists every template whose
+patterns overlap the winner's; PPL typed a count `integer` where it says
+`int`; a computed SQL column written `AS` carried no alias.
+
+Left, and known: the reference lists every processor with a stray parameter
+(`suppressed`), this names the first; SQL error texts differ where the
+reference's legacy engine answers with a Java exception.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+190/190, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths), cross-cluster suite 24/24. Against OpenSearch 3.1.0: ingest and
+aliases 55/59, SQL 31/37, data streams 21/27.
 

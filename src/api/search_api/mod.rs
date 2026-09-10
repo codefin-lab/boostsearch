@@ -524,6 +524,152 @@ fn prefiltered_skips(answers: &[(String, Value)], body: &Value, p: &Params) -> O
     Some(skippable.min(total.saturating_sub(1)))
 }
 
+/// A remote scroll's id, as this cluster hands it out: which cluster holds
+/// the scroll, and the id that cluster gave it.
+const REMOTE_SCROLL: &str = "ccs~";
+
+/// A scroll over one remote cluster's indices.
+///
+/// The remote keeps the scroll; this cluster keeps nothing but its name in
+/// the id, so the next batch is asked of the cluster that holds it. A scroll
+/// over indices of this cluster and another at once is refused rather than
+/// answered as though it were a scroll over one of them.
+fn scroll_across_clusters(
+    store: &Store,
+    split: crate::api::Split,
+    body: Value,
+    p: &Params,
+) -> Response {
+    if !split.local.is_empty() || split.remote.len() != 1 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "a scroll across clusters may name the indices of one remote cluster only",
+        );
+    }
+    let Some((name, indices)) = split.remote.into_iter().next() else {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "no cluster named");
+    };
+    let known = crate::api::remotes(store);
+    let Some(remote) = known.get(&name) else {
+        return crate::api::shared::no_such_index(&format!("{name}:{indices}"));
+    };
+    let query = p
+        .iter()
+        .filter(|(k, _)| {
+            matches!(
+                k.as_str().unwrap_or(""),
+                "scroll"
+                    | "sort"
+                    | "size"
+                    | "from"
+                    | "rest_total_hits_as_int"
+                    | "typed_keys"
+                    | "track_total_hits"
+                    | "_source"
+            )
+        })
+        .map(|(k, v)| format!("{k}={}", encode_component(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let path = format!("/{indices}/_search");
+    let answered =
+        tokio::task::block_in_place(|| crate::api::ask(remote, "POST", &path, &query, Some(&body)));
+    let (status, mut value) = match answered {
+        Ok(found) => found,
+        Err(why) => return err(StatusCode::BAD_GATEWAY, "connect_transport_exception", why),
+    };
+    if status >= 300 {
+        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+        return (code, axum::Json(value)).into_response();
+    }
+    name_remote_hits(&mut value, &name);
+    if let Some(id) = value.get("_scroll_id").and_then(|v| v.as_str()).map(String::from) {
+        value["_scroll_id"] = json!(format!("{REMOTE_SCROLL}{name}~{id}"));
+    }
+    value["_clusters"] = json!({"total": 1, "successful": 1, "skipped": 0});
+    respond(p, value)
+}
+
+/// A remote's hits, with its name in front of each index.
+fn name_remote_hits(value: &mut Value, cluster: &str) {
+    if let Some(hits) = value.pointer_mut("/hits/hits").and_then(|h| h.as_array_mut()) {
+        for hit in hits {
+            if let Some(index) = hit.get("_index").and_then(|v| v.as_str()).map(String::from) {
+                hit["_index"] = json!(format!("{cluster}:{index}"));
+            }
+        }
+    }
+}
+
+/// A value as it may stand in a URL.
+fn encode_component(v: &str) -> String {
+    v.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b',' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// The next batch of a scroll a remote cluster holds, if the id names one.
+pub(crate) fn remote_scroll(
+    store: &Store,
+    id: &str,
+    keep: Option<&str>,
+    p: &Params,
+) -> Option<Response> {
+    let (name, theirs) = id.strip_prefix(REMOTE_SCROLL)?.split_once('~')?;
+    let known = crate::api::remotes(store);
+    let Some(remote) = known.get(name) else {
+        return Some(err(
+            StatusCode::NOT_FOUND,
+            "search_context_missing_exception",
+            format!("No search context found for id [{id}]"),
+        ));
+    };
+    let query = if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
+        "rest_total_hits_as_int=true"
+    } else {
+        ""
+    };
+    let body = json!({"scroll_id": theirs, "scroll": keep.unwrap_or("1m")});
+    let answered = tokio::task::block_in_place(|| {
+        crate::api::ask(remote, "POST", "/_search/scroll", query, Some(&body))
+    });
+    let (status, mut value) = match answered {
+        Ok(found) => found,
+        Err(why) => return Some(err(StatusCode::BAD_GATEWAY, "connect_transport_exception", why)),
+    };
+    if status >= 300 {
+        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND);
+        return Some((code, axum::Json(value)).into_response());
+    }
+    name_remote_hits(&mut value, name);
+    value["_scroll_id"] = json!(id);
+    if let Some(o) = value.as_object_mut() {
+        o.remove("_clusters");
+    }
+    Some(respond(p, value))
+}
+
+/// A remote scroll let go of, if the id names one; whether it was there.
+pub(crate) fn clear_remote_scroll(store: &Store, id: &str) -> bool {
+    let Some((name, theirs)) = id.strip_prefix(REMOTE_SCROLL).and_then(|r| r.split_once('~'))
+    else {
+        return false;
+    };
+    let known = crate::api::remotes(store);
+    let Some(remote) = known.get(name) else { return false };
+    let path = format!("/_search/scroll/{}", encode_component(theirs));
+    matches!(
+        tokio::task::block_in_place(|| crate::api::ask(remote, "DELETE", &path, "", None)),
+        Ok((200, _))
+    )
+}
+
 /// A search that names another cluster: ask each of them, and put the answers
 /// together.
 async fn across_clusters(
@@ -533,6 +679,9 @@ async fn across_clusters(
     body: Value,
     p: &Params,
 ) -> Response {
+    if p.contains_key("scroll") {
+        return scroll_across_clusters(store, split, body, p);
+    }
     let known = crate::api::remotes(store);
     let size = body.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let from = body.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -547,7 +696,13 @@ async fn across_clusters(
     // average and report it for both.
     // An aggregation over `_index` keys its buckets by index name, and a
     // remote's index names carry the cluster in front of them.
-    let plan = crate::api::plan_across_clusters(&mut asked_body);
+    let mut plan = crate::api::plan_across_clusters(&mut asked_body);
+    // a sort written in the URL runs the way it says: `field:desc`
+    if body.get("sort").is_none()
+        && let Some(sort) = p.get("sort")
+    {
+        plan.descending = sort.split(',').map(|s| s.trim().ends_with(":desc")).collect();
+    }
     let mut answers: Vec<(String, Value)> = Vec::new();
     let mut skipped = 0usize;
     let mut successful = 0usize;
@@ -580,6 +735,7 @@ async fn across_clusters(
                     | Some("typed_keys")
                     | Some("ignore_unavailable")
                     | Some("pre_filter_shard_size")
+                    | Some("sort")
             )
         })
         .map(|(k, v)| format!("{k}={v}"))

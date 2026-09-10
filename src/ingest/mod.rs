@@ -675,7 +675,105 @@ fn templates_within(cfg: &serde_json::Map<String, Value>) -> Result<(), String> 
     cfg.values().try_for_each(walk)
 }
 
+/// What each processor may be configured with, beyond what every processor
+/// may be: a processor given anything else is refused, as the reference
+/// refuses it. A parameter a processor does not read was taken and ignored
+/// -- `ignore_missing` on a `json`, which the reference rejects -- so a
+/// pipeline that could never have been stored there ran here, doing less
+/// than it said. Processors not listed are not checked.
+fn allowed_parameters(kind: &str) -> Option<&'static [&'static str]> {
+    const ONE_FIELD: &[&str] = &["field", "target_field", "ignore_missing"];
+    Some(match kind {
+        "set" => &["field", "value", "copy_from", "override", "ignore_empty_value", "media_type"],
+        "append" => &["field", "value", "allow_duplicates", "media_type"],
+        "remove" => &["field", "exclude_field", "ignore_missing"],
+        "rename" => &["field", "target_field", "ignore_missing", "override_target"],
+        "lowercase" | "uppercase" | "trim" | "urldecode" | "html_strip" | "bytes" => ONE_FIELD,
+        "split" => &["field", "separator", "target_field", "ignore_missing", "preserve_trailing"],
+        "join" => &["field", "separator", "target_field"],
+        "convert" => &["field", "type", "target_field", "ignore_missing"],
+        "gsub" => &["field", "pattern", "replacement", "target_field", "ignore_missing"],
+        "json" => &[
+            "field",
+            "target_field",
+            "add_to_root",
+            "add_to_root_conflict_strategy",
+            "allow_duplicate_keys",
+        ],
+        "kv" => &[
+            "field",
+            "field_split",
+            "value_split",
+            "target_field",
+            "include_keys",
+            "exclude_keys",
+            "ignore_missing",
+            "prefix",
+            "trim_key",
+            "trim_value",
+            "strip_brackets",
+        ],
+        "dissect" => &["field", "pattern", "append_separator", "ignore_missing"],
+        "date" => &["field", "target_field", "formats", "timezone", "locale", "output_format"],
+        "fail" => &["message"],
+        "drop" => &[],
+        "foreach" => &["field", "processor", "ignore_missing"],
+        "pipeline" => &["name", "ignore_missing_pipeline"],
+        "copy" => {
+            &["source_field", "target_field", "ignore_missing", "override_target", "remove_source"]
+        }
+        "dot_expander" => &["field", "path"],
+        "sort" => &["field", "order", "target_field"],
+        _ => return None,
+    })
+}
+
+/// The first processor, anywhere in a list, given parameters it does not take.
+fn stray_parameters(list: &[Value]) -> Option<IngestError> {
+    const EVERY: &[&str] = &["tag", "description", "if", "ignore_failure", "on_failure"];
+    for item in list {
+        let Some((kind, config)) = item.as_object().and_then(|o| o.iter().next()) else { continue };
+        let Some(config) = config.as_object() else { continue };
+        if let Some(allowed) = allowed_parameters(kind) {
+            let stray: Vec<&str> = config
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !allowed.contains(k) && !EVERY.contains(k))
+                .collect();
+            if !stray.is_empty() {
+                let tag = config.get("tag").and_then(|t| t.as_str());
+                return Some(IngestError::parse(
+                    format!(
+                        "processor [{kind}] doesn't support one or more provided configuration \
+                         parameters [{}]",
+                        stray.join(", ")
+                    ),
+                    Some(kind),
+                    tag,
+                    None,
+                ));
+            }
+        }
+        for nested in ["on_failure"] {
+            if let Some(Value::Array(inner)) = config.get(nested)
+                && let Some(e) = stray_parameters(inner)
+            {
+                return Some(e);
+            }
+        }
+        if let Some(inner) = config.get("processor")
+            && let Some(e) = stray_parameters(std::slice::from_ref(inner))
+        {
+            return Some(e);
+        }
+    }
+    None
+}
+
 fn parse_processors(list: &[Value]) -> Result<Vec<ProcessorSpec>, IngestError> {
+    if let Some(e) = stray_parameters(list) {
+        return Err(e);
+    }
     let mut out = Vec::new();
     for item in list {
         let Some(o) = item.as_object() else {
@@ -1019,7 +1117,9 @@ fn run_processors(
 
 impl IngestError {
     fn with_processor(mut self, spec: &ProcessorSpec, pipeline: &str) -> IngestError {
-        if self.processor_type.is_none() {
+        // a `fail` processor's failure is the message it was given, and the
+        // reference does not say which processor gave it
+        if self.processor_type.is_none() && spec.kind != "fail" {
             self.processor_type = Some(spec.kind.clone());
         }
         if self.processor_tag.is_none() {

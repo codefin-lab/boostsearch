@@ -126,7 +126,7 @@ pub async fn delete_template(
     Query(p): Query<Params>,
 ) -> Response {
     // a pattern that reaches nothing has taken nothing away, which is not an
-    // error; a name that was written out in full and is not there is
+    // error; a name that was written out in full and is not there is missing
     if !store.delete_template(&name) && !name.contains('*') && name != "_all" {
         return err(
             StatusCode::NOT_FOUND,
@@ -215,11 +215,40 @@ pub async fn delete_component_template(
     Path(name): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    if !store.delete_component(&name) && !name.contains('*') {
+    // A component an index template is made of cannot be taken from under
+    // it: the index template would go on creating indices without the
+    // mappings it was written to give them. The reference refuses.
+    let users: Vec<String> = store
+        .get_templates()
+        .into_iter()
+        .filter(|(_, t)| {
+            t.pointer("/__composable/composed_of")
+                .and_then(|c| c.as_array())
+                .map(|c| {
+                    c.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|c| c == name || crate::store::glob_match(&name, c))
+                })
+                .unwrap_or(false)
+        })
+        .map(|(n, _)| n)
+        .collect();
+    if !users.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "component templates [{name}] cannot be removed as they are still in use by \
+                 index templates [{}]",
+                users.join(", ")
+            ),
+        );
+    }
+    if !store.delete_component(&name) && name != "*" && name != "_all" {
         return err(
             StatusCode::NOT_FOUND,
-            "resource_not_found_exception",
-            format!("component template matching [{name}] not found"),
+            "index_template_missing_exception",
+            format!("index_template [{name}] missing"),
         );
     }
     respond(&p, json!({"acknowledged": true}))
@@ -319,7 +348,7 @@ pub async fn simulate_template(
     respond(
         &p,
         json!({
-            "template": compose_template(&store, &source),
+            "template": without_empty_mappings(compose_template(&store, &source)),
             "overlapping": overlapping_templates(&store, &skip, &patterns),
         }),
     )
@@ -366,10 +395,33 @@ pub async fn simulate_index_template(
     let Some((_, winner, source)) = best else {
         return respond(&p, json!({}));
     };
-    let mut overlapping: Vec<Value> = matching
+    // What the reference calls overlapping is every other template whose
+    // patterns could claim some of the same names as the winner's -- not
+    // only those that claim this one
+    let winning: Vec<String> = match source.get("index_patterns") {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(Value::String(one)) => vec![one.clone()],
+        _ => Vec::new(),
+    };
+    let _ = matching;
+    let mut overlapping: Vec<Value> = store
+        .get_templates()
         .into_iter()
-        .filter(|(n, _)| *n != winner && !n.is_empty())
-        .map(|(n, pats)| json!({"name": n, "index_patterns": pats}))
+        .filter(|(n, _)| *n != winner)
+        .filter_map(|(n, t)| {
+            let c = t.get("__composable")?;
+            let pats: Vec<String> = match c.get("index_patterns") {
+                Some(Value::Array(a)) => {
+                    a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                }
+                Some(Value::String(one)) => vec![one.clone()],
+                _ => Vec::new(),
+            };
+            winning
+                .iter()
+                .any(|w| pats.iter().any(|p| patterns_overlap(w, p)))
+                .then(|| json!({"name": n, "index_patterns": pats}))
+        })
         .collect();
     // the legacy templates a name would also have picked up
     for (name, t) in store.get_templates() {
@@ -389,10 +441,21 @@ pub async fn simulate_index_template(
     respond(
         &p,
         json!({
-            "template": compose_template(&store, &source),
+            "template": without_empty_mappings(compose_template(&store, &source)),
             "overlapping": overlapping,
         }),
     )
+}
+
+/// A composed template as the simulate APIs show it: with no `mappings` at
+/// all where nothing was mapped, as the reference shows it.
+fn without_empty_mappings(mut t: Value) -> Value {
+    if t.get("mappings").and_then(|m| m.as_object()).map(|m| m.is_empty()).unwrap_or(false)
+        && let Some(o) = t.as_object_mut()
+    {
+        o.remove("mappings");
+    }
+    t
 }
 
 pub async fn put_index_template(
@@ -444,6 +507,50 @@ pub async fn put_index_template(
         let expanded: serde_json::Map<String, Value> =
             aliases.into_iter().map(|(a, def)| (a, crate::store::normalize_alias(&def))).collect();
         kept["template"]["aliases"] = Value::Object(expanded);
+    }
+    // Two templates of one priority whose patterns overlap leave it to
+    // chance which one an index is made from; the reference refuses the
+    // second, and naming the one it clashes with.
+    let priority = body.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mine: Vec<String> = flat["index_patterns"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut clashes: Vec<(String, Vec<String>)> = Vec::new();
+    for (other, t) in store.get_templates() {
+        let Some(c) = t.get("__composable") else { continue };
+        if other == name || c.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) != priority {
+            continue;
+        }
+        let theirs: Vec<String> = match c.get("index_patterns") {
+            Some(Value::Array(a)) => {
+                a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            }
+            Some(Value::String(one)) => vec![one.clone()],
+            _ => Vec::new(),
+        };
+        if mine.iter().any(|m| theirs.iter().any(|t| patterns_overlap(m, t))) {
+            clashes.push((other, theirs));
+        }
+    }
+    if !clashes.is_empty() {
+        clashes.sort();
+        let names: Vec<&str> = clashes.iter().map(|(n, _)| n.as_str()).collect();
+        let pairs: Vec<String> =
+            clashes.iter().map(|(n, pats)| format!("{n} => [{}]", pats.join(", "))).collect();
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "index template [{name}] has index patterns [{}] matching patterns from existing \
+                 templates [{}] with patterns ({}) that have the same priority [{priority}], \
+                 multiple index templates may not match during index creation, please use a \
+                 different priority",
+                mine.join(", "),
+                names.join(","),
+                pairs.join(",")
+            ),
+        );
     }
     if p.get("create").map(|v| v != "false").unwrap_or(false)
         && store.get_templates().contains_key(&name)
@@ -525,7 +632,9 @@ pub async fn delete_index_template(
             ),
         );
     }
-    if !store.delete_template(&name) && !name.contains('*') && name != "_all" {
+    // a pattern that matches no template is missing too, as the reference
+    // says; only `*` and `_all`, which name whatever there is, may find none
+    if !store.delete_template(&name) && name != "*" && name != "_all" {
         // deleting is answered in the words of the delete action, which are
         // not the words of the get
         return err(

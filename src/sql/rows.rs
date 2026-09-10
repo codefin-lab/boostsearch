@@ -495,6 +495,12 @@ fn arithmetic(op: &str, left: &Value, right: &Value) -> Value {
         }
         _ => return Value::Null,
     };
+    // a double on either side makes a double, whole or not: `10.0 * 2`
+    // is `20.0`, and answering `20` changed the type a client reads
+    let fractional = |v: &Value| matches!(v, Value::Number(n) if n.is_f64());
+    if fractional(left) || fractional(right) {
+        return json!(found);
+    }
     number(found)
 }
 

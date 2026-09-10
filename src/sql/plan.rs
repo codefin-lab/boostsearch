@@ -165,7 +165,13 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
         offset: select.offset,
         having: None,
         order_rows,
-        also_called: vec![None; select.columns.len()],
+        // a column written `price * units AS total` answers to the alias and
+        // carries the expression, as the grouped form's columns already did
+        also_called: select
+            .columns
+            .iter()
+            .map(|c| c.alias.as_ref().filter(|_| c.expr.field().is_none()).map(|_| c.expr.name()))
+            .collect(),
         distinct: select.distinct,
     })
 }
@@ -243,7 +249,11 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
     // the aggregations, built from the inside out
     let mut inner = Value::Object(metrics.clone());
     for (depth, key) in keys.iter().enumerate().rev() {
-        let mut terms = json!({"terms": {"field": key, "size": 1000}});
+        // Groups come back in key order, as the reference's composite
+        // aggregation returns them; the default order of a `terms` is by
+        // count, and a query with no ORDER BY answered its groups fullest
+        // first where the reference answers them by key.
+        let mut terms = json!({"terms": {"field": key, "size": 1000, "order": {"_key": "asc"}}});
         // the innermost group is the one that carries the metrics
         if !inner.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             terms["aggs"] = inner.clone();

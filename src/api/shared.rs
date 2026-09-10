@@ -427,29 +427,17 @@ pub(crate) fn nest_settings(flat: &Value) -> Value {
     out
 }
 
-/// Could one name match both of these patterns?
+/// Could a real index name match both of these patterns?
 ///
-/// Two templates overlap when some index name would pick up both, which is
-/// not the same as their patterns being written the same way: `t*` and `te*`
-/// both claim `test`.
+/// The reference's rule, from 3.6 on: a pattern with its wildcards taken out
+/// is the least name it could match, and two patterns overlap when either's
+/// least name matches the other. `t*` and `te*` overlap -- `te` is claimed by
+/// both. `app-test-*-some-*` and `app-test-*-some_other-*` do not: a name both
+/// could claim exists only as a construction, and comparing the text before
+/// the first `*` refused the second template for it.
 pub(crate) fn patterns_overlap(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    let head = |p: &str| p.split('*').next().unwrap_or(p).to_string();
-    let (ha, hb) = (head(a), head(b));
-    // with the wildcards taken off, one claim contains the other when its
-    // fixed part is a prefix of the other's
-    if a.contains('*') && b.contains('*') {
-        return ha.starts_with(&hb) || hb.starts_with(&ha);
-    }
-    if a.contains('*') {
-        return crate::store::glob_match(a, b);
-    }
-    if b.contains('*') {
-        return crate::store::glob_match(b, a);
-    }
-    false
+    let least = |p: &str| p.replace('*', "");
+    crate::store::glob_match(b, &least(a)) || crate::store::glob_match(a, &least(b))
 }
 
 pub(crate) fn num_cpus() -> usize {
@@ -573,4 +561,21 @@ fn matches_pattern(pattern: &str, name: &str) -> bool {
     }
     re.push('$');
     regex::Regex::new(&re).map(|r| r.is_match(name)).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::patterns_overlap;
+
+    #[test]
+    fn patterns_overlap_where_a_natural_name_matches_both() {
+        assert!(patterns_overlap("t*", "te*"));
+        assert!(patterns_overlap("r17-tpl*", "r17-tpl-hi*"));
+        assert!(patterns_overlap("logs-*", "logs-2026"));
+        assert!(patterns_overlap("same", "same"));
+        assert!(!patterns_overlap("app-test-*-some-*", "app-test-*-some_other-*"));
+        assert!(!patterns_overlap("*-a", "b-*"));
+        assert!(!patterns_overlap("x-*", "y-*"));
+        assert!(!patterns_overlap("logs", "metrics"));
+    }
 }

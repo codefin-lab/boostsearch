@@ -1,0 +1,59 @@
+{"method": "DELETE", "path": "/r17*", "body": null}
+{"method": "DELETE", "path": "/_ingest/pipeline/r17-*", "body": null}
+{"method": "DELETE", "path": "/_index_template/r17-*", "body": null}
+{"method": "DELETE", "path": "/_component_template/r17-*", "body": null}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-p1", "body": {"description": "all the usual", "processors": [{"set": {"field": "stage", "value": "one"}}, {"rename": {"field": "Name", "target_field": "name", "ignore_missing": true}}, {"lowercase": {"field": "name", "ignore_missing": true}}, {"uppercase": {"field": "code", "ignore_missing": true}}, {"trim": {"field": "note", "ignore_missing": true}}, {"split": {"field": "tags", "separator": ",", "ignore_missing": true}}, {"convert": {"field": "n", "type": "integer", "ignore_missing": true}}, {"append": {"field": "seen", "value": ["a", "b"]}}, {"gsub": {"field": "code", "pattern": "-", "replacement": "_", "ignore_missing": true}}, {"remove": {"field": "junk", "ignore_missing": true}}, {"set": {"field": "big", "value": true, "if": "ctx.n != null && ctx.n > 10"}}, {"date": {"field": "when", "formats": ["yyyy-MM-dd"], "target_field": "when_parsed", "ignore_failure": true}}]}}
+{"method": "GET", "path": "/_ingest/pipeline/r17-p1", "body": null}
+{"method": "POST", "path": "/_ingest/pipeline/r17-p1/_simulate", "body": {"docs": [{"_index": "r17", "_id": "0", "_source": {"Name": "ALICE", "code": "ab-c", "note": "  hi  ", "tags": "x,y", "n": "12", "junk": 1, "when": "2026-01-02"}}, {"_index": "r17", "_id": "1", "_source": {"Name": "Bob", "n": "3"}}, {"_index": "r17", "_id": "2", "_source": {"code": "z-z", "tags": "solo"}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-p2", "body": {"processors": [{"dissect": {"field": "line", "pattern": "%{verb} %{path} %{status}"}}, {"convert": {"field": "status", "type": "long"}}, {"kv": {"field": "q", "field_split": "&", "value_split": "=", "ignore_missing": true}}, {"json": {"field": "payload", "target_field": "parsed", "ignore_missing": true}}, {"join": {"field": "parts", "separator": "-", "ignore_missing": true}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/r17-p2/_simulate", "body": {"docs": [{"_source": {"line": "GET /a 200", "q": "a=1&b=2", "payload": "{\"k\":[1,2]}", "parts": ["x", "y"]}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"fail": {"message": "no {{name}}", "if": "ctx.name == 'x'"}}]}, "docs": [{"_source": {"name": "x"}}, {"_source": {"name": "y"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate?verbose=true", "body": {"pipeline": {"processors": [{"set": {"field": "a", "value": 1}}, {"set": {"field": "b", "value": "{{a}}-x"}}]}, "docs": [{"_source": {}}]}}
+{"method": "PUT", "path": "/r17-ing", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0, "index.default_pipeline": "r17-p1"}}}
+{"method": "PUT", "path": "/r17-ing/_doc/0?refresh=true", "body": {"Name": "ALICE", "code": "ab-c", "note": "  hi  ", "tags": "x,y", "n": "12", "junk": 1, "when": "2026-01-02"}}
+{"method": "PUT", "path": "/r17-ing/_doc/1?refresh=true", "body": {"Name": "Bob", "n": "3"}}
+{"method": "PUT", "path": "/r17-ing/_doc/2?refresh=true", "body": {"code": "z-z", "tags": "solo"}}
+{"method": "PUT", "path": "/r17-ing/_doc/9?refresh=true&pipeline=_none", "body": {"Name": "RAW"}}
+{"method": "POST", "path": "/r17-ing/_search", "body": {"query": {"match_all": {}}, "sort": ["_id"]}}
+{"method": "GET", "path": "/r17-ing/_doc/0", "body": null}
+{"method": "PUT", "path": "/r17-a", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"owner": {"type": "keyword"}, "n": {"type": "long"}}}}}
+{"method": "PUT", "path": "/r17-b", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"owner": {"type": "keyword"}, "n": {"type": "long"}}}}}
+{"method": "PUT", "path": "/r17-a/_doc/d0?refresh=true", "body": {"owner": "x", "n": 1}}
+{"method": "PUT", "path": "/r17-a/_doc/d1?refresh=true", "body": {"owner": "y", "n": 2}}
+{"method": "PUT", "path": "/r17-b/_doc/d2?refresh=true", "body": {"owner": "x", "n": 3}}
+{"method": "PUT", "path": "/r17-b/_doc/d3?refresh=true", "body": {"owner": "z", "n": 4}}
+{"method": "POST", "path": "/_aliases", "body": {"actions": [{"add": {"index": "r17-a", "alias": "r17-all"}}, {"add": {"index": "r17-b", "alias": "r17-all", "is_write_index": true}}, {"add": {"indices": ["r17-a", "r17-b"], "alias": "r17-x", "filter": {"term": {"owner": "x"}}}}, {"add": {"index": "r17-a", "alias": "r17-routed", "routing": "k1"}}]}}
+{"method": "GET", "path": "/_alias/r17-all", "body": null}
+{"method": "GET", "path": "/r17-a/_alias", "body": null}
+{"method": "GET", "path": "/_cat/aliases/r17*?format=json&s=alias,index&h=alias,index,filter,is_write_index", "body": null}
+{"method": "POST", "path": "/r17-x/_search", "body": {"query": {"match_all": {}}, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/r17-x/_count", "body": null}
+{"method": "POST", "path": "/r17-x,r17-b/_search", "body": {"query": {"match_all": {}}, "sort": [{"n": "asc"}]}}
+{"method": "PUT", "path": "/r17-all/_doc/w1?refresh=true", "body": {"owner": "w", "n": 9}}
+{"method": "GET", "path": "/r17-b/_doc/w1", "body": null}
+{"method": "POST", "path": "/_aliases", "body": {"actions": [{"remove": {"index": "r17-a", "alias": "r17-nope"}}]}}
+{"method": "POST", "path": "/_aliases", "body": {"actions": [{"remove": {"index": "r17-a", "alias": "r17-nope", "must_exist": false}}]}}
+{"method": "HEAD", "path": "/_alias/r17-x", "body": null}
+{"method": "HEAD", "path": "/_alias/r17-none", "body": null}
+{"method": "POST", "path": "/r17-a,r17-b/_update_by_query?refresh=true&conflicts=proceed", "body": {"query": {"term": {"owner": "x"}}, "script": {"source": "ctx._source.n += 100"}}}
+{"method": "POST", "path": "/r17-all/_search", "body": {"query": {"range": {"n": {"gte": 100}}}, "sort": [{"n": "asc"}]}}
+{"method": "POST", "path": "/_reindex?refresh=true", "body": {"source": {"index": "r17-a", "query": {"term": {"owner": "y"}}}, "dest": {"index": "r17-c"}, "script": {"source": "ctx._source.copied = true"}}}
+{"method": "GET", "path": "/r17-c/_doc/d1", "body": null}
+{"method": "POST", "path": "/r17-b/_delete_by_query?refresh=true", "body": {"query": {"term": {"owner": "z"}}}}
+{"method": "POST", "path": "/r17-all/_search", "body": {"size": 0, "aggs": {"o": {"terms": {"field": "owner"}}, "s": {"sum": {"field": "n"}}}}}
+{"method": "PUT", "path": "/_component_template/r17-ct", "body": {"template": {"settings": {"number_of_replicas": 0}, "mappings": {"properties": {"t": {"type": "keyword"}}}}}}
+{"method": "PUT", "path": "/_index_template/r17-t1", "body": {"index_patterns": ["r17-tpl*"], "priority": 10, "composed_of": ["r17-ct"], "template": {"mappings": {"properties": {"n": {"type": "integer"}}}, "aliases": {"r17-tpl-alias": {}}}}}
+{"method": "PUT", "path": "/_index_template/r17-t2", "body": {"index_patterns": ["r17-tpl-hi*"], "priority": 20, "template": {"settings": {"number_of_shards": 2}}}}
+{"method": "POST", "path": "/_index_template/_simulate_index/r17-tpl-hi-1", "body": null}
+{"method": "POST", "path": "/_index_template/_simulate_index/r17-tpl-lo", "body": null}
+{"method": "PUT", "path": "/r17-tpl-lo", "body": null}
+{"method": "GET", "path": "/r17-tpl-lo/_mapping", "body": null}
+{"method": "GET", "path": "/r17-tpl-lo/_alias", "body": null}
+{"method": "GET", "path": "/_index_template/r17-t1", "body": null}
+{"method": "GET", "path": "/_component_template/r17-ct", "body": null}
+{"method": "DELETE", "path": "/_component_template/r17-ct", "body": null}
+{"method": "PUT", "path": "/_index_template/r17-t3", "body": {"index_patterns": ["r17-tpl*"], "priority": 10}}
+{"method": "DELETE", "path": "/r17*", "body": null}
+{"method": "DELETE", "path": "/_index_template/r17-*", "body": null}
+{"method": "DELETE", "path": "/_component_template/r17-*", "body": null}
+{"method": "DELETE", "path": "/_ingest/pipeline/r17-*", "body": null}

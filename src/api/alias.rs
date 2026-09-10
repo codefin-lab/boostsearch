@@ -451,11 +451,7 @@ pub async fn delete_alias(
         }
     }
     if !removed {
-        return err(
-            StatusCode::NOT_FOUND,
-            "aliases_not_found_exception",
-            format!("aliases [{name}] missing"),
-        );
+        return aliases_missing(&name);
     }
     respond(&p, json!({"acknowledged": true}))
 }
@@ -611,11 +607,17 @@ pub async fn update_aliases(
     if !missing_required.is_empty() {
         missing_required.sort();
         missing_required.dedup();
-        return err(
-            StatusCode::NOT_FOUND,
-            "aliases_not_found_exception",
-            format!("aliases [{}] missing", missing_required.join(",")),
-        );
+        return aliases_missing(&missing_required.join(","));
     }
     respond(&p, json!({"acknowledged": true}))
+}
+
+/// `aliases [x] missing`, with the resource it names, as the reference says it.
+fn aliases_missing(names: &str) -> Response {
+    let reason = format!("aliases [{names}] missing");
+    let cause = json!({"type": "aliases_not_found_exception", "reason": reason,
+                       "resource.type": "aliases", "resource.id": names});
+    let mut error = cause.clone();
+    error["root_cause"] = json!([cause]);
+    (StatusCode::NOT_FOUND, axum::Json(json!({"error": error, "status": 404}))).into_response()
 }

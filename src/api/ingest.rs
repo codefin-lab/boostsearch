@@ -496,6 +496,8 @@ pub(crate) async fn get_pipeline(
 }
 
 pub(crate) async fn delete_pipeline(store: Store, kind: &str, name: String, p: Params) -> Response {
+    // a pattern that matches nothing is missing, as a name is: the
+    // reference answers 404 for both
     if store.remove_pipelines(kind, &name) == 0 && name != "*" {
         return err(
             StatusCode::NOT_FOUND,

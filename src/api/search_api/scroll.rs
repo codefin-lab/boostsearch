@@ -180,6 +180,14 @@ pub async fn scroll(
     };
     // the ceiling applies every time the scroll is asked to live longer, not
     // only when it was opened
+    let keep = body
+        .get("scroll")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| p.get("scroll").cloned());
+    if let Some(answer) = remote_scroll(&store, &id, keep.as_deref(), &p) {
+        return answer;
+    }
     let asked = body
         .get("scroll")
         .and_then(|v| v.as_str())
@@ -282,7 +290,8 @@ pub async fn clear_scroll(
             "Validation Failed: 1: no scroll ids specified;",
         );
     }
-    let freed = ids.iter().filter(|i| store.close_scroll(i)).count();
+    let freed =
+        ids.iter().filter(|i| store.close_scroll(i) || clear_remote_scroll(&store, i)).count();
     // a scroll that was not there is not an error to report: the answer is
     // the ordinary one, with nothing freed, under the status that says so
     let body = json!({"succeeded": freed > 0, "num_freed": freed});

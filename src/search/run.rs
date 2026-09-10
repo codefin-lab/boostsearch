@@ -1126,7 +1126,15 @@ pub fn run(
         let special = matches!(
             k.field.as_str(),
             "_score" | "_doc" | "_seq" | "_script" | "_geo_distance" | "_shard_doc" | "_index"
-        ) || k.script.is_some();
+        ) || k.script.is_some()
+            // `_id` can be sorted on unless the cluster said it may not:
+            // `indices.id_field_data.enabled` is true by default in the
+            // reference, and a sort by id was refused here outright
+            || (k.field == "_id"
+                && store
+                    .cluster_setting("indices.id_field_data.enabled")
+                    .map(|v| v != json!(false) && v != json!("false"))
+                    .unwrap_or(true));
         if !special && k.unmapped_type.is_none() {
             if k.field == "_id" {
                 return Err(err(

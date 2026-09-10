@@ -28,6 +28,8 @@ pub(crate) struct Tally {
     pub failures: Vec<Value>,
     /// a delete-by-query, which says nothing of documents made or changed
     pub deleting: bool,
+    /// an update-by-query, which makes no documents and does not say it did
+    pub updating: bool,
 }
 
 impl Tally {
@@ -89,6 +91,11 @@ impl Tally {
         {
             o.remove("created");
             o.remove("updated");
+        }
+        if self.updating
+            && let Some(o) = out.as_object_mut()
+        {
+            o.remove("created");
         }
         out
     }
@@ -801,7 +808,7 @@ pub async fn update_by_query(
         let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
     }
-    let mut tally = Tally { total: hits.len(), ..Default::default() };
+    let mut tally = Tally { total: hits.len(), updating: true, ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
     // `?pipeline=` names one every rewritten document goes through

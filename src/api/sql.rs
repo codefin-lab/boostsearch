@@ -127,7 +127,7 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
         Ok(out) => crate::search::envelope(out, &planned.body, &Params::new()),
         Err(r) => return r,
     };
-    let table = rows::shape(&planned, &answer);
+    let table = typed_by_mapping(store, &planned, rows::shape(&planned, &answer));
     // the format decides the shape of the answer, not what is in it
     let format = p
         .get("format")
@@ -163,14 +163,75 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
     }
 }
 
+/// The `min`, `max` and `sum` of a whole-number field, as whole numbers.
+///
+/// The search answers every metric as a double, so `max(units)` over a
+/// `long` came back `8.0` and typed `double`; the reference types it by the
+/// field it read. The mapping says what that field is.
+fn typed_by_mapping(store: &Store, planned: &plan::Planned, mut table: rows::Table) -> rows::Table {
+    fn find<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+        let o = node.as_object()?;
+        if let Some(found) = o.get(name) {
+            return Some(found);
+        }
+        o.values().find_map(|v| {
+            v.get("aggs").or_else(|| v.get("aggregations")).and_then(|a| find(a, name))
+        })
+    }
+    let Some(aggs) = planned.body.get("aggs") else { return table };
+    let first = store.resolve(&planned.index).into_iter().next();
+    for (at, read) in planned.reads.iter().enumerate() {
+        let plan::Read::Metric(name) = read else { continue };
+        let Some(def) = find(aggs, name) else { continue };
+        let Some((kind, field)) = ["min", "max", "sum"].iter().find_map(|k| {
+            def.get(*k).and_then(|d| d.get("field")).and_then(|f| f.as_str()).map(|f| (*k, f))
+        }) else {
+            continue;
+        };
+        let _ = kind;
+        let mapped = first
+            .as_deref()
+            .and_then(|n| store.get(n))
+            .and_then(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+        let Some(mapped) =
+            mapped.filter(|t| matches!(t.as_str(), "long" | "integer" | "short" | "byte"))
+        else {
+            continue;
+        };
+        for row in table.rows.iter_mut() {
+            if let Some(v) = row.get_mut(at)
+                && let Some(n) = v.as_f64()
+                && n.fract() == 0.0
+            {
+                *v = json!(n as i64);
+            }
+        }
+        if let Some(col) = table.columns.get_mut(at) {
+            col.1 = mapped;
+        }
+    }
+    table
+}
+
 fn schema(table: &rows::Table, piped: bool) -> Vec<Value> {
     table
         .columns
         .iter()
         .zip(table.aliases.iter())
-        // PPL names every text type `string`, where SQL keeps `keyword`
+        // PPL names every text type `string`, where SQL keeps `keyword`, and
+        // a count `int`, where SQL says `integer`
         .map(|((name, kind), alias)| {
-            (name, if piped && kind == "keyword" { "string" } else { kind.as_str() }, alias)
+            let kind = match (piped, kind.as_str()) {
+                (true, "keyword") => "string",
+                (true, "integer") => "int",
+                (_, other) => other,
+            };
+            (name, kind, alias)
+        })
+        // PPL has no `AS`: a column it computes is named what it was called,
+        // and the schema carries no alias beside it
+        .map(|(name, kind, alias)| {
+            if piped { (alias.as_ref().unwrap_or(name), kind, &None) } else { (name, kind, alias) }
         })
         .map(|(name, kind, alias)| match alias {
             // a column written `count(*) AS n` answers to both names, and the
