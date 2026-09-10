@@ -35,6 +35,58 @@ The ten sections that do not pass are named, with the reason, in
 rather than of a server, and `tools/module_gate.py` prints those and why on
 every run.
 
+## Against OpenSearch, dimension by dimension
+
+The same corpus (200,000 web-log documents), the same machine, the same client
+(`tools/bench.py`) driving both engines. OpenSearch 3.1.0 was measured once and
+its numbers kept (`bench/results/final-os-clean-*.json`, median of five runs);
+BoostSearch is the current build (`tools/bench_baseline.json`, median of three).
+Every change is held to BoostSearch's own last numbers by `tools/bench_gate.py`;
+how the numbers were taken and what not to read into them is in
+[docs/performance.md](docs/performance.md).
+
+| dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
+|---|---|---|---|---|
+| queries a second, one client | q/s | 380.9 | 1,414.8 | +271% |
+| memory, idle | MB | 1,095.2 | 19.0 | +98% |
+| time range agg p50 c1 | ms | 2.4 | 0.4 | +82% |
+| agg terms p50 c1 | ms | 2.3 | 0.5 | +81% |
+| agg date hist p50 c1 | ms | 2.3 | 0.4 | +81% |
+| agg nested p50 c1 | ms | 2.4 | 0.5 | +81% |
+| latency p50, one client | ms | 2.5 | 0.6 | +78% |
+| term numeric p50 c1 | ms | 2.3 | 0.5 | +78% |
+| term keyword p50 c1 | ms | 2.3 | 0.5 | +78% |
+| match all p50 c1 | ms | 2.1 | 0.5 | +77% |
+| memory, after indexing 200k | MB | 1,085.6 | 261.3 | +76% |
+| memory, after the search run | MB | 1,112.4 | 269.2 | +76% |
+| match text p50 c1 | ms | 2.7 | 0.8 | +71% |
+| sort paged p50 c1 | ms | 3.1 | 0.9 | +71% |
+| time range p50 c1 | ms | 2.5 | 0.8 | +70% |
+| latency p90, one client | ms | 3.2 | 1.1 | +68% |
+| bool filter p50 c1 | ms | 3.0 | 1.1 | +63% |
+| range numeric p50 c1 | ms | 2.4 | 0.9 | +63% |
+| indexing throughput | docs/s | 72,704.0 | 106,447.0 | +46% |
+| queries a second, eight clients | q/s | 1,621.9 | 2,307.6 | +42% |
+| agg nested p50 c8 | ms | 4.9 | 2.9 | +41% |
+| agg date hist p50 c8 | ms | 4.8 | 3.0 | +37% |
+| term numeric p50 c8 | ms | 4.6 | 2.9 | +36% |
+| time range agg p50 c8 | ms | 4.5 | 2.9 | +36% |
+| match all p50 c8 | ms | 4.6 | 3.0 | +35% |
+| term keyword p50 c8 | ms | 4.5 | 3.0 | +34% |
+| match text p50 c8 | ms | 4.9 | 3.2 | +33% |
+| agg terms p50 c8 | ms | 4.4 | 3.0 | +33% |
+| latency p50, eight clients | ms | 4.6 | 3.2 | +31% |
+| latency p90, eight clients | ms | 5.9 | 4.3 | +28% |
+| range numeric p50 c8 | ms | 4.6 | 3.4 | +27% |
+| time range p50 c8 | ms | 4.6 | 3.4 | +26% |
+| sort paged p50 c8 | ms | 5.0 | 3.7 | +25% |
+| bool filter p50 c8 | ms | 5.0 | 3.8 | +25% |
+
+Lower is better for latency and memory, higher for throughput; "better by" is
+the margin in BoostSearch's favour either way. Single node; the
+queries-a-second rows are what a Python client reached, not either engine's
+ceiling.
+
 ## What it does
 
 | | |
