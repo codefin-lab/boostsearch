@@ -459,7 +459,10 @@ pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query
     if kind == "most_fields" || kind == "cross_fields" || kind == "bool_prefix" {
         Ok(Box::new(BooleanQuery::union(subs)))
     } else {
-        Ok(Box::new(boostcore::query::DisjunctionMaxQuery::new(subs)))
+        // the best field counts whole and each other field by `tie_breaker`,
+        // which was read as an allowed key and then never used
+        let tie = body.get("tie_breaker").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        Ok(Box::new(boostcore::query::DisjunctionMaxQuery::with_tie_breaker(subs, tie)))
     }
 }
 

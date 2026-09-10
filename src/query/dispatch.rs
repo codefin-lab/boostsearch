@@ -60,6 +60,12 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "term" => {
             let (field, val, opts) = field_and_value(&body)?;
+            // a join field is asked after by the relation's name, which is
+            // kept beside the parent's id under the field
+            if ctx.mapping.type_of(&field) == Some("join") {
+                let spec = body.get(&field).cloned().unwrap_or(Value::Null);
+                return build(ctx, &serde_json::json!({"term": {format!("{field}.name"): spec}}));
+            }
             // `_id` is a field of its own, not part of either JSON view, so a
             // term naming it has to be built against that field directly
             if field == "_id" {
@@ -153,6 +159,14 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "terms" => {
             let (field, vals) = single_key(&body)?;
+            if ctx.mapping.type_of(&field) == Some("join") {
+                let mut spec = body.clone();
+                if let Some(o) = spec.as_object_mut() {
+                    o.remove(&field);
+                    o.insert(format!("{field}.name"), vals.clone());
+                }
+                return build(ctx, &serde_json::json!({ "terms": spec }));
+            }
             if field == "_id" {
                 let items: Vec<Value> = match &vals {
                     Value::Array(a) => a.clone(),
@@ -594,7 +608,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "dis_max" => {
             let qs = body.get("queries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let subs: Result<Vec<_>> = qs.iter().map(|s| build(ctx, s)).collect();
-            Box::new(boostcore::query::DisjunctionMaxQuery::new(subs?))
+            // the best clause counts whole and the others by `tie_breaker`;
+            // it was read nowhere, so only the best clause ever counted
+            let tie = body.get("tie_breaker").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            Box::new(boostcore::query::DisjunctionMaxQuery::with_tie_breaker(subs?, tie))
         }
         other => {
             // a near-miss is usually a typo, and saying which name was meant

@@ -60,6 +60,9 @@ pub(crate) fn add_human_settings(view: &mut Value, st: &IdxState) {
 pub(crate) fn settings_view(raw: &Value, name: Option<&str>, flat: bool) -> Value {
     let mut flat_map = serde_json::Map::new();
     flatten_settings(raw, "", &mut flat_map);
+    // how many routing shards an index was made with is kept for routing,
+    // not as a setting anyone set, and the reference does not list it
+    flat_map.remove("index.boost_routing_shards");
     if let Some(name) = name
         && name != "_all"
         && name != "*"

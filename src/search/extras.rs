@@ -261,10 +261,17 @@ pub(crate) fn settle_by_value(
         let path = format!("/{}", field.replace('.', "/"));
         let pivot = spec.get("pivot").and_then(|v| v.as_str()).unwrap_or("");
         let origin = spec.get("origin").cloned().unwrap_or(Value::Null);
-        let geo = origin.is_array() || origin.as_str().map(|s| s.contains(',')).unwrap_or(false);
+        // a point may be written as an object as well as a pair or text, and
+        // a field mapped as a point is a point whatever the origin looks
+        // like: an origin written `{lat, lon}` was read as a date, found no
+        // distance, and left every score as the query gave it
+        let written_geo = origin.is_array()
+            || origin.get("lat").is_some()
+            || origin.as_str().map(|s| s.contains(',')).unwrap_or(false);
         for c in cands.iter_mut() {
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
+            let geo = written_geo || g.mapping.type_of(&field) == Some("geo_point");
             let Some((_, src)) = source_of(searcher, &g, c.addr) else { continue };
             let src = derived_copy(src, &g.mapping);
             let Some(value) = src.pointer(&path) else { continue };

@@ -5823,3 +5823,96 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 paths). Against OpenSearch 3.1.0: the query corpus 50/59, the aggregations
 corpus 35-36/43.
 
+
+## The twenty-second review
+
+Three things the twenty-first review left: routing held to the reference,
+scores taken apart against the reference's `explain`, and the query corpus
+widened. `tools/corpora/query_dsl2.ndjson` is new -- 45 requests over a
+join index, a percolator, vectors, `rank_feature`, `distance_feature` on
+dates and points, and highlighting. Against OpenSearch 3.1.0 it reads
+45 of 45; the first corpus of queries moved from 50 of 59 to 53; the
+aggregations corpus holds at 36 of 43.
+
+**P0 -- `min_children` and `max_children` on `has_child` were ignored.** A
+parent with one matching answer passed a request for two. The children are
+now counted per parent and held to both bounds.
+
+**P0 -- a grouped value in a query string was cut apart.** `title:(quick OR
+lazy)` split at the space inside the brackets, so `lazy` went looking in
+every field. A bracket now holds its words together, and the group is read
+as a query of its own over the field it names, with the same default
+operator.
+
+**P0 -- a `term` or `terms` query on a join field found nothing.** The
+reference matches the relation's name (`{"term": {"rel": "answer"}}` finds
+every answer); here the name is kept under the field, and the query did
+not look there.
+
+**P1 -- an index made here put its documents on other shards than the
+reference would.** Ids were folded straight into the shard count; the
+reference folds them into its routing shards first -- 1,024 for one or two
+shards, 768 for three, 640 for five, or `number_of_routing_shards` when it
+is given. A new index now records its routing shards in its settings and is
+routed as the reference routes it: the shards OpenSearch 3.1 names for
+twelve ids at two, three and five shards are a unit test. An index made
+before keeps the fold it was written with, since moving it would lose its
+documents: an index of two, three and five shards written by the
+twenty-first review's binary was opened by this one, and all 200 documents
+of each were found by id, and could be written, updated and deleted. The
+setting is not shown in `_settings`. The first cut ignored
+`number_of_routing_shards` and two of OpenSearch's own tests -- a sliced
+scroll and the failure of an `hdr` percentile on a negative value -- put
+their documents elsewhere; the conformance corpus and phase one caught it.
+
+**P1 -- `score_mode` on `has_child` was ignored.** Every parent scored the
+same. It now scores by the `max`, `min`, `sum` or `avg` of its children's
+scores, taken with the join term as a filter -- and a `function_score` over
+the children is carried out, since the filter goes inside it rather than it
+inside a `bool`.
+
+**P1 -- `tie_breaker` was ignored by `dis_max` and by a `best_fields`
+`multi_match`.** The best clause alone scored; the others now add their
+share.
+
+**P1 -- the decay functions of a `function_score` were not carried out,
+and a filter with a `weight` did not match a value inside a list.**
+`gauss`, `exp` and `linear` now score numbers, dates and points as the
+reference does; a `term` or `match` filter matches any element of a list.
+
+**P1 -- `distance_feature` on a point ordered the documents wrongly.** An
+origin given as a point, or on a field mapped as one, is measured as a
+distance on the sphere.
+
+**P2** -- left, each a formula of its own: how a fuzzy term is weighed
+(the reference blends the frequencies of its top terms, with a boost of one
+less the edits over the length); how `intervals` scores (a saturation of
+the widths); the edge of a `geo_bounding_box`; `sampler`'s shard size and
+`significant_terms`' background count, which are per shard in the reference
+and counted once here; `extended_bounds` given as dates with `format`; and
+approximate percentiles and cardinality, whose last digits differ with the
+sketch. A term on the internal `rel#question` field that the reference
+exposes is not answered either.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398,
+unit 194/194, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths), cluster chaos with no acknowledged
+write lost in every run. Against OpenSearch 3.1.0: the query corpus
+53/59, the second query corpus 45/45, the aggregations corpus 36/43.
+
+Two runs of the conformance corpus and two of the chaos test failed while
+other runs shared the machine -- a hidden index left by one test showing in
+the next, a slice listed before the index was published, and two copies
+counted while one was still catching up -- and none of them failed run
+alone: the corpus passed whole on the final binary, and the two files that
+had failed passed three times each by themselves. One chaos run began
+beside a node a crashed run had left behind, and that node was stopped.
+
+Not everything in chaos is clean, and it is not new. Run alone, this
+review's binary settled with its copies agreeing once, and once left a node
+whose HTTP stopped answering while its cluster thread went on committing, so
+the run did not settle -- the copies still agreed. The twenty-first review's
+binary, run the same way twice, did both worse things: once two copies
+disagreed by twenty documents, once a node stopped answering. Neither is a
+write lost; both are P1s that were here before, and are left for a review of
+their own.

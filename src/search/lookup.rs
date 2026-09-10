@@ -586,8 +586,85 @@ pub(crate) fn expand_joins(store: &Store, targets: &[String], node: &mut Value) 
             let of_that_kind = json!({
                 "bool": {"must": [inner, on_that_side(&field, child)]}
             });
-            let parents = ids_of_field(store, targets, &of_that_kind, &format!("{field}.parent"));
-            json!({"ids": {"values": parents}})
+            let score_mode = spec.get("score_mode").and_then(|v| v.as_str()).unwrap_or("none");
+            let least = spec.get("min_children").and_then(|v| v.as_u64()).unwrap_or(1);
+            let most = spec.get("max_children").and_then(|v| v.as_u64());
+            if score_mode == "none" && least <= 1 && most.is_none() {
+                let parents =
+                    ids_of_field(store, targets, &of_that_kind, &format!("{field}.parent"));
+                json!({"ids": {"values": parents}})
+            } else {
+                // How many children answer, and how well, is a question about
+                // each parent. `min_children` was not read, so a parent with
+                // one matching child passed a request for two; `score_mode`
+                // was not read either, and every parent scored one. The
+                // children are asked for directly and counted per parent.
+                // A parent scores by what its children's query gives them,
+                // with the join term as a filter; and a `function_score` is
+                // only carried out at the top of a query, so the filter goes
+                // inside it rather than it inside a `bool`.
+                let side = on_that_side(&field, child);
+                let scored = match inner.get("function_score") {
+                    Some(Value::Object(fs)) => {
+                        let mut fs = fs.clone();
+                        let q = fs.remove("query").unwrap_or_else(|| json!({"match_all": {}}));
+                        fs.insert("query".into(), json!({"bool": {"must": [q], "filter": [side]}}));
+                        json!({ "function_score": fs })
+                    }
+                    _ => json!({"bool": {"must": [inner], "filter": [side]}}),
+                };
+                let probe = json!({
+                    "query": scored,
+                    "size": 10_000,
+                    "_source": [format!("{field}.parent")],
+                });
+                let hits = run(store, &targets.join(","), &probe, &Params::new())
+                    .map(|out| out.hits)
+                    .unwrap_or_default();
+                let mut per_parent: std::collections::BTreeMap<String, Vec<f64>> =
+                    Default::default();
+                for hit in &hits {
+                    let parent = hit
+                        .pointer(&format!("/_source/{}/parent", field.replace('.', "/")))
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        });
+                    let Some(parent) = parent else { continue };
+                    let score = hit.get("_score").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    per_parent.entry(parent).or_default().push(score);
+                }
+                per_parent.retain(|_, scores| {
+                    let n = scores.len() as u64;
+                    n >= least && most.map(|m| n <= m).unwrap_or(true)
+                });
+                if score_mode == "none" {
+                    let kept: Vec<&String> = per_parent.keys().collect();
+                    json!({"ids": {"values": kept}})
+                } else {
+                    let clauses: Vec<Value> = per_parent
+                        .iter()
+                        .map(|(parent, scores)| {
+                            let n = scores.len() as f64;
+                            let score = match score_mode {
+                                "max" => scores.iter().cloned().fold(f64::MIN, f64::max),
+                                "min" => scores.iter().cloned().fold(f64::MAX, f64::min),
+                                "sum" => scores.iter().sum(),
+                                _ => scores.iter().sum::<f64>() / n,
+                            };
+                            json!({"constant_score": {
+                                "filter": {"ids": {"values": [parent]}},
+                                "boost": score,
+                            }})
+                        })
+                        .collect();
+                    if clauses.is_empty() {
+                        json!({"match_none": {}})
+                    } else {
+                        json!({"bool": {"should": clauses, "minimum_should_match": 1}})
+                    }
+                }
+            }
         }
         // the documents whose parent answers the inner query
         "has_parent" => {

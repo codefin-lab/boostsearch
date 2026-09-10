@@ -143,7 +143,13 @@ pub(crate) fn run_multi_terms_agg(
                     .filter_map(|n| store.get(n))
                     .find_map(|st| st.read().routing.get(id).cloned())
                     .unwrap_or_else(|| id.to_string());
-                per_shard.entry(routing_shard(&placed_by, shards)).or_default().extend(combos);
+                let placed = targets
+                    .iter()
+                    .filter_map(|n| store.get(n))
+                    .next()
+                    .map(|st| st.read().shard_for(&placed_by))
+                    .unwrap_or_else(|| routing_shard(&placed_by, shards));
+                per_shard.entry(placed).or_default().extend(combos);
             }
             let mut merged: std::collections::HashMap<String, (Vec<Value>, u64)> =
                 std::collections::HashMap::new();

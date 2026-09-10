@@ -501,8 +501,7 @@ pub(crate) fn run_matrix_stats_agg(
             // worked out
             let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or_default();
             let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or_default();
-            let over = store.get(index).map(|st| st.read().shard_count().max(1)).unwrap_or(1);
-            let shard = crate::search::routing_shard(id, over) as usize;
+            let shard = store.get(index).map(|st| st.read().shard_for(id)).unwrap_or(0) as usize;
             fields
                 .iter()
                 .map(|field| {

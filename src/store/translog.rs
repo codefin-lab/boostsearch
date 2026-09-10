@@ -132,7 +132,11 @@ impl IdxState {
 
     /// Which shard a routing value lands on, the way OpenSearch routes it.
     pub fn shard_for(&self, routing: &str) -> u64 {
-        crate::search::routing_shard(routing, self.shard_count().max(1))
+        crate::search::routing_shard_in(
+            routing,
+            self.shard_count().max(1),
+            self.numeric_setting("boost_routing_shards"),
+        )
     }
 
     /// Which shard a document lands on: by the routing it was written with if

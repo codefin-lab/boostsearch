@@ -387,6 +387,40 @@ fn build_query_string(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                 ));
             }
         }
+        // `field:(a OR b)` is a group: its words are asked of that field and
+        // joined by the operators inside it, as one clause. The group was cut
+        // at its spaces, so `lazy)` was looked for in every field, and a
+        // document matched on the word in its body as well as its title.
+        if value.len() > 2 && value.starts_with('(') && value.ends_with(')') {
+            let inner = &value[1..value.len() - 1];
+            let mut spec = serde_json::json!({
+                "query": inner,
+                "fields": targets,
+                "default_operator": default_operator,
+            });
+            if let Some(named) = body.get("analyzer") {
+                spec["analyzer"] = named.clone();
+            }
+            if let Ok(sub) = build_query_string(ctx, &spec) {
+                let explicit = pending_occur.is_some();
+                let occur = if pending_not {
+                    Occur::MustNot
+                } else {
+                    pending_occur.take().unwrap_or(if default_operator == "and" {
+                        Occur::Must
+                    } else {
+                        Occur::Should
+                    })
+                };
+                last_by_default = !pending_not && !explicit && occur == Occur::Must;
+                pending_not = false;
+                if occur == Occur::Should {
+                    should_count += 1;
+                }
+                clauses.push((occur, sub));
+            }
+            continue;
+        }
         // `field:[a TO b]` is a range, not a term, and so is `field:>5`
         if let Some(spec) = parse_range_token(&value).or_else(|| comparison_range(&value)) {
             let mut per_field: Vec<Box<dyn Query>> = Vec::new();
@@ -517,11 +551,12 @@ fn split_query_string(s: &str) -> Vec<String> {
                 in_quotes = !in_quotes;
                 cur.push(c);
             }
-            '[' | '{' if !in_quotes => {
+            // a group in parentheses is one clause, like a range in brackets
+            '[' | '{' | '(' if !in_quotes => {
                 depth += 1;
                 cur.push(c);
             }
-            ']' | '}' if !in_quotes => {
+            ']' | '}' | ')' if !in_quotes => {
                 depth -= 1;
                 cur.push(c);
             }

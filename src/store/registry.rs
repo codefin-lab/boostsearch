@@ -603,10 +603,34 @@ impl Store {
                     g.path = Some(path);
                     g.open_translog();
                 }
-                Ok(())
             }
-            None => self.open_index_in_ram(name, body),
+            None => self.open_index_in_ram(name, body)?,
         }
+        // An index made from now on is routed as the reference routes it,
+        // folded by its routing shards; the count is kept in its settings so
+        // that every node holding it agrees where an id belongs. One made
+        // before has no such setting and keeps the fold it was written with.
+        if let Some(st) = self.get(name) {
+            let mut g = st.write();
+            if g.numeric_setting("boost_routing_shards").is_none() {
+                // `number_of_routing_shards` written at creation is the fold;
+                // without it, the one the reference derives from the count
+                let shards = g.shard_count().max(1);
+                let rns = g
+                    .numeric_setting("number_of_routing_shards")
+                    .filter(|&r| r >= shards && r % shards == 0)
+                    .unwrap_or_else(|| crate::search::default_routing_shards(shards));
+                if !g.settings.is_object() {
+                    g.settings = serde_json::json!({});
+                }
+                if !g.settings.get("index").map(|v| v.is_object()).unwrap_or(false) {
+                    g.settings["index"] = serde_json::json!({});
+                }
+                g.settings["index"]["boost_routing_shards"] = serde_json::json!(rns.to_string());
+                g.save_meta();
+            }
+        }
+        Ok(())
     }
 
     fn open_index(&self, name: &str, body: &Value, path: PathBuf) -> Result<()> {

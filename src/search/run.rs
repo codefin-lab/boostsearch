@@ -355,6 +355,16 @@ fn rescore_by_functions(
                 continue;
             }
             let weight = function.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            // `gauss`, `exp` and `linear` score by how far a value is from an
+            // origin. None of the three was read: they counted as one, so a
+            // decay over price or date or place changed nothing, and the
+            // documents came back in the order the query alone gave them.
+            if let Some((shape, decay_spec)) =
+                ["gauss", "exp", "linear"].iter().find_map(|k| function.get(*k).map(|d| (*k, d)))
+            {
+                made.push(weight * decay_value(shape, decay_spec, &source).unwrap_or(1.0));
+                continue;
+            }
             let value = match function.get("field_value_factor") {
                 None if function.get("script_score").is_some() => {
                     let script = function.pointer("/script_score/script").unwrap_or(&Value::Null);
@@ -461,9 +471,16 @@ fn matches_here(source: &Value, filter: &Value) -> bool {
                 return false;
             };
             let wanted = wanted.get("value").or_else(|| wanted.get("query")).unwrap_or(wanted);
+            // a field may hold several values, and matches when any of them
+            // does: `tags: ["a", "b"]` was compared whole with `a`, never
+            // matched, and a weight behind a filter on it was never applied
+            let one = |v: &Value| match v {
+                Value::String(s) => wanted.as_str().map(|w| s.contains(w)).unwrap_or(false),
+                other => other == wanted,
+            };
             match held(field) {
-                Some(Value::String(s)) => wanted.as_str().map(|w| s.contains(w)).unwrap_or(false),
-                Some(other) => &other == wanted,
+                Some(Value::Array(values)) => values.iter().any(one),
+                Some(v) => one(&v),
                 None => false,
             }
         }
@@ -964,12 +981,19 @@ pub fn run(
             .ok()
             .and_then(|o| o.hits.first().and_then(|h| h.get("_id")?.as_str().map(String::from)));
         if let Some(id) = refused {
-            let bad = routing_shard(&id, shards);
+            let route = |r: &str| {
+                targets
+                    .first()
+                    .and_then(|n| store.get(n))
+                    .map(|st| st.read().shard_for(r))
+                    .unwrap_or_else(|| routing_shard(r, shards))
+            };
+            let bad = route(&id);
             let all = json!({"query": {"match_all": {}}, "size": 10_000, "_source": false});
             if let Ok(o) = run(store, &targets.join(","), &all, &Params::new()) {
                 for hit in &o.hits {
                     let Some(other) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
-                    if routing_shard(other, shards) == bad {
+                    if route(other) == bad {
                         excluded_ids.push(other.to_string());
                     }
                 }
@@ -1515,10 +1539,10 @@ pub fn run(
         cands.retain(|c| {
             let (_, searcher, st) = &searchers[c.shard];
             let g = st.read();
-            let shards = g.numeric_setting("number_of_shards").unwrap_or(1).max(1);
             match source_of(searcher, &g, c.addr) {
                 Some((doc_id, _)) => {
-                    let routed = routing_shard(&doc_id, shards);
+                    // placed by the index's own fold, as its writes were
+                    let routed = g.shard_for(&doc_id);
                     routed % max == id
                 }
                 None => false,
@@ -2187,4 +2211,99 @@ fn without_derived(body: &Value) -> Value {
         o.remove("derived");
     }
     b
+}
+
+/// A decay function's value for one document: 1 at the origin, `decay` at
+/// `scale` beyond `offset`, and in between by the curve its name gives.
+/// Numbers, dates -- origin and scale as a date and a length of time -- and
+/// geo points -- a point and a distance -- are all distances from an origin.
+fn decay_value(shape: &str, spec: &Value, source: &Value) -> Option<f32> {
+    let (field, params) =
+        spec.as_object()?.iter().find(|(k, _)| String::as_str(k) != "multi_value_mode")?;
+    let held = source.pointer(&format!("/{}", field.replace('.', "/")))?;
+    let decay = params.get("decay").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let length = |v: Option<&Value>, scale_of: &dyn Fn(&str) -> Option<f64>| -> Option<f64> {
+        match v? {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => scale_of(s),
+            _ => None,
+        }
+    };
+    let metres = |s: &str| -> Option<f64> {
+        let s = s.trim();
+        let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+        let (n, unit) = s.split_at(split);
+        let n: f64 = n.trim().parse().ok()?;
+        Some(
+            n * match unit {
+                "km" => 1000.0,
+                "mi" => 1609.344,
+                "yd" => 0.9144,
+                "ft" => 0.3048,
+                "cm" => 0.01,
+                "mm" => 0.001,
+                "nmi" | "NM" => 1852.0,
+                _ => 1.0,
+            },
+        )
+    };
+    let millis = |s: &str| crate::search::extras::parse_time_amount(s);
+    // how far the value is from the origin, and the scale, in one unit
+    let (distance, scale, offset) = if let Some(origin) = params
+        .get("origin")
+        .and_then(crate::search::geo::read_point)
+        .filter(|_| crate::search::geo::read_point(held).is_some())
+    {
+        let (lat, lon) = crate::search::geo::read_point(held)?;
+        let (olat, olon) = origin;
+        const R: f64 = 6_371_008.771_4;
+        let (p1, p2) = (olat.to_radians(), lat.to_radians());
+        let (dp, dl) = ((lat - olat).to_radians(), (lon - olon).to_radians());
+        let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+        let d = 2.0 * R * h.sqrt().min(1.0).asin();
+        (
+            d,
+            length(params.get("scale"), &metres)?,
+            length(params.get("offset"), &metres).unwrap_or(0.0),
+        )
+    } else if let Some(v) = held.as_f64() {
+        let origin = params.get("origin").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let scale = params.get("scale").and_then(|v| v.as_f64())?;
+        let offset = params.get("offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        ((v - origin).abs(), scale, offset)
+    } else {
+        // a date: both ends read as instants, the lengths as time
+        let at = |v: &Value| {
+            crate::store::canonical_date(v)
+                .and_then(|d| crate::store::parse_date_lenient(&d))
+                .map(|d| d.unix_timestamp_nanos() as f64 / 1e6)
+        };
+        let value = at(held)?;
+        let origin = match params.get("origin") {
+            Some(o) => at(o)?,
+            None => {
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()
+                    as f64
+            }
+        };
+        let scale = length(params.get("scale"), &millis)?;
+        let offset = length(params.get("offset"), &millis).unwrap_or(0.0);
+        ((value - origin).abs(), scale, offset)
+    };
+    let d = (distance - offset).max(0.0);
+    if scale <= 0.0 {
+        return None;
+    }
+    let value = match shape {
+        "gauss" => {
+            let sigma_sq = -(scale * scale) / (2.0 * decay.ln());
+            (-(d * d) / (2.0 * sigma_sq)).exp()
+        }
+        "exp" => (decay.ln() / scale * d).exp(),
+        _ => {
+            let s = scale / (1.0 - decay);
+            ((s - d) / s).max(0.0)
+        }
+    };
+    Some(value as f32)
 }

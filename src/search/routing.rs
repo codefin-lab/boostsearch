@@ -74,3 +74,73 @@ pub(crate) fn term_partition(key: &Value, num: i64) -> i64 {
     };
     hash.rem_euclid(num.max(1))
 }
+
+/// How many routing shards the reference gives an index of this many shards
+/// when none is asked for: the shard count doubled as far as 1,024 allows,
+/// at least once -- which is what lets it be split later.
+pub(crate) fn default_routing_shards(shards: u64) -> u64 {
+    let shards = shards.max(1);
+    let log2_shards = 64 - (shards - 1).leading_zeros() as u64;
+    let splits = 10u64.saturating_sub(log2_shards).max(1);
+    shards << splits
+}
+
+/// Which shard a routing value lands on, by the reference's fold where the
+/// index records its routing shards: the hash taken modulo the routing
+/// shards, then divided down to the real ones. An index without the record
+/// -- every one made before this -- is folded by its shard count, as it was
+/// written, so none of its documents moves.
+pub(crate) fn routing_shard_in(routing: &str, shards: u64, routing_shards: Option<u64>) -> u64 {
+    let shards = shards.max(1);
+    match routing_shards {
+        Some(rns) if rns >= shards && rns % shards == 0 => {
+            let mut bytes = Vec::with_capacity(routing.len() * 2);
+            for c in routing.encode_utf16() {
+                bytes.push((c & 0xff) as u8);
+                bytes.push((c >> 8) as u8);
+            }
+            let hash = murmur3_x86_32(&bytes, 0) as i64;
+            (hash.rem_euclid(rns as i64) as u64) / (rns / shards)
+        }
+        _ => routing_shard(routing, shards),
+    }
+}
+
+#[cfg(test)]
+mod routing_shard_tests {
+    use super::*;
+
+    #[test]
+    fn ids_land_on_the_shard_opensearch_3_1_puts_them_on() {
+        // read back from OpenSearch 3.1.0 with `explain`, which names the
+        // shard of each hit, for indices made with the default routing shards
+        let keys =
+            ["f0", "f1", "f2", "f7", "doc-42", "ab", "x", "q9", "k3", "user_1234", "ไทย", "é"];
+        let seen: [(u64, [u64; 12]); 3] = [
+            (2, [0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0]),
+            (3, [2, 2, 1, 1, 2, 2, 2, 1, 1, 0, 0, 1]),
+            (5, [3, 2, 4, 4, 0, 3, 0, 2, 4, 2, 3, 4]),
+        ];
+        for (shards, want) in seen {
+            let rns = Some(default_routing_shards(shards));
+            let got: Vec<u64> = keys.iter().map(|k| routing_shard_in(k, shards, rns)).collect();
+            assert_eq!(got, want, "{shards} shards");
+        }
+    }
+
+    #[test]
+    fn routing_shards_default_as_the_reference_computes_them() {
+        assert_eq!(default_routing_shards(1), 1024);
+        assert_eq!(default_routing_shards(2), 1024);
+        assert_eq!(default_routing_shards(3), 768);
+        assert_eq!(default_routing_shards(5), 640);
+    }
+
+    #[test]
+    fn an_index_without_routing_shards_folds_as_before() {
+        for id in ["1", "a", "doc-42", "zz"] {
+            assert_eq!(routing_shard_in(id, 2, None), routing_shard(id, 2));
+            assert!(routing_shard_in(id, 2, Some(1024)) < 2);
+        }
+    }
+}
