@@ -5157,3 +5157,26 @@ Two things the gate found immediately, both about a node that has just started:
 Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
 over all 409 files, SQL and PPL 8 of 8, the bench gate green against a
 three-run baseline on this machine.
+
+### What the gate found about the gate
+
+The first thing the new gate said was that this engine had lost 5.2% of
+`rss_mb_after_search` since August. It had not: `tools/bench.py` sampled memory
+by looking through the process table for a command containing `boostsearch`
+and taking the **largest** match, so any other node left running on the machine
+-- another gate, another bench -- was reported as this one's memory. The
+recorded runs say so themselves: `rss_mb_idle` has a median of 257 MB across
+the five kept runs and a range of 15 to 273, and an idle node holds 19.
+
+It now takes `pid:<n>`, which is what a caller that started the server can
+give, and `bench_gate.py` gives it. A bare name that matches more than one
+process answers nothing at all and says why -- a missing number is worth more
+than a wrong one. With that, the spread between three runs of one build fell
+from 17.7 MB to 8.7 MB, and the comparison is:
+
+    rss idle          OpenSearch 1095.2 MB    BoostSearch  19.0 MB
+    rss after index   OpenSearch 1085.6 MB    BoostSearch 261.3 MB
+    rss after search  OpenSearch 1112.4 MB    BoostSearch 269.2 MB
+
+Ahead on all 34 dimensions, against numbers measured once and kept.
+

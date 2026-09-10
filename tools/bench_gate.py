@@ -144,7 +144,10 @@ def measure(binary, port, transport, rounds, data):
         out = tempfile.mktemp(suffix=".json")
         ran = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "bench.py"), "--url", url,
-             "--rounds", str(rounds), "--data", data, "--out", out],
+             "--rounds", str(rounds), "--data", data, "--out", out,
+             # this node's own memory, not the largest of whatever else on
+             # this machine happens to be called boostsearch
+             "--proc", f"pid:{node.pid}"],
             capture_output=True, text=True, check=False, cwd=ROOT,
         )
         if not pathlib.Path(out).exists():

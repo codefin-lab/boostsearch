@@ -70,9 +70,23 @@ def query_mix(index):
 def rss_mb(pattern):
     """Resident set size of the server, in MB.
 
-    `docker:<name>` reads the container's usage instead, since a containerised
-    server is invisible to the host's process table on macOS.
+    `pid:<n>` reads exactly that process, which is what a caller that started
+    the server should ask for. `docker:<name>` reads the container's usage
+    instead, since a containerised server is invisible to the host's process
+    table on macOS. A bare name matches the process table, and if it matches
+    more than one process it answers nothing at all: it used to answer the
+    largest of them, so a second node left running on the machine -- a gate,
+    another bench -- was reported as this one's memory. That is how a recorded
+    run came to say an idle server held 257 MB when it holds 19.
     """
+    if pattern.startswith("pid:"):
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "rss=", "-p", pattern.split(":", 1)[1]],
+                capture_output=True, text=True).stdout.strip()
+            return round(int(out) / 1024, 1) if out else None
+        except Exception:
+            return None
     if pattern.startswith("docker:"):
         name = pattern.split(":", 1)[1]
         try:
@@ -93,15 +107,22 @@ def rss_mb(pattern):
         out = subprocess.run(["ps", "-Ao", "rss,command"], capture_output=True, text=True).stdout
     except Exception:
         return None
-    best = 0
+    found = []
     for line in out.splitlines()[1:]:
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
             continue
         kb, cmd = parts
         if pattern in cmd and "ps -Ao" not in cmd:
-            best = max(best, int(kb))
-    return round(best / 1024, 1) if best else None
+            found.append(int(kb))
+    if len(found) > 1:
+        print(
+            f"  [rss] {len(found)} processes match [{pattern}]; the number would be one of "
+            "theirs, so none is reported. Ask for pid:<n>.",
+            file=sys.stderr,
+        )
+        return None
+    return round(found[0] / 1024, 1) if found else None
 
 
 def pct(xs, p):
