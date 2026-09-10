@@ -217,11 +217,15 @@ impl IdxState {
     /// read again, which is slower and always right.
     pub fn load_vectors(&mut self) {
         if let Some(path) = self.vector_path()
-            && let Some(held) = crate::knn::Vectors::load(&path)
+            && let Some((held, taken_at)) = crate::knn::Vectors::load(&path)
         {
             let documents = self.realtime.searcher().num_docs() as usize;
             let fields = self.mapping.vector_fields.len();
-            if !held.is_empty() && held.len() >= documents.min(documents * fields) {
+            // taken at the state the index is in now, and not short of it
+            if taken_at == self.seq_no
+                && !held.is_empty()
+                && held.len() >= documents.min(documents * fields)
+            {
                 *self.vectors.write() = held;
                 // the graph is not written down -- building it costs less
                 // than keeping it right on disk would -- so it is built here
@@ -268,7 +272,7 @@ impl IdxState {
         let mut held = self.vectors.write();
         held.maintain(&self.mapping.vector_fields);
         if let Some(path) = self.vector_path() {
-            held.save(&path);
+            held.save(&path, self.seq_no);
         }
     }
 }

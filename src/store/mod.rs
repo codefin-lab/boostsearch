@@ -563,6 +563,9 @@ pub struct IdxState {
     /// what `index.translog.durability: request` means: appended and fsynced
     /// before the write is answered.
     translog: Option<std::io::BufWriter<std::fs::File>>,
+    /// the first thing that went wrong recording writes since the last time a
+    /// write was answered for; the write that finds it is not acknowledged
+    pub(crate) translog_error: Option<String>,
     /// when the record was last forced to disk, which is what
     /// `durability: async` measures its interval from
     last_translog_sync: std::time::Instant,

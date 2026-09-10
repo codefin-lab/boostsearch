@@ -55,6 +55,12 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
             let _ = st.mapping.learn_dynamic(&source);
             let indexed = crate::store::expand_for_indexing(source, &st.mapping);
             st.observe(&indexed);
+            // the vector goes beside the copy as it goes beside the primary:
+            // a k-NN search answered by this copy found a document and not
+            // its vector, or the vector it had before
+            if !st.mapping.vector_fields.is_empty() {
+                st.vectors.write().write(&st.mapping.vector_fields, &op.id, &indexed);
+            }
             let doc = crate::store::make_doc(&st.fields, &st.mapping, &op.id, indexed, raw, op.seq);
             if existed {
                 st.queue_op_for(&op.id, shard, crate::store::PendingOp::Delete(op.id.clone()));
@@ -68,6 +74,9 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
         None => {
             if existed {
                 st.queue_op_for(&op.id, shard, crate::store::PendingOp::Delete(op.id.clone()));
+                if !st.mapping.vector_fields.is_empty() {
+                    st.vectors.write().forget(&op.id);
+                }
             }
             st.log_write(&op.id, None, op.version, op.seq, None);
             st.note_pending(&op.id, None);

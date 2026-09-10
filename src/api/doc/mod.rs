@@ -502,17 +502,25 @@ pub fn recover(store: &Store) {
     }
 }
 
-pub(crate) fn maybe_refresh(st: &mut IdxState, p: &Params, shard: Option<u64>) {
+pub(crate) fn maybe_refresh(
+    st: &mut IdxState,
+    p: &Params,
+    shard: Option<u64>,
+) -> Result<(), Response> {
     // the write is about to be answered for, so what was recorded of it has to
     // be on disk -- a refresh commits and makes that moot, but most writes are
-    // not refreshed
-    st.sync_translog();
+    // not refreshed. A record that did not reach the disk is a write that is
+    // not acknowledged.
+    if let Err(why) = st.sync_translog() {
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "translog_exception", why));
+    }
     if flag(p, "refresh") {
         let _ = match shard {
             Some(one) => st.refresh_shard(one),
             None => st.refresh(),
         };
     }
+    Ok(())
 }
 
 /// A write that was asked to refresh says so in its answer, so the caller can
@@ -740,7 +748,9 @@ pub(crate) async fn do_index(
                 body["_routing"] = json!(r);
             }
             let shard = g.shard_of_doc(&id);
-            maybe_refresh(&mut g, &p, Some(shard));
+            if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {
+                return r;
+            }
             note_forced_refresh(&mut body, &p);
             (status, axum::Json(body)).into_response()
         }
@@ -887,7 +897,9 @@ pub async fn delete_doc_route(
                 crate::security::audit_document_written(&g.name, &id, version, None, None, true);
             }
             g.routing.remove(&id);
-            maybe_refresh(&mut g, &p, Some(shard));
+            if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {
+                return r;
+            }
             let mut body = json!({
                 "_index": g.name, "_id": id, "_version": version,
                 "result": if existed { "deleted" } else { "not_found" },
@@ -918,7 +930,9 @@ pub async fn delete_doc_route(
         crate::security::audit_document_written(&g.name, &id, version, None, None, true);
     }
     g.routing.remove(&id);
-    maybe_refresh(&mut g, &p, Some(shard));
+    if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {
+        return r;
+    }
     note_forced_refresh(&mut body, &p);
     (status, axum::Json(body)).into_response()
 }

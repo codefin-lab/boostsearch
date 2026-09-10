@@ -119,8 +119,14 @@ impl Held {
 }
 
 /// Every vector an index holds, by field and then by document id.
+/// The first bytes of a vector file that carries the sequence number it was
+/// taken at.
+const VECTORS_MAGIC: &[u8] = b"BSVEC1";
+
 #[derive(Default)]
 pub struct Vectors {
+    /// the sequence number of the index the table was last written at
+    saved_seq: Option<u64>,
     by_field: HashMap<String, Held>,
     /// whether anything has changed since it was last written down
     dirty: bool,
@@ -313,12 +319,18 @@ impl Vectors {
         self.by_field.get(path)?.by_id.get(id).map(|v| v.as_slice())
     }
 
-    /// Write the table down, as it stands.
-    pub fn save(&mut self, path: &std::path::Path) {
-        if !self.dirty {
+    /// Write the table down, as it stands, marked with the sequence number
+    /// of the index it was taken from.
+    pub fn save(&mut self, path: &std::path::Path, seq: u64) {
+        if !self.dirty && self.saved_seq == Some(seq) {
             return;
         }
         let mut out = Vec::new();
+        // which state of the index this is: a table that held as many vectors
+        // as there were documents was taken back after a restart whatever
+        // their values, so a vector changed after the last save came back old
+        out.extend_from_slice(VECTORS_MAGIC);
+        out.extend_from_slice(&seq.to_le_bytes());
         // a plain format, written by hand: field, id, then the numbers. A
         // hundred thousand vectors of a thousand dimensions is four hundred
         // megabytes, and JSON would make it three times that. The graph is
@@ -341,13 +353,23 @@ impl Vectors {
         // record boundary -- which loads cleanly and is short of vectors
         if crate::store::write_atomic(path, &out).is_ok() {
             self.dirty = false;
+            self.saved_seq = Some(seq);
         }
     }
 
-    /// Read a table back.
-    pub fn load(path: &std::path::Path) -> Option<Vectors> {
+    /// Read a table back, with the sequence number it was taken at. A file
+    /// written before the mark was is not trusted: it is read again from the
+    /// documents.
+    pub fn load(path: &std::path::Path) -> Option<(Vectors, u64)> {
         let bytes = std::fs::read(path).ok()?;
-        let mut at = 0usize;
+        let head = bytes.get(..VECTORS_MAGIC.len() + 8)?;
+        if &head[..VECTORS_MAGIC.len()] != VECTORS_MAGIC {
+            return None;
+        }
+        let mut raw_seq = [0u8; 8];
+        raw_seq.copy_from_slice(&head[VECTORS_MAGIC.len()..]);
+        let seq = u64::from_le_bytes(raw_seq);
+        let mut at = VECTORS_MAGIC.len() + 8;
         let mut out = Vectors::default();
         let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
             let found = bytes.get(*at..*at + n)?;
@@ -374,7 +396,8 @@ impl Vectors {
             out.by_field.entry(field).or_default().put(&id, vector);
         }
         out.dirty = false;
-        Some(out)
+        out.saved_seq = Some(seq);
+        Some((out, seq))
     }
 }
 
@@ -431,10 +454,15 @@ mod tests {
         held.write(&fields, "one", &json!({"embedding": [1.5, -2.5]}));
         held.write(&fields, "two", &json!({"embedding": [0.0, 0.0]}));
         let path = std::env::temp_dir().join(format!("boost-vectors-{}", std::process::id()));
-        held.save(&path);
-        let read = Vectors::load(&path).expect("the table reads back");
+        held.save(&path, 7);
+        let (read, seq) = Vectors::load(&path).expect("the table reads back");
+        assert_eq!(seq, 7, "the table says which state of the index it holds");
         assert_eq!(read.len(), 2);
         assert_eq!(read.get("embedding", "one"), Some([1.5f32, -2.5].as_slice()));
+        // a file from before the mark is read again from the documents
+        let body = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &body[VECTORS_MAGIC.len() + 8..]).unwrap();
+        assert!(Vectors::load(&path).is_none());
         let _ = std::fs::remove_file(&path);
     }
 }

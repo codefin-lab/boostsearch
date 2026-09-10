@@ -571,7 +571,7 @@ pub fn install(store: Store) {
                             applied += 1;
                         }
                     }
-                    g.sync_translog();
+                    g.sync_translog()?;
                     if refresh == "true" || refresh == "wait_for" || refresh.is_empty() && false {
                         let _ = g.refresh();
                     }
@@ -882,7 +882,7 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
                 n += 1;
             }
         }
-        g.sync_translog();
+        g.sync_translog()?;
         let _ = g.refresh();
         Ok(n)
     })
@@ -1025,7 +1025,7 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
             for op in &batch {
                 crate::api::doc::apply_replicated(&mut g, op);
             }
-            g.sync_translog();
+            g.sync_translog()?;
         }
     })
     .await
@@ -1202,7 +1202,7 @@ pub async fn catch_up_by_scan(
                     crate::api::doc::apply_replicated(&mut g, op);
                 }
             }
-            g.sync_translog();
+            g.sync_translog()?;
             Ok(())
         })
         .await

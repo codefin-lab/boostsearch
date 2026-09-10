@@ -292,7 +292,9 @@ pub async fn update_doc(
         }
     }
     let shard = g.shard_of_doc(&id);
-    maybe_refresh(&mut g, &p, Some(shard));
+    if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {
+        return r;
+    }
     // a noop wrote nothing, so there was nothing for a refresh to show
     if result != "noop" {
         note_forced_refresh(&mut body_out, &p);

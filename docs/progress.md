@@ -6138,3 +6138,59 @@ paths); four chaos runs, all settled, no node silent, no acknowledged write
 lost, two with a copy one write short (above). Against OpenSearch 3.1.0:
 the query corpus 59/61, the second query corpus 45/45, the aggregations
 corpus 36/43.
+
+## The twenty-sixth review
+
+The two P1s the readiness review of 7 September left open, read again for
+the plan the twenty-fifth review wrote, and one found on the way to them.
+
+**P1 -- a write the disk refused was answered for (PR-06).** The translog
+dropped the error of every write and every sync to disk (`let _ =`), so a
+record that never reached the disk was acknowledged like one that had. The
+first failure is now kept -- opening the record, writing to it, flushing it,
+forcing it -- and the write that asks for its record to be on disk before it
+is answered finds it: a single write, an update or a delete answers 500
+`translog_exception`; a bulk answers 500 for every item written to that
+index; a copy answers its primary with the error, which fails the copy. The
+failure holds while the disk still refuses, so no later write is answered
+for either. An index on disk with no record open is a failure too; one held
+in memory has nothing to record to. A unit test gives an index a record it
+cannot write and asks for it to be forced.
+
+**P1 -- a vector cache was taken back after a restart when it held as many
+vectors as there were documents, whatever their values (PR-04).** The file
+now begins with a mark and the sequence number of the index it was written
+at, and is used only when that is the index's own; otherwise the vectors
+are read again from the documents. A file from before the mark is read
+again. The unit test that writes a table down now checks the number it
+carries, and that a file without one is not taken.
+
+**P1 (new) -- a replica's vectors were never written.** The primary puts a
+document's vector beside the index before the document goes in, and takes
+it out when the document is deleted; a copy applying the same write did
+neither, so a k-NN search a replica answered did not find the documents
+written since its fill, or found their old vectors. A copy now does both, as
+the primary does.
+
+**The P0 is worse than it looked, and it has one address.** Four chaos runs
+on this review's binary: in one, twenty acknowledged writes were on no copy
+at all -- the first run to lose writes outright since the twenty-first
+review -- and in another a copy was one write short. All twenty were
+acknowledged by one node in one instant: 64.9s, the moment that node was let
+go on after being stopped at 57.1s, answering `_shards.successful: 2`. The
+copy short came 0.1s after the same node was let go on in its own run, as
+both of the twenty-fifth review's did. A primary that was paused, resumed,
+and acknowledged writes before hearing it was no longer the primary -- or
+while it still was, and its copy then lost them -- is what the next review
+takes apart with a trace of every write. None of this review's changes was
+exercised by these runs: no node logged a translog failure, and the chaos
+index holds no vectors. The P0's count now reads: three runs in twenty-six
+with a copy short, one with writes lost.
+
+Open at the end of this review: P0 1 (writes acknowledged by a primary around a pause
+and resume: lost outright once, a copy short three times, in twenty-six
+chaos runs), P1 1 (no resync after a change of primary), P2 12.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths); chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.

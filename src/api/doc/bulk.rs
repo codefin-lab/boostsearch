@@ -733,13 +733,33 @@ pub async fn bulk(
     // one bulk is one write to answer for, so its record is forced once, not
     // once per item; a refresh commits the lot and makes the record moot
     let refreshing = flag(&p, "refresh");
+    // an index whose record did not reach the disk answers for none of the
+    // items written to it in this bulk
+    let mut unrecorded: Vec<(String, String)> = Vec::new();
     for n in touched {
         let Some(st) = store.get(&n) else { continue };
         let mut g = st.write();
         if refreshing {
             let _ = g.refresh();
-        } else {
-            g.sync_translog();
+        }
+        if let Err(why) = g.sync_translog() {
+            unrecorded.push((n.clone(), why));
+        }
+    }
+    for item in items.iter_mut() {
+        let Some(o) = item.as_object_mut().and_then(|o| o.values_mut().next()) else {
+            continue;
+        };
+        let index = o.get("_index").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if o.get("error").is_none()
+            && let Some((_, why)) = unrecorded.iter().find(|(n, _)| *n == index)
+        {
+            errors = true;
+            o["status"] = json!(500);
+            o["error"] = json!({"type": "translog_exception", "reason": why});
+            if let Some(m) = o.as_object_mut() {
+                m.remove("result");
+            }
         }
     }
     // a bulk asked to refresh says so of every item that wrote something, as

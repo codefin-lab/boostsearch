@@ -7,7 +7,18 @@ impl IdxState {
     pub(crate) fn open_translog(&mut self) {
         let Some(dir) = self.path.clone() else { return };
         let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(TRANSLOG));
+        if let Err(e) = &file {
+            self.note_translog_error(format!("the translog could not be opened: {e}"));
+        }
         self.translog = file.ok().map(std::io::BufWriter::new);
+    }
+
+    /// Keep the first failure until a write is answered for.
+    fn note_translog_error(&mut self, why: String) {
+        if self.translog_error.is_none() {
+            tracing::error!("index [{}]: {why}", self.name);
+            self.translog_error = Some(why);
+        }
     }
 
     /// Record a write, so a crash can find it again.
@@ -20,6 +31,14 @@ impl IdxState {
         source: Option<&str>,
     ) {
         use std::io::Write;
+        // An index on disk with no record open would answer for writes a crash
+        // takes with it; one held in memory has nothing to record to.
+        if self.translog.is_none() {
+            if self.path.is_some() {
+                self.note_translog_error("no translog is open for this index".into());
+            }
+            return;
+        }
         let Some(log) = self.translog.as_mut() else { return };
         // The document already is JSON. Recording it as a JSON *string* would
         // copy it and escape it a second time -- which, for a bulk of large
@@ -40,7 +59,12 @@ impl IdxState {
             None => line.push_str("null"),
         }
         line.push_str("}\n");
-        let _ = log.write_all(line.as_bytes());
+        // A record the disk refused was dropped here and the write answered
+        // for anyway: the reference fails the write when its translog does.
+        if let Err(e) = log.write_all(line.as_bytes()) {
+            self.note_translog_error(format!("a write could not be recorded: {e}"));
+            return;
+        }
         self.translog_bytes_since_commit += line.len() as u64;
         // a record that outgrows the index it stands in for is a recovery that
         // would take longer than the writing did
@@ -63,8 +87,14 @@ impl IdxState {
     ///
     /// Once per request rather than once per document: a bulk of ten thousand
     /// is one write to answer for, the way OpenSearch counts it too.
-    pub fn sync_translog(&mut self) {
+    /// It fails if anything recorded since the last write answered for did
+    /// not reach the disk; the caller does not acknowledge the write.
+    pub fn sync_translog(&mut self) -> Result<(), String> {
         self.flush_translog(false);
+        match self.translog_error.take() {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
     }
 
     /// The same, with the interval ignored: a shutdown or a flush forces
@@ -79,11 +109,19 @@ impl IdxState {
             || self.last_translog_sync.elapsed()
                 >= std::time::Duration::from_millis(self.knobs.sync_interval_ms);
         let Some(log) = self.translog.as_mut() else { return };
-        let _ = log.flush();
+        let flushed = log.flush();
+        let synced = if force && flushed.is_ok() { sync_file(log.get_ref()) } else { Ok(()) };
+        if let Err(e) = flushed {
+            self.note_translog_error(format!("the translog could not be written: {e}"));
+            return;
+        }
         if !force {
             return;
         }
-        let _ = sync_file(log.get_ref());
+        if let Err(e) = synced {
+            self.note_translog_error(format!("the translog could not be forced to disk: {e}"));
+            return;
+        }
         self.last_translog_sync = std::time::Instant::now();
     }
 
@@ -345,5 +383,32 @@ fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         file.sync_data()
+    }
+}
+
+#[cfg(test)]
+mod translog_failure_tests {
+    #[test]
+    fn a_write_the_disk_refused_is_not_answered_for() {
+        let dir = std::env::temp_dir().join(format!("bs-translog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let store = crate::store::Store::on_disk(&dir).expect("a store");
+        let st = store.ensure("refused").expect("an index");
+        let mut g = st.write();
+        // a record that can be opened but not written to, as a disk that has
+        // stopped taking writes is
+        let path = dir.join("readonly.log");
+        std::fs::write(&path, b"").expect("a file");
+        let readonly = std::fs::File::open(&path).expect("read only");
+        g.translog = Some(std::io::BufWriter::new(readonly));
+        let wrote = crate::api::doc::write_doc(&mut g, "a", serde_json::json!({"n": 1}), "index");
+        assert!(wrote.is_ok(), "the write itself goes through");
+        assert!(g.sync_translog().is_err(), "the record did not reach the disk");
+        // and goes on failing while the disk refuses: the record still holds
+        // what it could not write, so no later write is answered for either
+        assert!(g.sync_translog().is_err(), "a disk still refusing still fails");
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
