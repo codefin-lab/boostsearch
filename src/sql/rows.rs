@@ -63,6 +63,17 @@ pub fn shape(planned: &Planned, answer: &Value) -> Table {
     if planned.distinct {
         let mut seen = std::collections::HashSet::new();
         rows.retain(|row| seen.insert(Value::Array(row.clone()).to_string()));
+        // The reference answers DISTINCT from a composite aggregation, so
+        // the rows come back in key order; these came in document order.
+        if planned.order_rows.is_empty() {
+            rows.sort_by(|a, b| {
+                a.iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| order_of(x, y))
+                    .find(|o| *o != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
     }
     if planned.grouped || planned.distinct {
         if let Some(limit) = planned.limit {

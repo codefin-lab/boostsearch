@@ -293,7 +293,7 @@ pub async fn delete_index(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
                 format!(
-                    "index [{part}] is the write index for data stream [{stream}] and cannot be                      deleted"
+                    "index [{part}] is the write index for data stream [{stream}] and cannot be deleted"
                 ),
             );
         }

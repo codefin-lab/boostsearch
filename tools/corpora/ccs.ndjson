@@ -1,0 +1,35 @@
+{"method": "DELETE", "path": "/ccs_local", "body": null}
+{"method": "PUT", "path": "/ccs_local", "body": {"settings": {"number_of_shards": 2, "number_of_replicas": 0}, "mappings": {"properties": {"animal": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}, "f1": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}, "filter_field": {"type": "long"}}}}}
+{"method": "PUT", "path": "/ccs_local/_doc/l0?refresh=true", "body": {"f1": "local_cluster", "animal": "cow", "filter_field": 1}}
+{"method": "PUT", "path": "/ccs_local/_doc/l1?refresh=true", "body": {"f1": "local_cluster", "animal": "pig", "filter_field": 0}}
+{"method": "PUT", "path": "/ccs_local/_doc/l2?refresh=true", "body": {"f1": "local_cluster", "animal": "chicken", "filter_field": 1}}
+{"method": "PUT", "path": "/ccs_local/_doc/l3?refresh=true", "body": {"f1": "local_cluster", "animal": "cow", "filter_field": 0}}
+{"method": "PUT", "path": "/ccs_local/_doc/l4?refresh=true", "body": {"f1": "local_cluster", "animal": "horse", "filter_field": 2}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"match_all": {}}, "size": 20, "sort": [{"filter_field": "asc"}, {"animal.keyword": "asc"}]}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"match": {"animal": "pig"}}, "size": 20, "sort": ["_doc"]}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search?rest_total_hits_as_int=true", "body": {"query": {"term": {"filter_field": 0}}, "size": 0}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"a": {"terms": {"field": "animal.keyword"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"c": {"terms": {"field": "f1.keyword"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"avg": {"avg": {"field": "filter_field"}}, "st": {"stats": {"field": "filter_field"}}, "mx": {"max": {"field": "filter_field"}}, "sm": {"sum": {"field": "filter_field"}}, "vc": {"value_count": {"field": "filter_field"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"i": {"terms": {"field": "_index"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"a": {"terms": {"field": "animal.keyword"}, "aggs": {"m": {"avg": {"field": "filter_field"}}}}, "best": {"max_bucket": {"buckets_path": "a>m"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"h": {"histogram": {"field": "filter_field", "interval": 1}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"term": {"_index": "my_remote_cluster:test_index"}}, "size": 20, "sort": [{"filter_field": "asc"}, {"animal.keyword": "asc"}]}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"term": {"_index": "ccs_local"}}, "size": 0}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"bool": {"filter": [{"term": {"animal.keyword": "chicken"}}]}}, "size": 3, "from": 1, "sort": [{"filter_field": "desc"}, {"_index": "asc"}]}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search?ccs_minimize_roundtrips=false", "body": {"query": {"match": {"animal": "cow"}}, "size": 20, "sort": [{"filter_field": "asc"}]}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search?ccs_minimize_roundtrips=false&pre_filter_shard_size=1", "body": {"query": {"term": {"_index": "nope"}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"query": {"match_all": {}}, "size": 5, "_source": ["animal"], "sort": [{"animal.keyword": "desc"}, {"filter_field": "asc"}]}}
+{"method": "POST", "path": "/my_remote_cluster:test_*/_search", "body": {"size": 0, "aggs": {"a": {"terms": {"field": "animal.keyword"}}}}}
+{"method": "POST", "path": "/*:test_index/_search", "body": {"size": 0}}
+{"method": "POST", "path": "/my_remote_cluster:test_index/_search", "body": {"query": {"range": {"filter_field": {"gte": 1}}}, "size": 0}}
+{"method": "POST", "path": "/my_remote_cluster:does_not_exist/_search", "body": {"size": 0}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:does_not_exist/_search", "body": {"size": 0}}
+{"method": "POST", "path": "/nowhere:test_index/_search", "body": {"size": 0}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"f": {"filter": {"term": {"filter_field": 1}}, "aggs": {"a": {"terms": {"field": "animal.keyword"}}}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"card": {"cardinality": {"field": "animal.keyword"}}}}}
+{"method": "POST", "path": "/ccs_local,my_remote_cluster:test_index/_search", "body": {"size": 0, "aggs": {"a": {"terms": {"field": "animal.keyword", "size": 2}}, "t": {"top_hits": {"size": 3, "sort": [{"filter_field": "desc"}, {"animal.keyword": "asc"}]}}}}}
+{"method": "GET", "path": "/ccs_local,my_remote_cluster:test_index/_field_caps?fields=animal,filter_field", "body": null}
+{"method": "GET", "path": "/my_remote_cluster:field_caps_index_1/_field_caps?fields=*", "body": null}
+{"method": "GET", "path": "/_remote/info", "body": null}
+{"method": "DELETE", "path": "/ccs_local", "body": null}

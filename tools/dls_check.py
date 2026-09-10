@@ -178,6 +178,27 @@ try:
     check("top_hits sees only what is visible", [h["_id"] for h in hits] == ["1"], f"{s} {hits}")
     check("top_hits hides the masked field", all("ssn" not in (h.get("_source") or {}) for h in hits), hits)
 
+    # A filtered alias is the same promise made without a role, and it broke
+    # twice in the same place: named beside another index, the search ran its
+    # shards on threads that never saw the alias's filter, and bob's
+    # documents came back through a view that exists to hide them.
+    call(url, "PUT", "/beside", admin, {"mappings": {"properties": {"owner": {"type": "keyword"}}}})
+    call(url, "PUT", "/beside/_doc/b1?refresh=true", admin, {"owner": "carol"})
+    call(url, "POST", "/_aliases", admin, {"actions": [
+        {"add": {"index": "secret", "alias": "alice_view", "filter": {"term": {"owner": "alice"}}}}]})
+    for path in ["/alice_view/_search", "/alice_view,beside/_search", "/beside,alice_view/_search"]:
+        s, r = call(url, "POST", path + "?size=20", admin, {"query": {"match_all": {}}})
+        seen = sorted(h["_id"] for h in r.get("hits", {}).get("hits", []))
+        want = ["1", "b1"] if "beside" in path else ["1"]
+        check(f"a filtered alias holds its filter: {path}", seen == want, f"{s} {seen}")
+    s, r = call(url, "POST", "/alice_view,beside/_count", admin, {"query": {"match_all": {}}})
+    check("a filtered alias holds its filter in a count beside another index", r.get("count") == 2, f"{s} {r}")
+    s, r = call(url, "POST", "/alice_view,beside/_search", admin,
+                {"size": 0, "aggs": {"o": {"terms": {"field": "owner"}}}})
+    keys = sorted(b["key"] for b in (r.get("aggregations") or {}).get("o", {}).get("buckets", []))
+    check("a filtered alias holds its filter in an aggregation beside another index",
+          keys == ["alice", "carol"], f"{s} {keys}")
+
     print()
     print(f"  {len(asked)} paths asked")
     print()

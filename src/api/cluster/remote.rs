@@ -42,7 +42,7 @@ pub fn remotes(store: &Store) -> std::collections::BTreeMap<String, Remote> {
             mode: "sniff".into(),
             skip_unavailable: false,
             proxy_address: None,
-            node_connections: 1,
+            node_connections: default_connections(),
             proxy_socket_connections: 18,
         });
         let text = |v: &Value| match v {
@@ -66,7 +66,7 @@ pub fn remotes(store: &Store) -> std::collections::BTreeMap<String, Remote> {
                 e.proxy_address = (!value.is_null()).then(|| text(value));
             }
             "node_connections" => {
-                e.node_connections = text(value).parse().unwrap_or(1);
+                e.node_connections = text(value).parse().unwrap_or_else(|_| default_connections());
             }
             "proxy_socket_connections" => {
                 e.proxy_socket_connections = text(value).parse().unwrap_or(18);
@@ -91,6 +91,23 @@ pub fn remotes(store: &Store) -> std::collections::BTreeMap<String, Remote> {
     }
     out.retain(|_, r| !r.seeds.is_empty() || r.proxy_address.is_some());
     out
+}
+
+/// How many connections a sniffing remote keeps: three, as OpenSearch keeps,
+/// unless the node was started with `cluster.remote.connections_per_cluster`
+/// (or `BOOSTSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER`). It used to be one --
+/// the number OpenSearch's own cross-cluster suite configures its test
+/// cluster with, which is not the number anyone else gets.
+fn default_connections() -> u32 {
+    std::env::var("BOOSTSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER")
+        .ok()
+        .or_else(|| {
+            crate::tls::node_settings()
+                .get("cluster.remote.connections_per_cluster")
+                .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+        })
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
 }
 
 /// `cluster.remote.<name>.<leaf>` split into the name and the leaf.
@@ -245,7 +262,19 @@ pub fn ask(
     let Some(base) = base_url(r) else { return Err(format!("[{}] has no address", r.name)) };
     let url =
         if query.is_empty() { format!("{base}{path}") } else { format!("{base}{path}?{query}") };
-    let agent = crate::snapshot::blobs::web();
+    // A refusal from a remote is an answer with a body, and the body says what
+    // was wrong -- `no such index [x]` -- which is what the caller is owed.
+    // An agent that turns a status into an error threw it away, and a
+    // missing remote index came back as a 404 with nothing in it.
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    });
     let sent = match (method, body) {
         ("GET", None) => agent.get(&url).call(),
         ("DELETE", _) => agent.delete(&url).call(),
@@ -273,10 +302,9 @@ pub fn merge_answers(
     mut answers: Vec<(String, Value)>,
     size: usize,
     from: usize,
-    index_aggs: &[String],
-    avg_aggs: &[String],
-    pipelines: &[Pipeline],
+    plan: &Plan,
 ) -> Value {
+    let (index_aggs, avg_aggs, pipelines) = (&plan.index_aggs, &plan.avg_aggs, &plan.pipelines);
     // the local cluster's answer is the shape everything else is folded into
     let (_, mut out) = answers.remove(0);
     if !out.is_object() {
@@ -329,7 +357,7 @@ pub fn merge_answers(
             prefix_remote_names(a, &cluster, index_aggs);
         }
         match (&mut aggs, theirs_aggs) {
-            (Some(mine), Some(theirs)) => merge_aggregations(mine, &theirs),
+            (Some(mine), Some(theirs)) => merge_aggregations(mine, &theirs, plan),
             (None, Some(theirs)) => aggs = Some(theirs),
             _ => {}
         }
@@ -340,7 +368,7 @@ pub fn merge_answers(
     if sorted {
         hits.sort_by(|a, b| {
             let (x, y) = (a.get("sort"), b.get("sort"));
-            compare_sort_values(x, y)
+            compare_sort_values(x, y, &plan.descending)
         });
     } else {
         hits.sort_by(|a, b| {
@@ -357,6 +385,10 @@ pub fn merge_answers(
     out["_shards"] = shards;
     out["took"] = json!(took);
     if let Some(mut a) = aggs {
+        // the terms asked for deeper than the caller wanted are cut back to
+        // what was asked, and a cardinality asked for as its terms is a count
+        trim_terms(&mut a, &plan.terms_sizes);
+        terms_back_to_cardinality(&mut a, &plan.cardinalities);
         // the averages asked for as sums and counts are averages again
         stats_back_to_averages(&mut a, avg_aggs);
         // A sibling pipeline -- `avg_bucket` and its family -- reads other
@@ -411,7 +443,11 @@ fn recompute_bucket_pipelines(aggs: &mut Value, pipelines: &[Pipeline]) {
                         if metric == "_count" {
                             b.get("doc_count").and_then(|v| v.as_f64())
                         } else {
-                            b.get(metric).and_then(|m| m.get("value")).and_then(|v| v.as_f64())
+                            // `m.avg` is the `avg` of a `stats` -- or, once
+                            // the stats are an average again, its value
+                            let (agg, key) = metric.split_once('.').unwrap_or((metric, "value"));
+                            let m = b.get(agg)?;
+                            m.get(key).or_else(|| m.get("value")).and_then(|v| v.as_f64())
                         }
                     })
                     .collect()
@@ -560,13 +596,26 @@ fn stats_back_to_averages(aggs: &mut Value, avg_aggs: &[String]) {
     }
 }
 
-/// Two hits' `sort` arrays, compared the way a search sorted them: ascending
-/// on the first value that differs. A cluster answers in its own order and
-/// the merge has to put them in one.
-fn compare_sort_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
+/// Two hits' `sort` arrays, compared the way a search sorted them: on the
+/// first value that differs, in the direction that key was asked for. A
+/// cluster answers in its own order and the merge has to put them in one.
+///
+/// It compared every key ascending, so a search sorted `desc` across two
+/// clusters came back in ascending order.
+fn compare_sort_values(
+    a: Option<&Value>,
+    b: Option<&Value>,
+    descending: &[bool],
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (Some(Value::Array(a)), Some(Value::Array(b))) = (a, b) else { return Ordering::Equal };
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        // a hit missing the value sorts last, whichever way the key runs
+        match (x.is_null(), y.is_null()) {
+            (true, false) => return Ordering::Greater,
+            (false, true) => return Ordering::Less,
+            _ => {}
+        }
         let ord = match (x, y) {
             (Value::Number(p), Value::Number(q)) => p
                 .as_f64()
@@ -576,6 +625,7 @@ fn compare_sort_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Orderi
             (Value::String(p), Value::String(q)) => p.cmp(q),
             _ => Ordering::Equal,
         };
+        let ord = if descending.get(i).copied().unwrap_or(false) { ord.reverse() } else { ord };
         if ord != Ordering::Equal {
             return ord;
         }
@@ -589,7 +639,8 @@ fn compare_sort_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Orderi
 /// metric is combined the way that metric combines. What cannot be combined
 /// -- a cardinality sketch, a percentile -- is left as the first cluster's,
 /// which is wrong in the small and is said here rather than hidden.
-pub fn merge_aggregations(into: &mut Value, from: &Value) {
+pub fn merge_aggregations(into: &mut Value, from: &Value, plan: &Plan) {
+    let kinds = &plan.kinds;
     let (Some(mine), Some(theirs)) = (into.as_object_mut(), from.as_object()) else { return };
     for (name, theirs) in theirs {
         let Some(slot) = mine.get_mut(name) else {
@@ -609,7 +660,7 @@ pub fn merge_aggregations(into: &mut Value, from: &Value) {
                         let a = mine.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
                         let b = bucket.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
                         mine["doc_count"] = json!(a + b);
-                        merge_aggregations(mine, bucket);
+                        merge_aggregations(mine, bucket, plan);
                     }
                     None => joined.push(bucket.clone()),
                 }
@@ -627,6 +678,14 @@ pub fn merge_aggregations(into: &mut Value, from: &Value) {
                 c(b).cmp(&c(a)).then_with(|| k(a).cmp(&k(b)))
             });
             slot["buckets"] = json!(joined);
+            for key in ["sum_other_doc_count", "doc_count_error_upper_bound"] {
+                if let (Some(a), Some(b)) = (
+                    slot.get(key).and_then(|v| v.as_u64()),
+                    theirs.get(key).and_then(|v| v.as_u64()),
+                ) {
+                    slot[key] = json!(a + b);
+                }
+            }
             continue;
         }
         // `top_hits` holds hits, not buckets or a value: both clusters' hits
@@ -635,10 +694,27 @@ pub fn merge_aggregations(into: &mut Value, from: &Value) {
             slot.pointer("/hits/hits").and_then(|h| h.as_array()).cloned(),
             theirs.pointer("/hits/hits").and_then(|h| h.as_array()),
         ) {
-            let keep = mine_hits.len().max(their_hits.len());
+            // in the order the aggregation asked for, and as many as it asked
+            // for: both clusters' hits were kept, one list after the other,
+            // and the second cluster's best never reached the top
+            let (size, descending) = plan
+                .top_hits
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map(|(_, size, d)| (*size, d.clone()))
+                .unwrap_or((3, Vec::new()));
             let mut all = mine_hits;
             all.extend(their_hits.iter().cloned());
-            all.truncate(keep.max(all.len().min(keep * 2)));
+            if all.first().map(|h| h.get("sort").is_some()).unwrap_or(false) {
+                all.sort_by(|a, b| compare_sort_values(a.get("sort"), b.get("sort"), &descending));
+            } else {
+                all.sort_by(|a, b| {
+                    let s =
+                        |h: &Value| h.get("_score").and_then(|v| v.as_f64()).unwrap_or(f64::MIN);
+                    s(b).partial_cmp(&s(a)).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            all.truncate(size);
             let add = |p: &str| -> u64 {
                 slot.pointer(p).and_then(|v| v.as_u64()).unwrap_or(0)
                     + theirs.pointer(p).and_then(|v| v.as_u64()).unwrap_or(0)
@@ -676,32 +752,246 @@ pub fn merge_aggregations(into: &mut Value, from: &Value) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
-            slot["count"] = json!(count);
+            // a count is a whole number, and was answered as `11.0`
+            slot["count"] = json!(count as u64);
             slot["sum"] = json!(sum);
             slot["min"] = min.map(|m| json!(m)).unwrap_or(Value::Null);
             slot["max"] = max.map(|m| json!(m)).unwrap_or(Value::Null);
             slot["avg"] = if count > 0.0 { json!(sum / count) } else { Value::Null };
             continue;
         }
+        // By what the aggregation is, which the request says -- not by what
+        // it is called. The name was read for `min` and `max`, so a `max`
+        // called `mx` was added up and answered 3 where the answer was 2.
         if let Some((a, b)) = both("value") {
-            let combined = match name.as_str() {
-                n if n.contains("min") => a.min(b),
-                n if n.contains("max") => a.max(b),
-                // a sum, a count and a cardinality all add; an average
-                // cannot be added and is left as it was, which is said in
-                // the documentation rather than guessed at here
-                n if n.contains("avg") => a,
-                _ => a + b,
+            let kind = kinds.get(name).map(String::as_str).unwrap_or("");
+            let integral = slot.get("value").map(|v| v.is_u64()).unwrap_or(false)
+                && theirs.get("value").map(|v| v.is_u64()).unwrap_or(false);
+            slot["value"] = match kind {
+                "min" => json!(a.min(b)),
+                "max" => json!(a.max(b)),
+                // a sibling pipeline is worked out again from the merged
+                // buckets; what either cluster said of its own is not added
+                k if k.ends_with("_bucket") => json!(a),
+                _ if integral => json!(
+                    slot["value"].as_u64().unwrap_or(0) + theirs["value"].as_u64().unwrap_or(0)
+                ),
+                // a sum, a count, a script's reduction: they add
+                _ => json!(a + b),
             };
-            slot["value"] = json!(combined);
         }
         if slot.get("doc_count").is_some() {
             let a = slot.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
             let b = theirs.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
             slot["doc_count"] = json!(a + b);
-            merge_aggregations(slot, theirs);
+            merge_aggregations(slot, theirs, plan);
         }
     }
+}
+
+/// What a cross-cluster search had to change about the request it sends, so
+/// the answers can be put back together, and what each aggregation is.
+#[derive(Default)]
+pub struct Plan {
+    pub index_aggs: Vec<String>,
+    pub avg_aggs: Vec<String>,
+    pub pipelines: Vec<Pipeline>,
+    /// every aggregation's name, and its kind
+    pub kinds: std::collections::HashMap<String, String>,
+    /// `cardinality` aggregations, asked for as the `terms` they count
+    pub cardinalities: Vec<String>,
+    /// `terms` aggregations asked for deeper, and the size the caller wanted
+    pub terms_sizes: Vec<(String, usize)>,
+    /// for each sort key, whether it runs descending
+    pub descending: Vec<bool>,
+    /// `top_hits` aggregations: how many hits, and which way each key sorts
+    pub top_hits: Vec<(String, usize, Vec<bool>)>,
+}
+
+/// The request each cluster is sent, and the plan for merging what they say.
+pub fn plan_across_clusters(body: &mut Value) -> Plan {
+    let mut plan = Plan { kinds: aggregation_kinds(body), ..Default::default() };
+    rewrite_for_merge(body, &mut plan);
+    plan.avg_aggs = averages_as_stats(body);
+    plan.index_aggs = aggs_on_index(body);
+    plan.pipelines = bucket_pipelines(body);
+    plan.descending = sort_directions(body);
+    plan.top_hits = top_hits_of(body);
+    plan
+}
+
+/// Each aggregation's name and the kind of aggregation it is.
+fn aggregation_kinds(body: &Value) -> std::collections::HashMap<String, String> {
+    fn walk(node: &Value, out: &mut std::collections::HashMap<String, String>) {
+        let Some(o) = node.as_object() else { return };
+        for (name, def) in o {
+            let Some(d) = def.as_object() else { continue };
+            if let Some(kind) =
+                d.keys().find(|k| !matches!(k.as_str(), "aggs" | "aggregations" | "meta"))
+            {
+                out.insert(name.clone(), kind.clone());
+            }
+            for key in ["aggs", "aggregations"] {
+                if let Some(sub) = d.get(key) {
+                    walk(sub, out);
+                }
+            }
+        }
+    }
+    let mut out = Default::default();
+    for key in ["aggs", "aggregations"] {
+        if let Some(a) = body.get(key) {
+            walk(a, &mut out);
+        }
+    }
+    out
+}
+
+/// A `cardinality` cannot be merged from two counts -- the values both
+/// clusters saw were counted twice, 6 where there were 4 -- so each cluster
+/// is asked for the values and they are counted once they are together. A
+/// `terms` is asked for deeper than the caller wanted, the way OpenSearch
+/// asks its shards (`size * 1.5 + 10`): a bucket that is second on one
+/// cluster and third on another is first once they are added, and asking
+/// each for its top two left it out and undercounted what it did return.
+fn rewrite_for_merge(body: &mut Value, plan: &mut Plan) {
+    fn walk(node: &mut Value, plan: &mut Plan) {
+        let Some(o) = node.as_object_mut() else { return };
+        for (name, def) in o.iter_mut() {
+            if let Some(card) = def.get("cardinality").cloned()
+                && let Some(field) = card.get("field").cloned()
+                && card.get("script").is_none()
+                && let Some(d) = def.as_object_mut()
+            {
+                d.remove("cardinality");
+                // as many values as the search may make buckets of by default;
+                // past that the count is of the first ten thousand, which is
+                // still closer than two sketches added together
+                let mut terms = json!({"field": field, "size": 10_000});
+                if let Some(missing) = card.get("missing") {
+                    terms["missing"] = missing.clone();
+                }
+                d.insert("terms".into(), terms);
+                plan.cardinalities.push(name.clone());
+            } else if let Some(terms) = def.get_mut("terms").and_then(|t| t.as_object_mut())
+                && terms.get("order").is_none()
+            {
+                let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let shard = terms
+                    .get("shard_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(size + size / 2 + 10);
+                terms.insert("size".into(), json!(shard.max(size)));
+                plan.terms_sizes.push((name.clone(), size));
+            }
+            for key in ["aggs", "aggregations"] {
+                if let Some(sub) = def.get_mut(key) {
+                    walk(sub, plan);
+                }
+            }
+        }
+    }
+    for key in ["aggs", "aggregations"] {
+        if let Some(a) = body.get_mut(key) {
+            walk(a, plan);
+        }
+    }
+}
+
+/// The `terms` asked for deeper, cut back to the size the caller asked for;
+/// what is cut is counted in `sum_other_doc_count`, as it would have been.
+fn trim_terms(aggs: &mut Value, sizes: &[(String, usize)]) {
+    let Some(o) = aggs.as_object_mut() else { return };
+    for (name, agg) in o.iter_mut() {
+        let wanted = sizes.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
+        if let Some(buckets) = agg.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+            let mut cut = 0u64;
+            if let Some(size) = wanted
+                && buckets.len() > size
+            {
+                cut = buckets[size..]
+                    .iter()
+                    .map(|b| b.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0))
+                    .sum();
+                buckets.truncate(size);
+            }
+            for bucket in buckets.iter_mut() {
+                trim_terms(bucket, sizes);
+            }
+            if cut > 0 {
+                let other = agg.get("sum_other_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                agg["sum_other_doc_count"] = json!(other + cut);
+            }
+        }
+    }
+}
+
+/// A `cardinality` asked for as `terms`, answered as a count of its keys.
+fn terms_back_to_cardinality(aggs: &mut Value, names: &[String]) {
+    let Some(o) = aggs.as_object_mut() else { return };
+    for (name, agg) in o.iter_mut() {
+        if names.contains(name)
+            && let Some(buckets) = agg.get("buckets").and_then(|b| b.as_array())
+        {
+            *agg = json!({"value": buckets.len()});
+            continue;
+        }
+        if let Some(buckets) = agg.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+            for bucket in buckets.iter_mut() {
+                terms_back_to_cardinality(bucket, names);
+            }
+        }
+    }
+}
+
+/// Every `top_hits`, with its size and the direction of each of its sort keys.
+fn top_hits_of(body: &Value) -> Vec<(String, usize, Vec<bool>)> {
+    fn walk(node: &Value, out: &mut Vec<(String, usize, Vec<bool>)>) {
+        let Some(o) = node.as_object() else { return };
+        for (name, def) in o {
+            if let Some(t) = def.get("top_hits") {
+                let size = t.get("size").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                let from = t.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                out.push((name.clone(), size + from, sort_directions(t)));
+            }
+            for key in ["aggs", "aggregations"] {
+                if let Some(sub) = def.get(key) {
+                    walk(sub, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for key in ["aggs", "aggregations"] {
+        if let Some(a) = body.get(key) {
+            walk(a, &mut out);
+        }
+    }
+    out
+}
+
+/// For each key a request sorts on, whether it runs descending: a score
+/// runs descending unless it is told otherwise, and everything else ascends.
+fn sort_directions(body: &Value) -> Vec<bool> {
+    let keys: Vec<Value> = match body.get("sort") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(one) => vec![one.clone()],
+        None => Vec::new(),
+    };
+    keys.iter()
+        .map(|k| match k {
+            Value::String(s) => s == "_score",
+            Value::Object(o) => o.iter().next().is_some_and(|(field, spec)| {
+                let order = spec.as_str().or_else(|| spec.get("order").and_then(|v| v.as_str()));
+                match order {
+                    Some(o) => o == "desc",
+                    None => field == "_score",
+                }
+            }),
+            _ => false,
+        })
+        .collect()
 }
 
 /// A query's `_index` clauses, as a remote cluster must read them.
@@ -753,5 +1043,67 @@ pub fn localize_index_clauses(query: &mut Value, cluster: &str) {
     }
     for (_, v) in o.iter_mut() {
         localize_index_clauses(v, cluster);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn answer(hits: Value, aggs: Value) -> Value {
+        json!({"took": 1, "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+               "hits": {"total": {"value": 1, "relation": "eq"}, "max_score": null, "hits": hits},
+               "aggregations": aggs})
+    }
+
+    /// Measured against OpenSearch 3.1.0: every one of these was a different
+    /// number there, and every one was a merge that read the wrong thing.
+    #[test]
+    fn a_merge_reads_the_request_not_the_names() {
+        let mut body = json!({"size": 0, "aggs": {
+            "mx": {"max": {"field": "n"}}, "c": {"cardinality": {"field": "k"}},
+            "t": {"terms": {"field": "k", "size": 1}}}});
+        let plan = plan_across_clusters(&mut body);
+        assert_eq!(body.pointer("/aggs/t/terms/size"), Some(&json!(11)));
+        assert!(body.pointer("/aggs/c/terms").is_some());
+        let local = answer(
+            json!([]),
+            json!({"mx": {"value": 2.0},
+            "c": {"buckets": [{"key": "a", "doc_count": 1}, {"key": "b", "doc_count": 1}]},
+            "t": {"buckets": [{"key": "a", "doc_count": 2}, {"key": "b", "doc_count": 1}],
+                  "sum_other_doc_count": 0, "doc_count_error_upper_bound": 0}}),
+        );
+        let remote = answer(
+            json!([]),
+            json!({"mx": {"value": 1.0},
+            "c": {"buckets": [{"key": "b", "doc_count": 1}, {"key": "c", "doc_count": 1}]},
+            "t": {"buckets": [{"key": "b", "doc_count": 3}],
+                  "sum_other_doc_count": 0, "doc_count_error_upper_bound": 0}}),
+        );
+        let out = merge_answers(vec![(String::new(), local), ("r".into(), remote)], 0, 0, &plan);
+        assert_eq!(out.pointer("/aggregations/mx/value"), Some(&json!(2.0)));
+        assert_eq!(out.pointer("/aggregations/c/value"), Some(&json!(3)));
+        assert_eq!(out.pointer("/aggregations/t/buckets/0/key"), Some(&json!("b")));
+        assert_eq!(out.pointer("/aggregations/t/buckets/0/doc_count"), Some(&json!(4)));
+        assert_eq!(out.pointer("/aggregations/t/sum_other_doc_count"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn a_descending_sort_stays_descending_across_clusters() {
+        let mut body = json!({"sort": [{"n": "desc"}]});
+        let plan = plan_across_clusters(&mut body);
+        let local = answer(
+            json!([{"_index": "a", "sort": [1]}, {"_index": "a", "sort": [0]}]),
+            json!(null),
+        );
+        let remote = answer(json!([{"_index": "b", "sort": [2]}]), json!(null));
+        let out = merge_answers(vec![(String::new(), local), ("r".into(), remote)], 10, 0, &plan);
+        let order: Vec<i64> = out["hits"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["sort"][0].as_i64().unwrap())
+            .collect();
+        assert_eq!(order, vec![2, 1, 0]);
     }
 }

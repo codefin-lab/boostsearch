@@ -124,11 +124,8 @@ pub async fn get_data_stream(
         .map(|(n, t)| data_stream_entry(&store, &n, &t))
         .collect();
     if out.is_empty() && !want.contains('*') && want != "_all" {
-        return err(
-            StatusCode::NOT_FOUND,
-            "index_not_found_exception",
-            format!("no such index [{want}]"),
-        );
+        // the whole shape OpenSearch gives, resource and all
+        return crate::api::shared::no_such_index(&want);
     }
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     respond(&p, json!({"data_streams": out}))
@@ -140,18 +137,39 @@ pub async fn delete_data_stream(
     Path(name): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
+    // Every index behind the stream goes with it. Only the first generation
+    // was deleted: after a rollover the write index stayed, documents and
+    // all, and a stream made again under the same name adopted it -- the
+    // documents of a stream that had been deleted came back. The indices are
+    // read before the stream is forgotten, since forgetting it is what
+    // stops them being findable as its own.
+    let mut backing: Vec<String> = Vec::new();
+    for (n, t) in store.data_streams() {
+        let named = name.split(',').any(|pat| {
+            let pat = pat.trim();
+            pat == "*" || pat == "_all" || pat == n || crate::store::glob_match(pat, &n)
+        });
+        if !named {
+            continue;
+        }
+        let entry = data_stream_entry(&store, &n, &t);
+        if let Some(list) = entry["indices"].as_array() {
+            backing.extend(
+                list.iter()
+                    .filter_map(|i| i.get("index_name").and_then(|v| v.as_str()))
+                    .map(String::from),
+            );
+        }
+    }
     let gone = store.remove_data_stream(&name);
-    // a pattern that reaches no stream has taken none away
-    if gone.is_empty() && !name.contains('*') && name != "_all" {
-        return err(
-            StatusCode::NOT_FOUND,
-            "index_not_found_exception",
-            format!("no such index [{name}]"),
-        );
+    for index in &backing {
+        store.delete(index);
     }
     for g in &gone {
         store.delete(&backing_index(g, 1));
     }
+    // a stream that is not there has been deleted already: the reference
+    // acknowledges it, and a cleanup that runs twice is not an error
     respond(&p, json!({"acknowledged": true}))
 }
 
@@ -168,6 +186,7 @@ pub async fn data_stream_stats(
     let mut streams: Vec<Value> = Vec::new();
     let mut backing = 0usize;
     let mut total_bytes = 0u64;
+    let human = p.get("human").map(|v| v != "false").unwrap_or(false);
     for (n, t) in store.data_streams() {
         let _ = &t;
         let named = want.split(',').any(|pat| {
@@ -209,24 +228,28 @@ pub async fn data_stream_stats(
         }
         backing += indices.len();
         total_bytes += bytes;
-        streams.push(json!({
+        let mut one = json!({
             "data_stream": n,
             "backing_indices": indices.len(),
-            "store_size": crate::api::shared::readable_bytes(bytes),
             "store_size_bytes": bytes,
             "maximum_timestamp": latest,
-        }));
+        });
+        // the readable size is for a person, who asks for it with `human`
+        if human {
+            one["store_size"] = json!(crate::api::shared::readable_bytes(bytes));
+        }
+        streams.push(one);
     }
     streams.sort_by(|a, b| a["data_stream"].as_str().cmp(&b["data_stream"].as_str()));
-    respond(
-        &p,
-        json!({
-            "_shards": {"total": backing, "successful": backing, "failed": 0},
-            "data_stream_count": streams.len(),
-            "backing_indices": backing,
-            "total_store_size": crate::api::shared::readable_bytes(total_bytes),
-            "total_store_size_bytes": total_bytes,
-            "data_streams": streams,
-        }),
-    )
+    let mut out = json!({
+        "_shards": {"total": backing, "successful": backing, "failed": 0},
+        "data_stream_count": streams.len(),
+        "backing_indices": backing,
+        "total_store_size_bytes": total_bytes,
+        "data_streams": streams,
+    });
+    if human {
+        out["total_store_size"] = json!(crate::api::shared::readable_bytes(total_bytes));
+    }
+    respond(&p, out)
 }

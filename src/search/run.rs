@@ -1125,14 +1125,14 @@ pub fn run(
         // field with no values, which is the one case where nulls are right.
         let special = matches!(
             k.field.as_str(),
-            "_score" | "_doc" | "_seq" | "_script" | "_geo_distance" | "_shard_doc"
+            "_score" | "_doc" | "_seq" | "_script" | "_geo_distance" | "_shard_doc" | "_index"
         ) || k.script.is_some();
         if !special && k.unmapped_type.is_none() {
             if k.field == "_id" {
                 return Err(err(
                     StatusCode::BAD_REQUEST,
                     "illegal_argument_exception",
-                    "Fielddata access on the _id field is disallowed, you can re-enable it by                      updating the dynamic cluster setting: indices.id_field_data.enabled",
+                    "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
                 ));
             }
             // a multi-field is not in the type table under its own name --
@@ -1348,8 +1348,10 @@ pub fn run(
         }
         shards += o.shards;
         total += o.count as u64;
+        // a pre-filter skips shards, not indices: an index of two shards
+        // that cannot match is two shards the search did not need
         if o.count == 0 {
-            empty_shards += 1;
+            empty_shards += o.shards;
         }
         cands.extend(o.cands);
         if let Some(res) = o.agg {
@@ -2030,7 +2032,8 @@ pub(crate) fn finish_search(
 
     let skipped =
         if p.contains_key("pre_filter_shard_size") && query_json.is_some() && !agg_forces_all {
-            empty_shards.min((targets.len() as u64).saturating_sub(1))
+            // one shard is always searched, so that there is an answer to give
+            empty_shards.min(shards.max(1) - 1)
         } else {
             0
         };

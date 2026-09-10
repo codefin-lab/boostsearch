@@ -326,7 +326,7 @@ pub(crate) fn check_asked_sizes(
             StatusCode::BAD_REQUEST,
             "too_many_buckets_exception",
             format!(
-                "Trying to create too many buckets. Must be less than or equal to: [{limit}]                  but was [{asked}] in [{kind}]. This limit can be set by changing the                  [search.max_buckets] cluster level setting."
+                "Trying to create too many buckets. Must be less than or equal to: [{limit}] but was [{asked}] in [{kind}]. This limit can be set by changing the [search.max_buckets] cluster level setting."
             ),
         ));
     }

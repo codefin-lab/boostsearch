@@ -26,6 +26,8 @@ pub(crate) struct Tally {
     pub noops: usize,
     pub version_conflicts: usize,
     pub failures: Vec<Value>,
+    /// a delete-by-query, which says nothing of documents made or changed
+    pub deleting: bool,
 }
 
 impl Tally {
@@ -81,6 +83,17 @@ impl Tally {
 
     /// The answer OpenSearch gives for a walk of this kind.
     fn answer(&self, took: u128, batches: usize) -> Value {
+        let mut out = self.answer_all(took, batches);
+        if self.deleting
+            && let Some(o) = out.as_object_mut()
+        {
+            o.remove("created");
+            o.remove("updated");
+        }
+        out
+    }
+
+    fn answer_all(&self, took: u128, batches: usize) -> Value {
         json!({
             "took": took as u64,
             "timed_out": false,
@@ -723,7 +736,7 @@ pub async fn delete_by_query(
         let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
     }
-    let mut tally = Tally { total: hits.len(), ..Default::default() };
+    let mut tally = Tally { total: hits.len(), deleting: true, ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
     // `?pipeline=` names one every rewritten document goes through

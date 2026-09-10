@@ -144,28 +144,35 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
         "table" => text_answer(drawn(&table), "text/plain; charset=UTF-8"),
         "json" => respond(
             p,
-            json!({"schema": schema(&table), "datarows": table.rows,
+            json!({"schema": schema(&table, piped), "datarows": table.rows,
                                      "total": table.total, "size": table.rows.len()}),
         ),
-        _ => respond(
-            p,
-            json!({
-                "schema": schema(&table),
+        _ => {
+            let mut answer = json!({
+                "schema": schema(&table, piped),
                 "datarows": table.rows,
                 "total": table.total,
                 "size": table.rows.len(),
-                "status": 200,
-            }),
-        ),
+            });
+            // SQL says `status` in its body and PPL does not
+            if !piped {
+                answer["status"] = json!(200);
+            }
+            respond(p, answer)
+        }
     }
 }
 
-fn schema(table: &rows::Table) -> Vec<Value> {
+fn schema(table: &rows::Table, piped: bool) -> Vec<Value> {
     table
         .columns
         .iter()
         .zip(table.aliases.iter())
-        .map(|((name, kind), alias)| match alias {
+        // PPL names every text type `string`, where SQL keeps `keyword`
+        .map(|((name, kind), alias)| {
+            (name, if piped && kind == "keyword" { "string" } else { kind.as_str() }, alias)
+        })
+        .map(|(name, kind, alias)| match alias {
             // a column written `count(*) AS n` answers to both names, and the
             // schema says so: clients read the alias to label the column
             Some(alias) => json!({"name": name, "alias": alias, "type": kind}),

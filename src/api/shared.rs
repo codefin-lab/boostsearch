@@ -145,7 +145,11 @@ pub fn no_such_index(name: &str) -> Response {
                 "resource.type": "index_or_alias",
                 "resource.id": name,
                 "index_uuid": "_na_",
-                "root_cause": [{"type": "index_not_found_exception", "reason": reason, "index": name}]
+                // the cause says everything the error does: a client reading
+                // the first cause for the resource found only half of it
+                "root_cause": [{"type": "index_not_found_exception", "reason": reason, "index": name,
+                                "resource.type": "index_or_alias", "resource.id": name,
+                                "index_uuid": "_na_"}]
             },
             "status": 404
         })),

@@ -477,7 +477,18 @@ pub async fn get_index_template(
         if !hit {
             continue;
         }
-        let body = v.get("__composable").cloned().unwrap_or_else(|| v.clone());
+        let mut body = v.get("__composable").cloned().unwrap_or_else(|| v.clone());
+        // what the reference fills in when it stores a template: the time
+        // field a data stream reads, and -- for one with a template of its
+        // own -- the empty list of what it is composed of
+        if let Some(ds) = body.get_mut("data_stream").and_then(|d| d.as_object_mut()) {
+            ds.entry("timestamp_field").or_insert_with(|| json!({"name": "@timestamp"}));
+        }
+        if body.get("template").is_some()
+            && let Some(o) = body.as_object_mut()
+        {
+            o.entry("composed_of").or_insert_with(|| json!([]));
+        }
         list.push(json!({"name": k, "index_template": body}));
     }
     if list.is_empty()
@@ -515,10 +526,12 @@ pub async fn delete_index_template(
         );
     }
     if !store.delete_template(&name) && !name.contains('*') && name != "_all" {
+        // deleting is answered in the words of the delete action, which are
+        // not the words of the get
         return err(
             StatusCode::NOT_FOUND,
-            "resource_not_found_exception",
-            format!("index template matching [{name}] not found"),
+            "index_template_missing_exception",
+            format!("index_template [{name}] missing"),
         );
     }
     respond(&p, json!({"acknowledged": true}))

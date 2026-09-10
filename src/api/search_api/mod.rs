@@ -490,6 +490,40 @@ pub(crate) fn strip_sort(env: &mut Value) {
     }
 }
 
+/// How many shards a cross-cluster pre-filter skipped, where it is one
+/// pre-filter.
+///
+/// With `ccs_minimize_roundtrips: false` the coordinator sees every shard of
+/// every cluster and skips across all of them at once, keeping one so there
+/// is an answer to give. Each cluster keeps one of its own when it is asked
+/// alone, so their counts added up said a one-shard remote that could not
+/// match was not skipped. A cluster that matched nothing could skip all its
+/// shards; the rule of keeping one is applied once, to the whole.
+fn prefiltered_skips(answers: &[(String, Value)], body: &Value, p: &Params) -> Option<u64> {
+    let minimized = p.get("ccs_minimize_roundtrips").map(|v| v != "false").unwrap_or(true);
+    let aggregates = body.get("aggs").is_some() || body.get("aggregations").is_some();
+    if minimized
+        || !p.contains_key("pre_filter_shard_size")
+        || body.get("query").is_none()
+        || aggregates
+    {
+        return None;
+    }
+    let (mut total, mut skippable) = (0u64, 0u64);
+    for (_, answer) in answers {
+        let shards = answer.pointer("/_shards/total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let matched = answer
+            .pointer("/hits/total/value")
+            .or_else(|| answer.pointer("/hits/total"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let own = answer.pointer("/_shards/skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+        total += shards;
+        skippable += if matched == 0 { shards } else { own };
+    }
+    Some(skippable.min(total.saturating_sub(1)))
+}
+
 /// A search that names another cluster: ask each of them, and put the answers
 /// together.
 async fn across_clusters(
@@ -511,11 +545,9 @@ async fn across_clusters(
     // sum and the count behind its `avg`, and the average is worked out once
     // the counts are together. The answer used to keep the first cluster's
     // average and report it for both.
-    let avg_aggs = crate::api::averages_as_stats(&mut asked_body);
-    // an aggregation over `_index` keys its buckets by index name, and a
-    // remote's index names carry the cluster in front of them
-    let index_aggs = crate::api::aggs_on_index(&asked_body);
-    let pipelines = crate::api::bucket_pipelines(&asked_body);
+    // An aggregation over `_index` keys its buckets by index name, and a
+    // remote's index names carry the cluster in front of them.
+    let plan = crate::api::plan_across_clusters(&mut asked_body);
     let mut answers: Vec<(String, Value)> = Vec::new();
     let mut skipped = 0usize;
     let mut successful = 0usize;
@@ -544,7 +576,10 @@ async fn across_clusters(
         .filter(|(k, _)| {
             matches!(
                 k.as_str(),
-                Some("rest_total_hits_as_int") | Some("typed_keys") | Some("ignore_unavailable")
+                Some("rest_total_hits_as_int")
+                    | Some("typed_keys")
+                    | Some("ignore_unavailable")
+                    | Some("pre_filter_shard_size")
             )
         })
         .map(|(k, v)| format!("{k}={v}"))
@@ -577,12 +612,9 @@ async fn across_clusters(
                     continue;
                 }
                 let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
-                let mut body = value;
-                if let Some(reason) = body.pointer("/error/reason").and_then(|v| v.as_str()) {
-                    let reason = format!("{name}:{reason}");
-                    body["error"]["reason"] = json!(reason);
-                }
-                return (code, axum::Json(body)).into_response();
+                // passed on as the remote said it: OpenSearch does not put the
+                // cluster's name in front of the reason
+                return (code, axum::Json(value)).into_response();
             }
             Err(why) => {
                 if remote.skip_unavailable {
@@ -594,8 +626,11 @@ async fn across_clusters(
         }
     }
     let total_clusters = successful + skipped;
-    let mut merged =
-        crate::api::merge_answers(answers, size, from, &index_aggs, &avg_aggs, &pipelines);
+    let prefiltered = prefiltered_skips(&answers, &body, p);
+    let mut merged = crate::api::merge_answers(answers, size, from, &plan);
+    if let Some(n) = prefiltered {
+        merged["_shards"]["skipped"] = json!(n);
+    }
     merged["_clusters"] = json!({
         "total": total_clusters, "successful": successful, "skipped": skipped,
     });

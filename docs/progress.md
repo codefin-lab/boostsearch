@@ -5236,7 +5236,8 @@ claim in a document, a second lock on a door that is already locked.
 | 13 | 1 | 1 | 1 | 3 |
 | 14 | 1 | 3 | 1 | 5 |
 | 15 | 1 | 4 | 2 | 7 |
-| **6-15** | **13** | **21** | **9** | **43** |
+| 16 | 7 | 2 | 9 | 18 |
+| **6-16** | **20** | **23** | **18** | **61** |
 
 The fourteenth is the first review measured against a running OpenSearch
 rather than read out of the code, and it found a P0 in the first twenty
@@ -5359,4 +5360,88 @@ in the nested form.** It is dropped, as the reference drops it.
 Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 187/187, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean,
 cross-cluster 20/24.
+
+## The sixteenth review
+
+The fifteenth review's three suggestions, then the review itself.
+
+`tools/dls_check.py` now asks a filtered alias the questions the tenth and
+fifteenth reviews found it failing: named alone, named beside another index
+in either order, in a count and in an aggregation. 29 paths.
+
+Shard skipping: `_shards.skipped` counted indices and capped at one fewer
+than the number of indices, so a single index of two shards could never
+report a skip; it now counts shards. Across clusters with
+`ccs_minimize_roundtrips: false` the rule of keeping one shard is applied
+once to all of them, not once per cluster. The cross-cluster suite passes 23
+of 24; the one left is a scroll across clusters.
+
+Cross-cluster search was then replayed against OpenSearch 3.1.0 itself: two
+containers, one told where the other is (`tools/compat_ccs.sh`,
+`tools/corpora/ccs.ndjson`, 35 requests), and the two remotes filled by the
+same suite. Before this review 21 of 35 answers were the same; after it, 29,
+and the six left differ only in the ids the remotes generated and in the
+seed address. Compared by `_index` and `_source` instead of id, two searches
+still differ, both in the order of hits whose sort values tie.
+
+The data stream and SQL corpora were replayed again against the same
+reference, which is what found the data stream P0 below.
+
+**P0 -- a cross-cluster search sorted descending came back ascending.** The
+merge compared every sort key ascending.
+
+**P0 -- a `max` or `min` across clusters was added up.** The merge chose how
+to combine a metric by reading its name: a `max` called `mx` answered 3 where
+the answer was 2. It now reads what the aggregation is from the request.
+
+**P0 -- a `cardinality` across clusters was added up.** Values both clusters
+held were counted twice: 6 where there were 4. Each cluster is now asked for
+the values, and they are counted once together.
+
+**P0 -- a `terms` across clusters undercounted.** Each cluster was asked for
+only the top `size` buckets, so a bucket second on one and third on another
+was missing or short. Each is now asked for `size * 1.5 + 10`, as OpenSearch
+asks its shards, and the merged list is cut back.
+
+**P0 -- a sibling pipeline over an `avg` across clusters was wrong.** The
+path it read was rewritten to reach the `avg` inside a `stats`, and the
+recomputation could not follow it, so the clusters' own answers were added:
+2.5 where the answer was 2.
+
+**P0 -- `top_hits` across clusters was neither sorted nor cut.** Both
+clusters' hits were kept one list after the other.
+
+**P0 -- deleting a data stream after a rollover left its write index.** Only
+the first generation was deleted. The write index stayed with its documents,
+and a stream made again under the same name adopted it: the documents of a
+deleted stream came back.
+
+**P1 -- sorting on `_index` was refused** as an unmapped field.
+
+**P1 -- a remote's refusal lost its body.** A missing remote index answered
+404 with nothing in it.
+
+**P2** -- the `_shards.skipped` count above; stats `count` answered `11.0`;
+a remote's reason was prefixed with the cluster name; remote connections
+defaulted to 1 where OpenSearch's default is 3; a 404's cause lacked the
+resource fields, and so did the whole 404 from `GET _data_stream`; three
+messages carried a run of spaces from a joined line; a missing template on
+delete was named in the get action's words; `GET _index_template` left out
+`timestamp_field` and `composed_of`; data stream stats gave `store_size`
+without `human`; delete-by-query reported `created` and `updated`; PPL said
+`status` and `keyword`, where it says neither; `DISTINCT` rows came in
+document order. Deleting a data stream that does not exist is now
+acknowledged, as the reference acknowledges it.
+
+Left, and known: ties across clusters are not broken by shard and index the
+way OpenSearch breaks them; a scroll across clusters; SQL's `max` of a `long`
+answers a `double`, and an expression over a `double` that comes out whole
+answers a whole number -- the types there are judged by the values, and
+need the mapping; PPL's `stats ... by` rows are not put in key order.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+189/189, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths), cross-cluster suite 23/24. Against OpenSearch 3.1.0: cross-cluster
+28/35, data streams 21/27, SQL 27/37 -- what is left in each is listed
+above or is an id, a uuid or a size the two engines cannot share.
 
