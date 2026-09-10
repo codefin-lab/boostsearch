@@ -567,6 +567,23 @@ pub(crate) async fn do_index(
     body: String,
     default_op: &str,
 ) -> Response {
+    // A data stream takes appends and nothing else: a document written into
+    // one is a new event, never a replacement for an event already there.
+    // The reference refuses anything but `create`, in these words, and this
+    // took an ordinary index write with an id of the caller's choosing.
+    let into_a_stream = !store.backing_indices(&index).is_empty();
+    let asked_op = p.get("op_type").map(|v| v.as_str()).unwrap_or(default_op);
+    // an append carries no id and is a create whatever the route was; a write
+    // that names an id, or asks for `index` outright, is a replacement and
+    // there is nothing in a stream to replace
+    let default_op = if into_a_stream && id.is_none() { "create" } else { default_op };
+    if into_a_stream && (id.is_some() || p.contains_key("op_type")) && asked_op != "create" {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            "only write ops with an op_type of create are allowed in data streams",
+        );
+    }
     let source: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => return err(StatusCode::BAD_REQUEST, "mapper_parsing_exception", e.to_string()),

@@ -1,0 +1,37 @@
+{"method": "DELETE", "path": "/sqlc", "body": null}
+{"method": "PUT", "path": "/sqlc", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"region": {"type": "keyword"}, "note": {"type": "text"}, "price": {"type": "double"}, "units": {"type": "long"}, "when": {"type": "date"}, "ok": {"type": "boolean"}}}}}
+{"method": "PUT", "path": "/sqlc/_doc/1?refresh=true", "body": {"region": "south", "note": "cheap widget", "price": 10.0, "units": 2, "when": "2026-01-01", "ok": true}}
+{"method": "PUT", "path": "/sqlc/_doc/2?refresh=true", "body": {"region": "south", "note": "widget deluxe", "price": 33.25, "units": 2, "when": "2026-02-01", "ok": false}}
+{"method": "PUT", "path": "/sqlc/_doc/3?refresh=true", "body": {"region": "north", "note": "widget", "price": 7.5, "units": 8, "when": "2026-03-01", "ok": true}}
+{"method": "PUT", "path": "/sqlc/_doc/4?refresh=true", "body": {"region": "north", "note": "gadget", "price": 100.0, "units": 1, "when": "2026-04-01", "ok": false}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region, price FROM sqlc ORDER BY price DESC"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT count(*) FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT count(*) FROM sqlc WHERE price > 9"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region, count(*) FROM sqlc GROUP BY region"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region, count(*) AS n FROM sqlc GROUP BY region ORDER BY n DESC"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT max(price) - min(price) FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT sum(price) / count(*) FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT avg(price), max(units) FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region, avg(price) FROM sqlc GROUP BY region HAVING avg(price) > 20"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region, price * units AS total FROM sqlc WHERE region = 'south' ORDER BY total"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT DISTINCT region FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc WHERE note LIKE 'widget%'"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc WHERE price BETWEEN 8 AND 40"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc WHERE region IN ('north')"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc WHERE ok = true"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT count(*) FROM sqlc WHERE note IS NOT NULL"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc LIMIT 2"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM sqlc ORDER BY price LIMIT 1"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT upper(region) FROM sqlc LIMIT 1"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT abs(-price) FROM sqlc LIMIT 1"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT region FROM nowhere"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT nosuchcolumn FROM sqlc"}}
+{"method": "POST", "path": "/_plugins/_sql", "body": {"query": "SELECT"}}
+{"method": "POST", "path": "/_plugins/_ppl", "body": {"query": "source=sqlc | fields region, price | head 2"}}
+{"method": "POST", "path": "/_plugins/_ppl", "body": {"query": "source=sqlc | where price > 9 | stats count() by region"}}
+{"method": "POST", "path": "/_plugins/_ppl", "body": {"query": "source=sqlc | stats avg(price)"}}
+{"method": "POST", "path": "/_plugins/_ppl", "body": {"query": "source=sqlc | sort - price | head 1 | fields region"}}
+{"method": "POST", "path": "/_plugins/_ppl", "body": {"query": "source=sqlc | eval total = price * units | fields region, total | head 2"}}
+{"method": "POST", "path": "/_plugins/_sql/_explain", "body": {"query": "SELECT region FROM sqlc WHERE price > 9"}}
+{"method": "POST", "path": "/_plugins/_sql?format=csv", "body": {"query": "SELECT region, price FROM sqlc ORDER BY price"}}
+{"method": "DELETE", "path": "/sqlc", "body": null}

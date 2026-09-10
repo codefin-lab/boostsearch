@@ -375,9 +375,16 @@ pub async fn rollover(
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     let dry_run = p.get("dry_run").map(|v| v != "false").unwrap_or(false);
 
-    // the alias has to name exactly one index, or there is no one index to
-    // roll over from
-    let behind = store.resolve(&alias);
+    // A data stream rolls over onto its next backing index, and there is no
+    // alias in it at all: the newest backing index is the one being rolled
+    // out of, and making the next one is the whole of it.
+    let stream_backing = store.backing_indices(&alias);
+    let behind = if stream_backing.is_empty() {
+        store.resolve(&alias)
+    } else {
+        stream_backing.last().cloned().into_iter().collect()
+    };
+    let rolling_a_stream = !stream_backing.is_empty();
     let Some(old) = behind.first().cloned().filter(|_| behind.len() == 1) else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -388,9 +395,15 @@ pub async fn rollover(
     let Some(src) = store.get(&old) else { return no_such_index(&old) };
     let docs = src.read().reader.searcher().num_docs();
 
-    // every condition is reported with whether it was met, met or not
+    // Every condition is reported with whether it was met, met or not -- and
+    // a rollover with no conditions at all rolls. It used to stand still and
+    // answer `rolled_over: false`, so `POST /{alias}/_rollover` with an empty
+    // body did nothing, which is what a data stream's rollover is and what
+    // anybody rolling by hand writes. The reference rolls; measured against
+    // it.
     let mut conditions = serde_json::Map::new();
-    let mut met = false;
+    let mut met =
+        body.get("conditions").and_then(|c| c.as_object()).map(|o| o.is_empty()).unwrap_or(true);
     if let Some(o) = body.get("conditions").and_then(|v| v.as_object()) {
         for (name, want) in o {
             let text = want.as_str().map(|s| s.to_string()).unwrap_or_else(|| want.to_string());
@@ -467,7 +480,13 @@ pub async fn rollover(
                 c
             })
             .unwrap_or_else(|| json!({}));
-        if let Err(e) = roll_alias(&store, &alias, &old, &new_index, &create) {
+        if rolling_a_stream {
+            // the stream is its backing indices, so the new one is the whole
+            // of the rollover: nothing points anywhere else
+            if let Err(e) = store.create(&new_index, &create) {
+                return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e.to_string());
+            }
+        } else if let Err(e) = roll_alias(&store, &alias, &old, &new_index, &create) {
             return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", e);
         }
     }

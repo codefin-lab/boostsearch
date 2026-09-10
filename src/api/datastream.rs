@@ -81,14 +81,25 @@ pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Va
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "@timestamp".to_string());
+    // every backing index the stream has, oldest first, and the generation is
+    // the newest of them: it used to say one index and generation 1 whatever
+    // had happened, so a stream that had rolled over reported the index it
+    // had rolled out of and nothing else
+    let held = store.backing_indices(name);
+    let held = if held.is_empty() { vec![backing_index(name, 1)] } else { held };
+    let generation = held
+        .last()
+        .and_then(|n| n.rsplit('-').next())
+        .and_then(|g| g.parse::<u64>().ok())
+        .unwrap_or(1);
     json!({
         "name": name,
         "timestamp_field": {"name": field},
-        "indices": [{
-            "index_name": backing_index(name, 1),
-            "index_uuid": crate::store::index_uuid(&backing_index(name, 1)),
-        }],
-        "generation": 1,
+        "indices": held
+            .iter()
+            .map(|n| json!({"index_name": n, "index_uuid": crate::store::index_uuid(n)}))
+            .collect::<Vec<_>>(),
+        "generation": generation,
         "status": "GREEN",
         "template": template,
     })

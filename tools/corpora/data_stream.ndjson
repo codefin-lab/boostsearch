@@ -1,0 +1,27 @@
+{"method": "DELETE", "path": "/_data_stream/ds-test", "body": null}
+{"method": "DELETE", "path": "/_index_template/ds-tpl", "body": null}
+{"method": "PUT", "path": "/_index_template/ds-tpl", "body": {"index_patterns": ["ds-test*"], "priority": 500, "data_stream": {}, "template": {"mappings": {"properties": {"@timestamp": {"type": "date"}, "host": {"type": "keyword"}, "n": {"type": "long"}}}}}}
+{"method": "GET", "path": "/_index_template/ds-tpl", "body": null}
+{"method": "PUT", "path": "/_data_stream/ds-test", "body": null}
+{"method": "PUT", "path": "/_data_stream/ds-test", "body": null}
+{"method": "GET", "path": "/_data_stream/ds-test", "body": null}
+{"method": "GET", "path": "/_data_stream", "body": null}
+{"method": "POST", "path": "/ds-test/_doc?refresh=true", "body": {"@timestamp": "2026-01-01T00:00:00Z", "host": "a", "n": 1}}
+{"method": "POST", "path": "/ds-test/_doc?refresh=true", "body": {"@timestamp": "2026-01-02T00:00:00Z", "host": "b", "n": 2}}
+{"method": "PUT", "path": "/ds-test/_doc/1", "body": {"@timestamp": "2026-01-01T00:00:00Z"}}
+{"method": "POST", "path": "/ds-test/_search", "body": {"query": {"match_all": {}}, "sort": [{"@timestamp": "asc"}]}}
+{"method": "GET", "path": "/ds-test/_count", "body": null}
+{"method": "POST", "path": "/ds-test/_search", "body": {"size": 0, "aggs": {"h": {"terms": {"field": "host"}}}}}
+{"method": "GET", "path": "/_data_stream/ds-test/_stats", "body": null}
+{"method": "POST", "path": "/ds-test/_rollover", "body": {}}
+{"method": "GET", "path": "/_data_stream/ds-test", "body": null}
+{"method": "POST", "path": "/ds-test/_doc?refresh=true", "body": {"@timestamp": "2026-01-03T00:00:00Z", "host": "c", "n": 3}}
+{"method": "GET", "path": "/ds-test/_count", "body": null}
+{"method": "GET", "path": "/_cat/indices/.ds-ds-test*?format=json&h=index,docs.count", "body": null}
+{"method": "DELETE", "path": "/.ds-ds-test-000002", "body": null}
+{"method": "POST", "path": "/ds-test/_delete_by_query?refresh=true", "body": {"query": {"term": {"host": "a"}}}}
+{"method": "GET", "path": "/ds-test/_count", "body": null}
+{"method": "GET", "path": "/_data_stream/does-not-exist", "body": null}
+{"method": "DELETE", "path": "/_data_stream/ds-test", "body": null}
+{"method": "GET", "path": "/_data_stream/ds-test", "body": null}
+{"method": "DELETE", "path": "/_index_template/ds-tpl", "body": null}

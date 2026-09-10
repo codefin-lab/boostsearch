@@ -5248,3 +5248,57 @@ aliases, data streams, SQL, the write index of a rollover. The corpus passes
 1,427 of 1,427 and has passed it throughout; it says nothing about the parts
 OpenSearch keeps in plugins with their own suites, and that is exactly where
 the defects have been.
+
+## The fourteenth review
+
+This one was measured rather than reasoned about. OpenSearch 3.1.0 was started
+from the image on this machine -- the whole distribution, plugins and all --
+and the same requests were sent to both engines and the answers compared,
+which is what `tools/compat_audit.py replay` has always done for the core API
+and had never been given a corpus for anything else.
+
+Two corpora are new: `tools/corpora/data_stream.ndjson` (27 requests) and
+`tools/corpora/sql.ndjson` (37), with `tools/compat_stream_sql.sh` to run
+both. They exist because OpenSearch has no YAML suite for either -- data
+streams are Java integration tests, SQL lives in another repository -- so the
+only way to hold them to the reference is to ask the reference.
+
+Of the 717 YAML files in the checkout, 610 are already run by the two
+manifests. Of the 107 that are not: 24 are example plugins that do not exist
+here, 24 need HDFS, S3 or Azure, 12 are rolling upgrades, 11 are cross-cluster
+search (worth adding, and not added yet), 7 are not REST tests at all, and the
+rest are build scaffolding.
+
+**P0 -- a rollover with no conditions did not roll.** `POST /{name}/_rollover`
+with an empty body answered `rolled_over: false` and stood still. The
+reference rolls; an unconditional rollover is what a data stream's rollover
+is, what ISM asks for, and what anybody rolling by hand writes. Measured
+against the reference, which answers `rolled_over: true`.
+
+**P1 -- a data stream took writes that are not appends.** `PUT /ds/_doc/1`
+was accepted; the reference refuses anything but an `op_type` of `create`,
+because there is nothing in a stream to replace. A write with no id is an
+append and is still taken.
+
+**P1 -- a data stream's rollover made nothing, and its generation never
+moved.** Rolling one over went through the alias path, which a stream has no
+alias for; `GET _data_stream` reported one backing index and generation 1
+whatever had happened. Both now follow the backing indices.
+
+**P1 -- SQL answered a column no index maps with rows of nulls.** The
+reference refuses it as a `SemanticCheckException` and names the symbol. A
+typo looked like an empty field.
+
+**P2 -- `count(*)` was typed `long` where the reference says `integer`, and a
+column written `AS n` did not carry its alias in the schema.** Both are what a
+client reads to label a column.
+
+After the fixes, the data stream corpus agrees on 14 of 27 (from 10) and what
+is left is uuids, generated ids and the wording of errors; the SQL corpus
+agrees on 22 of 37 (from 17), and what is left is type names (`string` vs
+`keyword` in PPL), our accepting two queries the reference refuses, and the
+shape of `_explain`.
+
+Measured: unit tests 186/186, phase 1 398/398, the core corpus 1,427/1,427
+over all 409 files, SQL and PPL 8 of 8, ISM 6 of 6, 30 refusals, 24
+document-level security paths.

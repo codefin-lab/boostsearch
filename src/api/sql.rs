@@ -102,6 +102,18 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
             format!("no such index [{}]", planned.index),
         );
     }
+    // A column no index maps is a mistake in the query, not a column of
+    // nulls: the reference refuses it and names the symbol it could not
+    // resolve. This answered rows of nulls, so a typo looked like an empty
+    // field. `SELECT *` names nothing, an aggregate names what it counts, and
+    // a name a document taught the index dynamically counts as mapped.
+    if let Some(missing) = unresolved_column(store, &planned) {
+        return failed(
+            StatusCode::BAD_REQUEST,
+            "SemanticCheckException",
+            format!("can't resolve Symbol(namespace=FIELD_NAME, name={missing}) in type env"),
+        );
+    }
     // the index is named in the body, where the security layer cannot see
     // it, so it is judged here the way a bulk item is
     if let Some(why) = crate::security::item_refusal(
@@ -149,7 +161,17 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
 }
 
 fn schema(table: &rows::Table) -> Vec<Value> {
-    table.columns.iter().map(|(name, kind)| json!({"name": name, "type": kind})).collect()
+    table
+        .columns
+        .iter()
+        .zip(table.aliases.iter())
+        .map(|((name, kind), alias)| match alias {
+            // a column written `count(*) AS n` answers to both names, and the
+            // schema says so: clients read the alias to label the column
+            Some(alias) => json!({"name": name, "alias": alias, "type": kind}),
+            None => json!({"name": name, "type": kind}),
+        })
+        .collect()
 }
 
 /// A table as lines of values, which is what `csv` and `raw` are.
@@ -218,6 +240,35 @@ fn drawn(table: &rows::Table) -> String {
     }
     out.push_str(&line("+", "+", "+"));
     out
+}
+
+/// The first column the query names that no index behind it maps.
+fn unresolved_column(store: &Store, planned: &crate::sql::plan::Planned) -> Option<String> {
+    let targets = store.resolve(&planned.index);
+    if targets.is_empty() {
+        return None;
+    }
+    let known = |name: &str| -> bool {
+        // a metadata field is not in the mapping and is still a field
+        if name.starts_with('_') || name == "*" {
+            return true;
+        }
+        targets.iter().any(|n| {
+            store
+                .get(n)
+                .map(|st| {
+                    let g = st.read();
+                    g.mapping.type_of(name).is_some()
+                        || g.all_field_types().iter().any(|(f, _)| f == name)
+                        || name
+                            .rsplit_once('.')
+                            .map(|(head, _)| g.mapping.type_of(head).is_some())
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        })
+    };
+    planned.wanted_fields.iter().find(|f| !known(f)).cloned()
 }
 
 fn text_answer(text: String, kind: &str) -> Response {

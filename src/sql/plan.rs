@@ -28,6 +28,9 @@ pub struct Planned {
     pub having: Option<Condition>,
     /// which column to sort by, and which way, where sorting happens here
     pub order_rows: Vec<(usize, bool)>,
+    /// every field of a document the query names, so that a name no index
+    /// maps can be refused rather than answered with nulls
+    pub wanted_fields: Vec<String>,
     /// what each column may also be called: a column written `count(*) AS n`
     /// answers to both, and a `HAVING` may use either
     pub also_called: Vec<Option<String>>,
@@ -129,12 +132,35 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
     // the index, so the offset is asked for as well as the limit
     let size = select.limit.unwrap_or(200);
     body["size"] = json!(size + select.offset);
+    let mut wanted_fields = wanted.clone();
+    if let Some(c) = &select.filter {
+        collect_condition_fields(c, &mut wanted_fields);
+    }
+    for (expr, _) in &select.order_by {
+        collect_fields(expr, &mut wanted_fields);
+    }
+    // a name the query itself gives a column is not a field of a document:
+    // `price * units AS total ... ORDER BY total` names `total`, and no index
+    // maps it
+    // a name the query itself gives a column is not a field of a document --
+    // `price * units AS total ... ORDER BY total` -- but a column that is
+    // just a field is named after the field, and that name is a field
+    let called: Vec<String> = select
+        .columns
+        .iter()
+        .filter(|c| c.alias.is_some() || c.expr.field().is_none())
+        .map(|c| c.name())
+        .collect();
+    wanted_fields.retain(|f| !called.contains(f));
+    wanted_fields.sort();
+    wanted_fields.dedup();
     Ok(Planned {
         index: select.from.clone(),
         body,
         columns,
         reads,
         grouped: false,
+        wanted_fields,
         limit: select.limit,
         offset: select.offset,
         having: None,
@@ -247,12 +273,29 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
             })?;
         order_rows.push((at, *ascending));
     }
+    let mut wanted_fields: Vec<String> = keys.clone();
+    for c in &select.columns {
+        collect_fields(&c.expr, &mut wanted_fields);
+    }
+    if let Some(c) = &select.filter {
+        collect_condition_fields(c, &mut wanted_fields);
+    }
+    let called: Vec<String> = select
+        .columns
+        .iter()
+        .filter(|c| c.alias.is_some() || c.expr.field().is_none())
+        .map(|c| c.name())
+        .collect();
+    wanted_fields.retain(|f| !called.contains(f));
+    wanted_fields.sort();
+    wanted_fields.dedup();
     Ok(Planned {
         index: select.from.clone(),
         body,
         columns,
         reads,
         grouped: true,
+        wanted_fields,
         limit: select.limit,
         offset: select.offset,
         having: select.having.clone(),
@@ -333,6 +376,41 @@ fn metric_for(
             ))
         }
         other => Err(format!("unsupported aggregate [{other}]")),
+    }
+}
+
+/// Every field a `WHERE` names, so that one no index maps can be refused.
+fn collect_condition_fields(c: &Condition, out: &mut Vec<String>) {
+    match c {
+        Condition::And(a, b) | Condition::Or(a, b) => {
+            collect_condition_fields(a, out);
+            collect_condition_fields(b, out);
+        }
+        Condition::Not(inner) => collect_condition_fields(inner, out),
+        Condition::Compare { left, right, .. } => {
+            collect_fields(left, out);
+            collect_fields(right, out);
+        }
+        Condition::Between { value, low, high, .. } => {
+            collect_fields(value, out);
+            collect_fields(low, out);
+            collect_fields(high, out);
+        }
+        Condition::In { value, options, .. } => {
+            collect_fields(value, out);
+            options.iter().for_each(|o| collect_fields(o, out));
+        }
+        Condition::Like { value, .. } | Condition::IsNull { value, .. } => {
+            collect_fields(value, out)
+        }
+        // a full-text function names its field as its first argument, and
+        // the rest of its arguments are words rather than fields
+        Condition::Search { args, .. } => {
+            if let Some(first) = args.first() {
+                collect_fields(first, out);
+            }
+        }
+        Condition::Always(_) => {}
     }
 }
 

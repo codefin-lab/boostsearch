@@ -12,6 +12,9 @@ use super::plan::{Planned, Read};
 /// the rows themselves.
 pub struct Table {
     pub columns: Vec<(String, String)>,
+    /// the name a column was given with `AS`, where it was given one: the
+    /// schema names both, as the reference's does
+    pub aliases: Vec<Option<String>>,
     pub rows: Vec<Vec<Value>>,
     pub total: usize,
 }
@@ -72,13 +75,28 @@ pub fn shape(planned: &Planned, answer: &Value) -> Table {
     }
 
     let total = rows.len();
-    let columns = planned
+    let columns: Vec<(String, String)> = planned
         .columns
         .iter()
         .enumerate()
-        .map(|(at, name)| (name.clone(), kind_of(&rows, at)))
+        .map(|(at, name)| {
+            // counting answers a whole number, and the reference calls that
+            // an `integer` however large the count is
+            let counting = matches!(planned.reads.get(at), Some(Read::Count));
+            let kind = if counting { "integer".to_string() } else { kind_of(&rows, at) };
+            (name.clone(), kind)
+        })
         .collect();
-    Table { columns, rows, total }
+    // what a column was called with `AS`: the plan keeps the other way round
+    // (the expression behind an alias), so a column that has one is a column
+    // whose name is the alias
+    let aliases = planned
+        .also_called
+        .iter()
+        .enumerate()
+        .map(|(at, behind)| behind.as_ref().map(|_| planned.columns[at].clone()))
+        .collect();
+    Table { columns, aliases, rows, total }
 }
 
 /// What type a column holds, judged by what is in it.

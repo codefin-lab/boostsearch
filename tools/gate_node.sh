@@ -12,6 +12,10 @@
 # One suite is written against a cluster with no ingest node, which is a
 # different cluster rather than a different request -- BOOST_ROLES starts one.
 #
+# The transport port follows the http one (+100) unless BOOST_TRANSPORT says
+# otherwise: every gate node used to take 9300, so two of them could not run
+# at once and the second died with "Address already in use".
+#
 #   tools/gate_node.sh            starts it on 9213
 #   BOOST_PORT=9214 tools/gate_node.sh
 #   BOOST_PORT=9214 BOOST_DATA=/tmp/boost-noingest \
@@ -28,6 +32,7 @@ mkdir -p "$DATA/config/ingest-user-agent"
 cp study/OpenSearch/modules/ingest-user-agent/src/test/test-regexes.yml \
    "$DATA/config/ingest-user-agent/" 2>/dev/null || true
 BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
+BOOSTSEARCH_TRANSPORT_PORT=${BOOST_TRANSPORT:-$((PORT + 100))} \
 BOOSTSEARCH_DATA="$DATA" \
 BOOSTSEARCH_NODE_ATTRS=testattr=test \
 BOOSTSEARCH_GEOIP_PATH=${BOOST_GEOIP:-/tmp/geoip-db} \
