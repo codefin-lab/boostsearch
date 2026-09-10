@@ -879,13 +879,27 @@ impl Coordinator {
                     // though it is missing writes. An id the routing does not
                     // know is not a copy: retiring it anyway took a name out
                     // of the in-sync set that no copy answers to.
-                    if super::allocation::shard_stale(
+                    let placed = super::allocation::shard_stale(
                         &mut table,
                         &index,
                         shard,
                         &allocation_id,
                         self.last_wall,
-                    ) {
+                    );
+                    // An id no copy is placed under now -- its node left -- is
+                    // still retired when the set holds it and it is not the
+                    // primary's: the primary acknowledged a write that copy
+                    // never took, and an id kept in the set is a copy the
+                    // manager will hand the primary to when the primary is
+                    // lost.
+                    let remembered = !placed
+                        && s.indices
+                            .get(&index)
+                            .and_then(|m| m.in_sync_allocations.get(&shard))
+                            .is_some_and(|ids| ids.contains(&allocation_id))
+                        && table.primary(&index, shard).and_then(|p| p.allocation_id.as_deref())
+                            != Some(allocation_id.as_str());
+                    if placed || remembered {
                         retired.entry(index.clone()).or_default().push((shard, allocation_id));
                     }
                 }

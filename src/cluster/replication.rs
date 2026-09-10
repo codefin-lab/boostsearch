@@ -320,18 +320,18 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                     fine.push(a.clone());
                 }
             }
-            // ids that belong to a copy the routing still has: an id left in
-            // the set for a copy that is gone is the cluster's memory of
-            // where the data was, and there is nothing to take out of the set
-            let placed: Vec<String> = state
-                .routing
-                .shards_of(index)
-                .filter(|c| c.state != ShardState::Unassigned)
-                .filter_map(|c| c.allocation_id.clone())
-                .collect();
+            // Every id in the set that did not take this write leaves it,
+            // whether or not a copy is placed under it now. An id kept for a
+            // copy whose node had left was taken for the cluster's memory of
+            // where the data was -- but that copy is missing this write, and
+            // when the primary was lost the manager put the primary back on
+            // the node holding it, with none of the writes acknowledged while
+            // it was away. A chaos run lost ninety acknowledged documents
+            // from the surviving copies that way. The reference marks such a
+            // copy stale before it acknowledges the write.
             for (shard, ids) in &m.in_sync_allocations {
                 for id in ids {
-                    if !fine.contains(id) && placed.contains(id) {
+                    if !fine.contains(id) {
                         let body = json!({"index": index, "shard": shard, "allocation_id": id});
                         let answer = rt
                             .call(

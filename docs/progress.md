@@ -6034,3 +6034,59 @@ paths); cluster chaos six runs, every one settled, no node silent, the
 copies' counts agreeing, no acknowledged write lost, two with a copy short
 as above. Against OpenSearch 3.1.0: the query corpus 59/61 (two added for
 `_id` sorts), the second query corpus 45/45, the aggregations corpus 36/43.
+
+## The twenty-fourth review
+
+The P0 the twenty-third review left open: a copy ending a chaos run without
+acknowledged writes the other copy had.
+
+**P0 -- a copy away while writes were acknowledged could be handed the
+primary.** When a replica's node left, its copy became unassigned but its
+allocation id stayed in the in-sync set, as the cluster's memory of where
+the data was. The primary went on acknowledging writes alone, and at the
+end of each it marks stale the in-sync copies that did not take it -- but
+only those still placed, so the copy that was away kept its place in the
+set. When the primary was then lost, the manager put the primary back on
+the node holding an in-sync copy: the one that had been away, with none of
+the writes acknowledged meanwhile. The logs of the run that lost ninety
+showed exactly that: the removal of the copy from the set was published by
+a manager that lost its quorum a moment later and never committed, the next
+manager inherited the copy in sync, and put the primary on it with no fill.
+The primary now marks stale every in-sync id that did not take the write,
+placed or not, as the reference does before it acknowledges, and the
+manager retires such an id from the set even when no copy is placed under
+it -- never the primary's own. The model of the cluster already did this;
+the code had not, which is why the model's storms never found it: a
+simulation test written for it -- the replica's node down while the primary
+acknowledges alone, then the primary's, then the replica's back -- passed
+on the code before the change as well as after, and was not kept. The
+evidence is the logs of the run that lost ninety, read above, and the chaos
+runs below.
+
+Eight chaos runs alone on the final binary: every one settled, no node fell
+silent, no acknowledged write was lost from every copy, and in seven of the
+eight each copy held every acknowledged write. In one, a copy lacked a
+single acknowledged write -- against ninety and one in two runs of six
+before the change -- so the P0 is narrowed, not closed: something else
+still lets a copy miss a write and stay in the set. The chaos test now
+prints the faults and the routing against the load clock for a copy that
+is behind, as it did only for a lost write, so the next look starts from
+the fault that one write fell in. One run ended with the copies differing
+by twenty-two documents that were never acknowledged: the resync after a
+change of primary, still missing.
+
+Open at the end of this review: P0 1 (a copy can still miss an acknowledged write,
+now one in eight runs), P1 1 (no resync of the replicas after a change of
+primary), P2 14 (the aggregations corpus's seven -- `extended_bounds`,
+percentiles, percentile ranks, cardinality, the position in an
+include/exclude error, significant terms' background count, sampler's shard
+size -- and the last digit of a `weighted_avg`, which follows the order the
+segments are summed in; the edge of a bounding box; `combined_fields`;
+`rel#question`; `_cat/nodes`' HTTP address; allocation balance; intervals
+found more than once).
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+197/197, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths); chaos as above. Against OpenSearch 3.1.0: the query corpus 59/61,
+the second query corpus 45/45, the aggregations corpus 35/43 (the
+`weighted_avg` digit).

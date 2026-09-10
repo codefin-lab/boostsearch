@@ -484,6 +484,16 @@ def main():
             if name in ns and len(ns) < len(holders)
         )
         print(f"  BEHIND {name}: {n_behind} acknowledged writes it does not have, from {times[0]:.1f}s to {times[-1]:.1f}s on the load clock")
+    # a copy behind is read against the faults the same way a lost write is:
+    # without the timeline, "69.9s on the load clock" named no fault
+    if behind and not lost_ids:
+        print("  faults (event clock) and routing (load clock; the load clock starts %.1fs earlier):" % (t0 - load.t0))
+        merged = [(t + (t0 - load.t0), "FAULT " + what) for t, what in events] + [(t, "routing " + r) for t, r in routing_log]
+        for t, what in sorted(merged):
+            print(f"    {t:6.1f}s {what}")
+        for name in sorted(behind):
+            ids = sorted(i for i, ns in missing_from.items() if name in ns and len(ns) < len(holders))
+            print(f"  behind on {name}: {ids[:10]}")
     for doc_id in lost_ids[:5]:
         print(f"  LOST {doc_id}: on none of {holders}")
     if lost_ids:
