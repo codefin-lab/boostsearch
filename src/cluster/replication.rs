@@ -1086,45 +1086,31 @@ async fn seed_from_files(store: &Store, index: &str, primary: &NodeId) -> Result
             return Err(format!("recovery of [{index}]: [{name}] came back empty"));
         }
     }
-    // the copy that was here goes, the files take its place, and what its
-    // translog held (writes copied in while the files travelled) is replayed
+    // The copy that was here goes, translog and all, and the files take its
+    // place.
+    //
+    // Its translog used to be replayed over them, as though it held writes
+    // copied in while the files travelled. It did not: those wait for the
+    // fill beside it (`park`) and go in when it ends, and what the primary
+    // took after the commit these files are comes from the scan that
+    // follows. What the old translog held was the old copy -- writes the
+    // primary refused or never had among them -- and it came back, under
+    // term one, over the primary's own: a filled copy held twenty-three
+    // documents its primary did not, and kept them.
     let store2 = store.clone();
     let name = index.to_string();
     let tmp2 = tmp.clone();
-    let replayed = tokio::task::spawn_blocking(move || -> Result<usize, String> {
-        let held = store2.adopt(&name, &tmp2).map_err(|e| e.to_string())?;
+    let adopted = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        store2.adopt(&name, &tmp2).map_err(|e| e.to_string())?;
         let Some(st) = store2.get(&name) else {
             return Err(format!("[{name}] did not open after recovery"));
         };
-        let mut g = st.write();
-        let mut n = 0;
-        for rec in held {
-            let Some(id) = rec.get("id").and_then(|v| v.as_str()) else { continue };
-            let op = ReplicaOp {
-                index: name.clone(),
-                id: id.to_string(),
-                routing: rec.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                version: rec.get("version").and_then(|v| v.as_u64()).unwrap_or(1),
-                seq: rec.get("seq").and_then(|v| v.as_u64()).unwrap_or(0),
-                term: 1,
-                shard: 0,
-                source: match rec.get("source") {
-                    Some(Value::Null) | None => None,
-                    Some(Value::String(s)) => Some(s.clone()),
-                    Some(v) => Some(v.to_string()),
-                },
-            };
-            if crate::api::doc::apply_replicated(&mut g, &op) {
-                n += 1;
-            }
-        }
-        g.sync_translog()?;
-        let _ = g.refresh();
-        Ok(n)
+        let _ = st.write().refresh();
+        Ok(())
     })
     .await
     .unwrap_or_else(|e| Err(format!("adopting panicked: {e}")));
-    replayed?;
+    adopted?;
     Ok(true)
 }
 

@@ -214,21 +214,12 @@ impl Store {
     }
 
     /// Open an index from files recovery wrote: the directory replaces
-    /// whatever this node held under the name, and what the old copy's
-    /// translog was holding is handed back for replay.
-    pub fn adopt(&self, name: &str, recovered: &std::path::Path) -> Result<Vec<Value>> {
+    /// whatever this node held under the name, its translog with it -- the
+    /// old copy is what the recovery is replacing, not something to keep.
+    pub fn adopt(&self, name: &str, recovered: &std::path::Path) -> Result<()> {
         let Some(path) = self.index_path(name) else {
             anyhow::bail!("no data directory to adopt [{name}] into");
         };
-        // the old copy's unreplayed writes, if it had any
-        let mut held = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(path.join(TRANSLOG)) {
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(rec) = serde_json::from_str::<Value>(line) {
-                    held.push(rec);
-                }
-            }
-        }
         self.drop_local(name);
         if path.exists() {
             let _ = std::fs::remove_dir_all(&path);
@@ -263,7 +254,7 @@ impl Store {
                 g.load_vectors();
             }
         }
-        Ok(held)
+        Ok(())
     }
 
     fn index_path(&self, name: &str) -> Option<PathBuf> {

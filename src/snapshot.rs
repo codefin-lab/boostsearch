@@ -229,6 +229,10 @@ pub fn write(
         let _ = st.write().refresh();
         let g = st.read();
         let within = format!("{name}/{}", crate::store::dir_name(index));
+        let mut docs = Vec::new();
+        let count = dump(&g, &mut docs)?;
+        // what the documents file must be when it is read back: a restore
+        // checks both before it makes the index
         to.write(
             &format!("{within}/meta.json"),
             json!({
@@ -236,12 +240,11 @@ pub fn write(
                 "mappings": g.mapping.raw,
                 "settings": g.settings,
                 "aliases": g.aliases,
+                "docs": {"count": count, "sha256": sha256_hex(&docs)},
             })
             .to_string()
             .as_bytes(),
         )?;
-        let mut docs = Vec::new();
-        dump(&g, &mut docs)?;
         to.write(&format!("{within}/docs.ndjson"), &docs)?;
     }
     to.write(&format!("{name}/snapshot.json"), record.to_string().as_bytes())?;
@@ -280,8 +283,15 @@ pub fn clone_into(
     Ok(())
 }
 
-/// Write out every living document, as it was given to us.
-fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<()> {
+/// The digest a snapshot records for a file it wrote.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// Write out every living document, as it was given to us; how many.
+fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<usize> {
+    let mut count = 0usize;
     let searcher = g.reader.searcher();
     for seg in searcher.segment_readers() {
         let Ok(store_reader) = seg.get_store_reader(1) else { continue };
@@ -297,9 +307,10 @@ fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<()> {
                 "_source": raw,
             });
             writeln!(out, "{record}")?;
+            count += 1;
         }
     }
-    Ok(())
+    Ok(count)
 }
 
 /// The snapshots a repository already holds.
@@ -430,24 +441,57 @@ pub fn restore_index(
             "[{snapshot}] holds the mapping of index [{index}] but not its documents"
         ));
     };
+    // A damaged documents file used to restore as far as it could be read:
+    // a line that did not parse was skipped, a file cut short ended early,
+    // and the restore answered success with fewer documents than the
+    // snapshot took. The file is checked against what the snapshot recorded
+    // of it, and every line read, before the index is made -- a restore that
+    // cannot bring back everything brings back nothing and says why.
+    // Snapshots from before the record was kept are read line by line alone.
+    let damaged = |why: String| {
+        format!(
+            "[{snapshot}] cannot restore index [{index}]: its documents file is damaged ({why})"
+        )
+    };
+    if let Some(want) = meta.pointer("/docs/sha256").and_then(|v| v.as_str()) {
+        let got = sha256_hex(&docs);
+        if got != want {
+            return Err(damaged(format!("sha256 {got}, the snapshot recorded {want}")));
+        }
+    }
+    let mut records: Vec<(String, Option<String>, String, Value)> = Vec::new();
+    for (n, line) in docs.split(|b| *b == b'\n').filter(|l| !l.is_empty()).enumerate() {
+        let parsed = std::str::from_utf8(line)
+            .ok()
+            .and_then(|l| serde_json::from_str::<Value>(l).ok())
+            .and_then(|record| {
+                let id = record.get("_id")?.as_str()?.to_string();
+                let raw = record.get("_source")?.as_str()?.to_string();
+                let source = serde_json::from_str::<Value>(&raw).ok()?;
+                let routing = record.get("_routing").and_then(|v| v.as_str()).map(String::from);
+                Some((id, routing, raw, source))
+            });
+        match parsed {
+            Some(r) => records.push(r),
+            None => return Err(damaged(format!("line {} cannot be read", n + 1))),
+        }
+    }
+    if let Some(want) = meta.pointer("/docs/count").and_then(|v| v.as_u64())
+        && records.len() as u64 != want
+    {
+        return Err(damaged(format!("{} documents, the snapshot recorded {want}", records.len())));
+    }
     store.create(as_name, &body).map_err(|e| e.to_string())?;
     let Some(st) = store.get(as_name) else {
         return Err(format!("[{as_name}] could not be created"));
     };
     let mut count = 0usize;
     let mut g = st.write();
-    for line in docs.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let Ok(line) = std::str::from_utf8(line) else { continue };
-        let Ok(record) = serde_json::from_str::<Value>(line) else { continue };
-        let Some(id) = record.get("_id").and_then(|v| v.as_str()) else { continue };
-        let Some(raw) = record.get("_source").and_then(|v| v.as_str()) else { continue };
-        let Ok(source) = serde_json::from_str::<Value>(raw) else { continue };
-        if let Some(r) = record.get("_routing").and_then(|v| v.as_str()) {
-            g.routing.insert(id.to_string(), r.to_string());
+    for (id, routing, raw, source) in records {
+        if let Some(r) = routing {
+            g.routing.insert(id.clone(), r);
         }
-        if crate::api::write_doc_internal(&mut g, id, source, "index", Some(raw.to_string()), None)
-            .is_ok()
-        {
+        if crate::api::write_doc_internal(&mut g, &id, source, "index", Some(raw), None).is_ok() {
             count += 1;
         }
     }

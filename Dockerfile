@@ -52,7 +52,14 @@ ENV BOOSTSEARCH_ADDR=0.0.0.0:9200 \
 VOLUME ["/var/lib/boostsearch"]
 EXPOSE 9200 9300
 # a container that answers is a container that is up; a container that has
-# started the process but cannot answer is not
+# started the process but cannot answer is not. The probe asks the security
+# plugin's health, which answers without credentials and says DOWN (503) for
+# a node of a cluster with no cluster manager -- `_cluster/health` asked for a
+# password the probe does not have once security was on, and plain http of a
+# listener that speaks only TLS. HTTPS is tried first, the certificate being
+# the node's own; plain http when the listener is plain.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
-    CMD curl -sf http://127.0.0.1:9200/_cluster/health || exit 1
+    CMD curl -sfk https://127.0.0.1:9200/_plugins/_security/health \
+        || curl -sf http://127.0.0.1:9200/_plugins/_security/health \
+        || exit 1
 ENTRYPOINT ["/usr/local/bin/boostsearch"]

@@ -6371,8 +6371,100 @@ Open at the end of this review: P0 none; P1 one (a single unacknowledged documen
 left on one copy in one chaos run of ten); P2 twelve, as before.
 
 Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
-198/198, the model's storms over seeds 80 to 100 clean, sql_check 8/8,
+198/198, the model's storms over seeds 80 to 99 clean, sql_check 8/8,
 ism_check 6/6 (on a node started with a two-second job interval, as the
 check asks -- a gate node without it waits five minutes a tick and fails four
 of the six), refusal and DLS checks clean (30 refusals, 29 paths); chaos as
 above. Against OpenSearch 3.1.0: 59/61, 45/45, 35/43.
+
+## The thirtieth review
+
+The review of 2026-09-07 left three things to check, not fix: a backup
+restored against what was put in, faults on the disk and in the process, and
+a healthcheck on a node that speaks TLS or asks for a password. This review
+starts on the first and the last.
+
+**P1 -- a damaged snapshot restored as far as it could be read, and called
+that success.** A restore read the snapshot's documents file line by line,
+and a line that did not parse was skipped: a file cut short brought back the
+documents before the cut, a spoiled line lost that document, and either way
+the restore answered success with fewer documents than the snapshot took.
+Nothing in the snapshot said how many there should have been. A snapshot now
+records, beside each index's mapping, how many documents it wrote and the
+sha256 of the file it wrote them to; a restore checks both, and reads every
+line, before it makes the index. A restore that cannot bring everything back
+brings nothing back and says which of the three it was. A snapshot from
+before this records neither, and is read line by line as it was, except that
+a line that cannot be read now fails the restore rather than vanishing.
+
+`tools/snapshot_check.py` is the check the review asked for: two thousand five hundred
+documents, some of them routed, go into a filesystem repository and come
+back under another name identical document by document -- count, ids,
+routing and a digest of every source -- and a documents file cut short, one
+with a spoiled line, and one taken away are each refused with no index left
+behind: eleven of eleven. Before the change the first two restored and
+answered success.
+
+**P2 (PR-09) -- the container's healthcheck could not tell a node that was
+up from one that was not, once security was on.** It asked
+`_cluster/health` over plain http with no credentials: a node with
+authentication answered 401 and a node with TLS did not answer at all, so a
+healthy node was reported unhealthy. The probe now asks the security
+plugin's health, over https first and plain http after, and that endpoint
+answers without credentials -- as the plugin's does, before it asks who is
+calling; it was behind authentication here, which was a difference from the
+reference in its own right. It answers `DOWN` with 503 for a node of a
+cluster that has no cluster manager, and `UP` otherwise, so the probe
+separates healthy from unready: `tools/health_check.py` starts one of
+each -- security off, authentication on, TLS on, and a node of three whose
+other two never come -- and runs the Dockerfile's probe and the old one
+against each. The old probe called the authenticated node unhealthy (401),
+the TLS node unhealthy (no answer), and the node with no cluster manager
+healthy; the new one gets all four right, and with authentication on a
+caller with no credentials is still refused everything else -- the
+cluster's health, the root, a write to the health path, the security API:
+nine of nine. The first form of the change excused a node that knew only
+itself, as a node that is the whole cluster, and the check caught it
+calling the stranded node healthy; nothing is excused now, a node that is
+the whole cluster being one that elects itself in its first moments. The
+check runs the probe's own commands against the binary the image carries;
+the image itself has not been built and run here, which is what is left of
+the review's recheck for PR-09.
+
+**P1 -- a copy filled from the primary's files took back the writes it
+was being filled to be rid of.** The one disagreement the twenty-ninth
+review left open came back in twenty runs of chaos: a copy holding
+twenty-three documents the primary never had, none of them acknowledged,
+after a recovery that reported them there before and after. A copy filled
+from files read the translog of the copy it was replacing, put the
+primary's files in its place, and replayed that translog over them -- as
+though what it held were writes that arrived while the files travelled. It
+was not: those writes wait for the fill beside it and are applied when it
+ends, and what the primary took after its commit comes from the scan that
+follows. What the old translog held was the old copy -- including writes
+the primary refused, or never had -- and it came back under term one over
+the primary's own. The old copy now goes whole, translog and all.
+
+Chaos, twenty runs of ninety seconds before the recovery change: nineteen
+agreed, and one held twenty-three documents on one copy that the primary
+did not -- the recovery above. Twenty more on the final binary: no
+acknowledged write lost in any, no copy short of one, nineteen agreeing; the
+twentieth disagreed by a single unacknowledged document on a copy and not
+the primary. That is the smaller thing the twenty-ninth review saw once, on
+a binary since thrown away; it is not the recovery's, which put back
+twenty-three at a time, and it stays open, with the run's data kept for the
+next review to follow.
+
+Open at the end of this review: P0 none; P1 one (a single unacknowledged document
+left on one copy, one chaos run in twenty); P2 twelve, as before -- PR-09 was
+found and fixed here, and what is left of it is building the image and
+probing that.
+
+Gates on the final binary: core corpus 1,427/1,427 (a run of it beside a stray
+runner from an earlier gate job, which wiped indices under it, failed five
+sections and was run again alone), phase1 398/398, unit 198/198, the model's
+storms over seeds 100 to 119 clean, sql_check 8/8, ism_check 6/6,
+snapshot_check 11/11, health_check 9/9, refusal and DLS checks clean (29
+paths); chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43. The
+twenty-ninth review's entry said its storms ran over seeds 80 to 100; the
+range leaves out its end, and it was 80 to 99.

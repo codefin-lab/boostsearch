@@ -852,7 +852,22 @@ pub async fn authinfo(
     }))
 }
 
+/// `UP` when the node can serve; `DOWN`, with 503, when it cannot -- a node
+/// with no cluster manager refuses every write, and a probe that called it
+/// healthy sent traffic to a node that would turn it all away.
+///
+/// Not excused for a node that knows only itself: that is as much a node
+/// whose peers never came as a node that is the whole cluster, and the one
+/// answered UP while it refused every write. A node that is the whole
+/// cluster elects itself in its first moments, which a probe's start period
+/// is for.
 pub async fn health() -> Response {
+    if !crate::cluster::has_manager() {
+        let mut r =
+            ok_json(json!({"message": "no cluster-manager", "mode": "strict", "status": "DOWN"}));
+        *r.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+        return r;
+    }
     ok_json(json!({"message": Value::Null, "mode": "strict", "status": "UP"}))
 }
 

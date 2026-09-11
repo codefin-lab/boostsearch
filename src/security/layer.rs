@@ -100,6 +100,18 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     if req.uri().path().trim_end_matches('/') == "/_plugins/_security/api/authtoken" {
         return run_as(Caller::default(), req, next).await;
     }
+    // the plugin's health answers anyone, as the plugin answers it before it
+    // asks who is calling: it is what a probe with no credentials -- a
+    // container's healthcheck, a load balancer -- can ask. It says whether
+    // the node is up and nothing about any index. The exact path, read only.
+    if req.method() == axum::http::Method::GET
+        && matches!(
+            req.uri().path().trim_end_matches('/'),
+            "/_plugins/_security/health" | "/_opendistro/_security/health"
+        )
+    {
+        return run_as(Caller::default(), req, next).await;
+    }
     // the plain listener reports the peer as this crate's own type, the TLS
     // one hands the address in as itself
     let remote = req
