@@ -6468,3 +6468,76 @@ snapshot_check 11/11, health_check 9/9, refusal and DLS checks clean (29
 paths); chaos as above. Against OpenSearch 3.1.0: 59/61, 45/45, 36/43. The
 twenty-ninth review's entry said its storms ran over seeds 80 to 100; the
 range leaves out its end, and it was 80 to 99.
+
+## The thirty-first review
+
+**P1 -- a failure the manager could not be told was forgotten.** A primary
+whose copy did not take a write tells the manager, so the copy leaves the
+in-sync set and is filled again from the primary; it does the same for an
+in-sync copy whose node has gone. When the manager could not be reached --
+it had just changed, or this node was cut off from it for a moment -- the
+write was refused, which is right, and the report was dropped, which was
+not. The primary kept the document it had written, the copy stayed in the
+set without it, and nothing ever came back to either: no resync, because
+the primary had not changed, and no fill, because the copy was not failed.
+The reference does not let go of a failure it could not record. The report
+now waits, and is sent again every half second until the manager takes it,
+or until it is nobody's business -- this node is no longer the primary, and
+the new one resyncs, or the copy is gone from the routing and the in-sync
+set both. The resync's own report of a copy that missed a page, tried three
+times, now waits the same way when the three are not enough.
+
+**P1 -- the writes a bulk had made went with it when its caller hung up
+part-way.** A bulk writes its documents one after another, and for a
+document whose index may not be created on the fly it waits on the refusal
+before going on -- after the documents before it are written. A caller that
+gave up during that wait took the request's future with it, and the writes
+the request had noted went too: written on the primary, never copied, the
+copy never failed for missing them. The twenty-ninth review moved the
+copying off the request's task; what it copied was still held on it. The
+writes are now held where a guard can reach them as well, and a guard
+dropped before they were handed on copies them itself.
+
+**P1 -- a write made while its node lost the cluster manager was answered
+and left where it was.** The single document the thirtieth review left open
+came back once in twenty-five traced runs: on the primary, never
+acknowledged, and in no line of any trace. The primary was also the
+manager; it was stopped for eight seconds, and came back voted out -- its
+log's last commit was in a term it had not started in. A node with no
+manager is refused a write before the handler runs, and this one had a
+manager then; it lost it while the handler wrote. The step that copies a
+write looked again, found no manager, and answered `cluster_block_exception`
+from the top of itself -- before the line that traces a write, and before
+the copying. The document stayed on the primary alone, the copy was never
+failed for missing it, and once the node was voted back in it was still the
+primary and nothing resynced. The write is still refused, but copied first
+now, as any other: a copy that takes it has it, and a copy that does not is
+reported to the manager when there is one to hear it -- the two places that
+report a copy used to skip the report outright when there was no manager,
+and now queue it like any report the manager could not be reached for.
+
+Every other road a write could leave the trace by was ruled out on the way
+there: a caller hanging up, a trace buffer not flushed, a panic, a thread
+or task off the request. A write the primary makes where no request's scope
+reaches now says so -- once in the log, and with where it came from when
+writes are traced -- since that would look the same and had failed in
+silence; twenty-five traced runs found none.
+
+Chaos, forty-five runs of ninety seconds on the final binary -- twenty-five
+traced, twenty not: no acknowledged write lost, no copy short of one, and
+the copies agreed in every one of them. The twenty-fifth traced run refused
+a write for want of a manager and copied it, which is the road above being
+walked. Before these three changes the copies disagreed about one document
+in one run of twenty, and about twenty-three in one of twenty before the
+thirtieth review's.
+
+Open at the end of this review: P0 none; P1 none; P2 twelve, as before. The
+copies have now agreed in sixty-five runs of chaos across the last two
+reviews, and the one document that kept coming back has a name, a road and
+a fix.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, the model's storms over seeds 120 to 139 clean, sql_check 8/8,
+ism_check 6/6, snapshot_check 11/11, health_check 9/9, refusal and DLS
+checks clean (29 paths); chaos as above. Against OpenSearch 3.1.0: 59/61,
+45/45, 35/43.

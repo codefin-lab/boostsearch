@@ -952,10 +952,12 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
     // caller and the filters the security layer set for it are. A handler
     // moved to a task of its own ran as nobody, and every document-level
     // filter let everything through.
+    let writes: replication::Writes = Default::default();
+    let mut guard = replication::WritesGuard::new(writes.clone(), refresh.clone());
     replication::WRITES
-        .scope(std::cell::RefCell::new(Vec::new()), async move {
+        .scope(writes, async move {
             let response = next.run(req).await;
-            let ops = replication::WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+            let ops = guard.take();
             if ops.is_empty() {
                 return response;
             }

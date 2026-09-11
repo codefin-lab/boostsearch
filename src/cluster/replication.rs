@@ -134,7 +134,7 @@ pub struct ReplicaOp {
 
 tokio::task_local! {
     /// The writes the request in hand has made, waiting to be copied.
-    pub static WRITES: std::cell::RefCell<Vec<ReplicaOp>>;
+    pub static WRITES: Writes;
 }
 
 /// `BOOSTSEARCH_TRACE_WRITES`: every write, on every node, as it is copied,
@@ -179,9 +179,104 @@ macro_rules! trace {
     ($($arg:tt)*) => { trace_line(format!($($arg)*)) };
 }
 
+/// The writes a request has made, shared between the request and the guard
+/// that copies them if the request is dropped before it can.
+pub type Writes = Arc<parking_lot::Mutex<Vec<ReplicaOp>>>;
+
 /// Note a write the primary made, if a request is being handled.
+///
+/// A write made where no request's scope reaches -- a task spawned off the
+/// request, a blocking thread -- was not noted, and so was never copied: the
+/// primary held a document its copies never heard of, and nothing anywhere
+/// said so. A node of a cluster now says so, with where it came from when
+/// writes are traced.
 pub fn record(op: ReplicaOp) {
-    let _ = WRITES.try_with(|w| w.borrow_mut().push(op));
+    let Err(op) = WRITES.try_with(|w| w.lock().push(op.clone())).map_err(|_| op) else {
+        return;
+    };
+    let clustered = super::runtime().is_some() && super::with_state(|s| s.nodes.len() > 1);
+    if !clustered {
+        return;
+    }
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::error!(
+            "a write to [{}] was made outside any request and will not be copied",
+            op.index
+        );
+    });
+    if trace_writes() {
+        trace!(
+            "TRACE unrecorded {}/{} seq={} term={} from:\n{}",
+            op.index,
+            op.id,
+            op.seq,
+            op.term,
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+}
+
+/// What a request wrote, copied out even if the request is not there to do
+/// it.
+///
+/// A request's future is dropped where it stands when its caller hangs up.
+/// The writes it had made were held in the request's own task, and went with
+/// it: a primary stopped for eight seconds between writing a document and
+/// finishing the request came back to a caller that had given up, and the
+/// document stayed on the primary alone -- written, never copied, never
+/// traced, and the copy never failed for missing it. Nothing changed primary,
+/// so nothing resynced, and the copies disagreed for as long as the index
+/// lived. The writes are now held where this guard can reach them too: a
+/// guard dropped before they were handed on copies them itself, as the
+/// reference's replication finishes whether or not anyone is waiting.
+pub struct WritesGuard {
+    writes: Writes,
+    refresh: String,
+    handed_on: bool,
+}
+
+impl WritesGuard {
+    pub fn new(writes: Writes, refresh: String) -> Self {
+        WritesGuard { writes, refresh, handed_on: false }
+    }
+
+    /// The writes, for the request to copy itself; the guard lets go of them.
+    pub fn take(&mut self) -> Vec<ReplicaOp> {
+        self.handed_on = true;
+        std::mem::take(&mut *self.writes.lock())
+    }
+}
+
+impl Drop for WritesGuard {
+    fn drop(&mut self) {
+        if self.handed_on {
+            return;
+        }
+        let ops = std::mem::take(&mut *self.writes.lock());
+        if ops.is_empty() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(
+                "{} writes of a dropped request could not be copied: no runtime to copy them on",
+                ops.len()
+            );
+            return;
+        };
+        if trace_writes() {
+            for op in &ops {
+                trace!(
+                    "TRACE dropped {}/{} seq={} term={} copied by the guard",
+                    op.index, op.id, op.seq, op.term
+                );
+            }
+        }
+        let refresh = std::mem::take(&mut self.refresh);
+        handle.spawn(async move {
+            let _ = replicate(ops, &refresh).await;
+        });
+    }
 }
 
 /// Where a write to a shard is copied: the replica copies on other nodes,
@@ -306,7 +401,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                     }));
                 }
                 // the copy is no good: the manager hears of it and fails it
-                if let Some(mgr) = &manager {
+                {
                     let copies: Vec<(u32, String)> = state
                         .routing
                         .shards_of(&index)
@@ -316,14 +411,19 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                     for (shard, aid) in copies {
                         let body = json!({"index": index, "shard": shard, "allocation_id": aid,
                             "message": format!("replication to [{}] failed: {reason}", node.as_str())});
-                        let answer = rt
-                            .call(
-                                mgr,
-                                super::coordinator::SHARD_FAILED,
-                                serde_json::to_vec(&body).unwrap_or_default(),
-                                std::time::Duration::from_secs(10),
-                            )
-                            .await;
+                        let answer = match &manager {
+                            Some(mgr) => {
+                                rt.call(
+                                    mgr,
+                                    super::coordinator::SHARD_FAILED,
+                                    serde_json::to_vec(&body).unwrap_or_default(),
+                                    std::time::Duration::from_secs(10),
+                                )
+                                .await
+                            }
+                            // no manager to tell: the report waits for one
+                            None => None,
+                        };
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
                             if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
                                 eprintln!(
@@ -334,6 +434,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                                     }
                                 );
                             }
+                            retry_later(super::coordinator::SHARD_FAILED, &body);
                             manager_unreachable = true;
                         }
                     }
@@ -344,7 +445,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
     // a copy that was in sync and did not take this write is in sync no
     // more: the manager is told, so a copy that missed writes can never
     // be handed the primary on its own
-    if let Some(mgr) = &manager {
+    {
         for index in acks.keys() {
             let Some(m) = state.indices.get(index) else { continue };
             let acked = acked_nodes.get(index).cloned().unwrap_or_default();
@@ -375,14 +476,19 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                 for id in ids {
                     if !fine.contains(id) {
                         let body = json!({"index": index, "shard": shard, "allocation_id": id});
-                        let answer = rt
-                            .call(
-                                mgr,
-                                super::coordinator::SHARD_STALE,
-                                serde_json::to_vec(&body).unwrap_or_default(),
-                                std::time::Duration::from_secs(10),
-                            )
-                            .await;
+                        let answer = match &manager {
+                            Some(mgr) => {
+                                rt.call(
+                                    mgr,
+                                    super::coordinator::SHARD_STALE,
+                                    serde_json::to_vec(&body).unwrap_or_default(),
+                                    std::time::Duration::from_secs(10),
+                                )
+                                .await
+                            }
+                            // no manager to tell: the report waits for one
+                            None => None,
+                        };
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
                             if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
                                 eprintln!(
@@ -393,6 +499,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                                     }
                                 );
                             }
+                            retry_later(super::coordinator::SHARD_STALE, &body);
                             manager_unreachable = true;
                         }
                     }
@@ -593,7 +700,28 @@ pub async fn finish(
     // used to refuse every write for the tenth of a second between its
     // listener opening and its electing itself, which is where anything that
     // starts a node and writes at once lives -- the benchmark found it.
+    //
+    // The write is refused, but not before it is copied. The node had a
+    // manager when the request came in -- `run_with_replication` refuses one
+    // that has none before the handler runs -- and lost it while the handler
+    // wrote: a manager stopped for eight seconds came back to find itself
+    // voted out, and every write it had in hand was already on its own copy.
+    // Answering from here left each one there alone: never copied, never
+    // traced, the copy never failed for missing it, and the primary stayed
+    // the primary once it was voted back in. The writes go to the copies as
+    // any others do, a copy that does not take them is reported when there
+    // is a manager to hear it, and the caller is told the write was not
+    // acknowledged.
     if !super::has_manager() {
+        if trace_writes() {
+            for op in &ops {
+                trace!(
+                    "TRACE answer {}/{} seq={} term={} refused no-cluster-manager",
+                    op.index, op.id, op.seq, op.term
+                );
+            }
+        }
+        let _ = replicate(ops, refresh).await;
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "cluster_block_exception",
@@ -1666,9 +1794,101 @@ async fn fail_copy(store: &Store, index: &str, shard: u32, node: &NodeId, why: &
                 break;
             }
         }
+        if !landed {
+            retry_later(super::coordinator::SHARD_FAILED, &body);
+        }
         told &= landed;
     }
     told
+}
+
+/// Reports to the manager -- a copy failed, a copy stale -- that a write
+/// needed and could not deliver.
+///
+/// A primary whose copy did not take a write tells the manager, so the copy
+/// leaves the in-sync set and is filled again; when the manager could not be
+/// reached, the write was refused and the report dropped. The primary kept
+/// the document, the copy stayed in the set without it, and nothing came
+/// back to either: the two answered one search differently for as long as
+/// the index lived. The reference does not let go of a failure it could not
+/// record. The report now waits here and is sent again until the manager
+/// takes it -- or until it is nobody's business: this node no longer the
+/// primary (the new one resyncs), or the copy gone from the routing and the
+/// in-sync set both.
+type PendingReports = parking_lot::Mutex<Vec<(&'static str, Value)>>;
+
+fn pending_reports() -> &'static PendingReports {
+    static PENDING: std::sync::OnceLock<PendingReports> = std::sync::OnceLock::new();
+    PENDING.get_or_init(|| parking_lot::Mutex::new(Vec::new()))
+}
+
+fn retry_later(action: &'static str, body: &Value) {
+    {
+        let mut pending = pending_reports().lock();
+        let same = |b: &Value| {
+            b.get("index") == body.get("index")
+                && b.get("allocation_id") == body.get("allocation_id")
+        };
+        if pending.iter().any(|(a, b)| *a == action && same(b)) {
+            return;
+        }
+        pending.push((action, body.clone()));
+    }
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        tokio::spawn(retry_reports());
+    });
+}
+
+async fn retry_reports() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let batch: Vec<(&'static str, Value)> = pending_reports().lock().clone();
+        if batch.is_empty() {
+            continue;
+        }
+        let Some(rt) = super::runtime() else { continue };
+        let me = rt.local();
+        let state = rt.state();
+        let Some(mgr) = state.cluster_manager.clone() else { continue };
+        for (action, body) in batch {
+            let index = body.get("index").and_then(|v| v.as_str()).unwrap_or("");
+            let shard = body.get("shard").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let aid = body.get("allocation_id").and_then(|v| v.as_str()).unwrap_or("");
+            let primary_here =
+                state.routing.primary(index, shard).and_then(|p| p.node.clone()).as_ref()
+                    == Some(&me);
+            let placed = state
+                .routing
+                .shards_of(index)
+                .any(|c| c.shard == shard && c.allocation_id.as_deref() == Some(aid));
+            let in_sync = state
+                .indices
+                .get(index)
+                .and_then(|m| m.in_sync_allocations.get(&shard))
+                .map(|ids| ids.iter().any(|i| i == aid))
+                .unwrap_or(false);
+            let settled = if !primary_here || !(placed || in_sync) {
+                true
+            } else {
+                let answer = rt
+                    .call(
+                        &mgr,
+                        action,
+                        serde_json::to_vec(&body).unwrap_or_default(),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
+                matches!(answer, Some(ref a) if a.kind == Kind::Response)
+            };
+            if settled {
+                if trace_writes() {
+                    trace!("TRACE report settled {action} {index}/{aid}");
+                }
+                pending_reports().lock().retain(|(a, b)| !(*a == action && *b == body));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
