@@ -6299,3 +6299,14 @@ times by itself and the whole corpus passed again), phase1 398/398, unit
 198/198, the model's storms over seeds 60 to 79 clean, sql_check 8/8,
 ism_check 6/6, refusal and DLS checks clean (29 paths); chaos as above.
 Against OpenSearch 3.1.0: 59/61, 45/45, 36/43.
+
+**The P0 closed.** Thirty more chaos runs alone on this binary, and none
+lost a write or left a copy short: fifty-eight in a row since the ack is
+asked again, against four in twenty-six before. At the old rate, fifty-eight
+clean runs by chance would come about fewer than once in ten thousand. Three
+of the thirty ended with the copies differing by writes never acknowledged
+-- the resync after a change of primary, the P1 still open and now the next
+piece of work: with no copy left in sync short of an acknowledged write, a
+replica can be made to match its new primary without risking one.
+
+Open at the end of this review, after the confirmation: P0 0, P1 1, P2 12.
