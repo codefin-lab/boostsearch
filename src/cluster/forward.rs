@@ -939,6 +939,19 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
     let refresh =
         parse_query(req.uri().query().unwrap_or("")).get("refresh").cloned().unwrap_or_default();
     let _ = store;
+    // The copying runs as a task of their own. Run in the request's future,
+    // it stopped wherever that future was when the caller hung up: a client
+    // that gave up while a copy was slow to answer left the document written
+    // on the primary and never sent to the copy, nor the copy failed for
+    // missing it -- the primary stayed the primary, nothing resynced, and the
+    // two copies disagreed for as long as the index lived. OpenSearch
+    // finishes a replication whether or not anyone is still waiting for the
+    // answer.
+    //
+    // Only the copying: the handler stays on the request's task, where the
+    // caller and the filters the security layer set for it are. A handler
+    // moved to a task of its own ran as nobody, and every document-level
+    // filter let everything through.
     replication::WRITES
         .scope(std::cell::RefCell::new(Vec::new()), async move {
             let response = next.run(req).await;
@@ -946,7 +959,16 @@ async fn run_with_replication(store: &Store, req: Request, next: Next) -> Respon
             if ops.is_empty() {
                 return response;
             }
-            replication::finish(response, ops, &refresh).await
+            let task =
+                tokio::spawn(async move { replication::finish(response, ops, &refresh).await });
+            match task.await {
+                Ok(response) => response,
+                Err(e) => crate::api::err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "exception",
+                    format!("the write did not finish: {e}"),
+                ),
+            }
         })
         .await
 }

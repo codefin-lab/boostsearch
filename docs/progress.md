@@ -6310,3 +6310,69 @@ piece of work: with no copy left in sync short of an acknowledged write, a
 replica can be made to match its new primary without risking one.
 
 Open at the end of this review, after the confirmation: P0 0, P1 1, P2 12.
+
+
+## The twenty-ninth review
+
+**P1 -- after a change of primary, a copy kept writes the new primary never
+had.** A primary that takes over sends its copies everything it holds, under
+its own term, and that settles every document both have. A document the old
+primary gave one copy and not the other -- a write refused or cut off before
+it was acknowledged -- stayed on that copy, and the two answered one search
+differently for as long as the index lived. The chaos runs counted it every
+few runs: copies differing by a handful of documents nobody was told were
+taken. The reference throws away what a replica holds beyond the global
+checkpoint when a new primary takes over.
+
+A resync now opens and closes. Before its first page the new primary tells
+each copy its term; from then the copy notes every document any write of
+that term or later touches -- the resync's own pages and ordinary writes
+alike -- and when the primary says the resync is done, what nothing of the
+new term touched is deleted under that term. It is safe now, and was not
+before the twenty-eighth review: a copy in sync can no longer be short of an
+acknowledged write, so what the new primary lacks was never acknowledged. A
+copy being filled is not trimmed -- it is filled from the new primary and
+matches it -- and a fill that starts after a resync opened closes it without
+a trim. A copy from before this ignores the marks and keeps what it has.
+
+The first ten chaos runs with the trim in place still disagreed three
+times, and a traced run showed why: not a change of primary at all. Twenty-two
+documents reached the primary while a copy was slow to answer; the client
+gave up before the copy did, and the request's future --
+the handler, the copying, the tracing -- was dropped where it stood. The
+documents were written on the primary and on no copy, the copy was never
+failed for missing them, the primary stayed the primary, and no resync came
+to settle it. No line of the trace mentioned the documents, which is how it
+showed itself: they were in the index and nowhere in the story of any write.
+
+**P1 -- a client that hung up stopped the write half done.** The copying
+now runs as a task of its own, and finishes whether or not anyone is still
+waiting for the answer, as the reference's replication does. A copy that
+does not answer in time is then failed and filled again, as it always was
+when the request lived long enough to say so.
+
+The first form of this moved the handler into the task as well, and the
+document-level security check caught it: twenty-three of its twenty-nine
+paths let everything through. The caller and the filters the security layer
+sets for a request live on the request's own task, and a handler moved off
+it ran as nobody. Only the copying moves; the handler stays where its caller
+is, and the check is clean again.
+
+Chaos, ten runs of ninety seconds on the final binary: no acknowledged
+write lost, no copy short of one, and the copies agreed in all ten. Before
+these changes they disagreed in three of ten, by as many as twenty-two
+documents. On the binary between -- the one that moved the handler off its
+task -- one run of ten disagreed by a single unacknowledged document, held
+by a copy and not the primary. That binary is gone, but nothing yet shows
+the road that document took was only its own, so it stays open until more
+runs say otherwise.
+
+Open at the end of this review: P0 none; P1 one (a single unacknowledged document
+left on one copy in one chaos run of ten); P2 twelve, as before.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, the model's storms over seeds 80 to 100 clean, sql_check 8/8,
+ism_check 6/6 (on a node started with a two-second job interval, as the
+check asks -- a gate node without it waits five minutes a tick and fails four
+of the six), refusal and DLS checks clean (30 refusals, 29 paths); chaos as
+above. Against OpenSearch 3.1.0: 59/61, 45/45, 35/43.

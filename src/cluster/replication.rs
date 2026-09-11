@@ -709,6 +709,82 @@ pub fn install(store: Store) {
                         ),
                     );
                 }
+                // the start and end of a new primary's resync
+                if let Some(rs) = v.get("resync") {
+                    let term = rs.get("term").and_then(|t| t.as_u64()).unwrap_or(0);
+                    if term < known_term {
+                        return e.error(
+                            from,
+                            &format!("stale primary term for [{index}]: {term} < {known_term}"),
+                        );
+                    }
+                    let phase = rs.get("phase").and_then(|p| p.as_str()).unwrap_or("");
+                    if phase == "begin" {
+                        // a copy being filled is filled from the new primary
+                        // itself, and matches it without being trimmed
+                        if !arrived().lock().contains_key(&index) {
+                            open_resyncs()
+                                .lock()
+                                .insert(index.clone(), (term, std::collections::HashSet::new()));
+                        }
+                        return e.response(from, b"{}".to_vec());
+                    }
+                    if phase == "end" {
+                        let seen = {
+                            let mut open = open_resyncs().lock();
+                            match open.get(&index) {
+                                Some((t, _)) if *t == term => open.remove(&index).map(|(_, s)| s),
+                                _ => None,
+                            }
+                        };
+                        let Some(seen) = seen else {
+                            return e.response(from, b"{}".to_vec());
+                        };
+                        let store = store.clone();
+                        let name = index.clone();
+                        let trimmed = tokio::task::spawn_blocking(move || {
+                            let Some(st) = store.get(&name) else { return Ok(0usize) };
+                            let mut g = st.write();
+                            let (held, _) =
+                                crate::api::doc::scan_replicated(&g, u32::MAX, 0, usize::MAX);
+                            let doomed: Vec<String> = held
+                                .into_iter()
+                                .filter(|o| o.source.is_some() && !seen.contains(&o.id))
+                                .map(|o| o.id)
+                                .collect();
+                            let first = g.seq_no + 1;
+                            for (seq, id) in (first..).zip(doomed.iter()) {
+                                let op = ReplicaOp {
+                                    index: name.clone(),
+                                    id: id.clone(),
+                                    routing: None,
+                                    version: g.version_of(id) + 1,
+                                    seq,
+                                    term,
+                                    shard: g.shard_of_doc(id) as u32,
+                                    source: None,
+                                };
+                                if trace_writes() {
+                                    trace!("TRACE trimmed {name}/{id} term={term}");
+                                }
+                                crate::api::doc::apply_replicated(&mut g, &op);
+                            }
+                            g.sync_translog()?;
+                            let _ = g.refresh();
+                            Ok::<usize, String>(doomed.len())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("resync trim panicked: {e}")));
+                        return match trimmed {
+                            Ok(n) => e.response(
+                                from,
+                                serde_json::to_vec(&json!({"trimmed": n})).unwrap_or_default(),
+                            ),
+                            Err(msg) => e.error(from, &msg),
+                        };
+                    }
+                }
+                seen_by_resync(&index, &ops);
                 // a copy being filled takes the write when the seed is done
                 if park(&index, &ops) {
                     if trace_writes() {
@@ -1083,6 +1159,32 @@ fn arrived() -> &'static parking_lot::Mutex<BTreeMap<String, Vec<ReplicaOp>>> {
     ARRIVED.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()))
 }
 
+/// Resyncs a new primary has opened on this copy: the term, and every
+/// document a write of that term or later has touched here since.
+///
+/// A primary that takes over sends the copies everything it holds, and a
+/// copy then held both that and whatever the old primary gave it and the new
+/// one never had -- writes nobody was told were taken, left on one copy and
+/// not the other, so the two answered one search differently for as long as
+/// the index lived. At the end of the resync, what no write of the new term
+/// touched is what the new primary does not have, and it goes.
+type OpenResyncs = parking_lot::Mutex<BTreeMap<String, (u64, std::collections::HashSet<String>)>>;
+
+fn open_resyncs() -> &'static OpenResyncs {
+    static OPEN: std::sync::OnceLock<OpenResyncs> = std::sync::OnceLock::new();
+    OPEN.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()))
+}
+
+/// Note the documents these writes touch, if a resync is open on the index.
+fn seen_by_resync(index: &str, ops: &[ReplicaOp]) {
+    let mut open = open_resyncs().lock();
+    if let Some((term, seen)) = open.get_mut(index) {
+        for op in ops.iter().filter(|op| op.term >= *term) {
+            seen.insert(op.id.clone());
+        }
+    }
+}
+
 /// A write for a copy that is being filled: it waits for the seed. False
 /// when no recovery is running, and the caller applies it itself.
 fn park(index: &str, ops: &[ReplicaOp]) -> bool {
@@ -1115,6 +1217,9 @@ pub async fn seed_replica(
         return Ok(());
     }
     arrived().lock().insert(index.to_string(), Vec::new());
+    // a copy filled now matches the primary it is filled from; a resync
+    // opened before would trim what the fill brought in
+    open_resyncs().lock().remove(index);
     let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
     // whether there was anything here before this recovery: a half-filled copy
     // this recovery made is not something to leave behind
@@ -1441,8 +1546,9 @@ async fn call_while_member(
 /// for a document -- it took a write this node never did, in a term that is
 /// over -- and nothing later would reconcile the two. Every document goes
 /// out under the new term, which wins over whatever version stands on the
-/// copy. Documents the copy has and this node does not are left alone: they
-/// may be writes it took and answered for.
+/// copy. Documents the copy has and this node does not are trimmed when the
+/// resync ends: a copy in sync is never short of an acknowledged write, so
+/// what this node lacks was never acknowledged.
 pub async fn resync(
     store: &Store,
     index: &str,
@@ -1456,6 +1562,15 @@ pub async fn resync(
     // the copies that did not take everything: they are failed as they are
     // found, and nothing further is sent to them
     let mut missed: Vec<NodeId> = Vec::new();
+    let mark = |phase: &str| {
+        serde_json::to_vec(&json!({"index": index, "refresh": "", "ops": [],
+            "resync": {"phase": phase, "term": term}}))
+        .unwrap_or_default()
+    };
+    for node in to {
+        let _ =
+            rt.call(node, REPLICA_WRITE, mark("begin"), std::time::Duration::from_secs(30)).await;
+    }
     loop {
         let store2 = store.clone();
         let name = index.to_string();
@@ -1505,6 +1620,11 @@ pub async fn resync(
             Some(n) if n > from_seq => from_seq = n,
             _ => break,
         }
+    }
+    // every copy that took the whole resync lets go of what it has and the
+    // new primary does not
+    for node in to.iter().filter(|n| !missed.contains(n)) {
+        let _ = rt.call(node, REPLICA_WRITE, mark("end"), std::time::Duration::from_secs(60)).await;
     }
     if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
         eprintln!(
