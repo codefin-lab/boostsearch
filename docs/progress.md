@@ -6801,3 +6801,64 @@ answer that, and this does not.
 
 Nothing in the server changed in this review: the binary is the
 thirty-fourth review's, and its gates are the ones recorded there.
+
+## The thirty-sixth review
+
+Tier 2 -- one node holding data that matters -- asked for four things. Two
+were done: a disk with no room left (the thirty-second review) and a backup
+restored against what went into it (the thirtieth). This review does the
+third and closes the fourth, and what is left of Tier 2 is one thing that is
+not this server's to run.
+
+**The deployment, checked rather than assumed.** `tools/tls_auth_check.py`
+starts a node as a deployment would have it -- TLS on the http layer,
+security on, the certificates in this repository's study tree, whose subject
+alternative names cover `localhost` -- and asks it what a client would ask.
+It verifies: the check pins the test CA and requires the hostname in the
+certificate, rather than passing `-k` and calling whatever answers a
+success. Then: plain http is not served on the port that speaks TLS; a
+caller with no credentials is refused, and so is a wrong password; the
+probe's own path answers anyone, over TLS, as the thirtieth review arranged;
+the administrator is served; and a user given one role reads the index it
+was granted, is refused the index it was not, and may not administer
+security. Last, the claim the image makes of itself: a node published on
+every interface with neither security configured nor security explicitly
+disabled refuses to start. Thirteen checks of thirteen.
+
+**PR-09, closed against the image itself.** The thirty-second review wrote
+`tools/docker_health_check.py` and could not run it: this machine would not
+fetch the base image, and the build and a plain pull both stopped there.
+They work today, the image builds, and the check runs: four containers --
+security off, authentication on, TLS on, and one of a cluster whose peers
+never come -- with Docker running the image's own HEALTHCHECK and the
+verdict read back from `docker inspect`. All four are judged correctly,
+where the probe before the thirtieth review got three of the four wrong, and
+with authentication on a caller with no credentials is still refused
+everything but the probe. Nine of nine. What that review left open is
+closed: the image is what was probed, not the binary inside it.
+
+Two alarms were raised on the way and both were the checks' own fault rather
+than the server's, which is worth writing down because the second one
+questioned evidence this ledger has been reporting for a dozen reviews.
+
+The first: the TLS check asserted on a user it had failed to create, and
+reported the server's refusal as a failure of authorisation. A check that
+uses a fixture must also check that the fixture was made, and it now does --
+the role, the user and the mapping are each asked for by status, and the
+answer that came back was `Password is similar to user name`.
+
+The second followed from it. `tools/dls_check.py` creates its user the same
+way and never looks at the answer either, and if that creation had been
+refused, every request it makes as that user would be a 401 -- which returns
+no documents, and a check that asks whether a hidden document came back
+would pass on an empty answer. It has not been passing that way: the user is
+created, and the reason is in the rule. A password is refused for containing
+the name it belongs to only when the name is at least four characters long,
+and `dee` is three where `tenant` is six. The same server answered both, and
+the passes are real. One question is left over that cannot be answered
+here: the reference's own rule has no such length, as far as this can tell
+without asking it, and asking it means the password of a node that is not
+this one's to open.
+
+Nothing in the server changed in this review: the binary is the thirty-fifth
+review's, and its gates are the ones recorded there.

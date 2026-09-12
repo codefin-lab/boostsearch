@@ -26,6 +26,7 @@ this runs beside anything else without taking a port from it.
 import argparse
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,13 @@ def main():
     work = pathlib.Path(tempfile.mkdtemp(prefix="bsdocker."))
     config = work / "config"
     config.mkdir()
+    # the certificates are copied in beside the config rather than mounted
+    # over a directory inside it: a mount within a mount is refused outright
+    # on a machine that shares only some of its filesystem with the daemon
+    certs = config / "certs"
+    certs.mkdir()
+    for name in ("esnode.pem", "esnode-key.pem", "root-ca.pem"):
+        shutil.copy(CERTS / name, certs / name)
     (config / "boostsearch.yml").write_text(
         "plugins.security.ssl.http.enabled: true\n"
         "plugins.security.ssl.http.pemcert_filepath: /etc/boostsearch/certs/esnode.pem\n"
@@ -93,8 +101,7 @@ def main():
         ("bs-off", ["-e", "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true", *single], "healthy"),
         ("bs-auth", ["-e", "BOOSTSEARCH_DISABLED=false", *single], "healthy"),
         ("bs-tls", ["-e", "BOOSTSEARCH_DISABLED=false", *single,
-                    "-v", f"{config}:/etc/boostsearch:ro",
-                    "-v", f"{CERTS}:/etc/boostsearch/certs:ro"], "healthy"),
+                    "-v", f"{config}:/etc/boostsearch:ro"], "healthy"),
         # its two peers never come: no cluster manager, ever
         ("bs-unready", ["-e", "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true",
                         "-e", "BOOSTSEARCH_TRANSPORT_INSECURE=true",
