@@ -6677,3 +6677,65 @@ reference drops. Three more differences are recorded above as the shape of
 this server rather than faults: the two that follow from an index living
 whole on one node, and the query this server answers that the reference does
 not.
+
+## The thirty-fourth review
+
+**A correction to the thirty-third.** That review recorded the
+`significant_terms` background -- 180 against 60 -- as a sum over shards,
+and said the reference agreed with this server when asked with a single
+shard. It does not. Asked again with one shard on both sides and the same
+sixty documents, the reference still answers 180, and it answers 180 after a
+force-merge, with an explicit `background_filter`, and with every document
+written exactly once. What the earlier experiment proved was something
+narrower: it copied the documents with `_reindex`, and `_reindex` copies the
+`_source` into an index whose mapping it takes from the copy -- without the
+nested field.
+
+The number is the nested documents. `r20-a` maps `items` as `nested` and
+every document carries two of them, so Lucene holds sixty parents and a
+hundred and twenty children: `_cat/indices` says 180 where `_count` says 60,
+and the reference's background is the count of documents its reader holds,
+children and all. The counts per term are not inflated -- `cat` is a
+parent's field, and they match this server exactly -- so only the superset
+is, which is why the scores there are larger than here and why they order
+`red` above `green` where this orders `green` above `red`.
+
+There are no children to count here. A nested object is kept in the document
+it belongs to, and a `nested` query runs against that document rather than
+joining to children of it; sixty documents are sixty documents. Matching the
+reference's number would mean inventing a population this server does not
+have to feed a score with, so the difference stands, now with its real
+reason: an index with no nested field answers identically on both, and one
+with a nested field differs by however many children its documents carry.
+
+The other half of that paragraph does hold. A `sampler` keeps `shard_size`
+documents per shard, and the reference answers 10 for a one-shard index and
+20 for a two-shard one, against 10 here -- so that difference is the shard
+count, exactly as the thirty-third review said. One of the two claims was
+right for the reason given; the other was right that it is not a fault to
+fix, and wrong about why.
+
+**P2 -- a weighted average parted from the reference in the last place a
+double holds.** `weighted_avg` answered 7.0321499999999988 where the
+reference answered 7.03215, and a caller reading four decimals saw a
+different number. The sums themselves agreed: asked for the same corpus,
+both engines report the same total weight and the same total value. Adding the
+reference's own values, in the order the reference holds them, plainly --
+each product added to a running total -- reproduces this server's answer
+exactly, which says the difference is not in the data or the order but in
+how the additions are carried. The reference keeps the error each addition
+leaves and carries it into the next one; this added plainly. It now carries
+the error too, and both engines answer the same double: 7.0321499999999997,
+printed 7.03215 by each.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, sql_check 8/8, ism_check 6/6. Against OpenSearch 3.1.0: the query
+corpus 60 of 61, 45/45, and the aggregations 36 of 43, up from 35 -- the
+weighted average is the one that moved.
+
+Open at the end of this review: P0 none; P1 none; P2 four -- the two digests,
+the sketch, and the position in a parse error. Three more differences stand
+recorded as the shape of this server rather than faults in it: a sampler
+counting per shard, a query this answers and the reference refuses, and a
+background counted in documents here and in Lucene's documents there,
+children and all.

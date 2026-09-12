@@ -167,11 +167,24 @@ pub(crate) fn run_weighted_avg(
     let query = combine(main_query, None);
     let pairs = collect_field_pairs(store, targets, &query, &vf, vmiss, &wf, wmiss)?;
 
+    // Summed the way the reference sums, with the error each addition leaves
+    // carried into the next one (Kahan). Added plainly, the two answers part
+    // in the last place a double can hold -- 7.0321499999999988 here against
+    // 7.03215 there for the corpus this is measured against -- and a caller
+    // reading four decimal places sees a different number.
     let mut num = 0.0f64;
+    let mut num_err = 0.0f64;
     let mut den = 0.0f64;
+    let mut den_err = 0.0f64;
+    let add = |sum: &mut f64, err: &mut f64, v: f64| {
+        let y = v - *err;
+        let t = *sum + y;
+        *err = (t - *sum) - y;
+        *sum = t;
+    };
     for (v, w) in pairs {
-        num += v * w;
-        den += w;
+        add(&mut num, &mut num_err, v * w);
+        add(&mut den, &mut den_err, w);
     }
     if den == 0.0 {
         return Ok(json!({"value": Value::Null}));
