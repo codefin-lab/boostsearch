@@ -43,6 +43,45 @@ pub(crate) fn find_geo_clause(node: &Value) -> Option<(String, Value)> {
     }
 }
 
+/// A latitude as Lucene indexes it: the degrees divided into the whole range
+/// of a 32-bit integer, rounded down. `_ceil` rounds up instead, which is how
+/// the low edge of a box is encoded, so that a box covers only the ground
+/// from its edge inwards.
+const LAT_STEP: f64 = 180.0 / (1u64 << 32) as f64;
+const LON_STEP: f64 = 360.0 / (1u64 << 32) as f64;
+
+fn encode_lat(lat: f64) -> i32 {
+    let lat = lat.clamp(-90.0, 90.0);
+    if lat == 90.0 {
+        return i32::MAX;
+    }
+    (lat / LAT_STEP).floor() as i32
+}
+
+fn encode_lat_ceil(lat: f64) -> i32 {
+    let lat = lat.clamp(-90.0, 90.0);
+    if lat == 90.0 {
+        return i32::MAX;
+    }
+    (lat / LAT_STEP).ceil() as i32
+}
+
+fn encode_lon(lon: f64) -> i32 {
+    let lon = lon.clamp(-180.0, 180.0);
+    if lon == 180.0 {
+        return i32::MAX;
+    }
+    (lon / LON_STEP).floor() as i32
+}
+
+fn encode_lon_ceil(lon: f64) -> i32 {
+    let lon = lon.clamp(-180.0, 180.0);
+    if lon == 180.0 {
+        return i32::MAX;
+    }
+    (lon / LON_STEP).ceil() as i32
+}
+
 /// Is this point inside the shape the query named?
 pub(crate) fn point_within(shape: &Value, point: &Value) -> bool {
     let Some((lat, lon)) = read_point(point) else { return false };
@@ -52,7 +91,20 @@ pub(crate) fn point_within(shape: &Value, point: &Value) -> bool {
         "geo_bounding_box" => {
             let corner = |name: &str| spec.get(name).and_then(read_point);
             match (corner("top_left"), corner("bottom_right")) {
-                (Some((t, l)), Some((b, r))) => lat <= t && lat >= b && lon >= l && lon <= r,
+                // A point exactly on an edge is where the two answers used to
+                // part. Lucene does not compare the degrees: it compares the
+                // fixed-point numbers it indexed, a document's coordinates
+                // rounded down and the box's low edges rounded up, so a point
+                // on the southern or western edge of a box whose degrees are
+                // not exactly representable falls outside it. Compared as
+                // degrees, a document at 13.7 sat inside a box starting at
+                // 13.7 that the reference answered without it.
+                (Some((t, l)), Some((b, r))) => {
+                    encode_lat(lat) <= encode_lat(t)
+                        && encode_lat(lat) >= encode_lat_ceil(b)
+                        && encode_lon(lon) >= encode_lon_ceil(l)
+                        && encode_lon(lon) <= encode_lon(r)
+                }
                 _ => false,
             }
         }

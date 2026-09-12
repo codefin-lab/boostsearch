@@ -6582,3 +6582,98 @@ against the binary -- stands.
 
 Nothing in the server changed in this review: the binary is the thirty-first
 review's, and its gates are the ones recorded there.
+
+## The thirty-third review
+
+Ten requests of the replay corpora answer differently from OpenSearch 3.1.0:
+two of the query corpus and eight of the aggregations. This review reads
+every one of them, fixes the two that are wrong, and says of the rest which
+are the shape of this server rather than a fault in it.
+
+**P2 -- a point exactly on the southern or western edge of a bounding box
+was inside it here and outside it there.** A `geo_bounding_box` was answered
+by comparing degrees: a document at 13.7 was inside a box whose bottom edge
+is 13.7. The reference does not compare degrees. Lucene indexes a coordinate
+as a fixed-point number -- the range divided into a 32-bit integer -- and
+rounds a document's coordinate down; a box's low edges it rounds up, and its
+high edges down. A point exactly on the southern or western edge of a box
+whose degrees are not exactly representable therefore falls outside, and on
+the northern or eastern edge falls inside. Asked of the reference directly,
+with points laid on each edge of two boxes, that is what it answers: the
+south and west points are missing from both, the north and east points are
+in both. The comparison is now made where the reference makes it, in the
+fixed-point numbers.
+
+**P2 -- a date bound outside the aggregation's own format was read anyway.**
+A `date_histogram` formatted `yyyy-MM` was given `extended_bounds` of
+`2026-01-01`. The reference parses the bound with the aggregation's
+formatter and refuses it; this read it leniently, took it for the first of
+January, and drew the buckets from there. A bound is now read by the pattern
+the aggregation names, and a bound that does not fit it is refused.
+
+**P2 -- a bucket was named the full instant however the aggregation asked
+for it.** Looking at the first fix turned up a second thing wrong beside it.
+A `date_histogram` formatted `yyyy-MM` names its buckets `2026-01` in the
+reference; here they came back `2026-01-01T00:00:00.000Z`. Not always: a
+histogram stepping by a fixed length in UTC is handed to the engine and its
+buckets were named correctly, while one stepping by a calendar unit, or
+reported in a zone, or over a field counting something other than
+milliseconds, is walked a bucket at a time here -- and that path wrote the
+instant whatever the request asked for. So the same aggregation answered
+differently depending on the step it took. The replay never showed it: the
+one request that would have is the one the reference refuses over its
+bounds, and it never reaches a bucket. The walked path now names a bucket
+by the aggregation's format, in the aggregation's zone, as the other does.
+
+The other eight are differences of another kind, and this review settles
+what each of them is rather than leaving them a number in a table.
+
+Two are the shape of an index here. OpenSearch splits an index into shards
+and adds up what each shard says; an index here is held whole on one node
+(ADR 0003), so a number that is a sum over shards comes out smaller. A
+`significant_terms` over a two-shard index reports a background of 180 where
+this reports 60 -- and asked of the reference with the same sixty documents
+in a single shard, the reference reports 60 too, with the same counts per
+term. A `sampler` of `shard_size` 10 keeps 20 documents there against 10
+here, for the same reason. Neither is a fault to fix; both follow from how
+an index is laid out, and they are recorded here so the next reader of the
+table knows it.
+
+Three are the arithmetic of an approximation. `percentiles` and
+`percentile_ranks` interpolate within a t-digest, `cardinality` counts with
+a sketch a `precision_threshold` sizes, and each is a different
+approximation of the same truth: 7.0358 against 7.143, 52.9181 against
+53.3333, 51 against 60. Matching them means keeping the reference's own
+digests and sketches, bit for bit, which is a piece of work of its own and
+not one to start inside a review that is closing others. A `weighted_avg`
+differs in the last digit of thirteen -- 7.0321 against 7.0322 -- which is
+the order the sums are added in.
+
+One is a message: a `terms` aggregation given a bad `exclude` is refused by
+both, and the reference's reason carries `[1:91]`, the line and column in
+the request where the trouble is. Nothing here tracks where in the body a
+value was read from, so the reason is the same sentence without the
+position.
+
+And one is a query this server has and the reference does not:
+`combined_fields` is answered here and refused there as an unknown query.
+Answering more than the reference does costs nothing to a caller writing for
+the reference, and taking a working query away to match an absence would
+cost something, so it stays.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, sql_check 8/8, ism_check 6/6. Against OpenSearch 3.1.0: the query
+corpus 60 of 61, up from 59 -- the bounding box was the one that moved --
+45/45, and the aggregations 35 of 43 as before. That last number does not
+move for the bound this review fixed: the reference refused it and now this
+refuses it too, and the two refusals differ only in the words they are
+written in. The eight that differ are the eight above, and no new one
+appeared beside them.
+
+Open at the end of this review: P0 none; P1 none; P2 six -- the two digests
+and the sketch, the last digit of a weighted average, the position in a
+parse error, and the buckets a one-shard `significant_terms` keeps that the
+reference drops. Three more differences are recorded above as the shape of
+this server rather than faults: the two that follow from an index living
+whole on one node, and the query this server answers that the reference does
+not.

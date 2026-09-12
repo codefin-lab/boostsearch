@@ -196,15 +196,35 @@ pub(crate) fn run_calendar_histogram(
         }
     }
     // bounds are written the way a document would be, so they arrive as a date
-    // and have to meet the nanoseconds the calendar is walked in
-    let bound_ns = |key: &str| -> Option<f64> {
-        let v = bounds?.get(key)?;
-        crate::store::canonical_date(v)
+    // and have to meet the nanoseconds the calendar is walked in.
+    //
+    // Where the aggregation names a `format`, the bound is read by that
+    // pattern and by nothing else: OpenSearch parses it with the
+    // aggregation's own formatter and refuses what does not fit. Read
+    // leniently, `2026-01-01` passed for a histogram formatted `yyyy-MM`,
+    // and the buckets either side of it were invented from a date the
+    // request had not asked for.
+    let asked_format = spec.get("format").and_then(|f| f.as_str());
+    let bound_ns = |key: &str| -> std::result::Result<Option<f64>, Response> {
+        let Some(v) = bounds.and_then(|b| b.get(key)) else { return Ok(None) };
+        if let (Some(pattern), Some(text)) = (asked_format, v.as_str())
+            && !pattern.contains("epoch")
+        {
+            let Some(dt) = crate::store::parse_with_pattern(text, pattern) else {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "parse_exception",
+                    format!("failed to parse date field [{text}] with format [{pattern}]"),
+                ));
+            };
+            return Ok(Some(dt.unix_timestamp_nanos() as f64));
+        }
+        Ok(crate::store::canonical_date(v)
             .and_then(|d| crate::store::parse_date_lenient(&d))
-            .map(|d| d.unix_timestamp_nanos() as f64)
+            .map(|d| d.unix_timestamp_nanos() as f64))
     };
-    let lo_ns = bound_ns("min").unwrap_or(lo_ns);
-    let hi_ns = bound_ns("max").unwrap_or(hi_ns);
+    let lo_ns = bound_ns("min")?.unwrap_or(lo_ns);
+    let hi_ns = bound_ns("max")?.unwrap_or(hi_ns);
 
     let to_dt = |ns: f64| -> Option<OffsetDateTime> {
         OffsetDateTime::from_unix_timestamp_nanos(ns as i128).ok()
@@ -298,9 +318,20 @@ pub(crate) fn run_calendar_histogram(
         let combined = combine(main_query, Some(range));
         let (count, sub) = count_with_sub_aggs(store, targets, &combined, &sub_aggs, false)?;
         if count >= min_doc_count {
+            // a bucket's name is written in the aggregation's own format
+            // where it names one: a histogram formatted `yyyy-MM` is read
+            // back by its months, and this walked path -- a calendar step, a
+            // zone, a field counting something other than milliseconds --
+            // wrote the full instant whatever the request asked for. The
+            // path that does not walk has always honoured the format, so the
+            // two answered the same request differently.
+            let key_ms = cursor.unix_timestamp_nanos() as i64 / 1_000_000;
+            let named = asked_format.and_then(|pattern| {
+                crate::store::format_millis_at(key_ms, pattern, o.whole_milliseconds() as i64)
+            });
             let mut b = json!({
-                "key": cursor.unix_timestamp_nanos() as i64 / 1_000_000,
-                "key_as_string": iso_millis_at(cursor, &zone, o),
+                "key": key_ms,
+                "key_as_string": named.unwrap_or_else(|| iso_millis_at(cursor, &zone, o)),
                 "doc_count": count,
             });
             if let Some(Value::Object(o)) = sub {
