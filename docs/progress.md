@@ -6739,3 +6739,65 @@ recorded as the shape of this server rather than faults in it: a sampler
 counting per shard, a query this answers and the reference refuses, and a
 background counted in documents here and in Lucene's documents there,
 children and all.
+
+## The thirty-fifth review
+
+Tier 1 of the production path -- one node, holding an index that can be
+built again from what it was built from -- had one thing left against it: a
+short soak. The suites here are quick and the chaos runs are ninety seconds
+apiece; nothing had ever worked a node steadily for half an hour and then
+asked what it still held.
+
+`tools/soak_check.py` does. One node, one index, and four writers mixing
+what a real load mixes: single writes, bulks of twenty, updates of documents
+already acknowledged, deletes of others, searches, aggregations over a term
+and a calendar, and refreshes. Every acknowledged value is remembered. What
+it must hold, and what it asks at the end:
+
+  * every acknowledged document is there, with the value it was acknowledged
+    with -- three thousand of them sampled, since a soak acknowledges more
+    than can be asked after one at a time
+  * the node answered its health check throughout, and no request was
+    refused or left unanswered
+  * memory settles rather than climbing: the median of the last quarter of
+    the run against the first full quarter, where a doubling is a leak
+  * search is as quick at the end as at the beginning -- asked of a control
+    index written once before the run and never touched again
+  * and it all survives the node being stopped and started again on its data
+
+The control index is the second thing this review learned. The first run
+judged the searches it made against the index under load, and failed: 3.4
+milliseconds in the first quarter of the run against 18.1 in the last. That
+index had grown from nothing to two million documents while it was being
+asked, so the last quarter was searching twenty times as much as the first,
+and the number said more about the load than about the node. A soak wants to
+know whether the node slowed down, which is a question about the same work
+done later, so the check now asks it of twenty thousand documents written
+before the run and left alone. The index under load is still timed and still
+printed, as something to read rather than something to pass.
+
+Thirty minutes, four writers, one node: two million five hundred and
+thirty-two thousand seven hundred and ninety-two documents acknowledged over
+two million nine hundred and thirty-two thousand requests. Nothing was
+refused, nothing went unanswered, and the node answered its health check
+every fifteen seconds throughout. Of the acknowledged documents three
+thousand were asked after by id: every one was there, with the value it had
+been acknowledged with. The control index answered in 0.7 milliseconds in
+the first quarter of the run and 0.7 in the last. Then the node was stopped
+and started again on its data, and the sample was there again, and the index
+answered a search. Ten checks of ten.
+
+Two numbers in that run are worth reading rather than passing. The index
+under load answered in 2.9 milliseconds early and 17.2 late, having grown
+from nothing to two and a half million documents; that is the cost of more
+documents, not a slower node, which is what the control index is there to
+tell apart. And the node's memory went from 222 MiB to 905, peaking at
+1,011, over those two and a half million documents. The check this review
+applies to that -- the last quarter against the first full quarter, failing
+a doubling -- rules out memory running away during the run. It does not
+prove there is no slow leak, because the work was not constant: a soak that
+held the document count still, writing and deleting in equal measure, would
+answer that, and this does not.
+
+Nothing in the server changed in this review: the binary is the
+thirty-fourth review's, and its gates are the ones recorded there.

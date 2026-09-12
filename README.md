@@ -27,6 +27,7 @@ rather than believed.
 | who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths, counted as the check makes them rather than written into it | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
+| one node worked steadily for half an hour | **2.53 million writes** acknowledged over 2.93 million requests; every sampled one there afterwards and after a restart, nothing refused, and an index that does not grow answered in 0.7 ms at the start and 0.7 ms at the end | `tools/soak_check.py` |
 | a disk with no room left | **250 writes** against a full volume, 100 of them refused with `No space left on device`; everything acknowledged survives the filling and a `kill -9` | `tools/disk_fault_check.py` |
 | a backup restored against what went in | **2,500 documents** compared one by one, routing and all; a file cut short, one with a spoiled line, and one taken away are each refused rather than half restored | `tools/snapshot_check.py` |
 | the container's probe tells healthy from unready | **9 checks** over four nodes: security off, authentication on, TLS on, and one of a cluster with no cluster manager | `tools/health_check.py` |
