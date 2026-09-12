@@ -6541,3 +6541,44 @@ Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
 ism_check 6/6, snapshot_check 11/11, health_check 9/9, refusal and DLS
 checks clean (29 paths); chaos as above. Against OpenSearch 3.1.0: 59/61,
 45/45, 35/43.
+
+## The thirty-second review
+
+The production-readiness review of 2026-09-07 asked, second on its list, for
+fault injection on storage and a real restart, to show that an acknowledged
+write is not lost. Nothing here had ever run out of disk on purpose.
+
+`tools/disk_fault_check.py` does. A node is started on a memory-backed
+volume of its own, loaded until the volume is a third full, and then the
+volume is filled by a ballast file until a quarter of a megabyte is left.
+With the disk full, two hundred and fifty documents are written: a hundred
+were refused -- `translog_exception`, `a write could not be recorded: No
+space left on device (os error 28)` -- and a hundred and fifty were taken,
+the room for them having been found in what the ballast left. Every one of
+the hundred and fifty was there afterwards. Nothing acknowledged before the
+disk filled was lost, and the node went on answering rather than dying or
+falling silent. Then the ballast goes, the node is killed outright, and
+every document it ever acknowledged is there when it starts again, and the
+index takes writes as before: eleven checks of eleven.
+
+A test that never made a write fail would have passed all of this without
+touching the fault at all, so the check counts its refusals and fails when
+there are none. The first run of it did not count them, and its ten green
+lines said nothing about whether the disk had ever bitten.
+
+PR-09 of that review wanted the image itself probed, in each of the three
+modes it ships for. `tools/docker_health_check.py` is that check: four
+containers -- security off, authentication on, TLS on, and one of a cluster
+whose other members never come -- with Docker running the image's own
+HEALTHCHECK and the verdict read back from `docker inspect`, everything
+asked from inside so no port is taken from anything else. It has not run
+here. The image would not build on this machine: the build and a plain pull
+both stopped at fetching `rust:1-bookworm` and stayed there, writing
+nothing, though the registry answers. The check is written against the
+image, not against this machine's luck with it, and what it says will be
+recorded when it has an image to say it about. PR-09 stays open on that
+count; what the thirtieth review checked of it -- the probe's three modes
+against the binary -- stands.
+
+Nothing in the server changed in this review: the binary is the thirty-first
+review's, and its gates are the ones recorded there.
