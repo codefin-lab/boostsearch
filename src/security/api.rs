@@ -25,6 +25,48 @@ fn bad_request(message: impl Into<String>) -> Response {
     reply(StatusCode::BAD_REQUEST, "BAD_REQUEST", message)
 }
 
+/// What the plugin answers a request it will not act on at all: a `reason`
+/// rather than a `message`, and the word `error` rather than the status. Its
+/// own refusals of a missing entity keep the other shape, which is why both
+/// live here.
+fn invalid(reason: impl Into<String>) -> Response {
+    (StatusCode::BAD_REQUEST, axum::Json(json!({"status": "error", "reason": reason.into()})))
+        .into_response()
+}
+
+/// The same, naming the field whose type was wrong.
+fn wrong_datatype(field: &str, expected: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({"status": "error", "reason": "Wrong datatype", field: expected})),
+    )
+        .into_response()
+}
+
+/// The fields each kind keeps a list in.
+///
+/// A caller who writes one as something else was taken at their word and the
+/// entity written; the reference answers which field it was and what it
+/// expected, and a role whose `index_permissions` is a string grants nothing
+/// while looking as though it grants something.
+fn array_fields(kind: &str, body: &Value) -> Result<(), Response> {
+    let listed: &[&str] = match kind {
+        "roles" => &["index_permissions", "cluster_permissions", "tenant_permissions"],
+        "rolesmapping" => &["users", "backend_roles", "hosts", "and_backend_roles"],
+        "internalusers" => &["backend_roles", "opendistro_security_roles"],
+        "actiongroups" => &["allowed_actions"],
+        _ => &[],
+    };
+    for field in listed {
+        if let Some(v) = body.get(*field)
+            && !v.is_array()
+        {
+            return Err(wrong_datatype(field, "Array expected"));
+        }
+    }
+    Ok(())
+}
+
 fn created(name: &str) -> Response {
     reply(StatusCode::CREATED, "CREATED", format!("'{name}' created."))
 }
@@ -340,17 +382,30 @@ fn remove_entry(cfg: &mut SecurityConfig, kind: &str, name: &str) -> bool {
     gone
 }
 
-/// The plugin's password rules, in its words.
+/// The plugin's password rules, in its words, measured against OpenSearch
+/// 3.1.0 rather than read off its settings.
+///
+/// Three rules answer in the reference's own envelope. A password of more
+/// than a hundred characters is `Password is too long`. A password holding
+/// the user's name, where that name is four characters or more, is `Password
+/// is similar to user name` -- `deer` is refused and `dee` is not, which is
+/// where the four comes from. Anything the reference thinks weak is `Weak
+/// password`, and that judgement is a strength estimate rather than a rule:
+/// it refuses `abcdefghij`, `Dee123456x` and a hundred characters of `Aa1`
+/// followed by `x`, and accepts `Abcdefgh1`, `dee-password-1` and
+/// `Zq7-mesa-lantern-42`. Nothing shorter than nine characters was accepted
+/// by it in any shape, so nine is the floor kept here; the estimate itself
+/// is not reproduced, and what it refuses above nine is accepted here.
 fn validate_password(name: &str, password: &str) -> Result<(), Response> {
-    if password.is_empty() {
-        return Err(bad_request("Password does not match minimum criteria"));
+    if password.chars().count() > 100 {
+        return Err(invalid("Password is too long"));
     }
-    if password.len() > 100 {
-        return Err(bad_request("Password does not match minimum criteria"));
+    if password.chars().count() < 9 {
+        return Err(invalid("Weak password"));
     }
     if !name.is_empty() && password.to_lowercase().contains(&name.to_lowercase()) && name.len() >= 4
     {
-        return Err(bad_request("Password is similar to user name"));
+        return Err(invalid("Password is similar to user name"));
     }
     Ok(())
 }
@@ -467,16 +522,20 @@ pub async fn put_one(
         o.remove("hidden");
         o.remove("static");
     }
+    // An empty document is not one to write, and the reference says so before
+    // it looks at what the name refers to: a mapping to nobody was answered
+    // here with the absence of the role it named instead.
+    if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+        return invalid("Request body required for this action.");
+    }
+    if let Err(r) = array_fields(&kind, &body) {
+        return r;
+    }
     if let Err(r) = reject_unknown(&kind, &body) {
         return r;
     }
     if let Err(r) = required_fields(&kind, &body) {
         return r;
-    }
-    if kind == "internalusers" && body.get("hash").is_some() && body.get("password").is_some() {
-        return bad_request(
-            "Please specify either 'hash' or 'password' when creating a new internal user.",
-        );
     }
     let mut cfg = store.security.config.write();
     if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
@@ -868,7 +927,8 @@ pub async fn health() -> Response {
         *r.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
         return r;
     }
-    ok_json(json!({"message": Value::Null, "mode": "strict", "status": "UP"}))
+    ok_json(json!({"message": Value::Null, "mode": "strict", "status": "UP",
+        "settings": {"plugins.security.cache.ttl_minutes": 60}}))
 }
 
 pub async fn permissions_info(

@@ -2142,7 +2142,12 @@ pub(crate) fn finish_search(
         shards: if targets.is_empty() { 0 } else { shards.max(1) },
         total,
         hits: page,
-        max_score,
+        // A search that asked for no hits has no best hit to report. The
+        // reference answers `null` there whatever the query scored, and this
+        // reported the best score it had found while returning nothing to
+        // attach it to -- visible wherever a query and `size: 0` met, which
+        // is most of the way an aggregation is asked for.
+        max_score: if size == 0 { None } else { max_score },
         aggs,
         profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
         suggest,

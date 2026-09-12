@@ -72,14 +72,32 @@ pub async fn termvectors(
 /// is in, added up, and how many documents there are.
 fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64) {
     let searcher = g.reader.searcher();
-    let dyn_field = g.fields.dynamic;
-    let path = field.replace('.', "\u{1}");
-    let mut start = boostcore::Term::from_field_json_path(dyn_field, &path, true);
+    // Which field of the index holds this one's terms, and under which path:
+    // a field the mapping declares lives in the untouched view rather than
+    // among the dynamic JSON, and asking the dynamic field for it found
+    // nothing -- `sum_doc_freq` came back zero for a keyword every document
+    // had, where the reference reports one for each of them.
+    let ctx = crate::query::Ctx {
+        fields: &g.fields,
+        mapping: &g.mapping,
+        analysis: &g.analysis,
+        index: &g.index,
+        max_terms_count: g.max_terms_count(),
+        max_regex_length: g.max_regex_length(),
+        allow_expensive: true,
+        observed_kinds: &g.observed_kinds,
+        kinds_complete: g.kinds_complete,
+        stats: &g.stats,
+        vectors: &g.vectors,
+    };
+    let (held, path, _) = ctx.resolve(field, false);
+    let path = path.replace('.', "\u{1}");
+    let mut start = boostcore::Term::from_field_json_path(held, &path, true);
     start.append_type_and_str("");
     let prefix = start.serialized_value_bytes().to_vec();
     let mut sum_doc_freq = 0u64;
     for reader in searcher.segment_readers() {
-        let Ok(inverted) = reader.inverted_index(dyn_field) else { continue };
+        let Ok(inverted) = reader.inverted_index(held) else { continue };
         let Ok(mut stream) = inverted.terms().stream() else { continue };
         while let Some((bytes, info)) = stream.next() {
             if bytes.starts_with(&prefix) {

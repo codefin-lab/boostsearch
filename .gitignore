@@ -41,6 +41,7 @@ __pycache__/
 # it replays (compat-corpus.ndjson) is the input and stays
 /compat-inventory.json
 /compat-replay.json
+/security-replay.json
 
 # MEMANTO's project-local memory cache: one person's, not the project's
 /MEMORY.md

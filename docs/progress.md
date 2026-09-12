@@ -6862,3 +6862,94 @@ this one's to open.
 
 Nothing in the server changed in this review: the binary is the thirty-fifth
 review's, and its gates are the ones recorded there.
+
+## The thirty-seventh review
+
+**A blocker this ledger invented.** Since the twenty-sixth review the last
+item of Tier 2 has been written down as a security replay against a
+reference called `os-secure`, needing a password the reader was said to
+hold. Nothing was listening on the port it names, no script in this
+repository has ever pointed at it, and the only OpenSearch running was the
+plain one the gates use. The comparison had been made, twice, by scripts
+written into `/tmp` and lost with it; what remained was a note saying it was
+somebody else's to run. It was not. A security-enabled OpenSearch 3.1.0 is
+one `docker run` away, its password is whatever the run sets, and
+`tools/security_replay.py` now lives here rather than in `/tmp`, so the next
+review starts from a check instead of from a memory of one.
+
+The check sets the same fixture up on both engines through their own REST
+API -- a role over `logs-*` with a document filter, a field excluded, a
+field masked, a user mapped to it, three documents -- and asks each engine
+forty questions as the administrator and as that user: what the filtered
+caller sees of the documents, what it may not reach at all, and what the
+security API answers to a role, a user or a mapping that is wrong in some
+way. Answers are compared with the timings, addresses and identities
+levelled out. Eleven differed on the first run, and one of the eleven was
+the check comparing what its own previous run had left behind, which it now
+clears first.
+
+**P2 -- what the security API answers to a request it will not act on.**
+Six of the differences were one thing: the reference refuses with a `reason`
+and the word `error` where this refused with a `message` and the status, and
+in three of the six it refused where this accepted. A role whose
+`index_permissions` is a string is now `Wrong datatype`, naming the field
+and what was expected, rather than written as given -- a role that grants
+nothing while looking as though it grants something. An empty document is
+`Request body required for this action.`, answered before the name in the
+path is looked up, where a mapping to nobody used to be answered with the
+absence of the role it named. A password of more than a hundred characters
+is `Password is too long`. A user written with both a password and a hash is
+taken, as the reference takes it, rather than refused.
+
+The password rules are now what the reference answers, measured rather than
+read off a setting. Fourteen passwords were put to it: nothing shorter than
+nine characters was accepted in any shape, so nine is the floor here.
+Beyond that the reference judges strength rather than form -- it refuses
+`abcdefghij`, `Dee123456x`, and a hundred characters of `Aa1` followed by
+`x`, and accepts `Abcdefgh1`, `dee-password-1` and `Zq7-mesa-lantern-42` --
+and that judgement is an estimate this does not reproduce. What it refuses
+above nine characters is accepted here, and that is the difference which
+remains.
+
+**A correction to the thirty-sixth review.** That review asked whether the
+reference refuses a password for holding the user's name only when the name
+is four characters or longer, as this server does, and said the reference
+appeared to have no such length. It has exactly that length. A strong
+password holding the name is refused for `deer`, `deers`, `deersx` and
+`deersxy`, and accepted for `dee`; the words are the reference's own,
+`Password is similar to user name`. The rule here was right, and the note
+doubting it was wrong.
+
+**P2 -- a field's statistics were read from the wrong field.** A
+`_termvectors` answer carries what the index holds of the field as a whole,
+and this reported nothing held: zero where the reference reports one for
+each document. The count was taken from the dynamic JSON field, under the
+path of the field asked about, and a field the mapping declares does not
+keep its terms there. It is now asked of the field the mapping puts it in.
+
+**P2 -- a search that asked for no hits reported a best hit anyway.** With
+`size: 0` the reference answers `max_score: null`, having collected no hits
+to take a best from; this answered the best score it had found. Every
+aggregation asked with a query met it, which is most of the ways an
+aggregation is asked for, and the aggregations corpus never showed it
+because its requests carry no query. The engine was not at fault and
+neither was the document filter: asked the same questions by a caller, both
+engines score a filter clause identically, in all six shapes they were put
+in. It was only the answer's shape.
+
+The security replay now reads forty of forty.
+
+Gates on the final binary: core corpus 1,427/1,427, phase1 398/398, unit
+198/198, sql_check 8/8, ism_check 6/6, refusal and DLS checks clean (29
+paths), auth_matrix 1,587 answers over 334 routes with its baseline
+unmoved, tls_auth_check 13/13, security_replay 40/40. Against OpenSearch
+3.1.0: the query corpus 60 of 61, 45/45, the aggregations 36 of 43 -- none
+of them moved by the three fixes here, the aggregations corpus asking its
+questions without a query and so never meeting the one about `size`.
+
+With this, Tier 2 of the production path has nothing left against it: the
+disk fault injection of the thirty-second review, the backup restored
+against what went in of the thirtieth, the TLS and authentication
+deployment and the image's own healthcheck of the thirty-sixth, and now the
+security surface compared with the reference. What remains is Tier 3: a
+cluster, two hundred chaos runs, and a soak in staging.
