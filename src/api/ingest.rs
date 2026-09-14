@@ -6,13 +6,14 @@ use super::*;
 /// mistake worth naming rather than storing.
 pub(crate) fn pipeline_keys(kind: &str) -> &'static [&'static str] {
     match kind {
+        // a search pipeline names what it does not take once it has read what
+        // it does, and says so in its own words; see `search::pipeline`
         "search" => &[
             "description",
             "version",
             "request_processors",
             "response_processors",
             "phase_results_processors",
-            "_meta",
         ],
         _ => &["description", "version", "processors", "on_failure", "_meta"],
     }
@@ -37,7 +38,10 @@ pub(crate) async fn put_pipeline(
         );
     };
     let allowed = pipeline_keys(kind);
-    let stray = o.keys().map(|k| k.to_string()).find(|k| !allowed.contains(&k.as_str()));
+    let stray = o
+        .keys()
+        .map(|k| k.to_string())
+        .find(|k| kind != "search" && !allowed.contains(&k.as_str()));
     if let Some(stray) = stray {
         return err(
             StatusCode::BAD_REQUEST,
@@ -56,7 +60,7 @@ pub(crate) async fn put_pipeline(
         return ingest_failure(&e);
     }
     if kind == "search"
-        && let Err(e) = crate::search::pipeline::Pipeline::parse(&name, &body)
+        && let Err(e) = crate::search::pipeline::Pipeline::parse(&store, &name, &body)
     {
         return crate::api::pipeline_failure(&e);
     }

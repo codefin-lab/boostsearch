@@ -55,6 +55,7 @@ pub(crate) use routing::*;
 mod sort;
 pub(crate) use sort::*;
 
+pub(crate) mod hybrid;
 pub mod pipeline;
 mod suggest;
 pub(crate) use suggest::*;
