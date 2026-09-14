@@ -1,0 +1,9 @@
+{
+  "conflicts": "proceed",
+  "query": { "match_all": {} },
+  "script": {
+    "lang": "painless",
+    "source": "int bands = (ctx._source.weight_g + params.band_g - 1) / params.band_g; ctx._source.fee = params.base + bands * params.per_band + (ctx._source.surcharge == null ? 0 : ctx._source.surcharge);",
+    "params": { "base": 40.0, "band_g": 500, "per_band": 5.0 }
+  }
+}

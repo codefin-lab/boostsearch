@@ -1,0 +1,16 @@
+{
+  "description": "What the shop app sees: only books that can be bought, with the price under the name the app was built against",
+  "version": 1,
+  "request_processors": [
+    { "filter_query": {
+        "tag": "only-in-stock",
+        "description": "a book that cannot be bought is not a result",
+        "query": { "term": { "in_stock": true } } } }
+  ],
+  "response_processors": [
+    { "rename_field": {
+        "tag": "price-for-old-apps",
+        "description": "the catalogue renamed price to price_eur; released apps still read price",
+        "field": "price_eur", "target_field": "price" } }
+  ]
+}

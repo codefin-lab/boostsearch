@@ -1,0 +1,9 @@
+{
+  "_source": ["title"],
+  "query": {
+    "combined_fields": {
+      "query": "termination notice",
+      "fields": ["title^2", "body"]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "description": "What the shop app sees: in stock, priced as the app expects, at most five a page, formats in a stable order",
+  "version": 2,
+  "request_processors": [
+    { "filter_query": {
+        "tag": "only-in-stock",
+        "query": { "term": { "in_stock": true } } } },
+    { "script": {
+        "tag": "cap-page-size",
+        "description": "an old app asks for twenty; the new page design shows five",
+        "source": "if (ctx._source.size > params.max) { ctx._source.size = params.max; }",
+        "params": { "max": 5 } } }
+  ],
+  "response_processors": [
+    { "rename_field": {
+        "tag": "price-for-old-apps",
+        "field": "price_eur", "target_field": "price" } },
+    { "sort": {
+        "tag": "formats-in-order",
+        "description": "formats are stored in whatever order the publisher sent them",
+        "field": "formats", "order": "asc" } }
+  ]
+}

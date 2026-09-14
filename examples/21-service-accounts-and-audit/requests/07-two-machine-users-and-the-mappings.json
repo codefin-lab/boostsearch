@@ -1,0 +1,7 @@
+{
+  "password": "dashboard-example-passphrase-2",
+  "backend_roles": [
+    "dashboards"
+  ],
+  "description": "the operations dashboard"
+}

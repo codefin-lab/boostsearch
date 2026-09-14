@@ -1,0 +1,28 @@
+{
+  "size": 0,
+  "aggs": {
+    "pairs": {
+      "multi_terms": {
+        "terms": [
+          {
+            "field": "region"
+          },
+          {
+            "field": "channel"
+          }
+        ],
+        "size": 5,
+        "order": {
+          "revenue": "desc"
+        }
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        }
+      }
+    }
+  }
+}

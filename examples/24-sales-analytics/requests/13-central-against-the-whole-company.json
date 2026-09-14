@@ -1,0 +1,35 @@
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "region": "central"
+    }
+  },
+  "aggs": {
+    "central_revenue": {
+      "sum": {
+        "field": "revenue"
+      }
+    },
+    "central_discount": {
+      "avg": {
+        "field": "discount"
+      }
+    },
+    "company": {
+      "global": {},
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        },
+        "discount": {
+          "avg": {
+            "field": "discount"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "size": 5,
+  "_source": ["completed", "task.action", "response.total", "response.updated", "response.version_conflicts"],
+  "query": {
+    "range": { "response.version_conflicts": { "gt": 0 } }
+  }
+}

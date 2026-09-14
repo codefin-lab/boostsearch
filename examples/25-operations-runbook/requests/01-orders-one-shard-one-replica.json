@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 1
+  },
+  "mappings": {
+    "properties": {
+      "sku": {
+        "type": "keyword"
+      },
+      "qty": {
+        "type": "integer"
+      },
+      "city": {
+        "type": "keyword"
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "placed_at": {
+        "type": "date"
+      }
+    }
+  }
+}

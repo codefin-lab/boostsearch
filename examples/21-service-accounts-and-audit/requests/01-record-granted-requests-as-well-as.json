@@ -1,0 +1,43 @@
+{
+  "enabled": true,
+  "audit": {
+    "enable_rest": true,
+    "disabled_rest_categories": [
+      "AUTHENTICATED"
+    ],
+    "enable_transport": true,
+    "disabled_transport_categories": [
+      "AUTHENTICATED"
+    ],
+    "ignore_users": [
+      "kibanaserver"
+    ],
+    "ignore_requests": [
+      "indices:admin/refresh"
+    ],
+    "ignore_headers": [],
+    "ignore_url_params": [],
+    "resolve_bulk_requests": false,
+    "log_request_body": true,
+    "resolve_indices": true,
+    "exclude_sensitive_headers": true
+  },
+  "compliance": {
+    "enabled": true,
+    "internal_config": true,
+    "external_config": false,
+    "read_metadata_only": true,
+    "read_watched_fields": {},
+    "read_ignore_users": [
+      "kibanaserver"
+    ],
+    "write_metadata_only": true,
+    "write_log_diffs": false,
+    "write_watched_indices": [
+      "orders-*"
+    ],
+    "write_ignore_users": [
+      "kibanaserver"
+    ]
+  }
+}

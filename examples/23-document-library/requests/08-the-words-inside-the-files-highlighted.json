@@ -1,0 +1,27 @@
+{
+  "_source": [
+    "title",
+    "file.name",
+    "library.shelf"
+  ],
+  "query": {
+    "multi_match": {
+      "query": "password",
+      "fields": [
+        "attachment.content",
+        "attachments.attachment.content"
+      ]
+    }
+  },
+  "highlight": {
+    "pre_tags": [
+      "["
+    ],
+    "post_tags": [
+      "]"
+    ],
+    "fields": {
+      "attachment.content": {}
+    }
+  }
+}

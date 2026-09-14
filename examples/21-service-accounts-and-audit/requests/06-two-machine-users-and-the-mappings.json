@@ -1,0 +1,11 @@
+{
+  "password": "ingest-example-passphrase-1",
+  "backend_roles": [
+    "service"
+  ],
+  "attributes": {
+    "owner": "orders-pipeline",
+    "rotated": "never"
+  },
+  "description": "the order ingest service"
+}

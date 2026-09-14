@@ -1,0 +1,17 @@
+{
+  "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": {
+    "properties": {
+      "title":     { "type": "text" },
+      "author":    { "type": "keyword" },
+      "genre":     { "type": "keyword" },
+      "in_stock":  { "type": "boolean" },
+      "price_eur": { "type": "float" },
+      "rating":    { "type": "float" },
+      "year":      { "type": "integer" },
+      "formats":   { "type": "keyword" },
+      "series":    { "type": "keyword" },
+      "blurb":     { "type": "text" }
+    }
+  }
+}

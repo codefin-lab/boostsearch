@@ -2,8 +2,9 @@
 # The examples that can share one node, run in order against a node started
 # here with everything any of them needs.
 #
-# Skipped: 06 (wants security on, which changes every request) and 13 (starts
-# its own three-node cluster). Each of those has `make serve` of its own.
+# Skipped: 06 and 21 (want security on, which changes every request), 13
+# (starts its own three-node cluster) and 25 (reads the health of the whole
+# node, which the others leave yellow). Each has `make serve` of its own.
 set -uo pipefail
 cd "$(dirname "$0")"
 BIN=${BIN:-../target/release/boostsearch}
@@ -35,7 +36,7 @@ ran=0; failed=0; failures=()
 for d in [0-9]*/; do
   name=${d%/}
   case "$name" in
-    06-*|13-*) echo "-- skipping $name (needs its own node; see $name/README.md)"; continue ;;
+    06-*|13-*|21-*|25-*) echo "-- skipping $name (needs its own node; see $name/README.md)"; continue ;;
   esac
   [ -x "$name/run.sh" ] || continue
   echo

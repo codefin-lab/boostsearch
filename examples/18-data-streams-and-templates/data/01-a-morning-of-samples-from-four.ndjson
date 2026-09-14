@@ -1,0 +1,144 @@
+{"create": {}}
+{"@timestamp": "2026-09-14T06:00:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 29.9, "mem_pct": 56.5, "load_1m": 1.33}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:00:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 25.2, "mem_pct": 52.2, "load_1m": 1.2}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:00:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 54.7, "mem_pct": 66.5, "load_1m": 2.29}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:00:00Z", "host": "web03", "region": "us-east", "cpu_pct": 21.1, "mem_pct": 57.3, "load_1m": 0.97}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:10:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 37.8, "mem_pct": 59.7, "load_1m": 1.86}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:10:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 37.1, "mem_pct": 45.9, "load_1m": 1.58}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:10:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 58.8, "mem_pct": 69.4, "load_1m": 2.43}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:10:00Z", "host": "web03", "region": "us-east", "cpu_pct": 27.8, "mem_pct": 61.8, "load_1m": 1.45}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:20:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 30.5, "mem_pct": 47.5, "load_1m": 1.22}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:20:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 37.6, "mem_pct": 45.5, "load_1m": 1.8}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:20:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 55.6, "mem_pct": 69.8, "load_1m": 2.43}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:20:00Z", "host": "web03", "region": "us-east", "cpu_pct": 30.2, "mem_pct": 55.0, "load_1m": 1.33}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:30:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 28.8, "mem_pct": 51.9, "load_1m": 1.52}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:30:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 24.3, "mem_pct": 57.1, "load_1m": 1.23}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:30:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 49.6, "mem_pct": 60.2, "load_1m": 2.26}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:30:00Z", "host": "web03", "region": "us-east", "cpu_pct": 24.0, "mem_pct": 50.2, "load_1m": 1.15}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:40:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 28.6, "mem_pct": 57.6, "load_1m": 1.38}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:40:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 30.5, "mem_pct": 48.5, "load_1m": 1.55}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:40:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 60.2, "mem_pct": 68.6, "load_1m": 2.44}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:40:00Z", "host": "web03", "region": "us-east", "cpu_pct": 19.4, "mem_pct": 43.8, "load_1m": 0.81}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:50:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 37.4, "mem_pct": 53.6, "load_1m": 1.58}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:50:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 36.6, "mem_pct": 55.7, "load_1m": 1.78}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:50:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 60.1, "mem_pct": 72.0, "load_1m": 2.61}
+{"create": {}}
+{"@timestamp": "2026-09-14T06:50:00Z", "host": "web03", "region": "us-east", "cpu_pct": 32.8, "mem_pct": 43.3, "load_1m": 1.59}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:00:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 41.1, "mem_pct": 52.0, "load_1m": 1.97}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:00:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 24.9, "mem_pct": 50.4, "load_1m": 1.1}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:00:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 53.4, "mem_pct": 72.5, "load_1m": 2.19}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:00:00Z", "host": "web03", "region": "us-east", "cpu_pct": 22.4, "mem_pct": 61.2, "load_1m": 1.02}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:10:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 29.0, "mem_pct": 64.9, "load_1m": 1.38}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:10:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 22.3, "mem_pct": 54.3, "load_1m": 0.95}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:10:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 49.6, "mem_pct": 73.5, "load_1m": 2.25}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:10:00Z", "host": "web03", "region": "us-east", "cpu_pct": 23.8, "mem_pct": 52.9, "load_1m": 1.18}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:20:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 34.3, "mem_pct": 42.5, "load_1m": 1.68}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:20:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 34.3, "mem_pct": 50.5, "load_1m": 1.53}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:20:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 56.8, "mem_pct": 66.8, "load_1m": 2.44}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:20:00Z", "host": "web03", "region": "us-east", "cpu_pct": 31.0, "mem_pct": 62.6, "load_1m": 1.3}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:30:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 29.8, "mem_pct": 59.6, "load_1m": 1.57}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:30:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 33.7, "mem_pct": 47.4, "load_1m": 1.37}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:30:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 60.2, "mem_pct": 78.3, "load_1m": 2.71}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:30:00Z", "host": "web03", "region": "us-east", "cpu_pct": 28.8, "mem_pct": 64.3, "load_1m": 1.36}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:40:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 41.9, "mem_pct": 46.6, "load_1m": 1.71}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:40:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 35.4, "mem_pct": 57.5, "load_1m": 1.74}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:40:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 49.1, "mem_pct": 62.5, "load_1m": 2.2}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:40:00Z", "host": "web03", "region": "us-east", "cpu_pct": 18.0, "mem_pct": 48.2, "load_1m": 0.96}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:50:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 42.0, "mem_pct": 58.0, "load_1m": 1.84}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:50:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 28.5, "mem_pct": 52.8, "load_1m": 1.44}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:50:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 62.9, "mem_pct": 55.3, "load_1m": 2.89}
+{"create": {}}
+{"@timestamp": "2026-09-14T07:50:00Z", "host": "web03", "region": "us-east", "cpu_pct": 29.8, "mem_pct": 41.1, "load_1m": 1.3}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:00:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 31.4, "mem_pct": 45.4, "load_1m": 1.32}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:00:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 24.2, "mem_pct": 56.9, "load_1m": 1.14}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:00:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 48.7, "mem_pct": 76.1, "load_1m": 2.28}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:00:00Z", "host": "web03", "region": "us-east", "cpu_pct": 21.2, "mem_pct": 60.7, "load_1m": 1.16}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:10:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 35.5, "mem_pct": 42.2, "load_1m": 1.7}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:10:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 36.0, "mem_pct": 62.2, "load_1m": 1.82}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:10:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 49.6, "mem_pct": 79.4, "load_1m": 2.02}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:10:00Z", "host": "web03", "region": "us-east", "cpu_pct": 22.8, "mem_pct": 53.5, "load_1m": 1.17}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:20:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 35.5, "mem_pct": 62.7, "load_1m": 1.73}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:20:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 35.7, "mem_pct": 56.9, "load_1m": 1.61}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:20:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 47.3, "mem_pct": 71.2, "load_1m": 2.27}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:20:00Z", "host": "web03", "region": "us-east", "cpu_pct": 20.0, "mem_pct": 64.9, "load_1m": 0.81}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:30:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 33.4, "mem_pct": 58.8, "load_1m": 1.62}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:30:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 31.2, "mem_pct": 47.0, "load_1m": 1.35}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:30:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 49.2, "mem_pct": 71.1, "load_1m": 1.98}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:30:00Z", "host": "web03", "region": "us-east", "cpu_pct": 19.1, "mem_pct": 57.9, "load_1m": 0.94}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:40:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 27.3, "mem_pct": 50.6, "load_1m": 1.46}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:40:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 30.2, "mem_pct": 46.7, "load_1m": 1.26}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:40:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 55.0, "mem_pct": 61.1, "load_1m": 2.31}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:40:00Z", "host": "web03", "region": "us-east", "cpu_pct": 18.0, "mem_pct": 55.2, "load_1m": 1.04}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:50:00Z", "host": "web01", "region": "eu-west", "cpu_pct": 35.1, "mem_pct": 55.3, "load_1m": 1.52}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:50:00Z", "host": "web02", "region": "eu-west", "cpu_pct": 37.9, "mem_pct": 47.2, "load_1m": 1.88}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:50:00Z", "host": "db01", "region": "eu-west", "cpu_pct": 47.2, "mem_pct": 71.5, "load_1m": 2.24}
+{"create": {}}
+{"@timestamp": "2026-09-14T08:50:00Z", "host": "web03", "region": "us-east", "cpu_pct": 26.1, "mem_pct": 45.4, "load_1m": 1.11}

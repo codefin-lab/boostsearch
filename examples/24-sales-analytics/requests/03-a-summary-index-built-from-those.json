@@ -1,0 +1,30 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "region": {
+        "type": "keyword"
+      },
+      "category": {
+        "type": "keyword"
+      },
+      "month": {
+        "type": "date",
+        "format": "yyyy-MM"
+      },
+      "orders": {
+        "type": "long"
+      },
+      "units": {
+        "type": "long"
+      },
+      "revenue": {
+        "type": "double"
+      }
+    }
+  }
+}

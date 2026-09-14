@@ -1,0 +1,11 @@
+{
+  "_source": [
+    "title",
+    "attachment.content_length"
+  ],
+  "query": {
+    "match_phrase": {
+      "attachment.content": "reserve fund"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "index_patterns": ["metrics-edge-*"],
+  "data_stream": {},
+  "priority": 200,
+  "composed_of": ["metrics-settings", "metrics-mappings"],
+  "template": {
+    "settings": {
+      "refresh_interval": "30s"
+    },
+    "mappings": {
+      "properties": {
+        "site": { "type": "keyword" }
+      }
+    }
+  },
+  "_meta": {
+    "description": "edge boxes: one more field, and refreshed less often"
+  }
+}

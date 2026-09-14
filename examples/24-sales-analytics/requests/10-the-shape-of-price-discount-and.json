@@ -1,0 +1,58 @@
+{
+  "size": 0,
+  "aggs": {
+    "by_category": {
+      "terms": {
+        "field": "category",
+        "order": {
+          "_key": "asc"
+        }
+      },
+      "aggs": {
+        "price_paid_per_unit": {
+          "weighted_avg": {
+            "value": {
+              "field": "unit_price"
+            },
+            "weight": {
+              "field": "quantity"
+            }
+          }
+        },
+        "plain_avg_price": {
+          "avg": {
+            "field": "unit_price"
+          }
+        }
+      }
+    },
+    "revenue_spread": {
+      "median_absolute_deviation": {
+        "field": "revenue"
+      }
+    },
+    "revenue_median": {
+      "percentiles": {
+        "field": "revenue",
+        "percents": [
+          50
+        ]
+      }
+    },
+    "discount": {
+      "extended_stats": {
+        "field": "discount",
+        "sigma": 2
+      }
+    },
+    "together": {
+      "matrix_stats": {
+        "fields": [
+          "quantity",
+          "discount",
+          "revenue"
+        ]
+      }
+    }
+  }
+}

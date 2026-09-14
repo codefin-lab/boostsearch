@@ -1,0 +1,24 @@
+{"index": {"_id": "r01"}}
+{"name": "payments errors", "owner": "ana", "severity": "critical", "channel": "pager", "query": {"bool": {"filter": [{"term": {"service": "payments"}}, {"term": {"level": "error"}}]}}}
+{"index": {"_id": "r02"}}
+{"name": "checkout is slow", "owner": "ana", "severity": "warning", "channel": "slack", "query": {"bool": {"filter": [{"term": {"service": "checkout"}}, {"range": {"latency_ms": {"gte": 2000}}}]}}}
+{"index": {"_id": "r03"}}
+{"name": "a disk is full", "owner": "ops", "severity": "critical", "channel": "pager", "query": {"match_phrase": {"message": "no space left on device"}}}
+{"index": {"_id": "r04"}}
+{"name": "logins failing", "owner": "ben", "severity": "warning", "channel": "slack", "query": {"bool": {"filter": [{"term": {"service": "auth"}}], "must": [{"match_phrase": {"message": "authentication failed"}}]}}}
+{"index": {"_id": "r05"}}
+{"name": "any error in eu-west", "owner": "ops", "severity": "warning", "channel": "slack", "query": {"bool": {"filter": [{"term": {"level": "error"}}, {"term": {"region": "eu-west"}}]}}}
+{"index": {"_id": "r06"}}
+{"name": "timeouts, anywhere", "owner": "ben", "severity": "info", "channel": "email", "query": {"match": {"message": "timeout timed"}}}
+{"index": {"_id": "r07"}}
+{"name": "database refusing connections", "owner": "ops", "severity": "critical", "channel": "pager", "query": {"bool": {"must": [{"match_phrase": {"message": "connection refused"}}], "filter": [{"prefix": {"host": "db-"}}]}}}
+{"index": {"_id": "r08"}}
+{"name": "anything slower than five seconds", "owner": "chen", "severity": "info", "channel": "email", "query": {"range": {"latency_ms": {"gte": 5000}}}}
+{"index": {"_id": "r09"}}
+{"name": "payments timing out", "owner": "ana", "severity": "critical", "channel": "pager", "query": {"bool": {"filter": [{"term": {"service": "payments"}}], "must": [{"match": {"message": "timeout"}}]}}}
+{"index": {"_id": "r10"}}
+{"name": "out of memory", "owner": "chen", "severity": "critical", "channel": "pager", "query": {"match_phrase": {"message": "out of memory"}}}
+{"index": {"_id": "r11"}}
+{"name": "certificate expired", "owner": "chen", "severity": "warning", "channel": "slack", "query": {"match": {"message": {"query": "certificate expired", "operator": "and"}}}}
+{"index": {"_id": "r12"}}
+{"name": "errors on database hosts", "owner": "ops", "severity": "info", "channel": "email", "query": {"bool": {"filter": [{"term": {"level": "error"}}, {"wildcard": {"host": "db-*"}}]}}}

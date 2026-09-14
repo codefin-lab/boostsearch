@@ -1,0 +1,13 @@
+{
+  "_source": ["title"],
+  "query": {
+    "span_near": {
+      "clauses": [
+        { "span_term": { "body": "terminate" } },
+        { "span_term": { "body": "notice" } }
+      ],
+      "slop": 5,
+      "in_order": true
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "description": "a base64 file in `data` to its text in `attachment`, and the file itself thrown away",
+  "processors": [
+    {
+      "attachment": {
+        "field": "data",
+        "target_field": "attachment",
+        "indexed_chars": 1000,
+        "properties": [
+          "content",
+          "title",
+          "author",
+          "date",
+          "content_type",
+          "content_length",
+          "language"
+        ]
+      }
+    },
+    {
+      "remove": {
+        "field": "data"
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "size": 3,
+  "_source": ["@timestamp", "host", "cpu_pct"],
+  "sort": [{ "@timestamp": "asc" }],
+  "track_total_hits": true,
+  "query": {
+    "bool": {
+      "must": [{ "match": { "host": "db01" } }],
+      "filter": [{ "range": { "@timestamp": { "gte": "2026-09-14T08:30:00Z", "lt": "2026-09-14T09:30:00Z" } } }]
+    }
+  },
+  "aggs": {
+    "by_generation": { "terms": { "field": "_index" } },
+    "cpu": { "stats": { "field": "cpu_pct" } }
+  }
+}

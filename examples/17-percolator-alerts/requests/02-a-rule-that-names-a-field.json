@@ -1,0 +1,11 @@
+{
+  "name": "errors on db-1",
+  "owner": "ops",
+  "severity": "info",
+  "channel": "email",
+  "query": {
+    "term": {
+      "hostname": "db-1"
+    }
+  }
+}

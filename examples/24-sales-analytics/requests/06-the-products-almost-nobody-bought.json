@@ -1,0 +1,23 @@
+{
+  "size": 0,
+  "aggs": {
+    "hardly_sold": {
+      "rare_terms": {
+        "field": "product",
+        "max_doc_count": 2
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        },
+        "first_sold": {
+          "min": {
+            "field": "sold_at"
+          }
+        }
+      }
+    }
+  }
+}

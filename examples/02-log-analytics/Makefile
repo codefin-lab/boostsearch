@@ -13,7 +13,7 @@ serve:
 	./node.sh
 
 run:
-	./run.sh
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS="$${BS:-http://127.0.0.1:9262}" ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -23,6 +23,6 @@ check:
 print('requests and data: valid JSON')"
 
 clean:
-	@sh -c '. ./.env 2>/dev/null || true; \
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; \
 for i in $(INDICES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9262}/$$i" > /dev/null 2>&1 || true; done; \
 echo "deleted: $(INDICES)"'

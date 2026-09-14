@@ -1,0 +1,47 @@
+{
+  "size": 0,
+  "aggs": {
+    "lines": {
+      "composite": {
+        "size": 100,
+        "sources": [
+          {
+            "region": {
+              "terms": {
+                "field": "region"
+              }
+            }
+          },
+          {
+            "category": {
+              "terms": {
+                "field": "category"
+              }
+            }
+          },
+          {
+            "month": {
+              "date_histogram": {
+                "field": "sold_at",
+                "calendar_interval": "month",
+                "format": "yyyy-MM"
+              }
+            }
+          }
+        ]
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        },
+        "units": {
+          "sum": {
+            "field": "quantity"
+          }
+        }
+      }
+    }
+  }
+}

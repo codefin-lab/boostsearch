@@ -1,0 +1,14 @@
+{
+  "index_patterns": ["metrics-*"],
+  "data_stream": {},
+  "priority": 100,
+  "composed_of": ["metrics-settings", "metrics-mappings"],
+  "template": {
+    "settings": {
+      "index.codec": "best_compression"
+    }
+  },
+  "_meta": {
+    "description": "every metrics-* name becomes a data stream"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "_source": [
+    "title",
+    "project"
+  ],
+  "sort": [
+    {
+      "created": "desc"
+    }
+  ],
+  "query": {
+    "terms": {
+      "project": {
+        "index": "users",
+        "id": "ann",
+        "path": "projects",
+        "routing": "acme"
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "_source": ["title"],
+  "query": {
+    "term": {
+      "clause_type": "liability"
+    }
+  },
+  "highlight": {
+    "pre_tags": ["<mark>"],
+    "post_tags": ["</mark>"],
+    "fields": {
+      "body": {
+        "number_of_fragments": 0,
+        "highlight_query": {
+          "match": {
+            "body": "damages negligence fraud"
+          }
+        }
+      }
+    }
+  }
+}

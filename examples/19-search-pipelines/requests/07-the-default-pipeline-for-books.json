@@ -1,0 +1,3 @@
+{
+  "index": { "search": { "default_pipeline": "storefront" } }
+}

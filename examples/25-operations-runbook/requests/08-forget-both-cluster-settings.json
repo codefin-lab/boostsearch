@@ -1,0 +1,8 @@
+{
+  "persistent": {
+    "cluster.routing.allocation.disk.watermark.low": null
+  },
+  "transient": {
+    "cluster.routing.allocation.enable": null
+  }
+}

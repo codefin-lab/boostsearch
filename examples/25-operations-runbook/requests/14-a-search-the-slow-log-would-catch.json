@@ -1,0 +1,15 @@
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "status": "refunded"
+    }
+  },
+  "aggs": {
+    "by_city": {
+      "terms": {
+        "field": "city"
+      }
+    }
+  }
+}

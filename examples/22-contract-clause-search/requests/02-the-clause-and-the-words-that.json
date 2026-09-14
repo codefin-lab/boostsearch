@@ -1,0 +1,16 @@
+{
+  "_source": ["contract", "section", "title"],
+  "query": {
+    "match": {
+      "body": "written notice"
+    }
+  },
+  "highlight": {
+    "fields": {
+      "body": {
+        "type": "unified",
+        "number_of_fragments": 0
+      }
+    }
+  }
+}

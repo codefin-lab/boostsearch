@@ -1,0 +1,18 @@
+{
+  "_source": ["title", "body"],
+  "query": {
+    "intervals": {
+      "body": {
+        "match": {
+          "query": "liability limited",
+          "ordered": true,
+          "filter": {
+            "not_containing": {
+              "match": { "query": "not" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

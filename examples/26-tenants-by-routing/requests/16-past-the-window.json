@@ -1,0 +1,15 @@
+{
+  "from": 8,
+  "size": 5,
+  "_source": false,
+  "sort": [
+    {
+      "created": "asc"
+    }
+  ],
+  "query": {
+    "term": {
+      "tenant": "acme"
+    }
+  }
+}

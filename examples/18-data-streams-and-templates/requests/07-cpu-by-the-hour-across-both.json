@@ -1,0 +1,60 @@
+{
+  "size": 0,
+  "aggs": {
+    "by_generation": {
+      "terms": {
+        "field": "_index"
+      },
+      "aggs": {
+        "first": {
+          "min": {
+            "field": "@timestamp"
+          }
+        },
+        "last": {
+          "max": {
+            "field": "@timestamp"
+          }
+        }
+      }
+    },
+    "by_hour": {
+      "date_histogram": {
+        "field": "@timestamp",
+        "fixed_interval": "1h"
+      },
+      "aggs": {
+        "cpu_avg": {
+          "avg": {
+            "field": "cpu_pct"
+          }
+        },
+        "cpu_max": {
+          "max": {
+            "field": "cpu_pct"
+          }
+        }
+      }
+    },
+    "by_host": {
+      "terms": {
+        "field": "host",
+        "order": {
+          "cpu_max": "desc"
+        }
+      },
+      "aggs": {
+        "cpu_avg": {
+          "avg": {
+            "field": "cpu_pct"
+          }
+        },
+        "cpu_max": {
+          "max": {
+            "field": "cpu_pct"
+          }
+        }
+      }
+    }
+  }
+}

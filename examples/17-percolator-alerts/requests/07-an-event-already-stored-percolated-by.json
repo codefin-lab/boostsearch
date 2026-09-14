@@ -1,0 +1,14 @@
+{
+  "_source": [
+    "name",
+    "owner",
+    "severity"
+  ],
+  "query": {
+    "percolate": {
+      "field": "query",
+      "index": "events",
+      "id": "e05"
+    }
+  }
+}

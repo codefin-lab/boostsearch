@@ -1,0 +1,4 @@
+{"index":{"_index":"orders-2026.09","_id":"o-1007"}}
+{"order_id":"o-1007","customer":"c-17","sku":"CB-003","quantity":2,"amount":11.90,"placed_at":"2026-09-06T07:45:00Z"}
+{"index":{"_index":"payroll","_id":"p-3"}}
+{"employee":"e-9","monthly":99999}

@@ -1,0 +1,48 @@
+{"index": {"_id": "1"}}
+{"title": "The Sea Remembers", "author": "Ines Varga", "genre": "fiction", "in_stock": true, "price_eur": 14.99, "rating": 4.6, "year": 2019, "formats": ["paperback", "ebook", "hardback"], "series": "Coastline", "blurb": "A fishing town, a drowned bell, and a family that has kept one secret from the sea for three generations."}
+{"index": {"_id": "2"}}
+{"title": "Salt and Sea", "author": "Ines Varga", "genre": "fiction", "in_stock": true, "price_eur": 12.5, "rating": 4.2, "year": 2020, "formats": ["ebook", "paperback"], "series": "Coastline", "blurb": "Two sisters inherit a salt works on a failing coast and have one summer to decide whether to keep it."}
+{"index": {"_id": "3"}}
+{"title": "A Sea Without Shores", "author": "Ines Varga", "genre": "fiction", "in_stock": false, "price_eur": 16.0, "rating": 4.8, "year": 2022, "formats": ["hardback", "audiobook", "ebook"], "series": "Coastline", "blurb": "The last book of the trilogy: the town is flooded, and the bell is heard again."}
+{"index": {"_id": "4"}}
+{"title": "The Quiet Sea", "author": "Ines Varga", "genre": "fiction", "in_stock": true, "price_eur": 11.99, "rating": 3.9, "year": 2016, "formats": ["paperback"], "blurb": "An early novel about a lighthouse, a radio operator, and a winter with no ships."}
+{"index": {"_id": "5"}}
+{"title": "Deep Sea Engineering", "author": "Tomas Reyes", "genre": "science", "in_stock": true, "price_eur": 39.0, "rating": 4.4, "year": 2021, "formats": ["hardback", "ebook"], "blurb": "Pressure hulls, cables and robots: how people build things that work four kilometres under the sea."}
+{"index": {"_id": "6"}}
+{"title": "Mapping the Sea Floor", "author": "Priya Nair", "genre": "science", "in_stock": false, "price_eur": 42.5, "rating": 4.7, "year": 2023, "formats": ["hardback"], "blurb": "Sonar, satellites and the long project to draw the bottom of every ocean."}
+{"index": {"_id": "7"}}
+{"title": "Sea Kayaking the North", "author": "Hannah Lund", "genre": "travel", "in_stock": true, "price_eur": 22.0, "rating": 4.1, "year": 2018, "formats": ["paperback", "ebook"], "blurb": "Routes, tides and campsites along the coasts of Norway and Scotland."}
+{"index": {"_id": "8"}}
+{"title": "The Sea Cook's Table", "author": "Marco Bellini", "genre": "cookery", "in_stock": true, "price_eur": 28.0, "rating": 4.5, "year": 2021, "formats": ["hardback", "ebook"], "blurb": "Fish, shellfish and seaweed, cooked the way harbour kitchens cook them."}
+{"index": {"_id": "9"}}
+{"title": "Islands in a Grey Sea", "author": "Hannah Lund", "genre": "travel", "in_stock": false, "price_eur": 19.99, "rating": 3.8, "year": 2015, "formats": ["paperback"], "blurb": "A year of ferries between the small islands of the Baltic."}
+{"index": {"_id": "10"}}
+{"title": "A Short History of the Sea", "author": "Priya Nair", "genre": "history", "in_stock": true, "price_eur": 18.0, "rating": 4.3, "year": 2019, "formats": ["paperback", "audiobook", "ebook"], "blurb": "Trade, empire and war, told from the water rather than the land."}
+{"index": {"_id": "11"}}
+{"title": "Sea Glass", "author": "Olu Adeyemi", "genre": "poetry", "in_stock": true, "price_eur": 9.99, "rating": 4.0, "year": 2024, "formats": ["paperback"], "blurb": "Short poems collected on one beach over ten years."}
+{"index": {"_id": "12"}}
+{"title": "Beyond the Sea Wall", "author": "Olu Adeyemi", "genre": "fiction", "in_stock": false, "price_eur": 13.5, "rating": 4.4, "year": 2017, "formats": ["ebook", "paperback"], "blurb": "A novel in verse about a city that builds a wall against the sea and forgets what is outside it."}
+{"index": {"_id": "13"}}
+{"title": "Mountains of the Moon", "author": "Tomas Reyes", "genre": "science", "in_stock": true, "price_eur": 35.0, "rating": 4.2, "year": 2020, "formats": ["hardback"], "blurb": "The geology of the lunar highlands, and what the samples brought back tell us."}
+{"index": {"_id": "14"}}
+{"title": "The Bread Book", "author": "Marco Bellini", "genre": "cookery", "in_stock": true, "price_eur": 24.0, "rating": 4.6, "year": 2019, "formats": ["hardback", "ebook"], "blurb": "Sourdough, flatbreads and enriched doughs, with a chapter on ovens."}
+{"index": {"_id": "15"}}
+{"title": "Winter Roads", "author": "Hannah Lund", "genre": "travel", "in_stock": true, "price_eur": 17.5, "rating": 3.7, "year": 2021, "formats": ["ebook", "paperback"], "blurb": "Driving the ice roads of northern Canada in February."}
+{"index": {"_id": "16"}}
+{"title": "The Lighthouse Keeper's Daughter", "author": "Ines Varga", "genre": "fiction", "in_stock": true, "price_eur": 13.99, "rating": 4.5, "year": 2024, "formats": ["audiobook", "paperback", "ebook"], "series": "Coastline", "blurb": "A prequel: the girl who first heard the bell."}
+{"index": {"_id": "17"}}
+{"title": "Stone and Sky", "author": "Olu Adeyemi", "genre": "poetry", "in_stock": false, "price_eur": 10.99, "rating": 4.1, "year": 2021, "formats": ["paperback"], "blurb": "Poems about hills, weather and walking."}
+{"index": {"_id": "18"}}
+{"title": "Counting Stars", "author": "Priya Nair", "genre": "science", "in_stock": true, "price_eur": 26.0, "rating": 4.0, "year": 2017, "formats": ["paperback", "ebook"], "blurb": "How astronomers measured the size of the galaxy, one star at a time."}
+{"index": {"_id": "19"}}
+{"title": "A City of Bridges", "author": "Leo Marsh", "genre": "history", "in_stock": true, "price_eur": 21.0, "rating": 3.9, "year": 2016, "formats": ["paperback"], "blurb": "Eight hundred years of a river town, told through its crossings."}
+{"index": {"_id": "20"}}
+{"title": "The Orchard Year", "author": "Leo Marsh", "genre": "cookery", "in_stock": true, "price_eur": 23.5, "rating": 4.3, "year": 2022, "formats": ["hardback"], "blurb": "Apples, pears and plums, month by month, from blossom to jam."}
+{"index": {"_id": "21"}}
+{"title": "Small Engines", "author": "Tomas Reyes", "genre": "science", "in_stock": false, "price_eur": 31.0, "rating": 3.6, "year": 2014, "formats": ["paperback"], "blurb": "How a two-stroke engine works, and how to mend one."}
+{"index": {"_id": "22"}}
+{"title": "Rivers Run East", "author": "Leo Marsh", "genre": "history", "in_stock": true, "price_eur": 19.0, "rating": 4.2, "year": 2023, "formats": ["ebook", "hardback"], "blurb": "The canals and rivers that moved the goods of an empire."}
+{"index": {"_id": "23"}}
+{"title": "The Harbour Lights", "author": "Ines Varga", "genre": "fiction", "in_stock": true, "price_eur": 12.99, "rating": 4.0, "year": 2018, "formats": ["paperback", "ebook"], "series": "Coastline", "blurb": "A detective story set in the town from the Coastline books."}
+{"index": {"_id": "24"}}
+{"title": "Night Trains", "author": "Hannah Lund", "genre": "travel", "in_stock": true, "price_eur": 16.0, "rating": 4.4, "year": 2020, "formats": ["ebook", "paperback"], "blurb": "Sleeper services across Europe, and the people on them."}

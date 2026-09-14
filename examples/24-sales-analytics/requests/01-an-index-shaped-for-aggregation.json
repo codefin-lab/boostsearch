@@ -1,0 +1,53 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "order_id": {
+        "type": "keyword"
+      },
+      "sold_at": {
+        "type": "date"
+      },
+      "region": {
+        "type": "keyword"
+      },
+      "rep": {
+        "type": "keyword"
+      },
+      "channel": {
+        "type": "keyword"
+      },
+      "category": {
+        "type": "keyword"
+      },
+      "product": {
+        "type": "keyword"
+      },
+      "quantity": {
+        "type": "integer"
+      },
+      "unit_price": {
+        "type": "double"
+      },
+      "discount": {
+        "type": "double"
+      },
+      "revenue": {
+        "type": "double"
+      },
+      "cost": {
+        "type": "double"
+      },
+      "rating": {
+        "type": "integer"
+      },
+      "coupon": {
+        "type": "keyword"
+      }
+    }
+  }
+}

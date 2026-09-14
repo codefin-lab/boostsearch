@@ -1,0 +1,33 @@
+{
+  "_source": [
+    "name",
+    "owner",
+    "severity",
+    "channel"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "percolate": {
+            "field": "query",
+            "document": {
+              "@timestamp": "2026-09-14T08:05:51Z",
+              "service": "payments",
+              "level": "error",
+              "region": "eu-west",
+              "host": "pay-3",
+              "latency_ms": 3100,
+              "message": "upstream timeout calling card processor"
+            }
+          }
+        },
+        {
+          "term": {
+            "severity": "critical"
+          }
+        }
+      ]
+    }
+  }
+}

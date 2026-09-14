@@ -1,0 +1,40 @@
+{
+  "size": 0,
+  "derived": {
+    "cost": {
+      "type": "double",
+      "script": {
+        "source": "emit(params._source.minutes / 60.0 * params.rates[params._source.tenant])",
+        "params": {
+          "rates": {
+            "acme": 120,
+            "initech": 90,
+            "globex": 150
+          }
+        }
+      }
+    }
+  },
+  "aggs": {
+    "tenants": {
+      "terms": {
+        "field": "tenant",
+        "order": {
+          "_key": "asc"
+        }
+      },
+      "aggs": {
+        "cost": {
+          "sum": {
+            "field": "cost"
+          }
+        },
+        "minutes": {
+          "sum": {
+            "field": "minutes"
+          }
+        }
+      }
+    }
+  }
+}

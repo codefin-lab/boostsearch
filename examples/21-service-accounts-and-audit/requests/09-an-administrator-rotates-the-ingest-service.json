@@ -1,0 +1,12 @@
+[
+  {
+    "op": "replace",
+    "path": "/password",
+    "value": "ingest-rotated-passphrase-4"
+  },
+  {
+    "op": "replace",
+    "path": "/attributes/rotated",
+    "value": "2026-09"
+  }
+]

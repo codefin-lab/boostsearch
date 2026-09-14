@@ -1,0 +1,32 @@
+{
+  "_source": [
+    "title",
+    "minutes"
+  ],
+  "derived": {
+    "cost": {
+      "type": "double",
+      "script": {
+        "source": "emit(params._source.minutes / 60.0 * params.rate)",
+        "params": {
+          "rate": 120
+        }
+      }
+    }
+  },
+  "fields": [
+    "cost"
+  ],
+  "query": {
+    "range": {
+      "cost": {
+        "gte": 100
+      }
+    }
+  },
+  "sort": [
+    {
+      "created": "desc"
+    }
+  ]
+}

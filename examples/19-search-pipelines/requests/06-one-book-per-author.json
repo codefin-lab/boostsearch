@@ -1,0 +1,10 @@
+{
+  "description": "A carousel of different authors: fetch three times what was asked, keep the best of each author, cut back to the size asked",
+  "request_processors": [
+    { "oversample": { "sample_factor": 3.0 } }
+  ],
+  "response_processors": [
+    { "collapse": { "field": "author" } },
+    { "truncate_hits": {} }
+  ]
+}

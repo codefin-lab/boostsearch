@@ -1,0 +1,18 @@
+{
+  "_source": ["title"],
+  "query": {
+    "match_phrase": {
+      "body": {
+        "query": "notify in writing",
+        "slop": 2
+      }
+    }
+  },
+  "highlight": {
+    "fields": {
+      "body": {
+        "number_of_fragments": 0
+      }
+    }
+  }
+}

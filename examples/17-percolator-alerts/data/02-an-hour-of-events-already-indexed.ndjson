@@ -1,0 +1,20 @@
+{"index": {"_id": "e01"}}
+{"@timestamp": "2026-09-14T08:00:05Z", "service": "payments", "level": "info", "region": "us-east", "host": "pay-1", "latency_ms": 120, "message": "charge captured"}
+{"index": {"_id": "e02"}}
+{"@timestamp": "2026-09-14T08:01:10Z", "service": "checkout", "level": "warn", "region": "us-east", "host": "web-4", "latency_ms": 2600, "message": "slow response from inventory service"}
+{"index": {"_id": "e03"}}
+{"@timestamp": "2026-09-14T08:02:44Z", "service": "orders", "level": "error", "region": "eu-west", "host": "db-2", "latency_ms": 40, "message": "connection refused by database primary"}
+{"index": {"_id": "e04"}}
+{"@timestamp": "2026-09-14T08:03:02Z", "service": "auth", "level": "warn", "region": "us-east", "host": "auth-1", "latency_ms": 30, "message": "authentication failed for user 4412"}
+{"index": {"_id": "e05"}}
+{"@timestamp": "2026-09-14T08:04:19Z", "service": "search", "level": "error", "region": "ap-south", "host": "db-1", "latency_ms": 15, "message": "write failed: no space left on device"}
+{"index": {"_id": "e06"}}
+{"@timestamp": "2026-09-14T08:05:51Z", "service": "payments", "level": "error", "region": "eu-west", "host": "pay-3", "latency_ms": 3100, "message": "upstream timeout calling card processor"}
+{"index": {"_id": "e07"}}
+{"@timestamp": "2026-09-14T08:06:30Z", "service": "reports", "level": "error", "region": "us-east", "host": "batch-2", "latency_ms": 8200, "message": "worker killed: out of memory"}
+{"index": {"_id": "e08"}}
+{"@timestamp": "2026-09-14T08:07:12Z", "service": "gateway", "level": "warn", "region": "eu-west", "host": "edge-5", "latency_ms": 60, "message": "TLS certificate expired for api.partner.example"}
+{"index": {"_id": "e09"}}
+{"@timestamp": "2026-09-14T08:08:00Z", "service": "checkout", "level": "info", "region": "eu-west", "host": "web-2", "latency_ms": 180, "message": "order placed"}
+{"index": {"_id": "e10"}}
+{"@timestamp": "2026-09-14T08:09:37Z", "service": "inventory", "level": "warn", "region": "ap-south", "host": "inv-1", "latency_ms": 5400, "message": "request timed out waiting for lock"}

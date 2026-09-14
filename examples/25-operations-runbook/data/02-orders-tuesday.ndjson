@@ -1,0 +1,12 @@
+{"index": {"_id": "o07"}}
+{"sku": "mixer", "qty": 4, "city": "Bristol", "status": "paid", "placed_at": "2026-09-09T08:15:00Z"}
+{"index": {"_id": "o08"}}
+{"sku": "scale", "qty": 1, "city": "Glasgow", "status": "paid", "placed_at": "2026-09-09T09:15:00Z"}
+{"index": {"_id": "o09"}}
+{"sku": "grinder", "qty": 2, "city": "Cardiff", "status": "paid", "placed_at": "2026-09-09T10:15:00Z"}
+{"index": {"_id": "o10"}}
+{"sku": "blender", "qty": 3, "city": "Belfast", "status": "refunded", "placed_at": "2026-09-09T11:15:00Z"}
+{"index": {"_id": "o11"}}
+{"sku": "toaster", "qty": 4, "city": "York", "status": "paid", "placed_at": "2026-09-09T12:15:00Z"}
+{"index": {"_id": "o12"}}
+{"sku": "kettle", "qty": 1, "city": "Leeds", "status": "paid", "placed_at": "2026-09-09T13:15:00Z"}

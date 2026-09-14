@@ -1,0 +1,51 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "query": {
+        "type": "percolator"
+      },
+      "name": {
+        "type": "text",
+        "fields": {
+          "raw": {
+            "type": "keyword"
+          }
+        }
+      },
+      "owner": {
+        "type": "keyword"
+      },
+      "severity": {
+        "type": "keyword"
+      },
+      "channel": {
+        "type": "keyword"
+      },
+      "@timestamp": {
+        "type": "date"
+      },
+      "service": {
+        "type": "keyword"
+      },
+      "level": {
+        "type": "keyword"
+      },
+      "region": {
+        "type": "keyword"
+      },
+      "host": {
+        "type": "keyword"
+      },
+      "latency_ms": {
+        "type": "integer"
+      },
+      "message": {
+        "type": "text"
+      }
+    }
+  }
+}

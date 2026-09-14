@@ -1,0 +1,23 @@
+{
+  "_source": ["title"],
+  "query": {
+    "intervals": {
+      "body": {
+        "all_of": {
+          "ordered": true,
+          "max_gaps": 8,
+          "intervals": [
+            { "any_of": { "intervals": [
+              { "match": { "query": "terminate" } },
+              { "match": { "query": "suspend" } }
+            ] } },
+            { "any_of": { "intervals": [
+              { "match": { "query": "notice" } },
+              { "match": { "query": "unpaid" } }
+            ] } }
+          ]
+        }
+      }
+    }
+  }
+}

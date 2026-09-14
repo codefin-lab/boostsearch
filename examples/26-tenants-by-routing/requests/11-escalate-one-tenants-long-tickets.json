@@ -1,0 +1,29 @@
+{
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "term": {
+            "tenant": "acme"
+          }
+        },
+        {
+          "term": {
+            "status": "open"
+          }
+        },
+        {
+          "range": {
+            "minutes": {
+              "gte": 60
+            }
+          }
+        }
+      ]
+    }
+  },
+  "script": {
+    "lang": "painless",
+    "source": "ctx._source.status = 'escalated'"
+  }
+}

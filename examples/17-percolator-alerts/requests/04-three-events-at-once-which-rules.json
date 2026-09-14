@@ -1,0 +1,40 @@
+{
+  "_source": [
+    "name",
+    "owner"
+  ],
+  "query": {
+    "percolate": {
+      "field": "query",
+      "documents": [
+        {
+          "@timestamp": "2026-09-14T08:01:10Z",
+          "service": "checkout",
+          "level": "warn",
+          "region": "us-east",
+          "host": "web-4",
+          "latency_ms": 2600,
+          "message": "slow response from inventory service"
+        },
+        {
+          "@timestamp": "2026-09-14T08:02:44Z",
+          "service": "orders",
+          "level": "error",
+          "region": "eu-west",
+          "host": "db-2",
+          "latency_ms": 40,
+          "message": "connection refused by database primary"
+        },
+        {
+          "@timestamp": "2026-09-14T08:03:02Z",
+          "service": "auth",
+          "level": "warn",
+          "region": "us-east",
+          "host": "auth-1",
+          "latency_ms": 30,
+          "message": "authentication failed for user 4412"
+        }
+      ]
+    }
+  }
+}

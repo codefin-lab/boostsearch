@@ -1,0 +1,9 @@
+{
+  "query": {
+    "percolate": {
+      "field": "query",
+      "index": "events",
+      "id": "e99"
+    }
+  }
+}

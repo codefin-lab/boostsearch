@@ -1,0 +1,7 @@
+{
+  "size": 4,
+  "_source": ["title", "author"],
+  "query": {
+    "multi_match": { "query": "sea", "fields": ["title^3", "blurb"] }
+  }
+}

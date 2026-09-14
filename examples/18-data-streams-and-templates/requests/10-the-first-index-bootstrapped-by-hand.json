@@ -1,0 +1,5 @@
+{
+  "aliases": {
+    "legacy-metrics": { "is_write_index": true }
+  }
+}

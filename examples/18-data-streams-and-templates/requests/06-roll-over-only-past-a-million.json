@@ -1,0 +1,5 @@
+{
+  "conditions": {
+    "max_docs": 1000000
+  }
+}

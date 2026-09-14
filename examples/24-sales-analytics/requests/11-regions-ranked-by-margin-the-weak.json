@@ -1,0 +1,61 @@
+{
+  "size": 0,
+  "aggs": {
+    "regions": {
+      "terms": {
+        "field": "region",
+        "size": 10
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        },
+        "cost": {
+          "sum": {
+            "field": "cost"
+          }
+        },
+        "margin": {
+          "bucket_script": {
+            "buckets_path": {
+              "r": "revenue",
+              "c": "cost"
+            },
+            "script": "params.r - params.c"
+          }
+        },
+        "margin_pct": {
+          "bucket_script": {
+            "buckets_path": {
+              "r": "revenue",
+              "c": "cost"
+            },
+            "script": "100.0 * (params.r - params.c) / params.r"
+          }
+        },
+        "healthy": {
+          "bucket_selector": {
+            "buckets_path": {
+              "m": "margin_pct"
+            },
+            "script": "params.m >= 30"
+          }
+        },
+        "ranked": {
+          "bucket_sort": {
+            "sort": [
+              {
+                "margin_pct": {
+                  "order": "desc"
+                }
+              }
+            ],
+            "size": 3
+          }
+        }
+      }
+    }
+  }
+}

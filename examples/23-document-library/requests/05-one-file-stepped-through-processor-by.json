@@ -1,0 +1,20 @@
+{
+  "docs": [
+    {
+      "_source": {
+        "file": {
+          "name": "legal_policy_2026-05-01_data-retention.txt"
+        },
+        "data": "RGF0YSByZXRlbnRpb24KCkN1c3RvbWVyIHJlY29yZHMgYXJlIGtlcHQgZm9yIHNldmVuIHllYXJzLCBpbnZvaWNlcyBmb3IgdGVuLgo="
+      }
+    },
+    {
+      "_source": {
+        "file": {
+          "name": "hr_draft_2026-04-01_parental-leave.txt"
+        },
+        "data": "UGFyZW50YWwgbGVhdmUgKERSQUZUKQo="
+      }
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "size": 0,
+  "aggs": {
+    "coupons": {
+      "terms": {
+        "field": "coupon",
+        "missing": "(none)"
+      }
+    },
+    "unrated": {
+      "missing": {
+        "field": "rating"
+      }
+    },
+    "rating_of_the_rated": {
+      "avg": {
+        "field": "rating"
+      }
+    },
+    "rating_if_unrated_is_1": {
+      "avg": {
+        "field": "rating",
+        "missing": 1
+      }
+    },
+    "ratings": {
+      "terms": {
+        "field": "rating",
+        "missing": 0,
+        "order": {
+          "_key": "asc"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "size": 0,
+  "aggs": {
+    "shelves": {
+      "terms": {
+        "field": "library.shelf"
+      }
+    },
+    "file_types": {
+      "terms": {
+        "field": "attachment.content_type"
+      }
+    },
+    "not_extracted": {
+      "filter": {
+        "term": {
+          "library.extracted": false
+        }
+      }
+    }
+  }
+}

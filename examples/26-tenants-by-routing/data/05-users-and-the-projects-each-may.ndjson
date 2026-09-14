@@ -1,0 +1,6 @@
+{"index": {"_id": "ann", "routing": "acme"}}
+{"tenant": "acme", "name": "Ann", "projects": ["web", "mobile"]}
+{"index": {"_id": "bob", "routing": "acme"}}
+{"tenant": "acme", "name": "Bob", "projects": ["data", "billing"]}
+{"index": {"_id": "ian", "routing": "initech"}}
+{"tenant": "initech", "name": "Ian", "projects": ["reports"]}

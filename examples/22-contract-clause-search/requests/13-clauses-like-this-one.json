@@ -1,0 +1,15 @@
+{
+  "size": 3,
+  "_source": ["contract", "title"],
+  "query": {
+    "more_like_this": {
+      "fields": ["body"],
+      "like": [
+        { "_index": "clauses", "_id": "c1" }
+      ],
+      "min_term_freq": 1,
+      "min_doc_freq": 1,
+      "minimum_should_match": 1
+    }
+  }
+}

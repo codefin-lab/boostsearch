@@ -1,0 +1,28 @@
+{
+  "size": 10,
+  "_source": [
+    "title",
+    "status"
+  ],
+  "sort": [
+    {
+      "created": "asc"
+    }
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "term": {
+            "tenant": "acme"
+          }
+        },
+        {
+          "term": {
+            "status": "open"
+          }
+        }
+      ]
+    }
+  }
+}

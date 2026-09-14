@@ -1,0 +1,20 @@
+{"index": {"_id": "a01"}}
+{"level": "info", "actor": "svc-billing", "action": "login", "at": "2026-09-11T00:00:00Z"}
+{"index": {"_id": "a02"}}
+{"level": "info", "actor": "ops-alice", "action": "reindex", "at": "2026-09-11T01:00:00Z"}
+{"index": {"_id": "a03"}}
+{"level": "warn", "actor": "ops-bob", "action": "settings", "at": "2026-09-11T02:00:00Z"}
+{"index": {"_id": "a04"}}
+{"level": "info", "actor": "svc-billing", "action": "snapshot", "at": "2026-09-11T03:00:00Z"}
+{"index": {"_id": "a05"}}
+{"level": "error", "actor": "ops-alice", "action": "delete", "at": "2026-09-11T04:00:00Z"}
+{"index": {"_id": "a06"}}
+{"level": "info", "actor": "ops-bob", "action": "login", "at": "2026-09-11T05:00:00Z"}
+{"index": {"_id": "a07"}}
+{"level": "warn", "actor": "svc-billing", "action": "reindex", "at": "2026-09-11T06:00:00Z"}
+{"index": {"_id": "a08"}}
+{"level": "info", "actor": "ops-alice", "action": "settings", "at": "2026-09-11T07:00:00Z"}
+{"index": {"_id": "a09"}}
+{"level": "info", "actor": "ops-bob", "action": "snapshot", "at": "2026-09-11T08:00:00Z"}
+{"index": {"_id": "a10"}}
+{"level": "info", "actor": "svc-billing", "action": "delete", "at": "2026-09-11T09:00:00Z"}

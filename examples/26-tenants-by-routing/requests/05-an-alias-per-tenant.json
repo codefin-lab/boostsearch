@@ -1,0 +1,84 @@
+{
+  "actions": [
+    {
+      "add": {
+        "index": "tickets",
+        "alias": "tenant-acme",
+        "filter": {
+          "term": {
+            "tenant": "acme"
+          }
+        },
+        "routing": "acme",
+        "is_write_index": true
+      }
+    },
+    {
+      "add": {
+        "index": "tickets-2025",
+        "alias": "tenant-acme",
+        "filter": {
+          "term": {
+            "tenant": "acme"
+          }
+        },
+        "routing": "acme",
+        "is_write_index": false
+      }
+    },
+    {
+      "add": {
+        "index": "tickets",
+        "alias": "tenant-initech",
+        "filter": {
+          "term": {
+            "tenant": "initech"
+          }
+        },
+        "index_routing": "initech",
+        "search_routing": "initech",
+        "is_write_index": true
+      }
+    },
+    {
+      "add": {
+        "index": "tickets-2025",
+        "alias": "tenant-initech",
+        "filter": {
+          "term": {
+            "tenant": "initech"
+          }
+        },
+        "index_routing": "initech",
+        "search_routing": "initech",
+        "is_write_index": false
+      }
+    },
+    {
+      "add": {
+        "index": "tickets",
+        "alias": "tenant-globex",
+        "filter": {
+          "term": {
+            "tenant": "globex"
+          }
+        },
+        "routing": "globex",
+        "is_write_index": true
+      }
+    },
+    {
+      "add": {
+        "index": "tickets-2025",
+        "alias": "tenant-globex",
+        "filter": {
+          "term": {
+            "tenant": "globex"
+          }
+        },
+        "routing": "globex",
+        "is_write_index": false
+      }
+    }
+  ]
+}

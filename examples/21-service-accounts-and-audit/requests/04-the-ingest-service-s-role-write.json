@@ -1,0 +1,16 @@
+{
+  "description": "the order ingest service: index into orders-*, and that is all",
+  "cluster_permissions": [
+    "indices:data/write/bulk"
+  ],
+  "index_permissions": [
+    {
+      "index_patterns": [
+        "orders-*"
+      ],
+      "allowed_actions": [
+        "orders_writer"
+      ]
+    }
+  ]
+}

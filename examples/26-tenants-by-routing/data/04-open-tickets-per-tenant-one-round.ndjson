@@ -1,0 +1,6 @@
+{"index": "tenant-acme"}
+{"size": 0, "query": {"term": {"status": "open"}}}
+{"index": "tenant-initech"}
+{"size": 0, "query": {"term": {"status": "open"}}}
+{"index": "tenant-globex"}
+{"size": 0, "query": {"term": {"status": "open"}}}

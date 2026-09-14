@@ -1,0 +1,12 @@
+{
+  "size": 20,
+  "_source": ["title", "author", "in_stock"],
+  "query": {
+    "multi_match": { "query": "sea", "fields": ["title^3", "blurb"] }
+  },
+  "search_pipeline": {
+    "request_processors": [
+      { "filter_query": { "query": { "term": { "genre": "fiction" } } } }
+    ]
+  }
+}

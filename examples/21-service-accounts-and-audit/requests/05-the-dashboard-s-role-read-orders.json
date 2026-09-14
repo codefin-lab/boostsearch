@@ -1,0 +1,26 @@
+{
+  "description": "the operations dashboard: read orders-*, read-only in its tenant",
+  "cluster_permissions": [
+    "cluster_composite_ops_ro"
+  ],
+  "index_permissions": [
+    {
+      "index_patterns": [
+        "orders-*"
+      ],
+      "allowed_actions": [
+        "read"
+      ]
+    }
+  ],
+  "tenant_permissions": [
+    {
+      "tenant_patterns": [
+        "ops_dashboards"
+      ],
+      "allowed_actions": [
+        "kibana_all_read"
+      ]
+    }
+  ]
+}

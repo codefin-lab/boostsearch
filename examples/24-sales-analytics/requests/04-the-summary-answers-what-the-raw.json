@@ -1,0 +1,25 @@
+{
+  "size": 0,
+  "aggs": {
+    "regions": {
+      "terms": {
+        "field": "region",
+        "order": {
+          "_key": "asc"
+        }
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        }
+      }
+    },
+    "total": {
+      "sum": {
+        "field": "revenue"
+      }
+    }
+  }
+}

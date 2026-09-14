@@ -1,0 +1,24 @@
+{"index": {"_id": "w-1", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Batcave door sensor offline", "status": "open", "project": "facilities", "minutes": 30, "created": "2026-08-01"}
+{"index": {"_id": "w-2", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Payroll export missing night shift", "status": "open", "project": "payroll", "minutes": 60, "created": "2026-08-02"}
+{"index": {"_id": "w-3", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Login to the fleet portal fails", "status": "open", "project": "web", "minutes": 25, "created": "2026-08-03"}
+{"index": {"_id": "w-4", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Vehicle telemetry gaps", "status": "closed", "project": "fleet", "minutes": 90, "created": "2026-08-04"}
+{"index": {"_id": "w-5", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Board report charts misaligned", "status": "closed", "project": "reports", "minutes": 20, "created": "2026-08-05"}
+{"index": {"_id": "w-6", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Badge reader rejects new staff", "status": "open", "project": "facilities", "minutes": 45, "created": "2026-08-06"}
+{"index": {"_id": "w-7", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Expense approvals stuck", "status": "open", "project": "payroll", "minutes": 35, "created": "2026-08-07"}
+{"index": {"_id": "w-8", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Warehouse scanner drops scans", "status": "closed", "project": "fleet", "minutes": 70, "created": "2026-08-08"}
+{"index": {"_id": "w-9", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Password policy too strict", "status": "closed", "project": "web", "minutes": 15, "created": "2026-08-09"}
+{"index": {"_id": "w-10", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Quarterly audit export slow", "status": "open", "project": "reports", "minutes": 110, "created": "2026-08-10"}
+{"index": {"_id": "w-11", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Parking gate opens twice", "status": "closed", "project": "facilities", "minutes": 10, "created": "2026-08-11"}
+{"index": {"_id": "w-12", "routing": "wayne"}}
+{"tenant": "wayne", "title": "Mobile app crashes on launch", "status": "open", "project": "web", "minutes": 50, "created": "2026-08-12"}

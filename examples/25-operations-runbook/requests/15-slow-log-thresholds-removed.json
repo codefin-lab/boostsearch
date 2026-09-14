@@ -1,0 +1,7 @@
+{
+  "index.search.slowlog.threshold.query.warn": null,
+  "index.search.slowlog.threshold.query.info": null,
+  "index.search.slowlog.threshold.query.debug": null,
+  "index.search.slowlog.threshold.fetch.warn": null,
+  "index.search.slowlog.level": null
+}

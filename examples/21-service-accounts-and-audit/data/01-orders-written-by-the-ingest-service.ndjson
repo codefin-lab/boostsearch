@@ -1,0 +1,10 @@
+{"index":{"_id":"o-1001"}}
+{"order_id":"o-1001","customer":"c-17","sku":"KB-101","quantity":2,"amount":59.80,"placed_at":"2026-09-01T08:12:00Z"}
+{"index":{"_id":"o-1002"}}
+{"order_id":"o-1002","customer":"c-42","sku":"MS-220","quantity":1,"amount":24.50,"placed_at":"2026-09-01T09:40:00Z"}
+{"index":{"_id":"o-1003"}}
+{"order_id":"o-1003","customer":"c-17","sku":"MN-270","quantity":1,"amount":219.00,"placed_at":"2026-09-02T14:05:00Z"}
+{"index":{"_id":"o-1004"}}
+{"order_id":"o-1004","customer":"c-08","sku":"KB-101","quantity":5,"amount":149.50,"placed_at":"2026-09-03T11:30:00Z"}
+{"index":{"_id":"o-1005"}}
+{"order_id":"o-1005","customer":"c-42","sku":"CB-003","quantity":3,"amount":17.85,"placed_at":"2026-09-04T16:55:00Z"}

@@ -1,0 +1,7 @@
+{
+  "query": { "match_all": {} },
+  "script": {
+    "lang": "painless",
+    "source": "ctx._source.audited = true;"
+  }
+}

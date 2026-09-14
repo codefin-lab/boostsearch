@@ -1,0 +1,6 @@
+{"index": {"_id": "t-0901", "routing": "acme"}}
+{"tenant": "acme", "title": "Login page slow in December", "status": "closed", "project": "web", "minutes": 25, "created": "2025-12-02"}
+{"index": {"_id": "t-0902", "routing": "acme"}}
+{"tenant": "acme", "title": "Year-end export missing rows", "status": "closed", "project": "data", "minutes": 100, "created": "2025-12-15"}
+{"index": {"_id": "t-0903", "routing": "initech"}}
+{"tenant": "initech", "title": "Holiday schedule is not saved", "status": "closed", "project": "web", "minutes": 20, "created": "2025-12-20"}

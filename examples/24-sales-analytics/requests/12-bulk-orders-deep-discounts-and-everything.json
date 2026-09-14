@@ -1,0 +1,33 @@
+{
+  "size": 0,
+  "aggs": {
+    "kinds": {
+      "filters": {
+        "other_bucket_key": "neither",
+        "filters": {
+          "bulk": {
+            "range": {
+              "quantity": {
+                "gte": 10
+              }
+            }
+          },
+          "deep_discount": {
+            "range": {
+              "discount": {
+                "gte": 0.2
+              }
+            }
+          }
+        }
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        }
+      }
+    }
+  }
+}

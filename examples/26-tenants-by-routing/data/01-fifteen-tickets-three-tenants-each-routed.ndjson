@@ -1,0 +1,30 @@
+{"index": {"_id": "t-1001", "routing": "acme"}}
+{"tenant": "acme", "title": "Login page rejects a valid password", "status": "open", "project": "web", "minutes": 30, "created": "2026-08-01"}
+{"index": {"_id": "t-1002", "routing": "acme"}}
+{"tenant": "acme", "title": "Export to CSV times out", "status": "open", "project": "data", "minutes": 90, "created": "2026-08-03"}
+{"index": {"_id": "t-1003", "routing": "acme"}}
+{"tenant": "acme", "title": "Push notifications arrive twice", "status": "closed", "project": "mobile", "minutes": 45, "created": "2026-08-05"}
+{"index": {"_id": "t-1004", "routing": "acme"}}
+{"tenant": "acme", "title": "Invoice total rounds the wrong way", "status": "open", "project": "billing", "minutes": 60, "created": "2026-08-07"}
+{"index": {"_id": "t-1005", "routing": "acme"}}
+{"tenant": "acme", "title": "Login with SSO loops back to the start", "status": "open", "project": "web", "minutes": 120, "created": "2026-08-09"}
+{"index": {"_id": "t-1006", "routing": "acme"}}
+{"tenant": "acme", "title": "Dark mode hides the save button", "status": "closed", "project": "mobile", "minutes": 15, "created": "2026-08-11"}
+{"index": {"_id": "t-1007", "routing": "acme"}}
+{"tenant": "acme", "title": "Nightly report is empty", "status": "closed", "project": "data", "minutes": 75, "created": "2026-08-13"}
+{"index": {"_id": "t-1008", "routing": "acme"}}
+{"tenant": "acme", "title": "Password reset email never arrives", "status": "open", "project": "web", "minutes": 40, "created": "2026-08-15"}
+{"index": {"_id": "t-2001", "routing": "initech"}}
+{"tenant": "initech", "title": "TPS report cover sheet is missing", "status": "open", "project": "reports", "minutes": 30, "created": "2026-08-02"}
+{"index": {"_id": "t-2002", "routing": "initech"}}
+{"tenant": "initech", "title": "Login throttled after one attempt", "status": "open", "project": "web", "minutes": 20, "created": "2026-08-06"}
+{"index": {"_id": "t-2003", "routing": "initech"}}
+{"tenant": "initech", "title": "Printer queue stalls overnight", "status": "closed", "project": "hardware", "minutes": 50, "created": "2026-08-10"}
+{"index": {"_id": "t-2004", "routing": "initech"}}
+{"tenant": "initech", "title": "Stapler inventory count is wrong", "status": "closed", "project": "inventory", "minutes": 10, "created": "2026-08-14"}
+{"index": {"_id": "t-3001", "routing": "globex"}}
+{"tenant": "globex", "title": "Login fails for accounts over ten years old", "status": "open", "project": "web", "minutes": 35, "created": "2026-08-04"}
+{"index": {"_id": "t-3002", "routing": "globex"}}
+{"tenant": "globex", "title": "Dashboard graphs load slowly", "status": "open", "project": "web", "minutes": 55, "created": "2026-08-08"}
+{"index": {"_id": "t-3003", "routing": "globex"}}
+{"tenant": "globex", "title": "API key rotation breaks webhooks", "status": "closed", "project": "api", "minutes": 80, "created": "2026-08-12"}

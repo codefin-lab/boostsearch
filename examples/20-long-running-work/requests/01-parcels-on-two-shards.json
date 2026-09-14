@@ -1,0 +1,50 @@
+{
+  "settings": {
+    "number_of_shards": 2,
+    "number_of_replicas": 0,
+    "refresh_interval": "-1"
+  },
+  "mappings": {
+    "properties": {
+      "tracking": {
+        "type": "keyword"
+      },
+      "customer": {
+        "type": "keyword"
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "region": {
+        "type": "keyword"
+      },
+      "remote_area": {
+        "type": "boolean"
+      },
+      "weight_g": {
+        "type": "integer"
+      },
+      "fee": {
+        "type": "double"
+      },
+      "surcharge": {
+        "type": "double"
+      },
+      "booked_at": {
+        "type": "date"
+      },
+      "audited": {
+        "type": "boolean"
+      },
+      "delivered_by": {
+        "type": "keyword"
+      },
+      "returned_by": {
+        "type": "keyword"
+      },
+      "checked_at": {
+        "type": "date"
+      }
+    }
+  }
+}

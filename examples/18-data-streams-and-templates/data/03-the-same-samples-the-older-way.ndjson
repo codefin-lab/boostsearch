@@ -1,0 +1,8 @@
+{"index":{}}
+{"@timestamp":"2026-09-14T06:00:00Z","host":"web01","cpu_pct":31.2}
+{"index":{}}
+{"@timestamp":"2026-09-14T06:00:00Z","host":"web02","cpu_pct":28.7}
+{"index":{}}
+{"@timestamp":"2026-09-14T06:10:00Z","host":"web01","cpu_pct":36.4}
+{"index":{}}
+{"@timestamp":"2026-09-14T06:10:00Z","host":"web02","cpu_pct":27.9}

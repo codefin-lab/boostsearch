@@ -1,0 +1,17 @@
+{
+  "description": "runs after whatever pipeline the writer chose, or none: no base64 is ever stored",
+  "processors": [
+    {
+      "remove": {
+        "field": "data",
+        "ignore_missing": true
+      }
+    },
+    {
+      "script": {
+        "lang": "painless",
+        "source": "if (ctx.library == null) { ctx.library = [:]; } ctx.library.extracted = ctx.containsKey('attachment') || ctx.containsKey('attachments');"
+      }
+    }
+  ]
+}

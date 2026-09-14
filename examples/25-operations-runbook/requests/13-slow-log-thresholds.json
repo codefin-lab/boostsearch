@@ -1,0 +1,7 @@
+{
+  "index.search.slowlog.threshold.query.warn": "10s",
+  "index.search.slowlog.threshold.query.info": "2s",
+  "index.search.slowlog.threshold.query.debug": "0ms",
+  "index.search.slowlog.threshold.fetch.warn": "1s",
+  "index.search.slowlog.level": "debug"
+}

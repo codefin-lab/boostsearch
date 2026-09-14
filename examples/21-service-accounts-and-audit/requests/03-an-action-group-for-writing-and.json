@@ -1,0 +1,7 @@
+{
+  "allowed_actions": [
+    "indices:data/write/index",
+    "indices:data/write/bulk*"
+  ],
+  "description": "add documents, one at a time or in bulk; nothing else"
+}

@@ -1,0 +1,32 @@
+{
+  "pipeline": {
+    "description": "one file read twice: everything, and a short preview",
+    "processors": [
+      {
+        "attachment": {
+          "field": "data",
+          "target_field": "attachment"
+        }
+      },
+      {
+        "attachment": {
+          "field": "data",
+          "target_field": "preview",
+          "indexed_chars": 20,
+          "properties": [
+            "content",
+            "content_length"
+          ]
+        }
+      }
+    ]
+  },
+  "docs": [
+    {
+      "_source": {
+        "note": "data is the base64 of: Rotate every password every ninety days, and report a lost laptop within the hour.",
+        "data": "Um90YXRlIGV2ZXJ5IHBhc3N3b3JkIGV2ZXJ5IG5pbmV0eSBkYXlzLCBhbmQgcmVwb3J0IGEgbG9zdCBsYXB0b3Agd2l0aGluIHRoZSBob3VyLgo="
+      }
+    }
+  ]
+}

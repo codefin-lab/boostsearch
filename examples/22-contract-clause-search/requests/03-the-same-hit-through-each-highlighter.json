@@ -1,0 +1,18 @@
+{
+  "_source": false,
+  "query": {
+    "match": {
+      "body": "consequential damages"
+    }
+  },
+  "highlight": {
+    "pre_tags": ["<mark>"],
+    "post_tags": ["</mark>"],
+    "fields": {
+      "body": {
+        "type": "plain",
+        "number_of_fragments": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "number_of_shards": 4,
+    "number_of_replicas": 0,
+    "index.routing_partition_size": 2
+  },
+  "mappings": {
+    "_routing": {
+      "required": true
+    },
+    "properties": {
+      "tenant": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text"
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "project": {
+        "type": "keyword"
+      },
+      "minutes": {
+        "type": "integer"
+      },
+      "created": {
+        "type": "date"
+      }
+    }
+  }
+}

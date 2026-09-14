@@ -1,0 +1,60 @@
+{
+  "description": "one document carrying several files in `attachments`, each read where it is",
+  "processors": [
+    {
+      "dissect": {
+        "field": "file.name",
+        "pattern": "%{file.department}_%{file.kind}_%{file.published}_%{file.slug}"
+      }
+    },
+    {
+      "date": {
+        "field": "file.published",
+        "target_field": "published_at",
+        "formats": [
+          "yyyy-MM-dd"
+        ]
+      }
+    },
+    {
+      "foreach": {
+        "field": "attachments",
+        "processor": {
+          "attachment": {
+            "field": "_ingest._value.data",
+            "target_field": "_ingest._value.attachment",
+            "indexed_chars": 1000,
+            "properties": [
+              "content",
+              "title",
+              "content_type",
+              "content_length"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "foreach": {
+        "field": "attachments",
+        "processor": {
+          "remove": {
+            "field": "_ingest._value.data"
+          }
+        }
+      }
+    },
+    {
+      "script": {
+        "lang": "painless",
+        "source": "ctx.title = 'Board pack, ' + ctx.file.published; int chars = 0; for (def a : ctx.attachments) { chars += a.attachment.content_length; } ctx.reading_minutes = (int) Math.ceil(chars / 1000.0);"
+      }
+    },
+    {
+      "set": {
+        "field": "library.shelf",
+        "value": "{{file.department}}/{{file.kind}}"
+      }
+    }
+  ]
+}

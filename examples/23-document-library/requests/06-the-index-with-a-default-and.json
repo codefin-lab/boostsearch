@@ -1,0 +1,104 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.default_pipeline": "library",
+    "index.final_pipeline": "library-final"
+  },
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text"
+      },
+      "published_at": {
+        "type": "date"
+      },
+      "reading_minutes": {
+        "type": "integer"
+      },
+      "file": {
+        "properties": {
+          "name": {
+            "type": "keyword"
+          },
+          "department": {
+            "type": "keyword"
+          },
+          "kind": {
+            "type": "keyword"
+          },
+          "published": {
+            "type": "keyword"
+          },
+          "slug": {
+            "type": "keyword"
+          },
+          "extension": {
+            "type": "keyword"
+          }
+        }
+      },
+      "attachment": {
+        "properties": {
+          "content": {
+            "type": "text"
+          },
+          "title": {
+            "type": "text"
+          },
+          "author": {
+            "type": "keyword"
+          },
+          "date": {
+            "type": "date"
+          },
+          "content_type": {
+            "type": "keyword"
+          },
+          "content_length": {
+            "type": "integer"
+          },
+          "language": {
+            "type": "keyword"
+          }
+        }
+      },
+      "attachments": {
+        "properties": {
+          "name": {
+            "type": "keyword"
+          },
+          "attachment": {
+            "properties": {
+              "content": {
+                "type": "text"
+              },
+              "title": {
+                "type": "text"
+              },
+              "content_type": {
+                "type": "keyword"
+              },
+              "content_length": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "library": {
+        "properties": {
+          "shelf": {
+            "type": "keyword"
+          },
+          "ingested_at": {
+            "type": "date"
+          },
+          "extracted": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

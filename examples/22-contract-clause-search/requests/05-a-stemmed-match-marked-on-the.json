@@ -1,0 +1,18 @@
+{
+  "_source": ["title"],
+  "query": {
+    "multi_match": {
+      "query": "terminates notices",
+      "fields": ["body", "body.english"]
+    }
+  },
+  "highlight": {
+    "fields": {
+      "body": {
+        "type": "fvh",
+        "matched_fields": ["body", "body.english"],
+        "number_of_fragments": 0
+      }
+    }
+  }
+}

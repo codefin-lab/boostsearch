@@ -1,0 +1,24 @@
+{"index":{"_id":"c1"}}
+{"contract":"northwind-msa","section":"9.1","clause_type":"liability","title":"Limitation of liability","body":"In no event shall either party be liable to the other for any indirect, incidental, special or consequential damages, including loss of profits, arising out of this agreement. The total liability of either party shall not exceed the fees paid in the twelve months preceding the claim."}
+{"index":{"_id":"c2"}}
+{"contract":"northwind-msa","section":"10.1","clause_type":"indemnity","title":"Indemnification","body":"The supplier shall indemnify, defend and hold harmless the customer against any third party claim alleging that the services infringe intellectual property rights. The customer shall promptly notify the supplier in writing of any such claim."}
+{"index":{"_id":"c3"}}
+{"contract":"northwind-msa","section":"12.1","clause_type":"termination","title":"Termination for convenience","body":"Either party may terminate this agreement for convenience upon ninety days written notice to the other party. Fees paid in advance for the remaining term shall be refunded."}
+{"index":{"_id":"c4"}}
+{"contract":"northwind-msa","section":"12.2","clause_type":"termination","title":"Termination for cause","body":"Either party may terminate this agreement immediately upon written notice if the other party commits a material breach and fails to cure that breach within thirty days."}
+{"index":{"_id":"c5"}}
+{"contract":"northwind-msa","section":"14.1","clause_type":"confidentiality","title":"Confidentiality","body":"Each party shall keep the confidential information of the other party in strict confidence and shall not disclose it to any third party, except to employees who need to know it. This obligation survives termination of this agreement for five years."}
+{"index":{"_id":"c6"}}
+{"contract":"northwind-msa","section":"18.1","clause_type":"governing-law","title":"Governing law and jurisdiction","body":"This agreement shall be governed by the laws of England and Wales. The courts of London shall have exclusive jurisdiction over any dispute arising out of this agreement."}
+{"index":{"_id":"c7"}}
+{"contract":"contoso-saas","section":"15.1","clause_type":"force-majeure","title":"Force majeure","body":"Neither party shall be liable for any failure or delay in performance caused by events beyond its reasonable control, including fire, flood, war, strike or pandemic. The affected party shall notify the other party without undue delay."}
+{"index":{"_id":"c8"}}
+{"contract":"contoso-saas","section":"6.2","clause_type":"payment","title":"Payment terms","body":"The customer shall pay each invoice within thirty days of receipt. Late payments shall bear interest at two percent per month. The supplier may suspend the services if any invoice remains unpaid for sixty days."}
+{"index":{"_id":"c9"}}
+{"contract":"contoso-saas","section":"11.1","clause_type":"liability","title":"Cap on liability","body":"The liability of the supplier for direct damages shall be limited to the amount paid under this order form. Nothing in this clause limits liability for death or personal injury caused by negligence, or for fraud."}
+{"index":{"_id":"c10"}}
+{"contract":"contoso-saas","section":"19.3","clause_type":"assignment","title":"Assignment","body":"Neither party may assign or transfer this agreement without the prior written consent of the other party, except to an affiliate in connection with a merger or sale of assets."}
+{"index":{"_id":"c11"}}
+{"contract":"fabrikam-dpa","section":"4.3","clause_type":"data-protection","title":"Personal data breaches","body":"The supplier shall process personal data only on documented instructions from the customer and shall notify the customer of any personal data breach without undue delay."}
+{"index":{"_id":"c12"}}
+{"contract":"fabrikam-dpa","section":"7.1","clause_type":"warranty","title":"Warranty","body":"The supplier warrants that the services will be performed in a professional manner. Liability under this warranty is not limited where a defect is caused by gross negligence of the supplier."}

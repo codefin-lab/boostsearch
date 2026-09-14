@@ -1,0 +1,17 @@
+{
+  "_source": ["title"],
+  "query": {
+    "intervals": {
+      "body": {
+        "all_of": {
+          "ordered": true,
+          "max_gaps": 4,
+          "intervals": [
+            { "match": { "query": "notify" } },
+            { "match": { "query": "without undue delay", "max_gaps": 0, "ordered": true } }
+          ]
+        }
+      }
+    }
+  }
+}

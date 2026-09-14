@@ -1,0 +1,49 @@
+{
+  "description": "a file named <department>_<kind>_<yyyy-MM-dd>_<slug>.<extension> to a library document",
+  "processors": [
+    {
+      "dissect": {
+        "field": "file.name",
+        "pattern": "%{file.department}_%{file.kind}_%{file.published}_%{file.slug}.%{file.extension}"
+      }
+    },
+    {
+      "drop": {
+        "if": "ctx.file.kind == 'draft'",
+        "description": "a draft is not published, so it is not in the library"
+      }
+    },
+    {
+      "date": {
+        "field": "file.published",
+        "target_field": "published_at",
+        "formats": [
+          "yyyy-MM-dd"
+        ]
+      }
+    },
+    {
+      "pipeline": {
+        "name": "library-extract"
+      }
+    },
+    {
+      "script": {
+        "lang": "painless",
+        "source": "String t = ctx.attachment.title; if (t == null) { t = ctx.file.slug.replace('-', ' '); t = t.substring(0, 1).toUpperCase() + t.substring(1); } ctx.title = t; ctx.reading_minutes = (int) Math.ceil(ctx.attachment.content_length / 1000.0);"
+      }
+    },
+    {
+      "set": {
+        "field": "library.shelf",
+        "value": "{{file.department}}/{{file.kind}}"
+      }
+    },
+    {
+      "set": {
+        "field": "library.ingested_at",
+        "value": "{{_ingest.timestamp}}"
+      }
+    }
+  ]
+}

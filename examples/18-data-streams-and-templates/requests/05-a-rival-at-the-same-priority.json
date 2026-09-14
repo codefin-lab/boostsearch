@@ -1,0 +1,6 @@
+{
+  "index_patterns": ["metrics-*"],
+  "data_stream": {},
+  "priority": 100,
+  "composed_of": ["metrics-settings"]
+}

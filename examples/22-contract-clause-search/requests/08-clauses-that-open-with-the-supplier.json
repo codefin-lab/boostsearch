@@ -1,0 +1,11 @@
+{
+  "_source": ["title", "body"],
+  "query": {
+    "span_first": {
+      "match": {
+        "span_term": { "body": "supplier" }
+      },
+      "end": 2
+    }
+  }
+}

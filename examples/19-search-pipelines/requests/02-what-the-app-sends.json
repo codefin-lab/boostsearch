@@ -1,0 +1,6 @@
+{
+  "size": 20,
+  "query": {
+    "multi_match": { "query": "sea", "fields": ["title^3", "blurb"] }
+  }
+}

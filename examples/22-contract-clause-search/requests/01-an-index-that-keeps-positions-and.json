@@ -1,0 +1,33 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "contract": {
+        "type": "keyword"
+      },
+      "clause_type": {
+        "type": "keyword"
+      },
+      "section": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text"
+      },
+      "body": {
+        "type": "text",
+        "term_vector": "with_positions_offsets",
+        "fields": {
+          "english": {
+            "type": "text",
+            "analyzer": "english",
+            "term_vector": "with_positions_offsets"
+          }
+        }
+      }
+    }
+  }
+}

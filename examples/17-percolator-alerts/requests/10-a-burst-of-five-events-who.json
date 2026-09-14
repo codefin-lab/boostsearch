@@ -1,0 +1,90 @@
+{
+  "size": 10,
+  "_source": [
+    "name"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "percolate": {
+            "field": "query",
+            "documents": [
+              {
+                "@timestamp": "2026-09-14T08:02:44Z",
+                "service": "orders",
+                "level": "error",
+                "region": "eu-west",
+                "host": "db-2",
+                "latency_ms": 40,
+                "message": "connection refused by database primary"
+              },
+              {
+                "@timestamp": "2026-09-14T08:03:02Z",
+                "service": "auth",
+                "level": "warn",
+                "region": "us-east",
+                "host": "auth-1",
+                "latency_ms": 30,
+                "message": "authentication failed for user 4412"
+              },
+              {
+                "@timestamp": "2026-09-14T08:04:19Z",
+                "service": "search",
+                "level": "error",
+                "region": "ap-south",
+                "host": "db-1",
+                "latency_ms": 15,
+                "message": "write failed: no space left on device"
+              },
+              {
+                "@timestamp": "2026-09-14T08:05:51Z",
+                "service": "payments",
+                "level": "error",
+                "region": "eu-west",
+                "host": "pay-3",
+                "latency_ms": 3100,
+                "message": "upstream timeout calling card processor"
+              },
+              {
+                "@timestamp": "2026-09-14T08:06:30Z",
+                "service": "reports",
+                "level": "error",
+                "region": "us-east",
+                "host": "batch-2",
+                "latency_ms": 8200,
+                "message": "worker killed: out of memory"
+              }
+            ]
+          }
+        }
+      ],
+      "must_not": [
+        {
+          "term": {
+            "severity": "info"
+          }
+        }
+      ]
+    }
+  },
+  "aggs": {
+    "by_severity": {
+      "terms": {
+        "field": "severity"
+      }
+    },
+    "by_owner": {
+      "terms": {
+        "field": "owner"
+      },
+      "aggs": {
+        "channels": {
+          "terms": {
+            "field": "channel"
+          }
+        }
+      }
+    }
+  }
+}

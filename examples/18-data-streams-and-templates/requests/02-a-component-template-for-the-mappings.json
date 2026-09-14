@@ -1,0 +1,18 @@
+{
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "host":       { "type": "keyword" },
+        "region":     { "type": "keyword" },
+        "cpu_pct":    { "type": "float" },
+        "mem_pct":    { "type": "float" },
+        "load_1m":    { "type": "float" }
+      }
+    }
+  },
+  "_meta": {
+    "owner": "platform",
+    "description": "the fields every host sample carries"
+  }
+}

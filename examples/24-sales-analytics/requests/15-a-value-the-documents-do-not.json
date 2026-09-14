@@ -1,0 +1,31 @@
+{
+  "size": 0,
+  "aggs": {
+    "quarter": {
+      "terms": {
+        "script": {
+          "lang": "painless",
+          "source": "'Q' + ((doc['sold_at'].value.getMonthValue() + 2) / 3)"
+        },
+        "order": {
+          "_key": "asc"
+        }
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        },
+        "basket": {
+          "terms": {
+            "script": {
+              "lang": "painless",
+              "source": "long q = doc['quantity'].value; return q >= 10 ? 'bulk' : (q >= 3 ? 'several' : 'one or two');"
+            }
+          }
+        }
+      }
+    }
+  }
+}

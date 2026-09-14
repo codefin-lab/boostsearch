@@ -1,0 +1,15 @@
+{
+  "query": {
+    "bool": {
+      "filter": [
+        { "term": { "remote_area": true } },
+        { "terms": { "status": ["booked", "in_transit"] } }
+      ]
+    }
+  },
+  "script": {
+    "lang": "painless",
+    "source": "ctx._source.surcharge = params.surcharge; ctx._source.fee = ctx._source.fee + params.surcharge;",
+    "params": { "surcharge": 35.0 }
+  }
+}

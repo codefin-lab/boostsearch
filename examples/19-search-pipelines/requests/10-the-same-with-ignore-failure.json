@@ -1,0 +1,7 @@
+{
+  "description": "Written when books still carried legacy_sku; no document has it now, and that is no longer fatal",
+  "response_processors": [
+    { "rename_field": { "tag": "old-sku", "field": "legacy_sku", "target_field": "sku", "ignore_failure": true } },
+    { "rename_field": { "tag": "price-for-old-apps", "field": "price_eur", "target_field": "price" } }
+  ]
+}

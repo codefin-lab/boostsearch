@@ -1,0 +1,19 @@
+{
+  "size": 0,
+  "aggs": {
+    "year": {
+      "auto_date_histogram": {
+        "field": "sold_at",
+        "buckets": 6,
+        "format": "yyyy-MM-dd"
+      },
+      "aggs": {
+        "revenue": {
+          "sum": {
+            "field": "revenue"
+          }
+        }
+      }
+    }
+  }
+}
