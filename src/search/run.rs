@@ -1742,6 +1742,15 @@ pub fn run(
     // than silently truncated -- unless the request says how much to analyse,
     // or the field stores offsets and the highlighter can use them.
     if let Some(spec) = body.get("highlight") {
+        // A highlighter that cannot read a field refuses the whole request,
+        // as upstream does while it sets the highlighter up: `fvh` on a field
+        // without term vectors used to be answered as if it were `unified`.
+        if let Some(h) = all_hits.first() {
+            let g = searchers[h.shard_idx].2.read();
+            if let Some(reason) = crate::search::highlight::highlight_refusal(spec, &g.mapping) {
+                return Err(search_shard_failure("illegal_argument_exception", &reason, &h.index));
+            }
+        }
         for h in &all_hits {
             let g = searchers[h.shard_idx].2.read();
             let Some(cap) =
