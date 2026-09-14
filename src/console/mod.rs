@@ -181,7 +181,12 @@ fn uuid_of() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let mut seed = now as u64 ^ (std::process::id() as u64) << 32;
+    // the clock on macOS moves in microseconds, so two names asked for within
+    // one of them came out the same; a count keeps them apart
+    static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let asked = ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut seed =
+        now as u64 ^ (std::process::id() as u64) << 32 ^ asked.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut hex = String::new();
     for _ in 0..32 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);

@@ -223,6 +223,17 @@ impl Store {
     /// Merge every template whose pattern matches, lowest order first, so an
     /// index picks up the mappings and settings it was meant to be born with.
     pub(crate) fn apply_templates(&self, index: &str, body: &Value) -> Value {
+        // A backing index is made from its data stream's template, which
+        // names the stream's patterns and not `.ds-<stream>-NNNNNN`: matched
+        // by its own name it matched nothing, and every backing index came
+        // out with no mappings and the default settings while
+        // `_simulate_index` promised the template's. The stream's name is
+        // what the template is matched against.
+        if let Some(stream) = stream_of_backing_name(index)
+            && let Some(made) = self.apply_stream_template(stream, index, body)
+        {
+            return made;
+        }
         let templates = self.templates.read();
         let mut matched: Vec<(i64, &String, &Value)> = templates
             .iter()
@@ -271,7 +282,61 @@ impl Store {
     }
 }
 
+/// The stream a `.ds-<stream>-NNNNNN` name would belong to, by its shape.
+fn stream_of_backing_name(index: &str) -> Option<&str> {
+    let rest = index.strip_prefix(".ds-")?;
+    let (stream, generation) = rest.rsplit_once('-')?;
+    (generation.len() == 6 && generation.bytes().all(|b| b.is_ascii_digit()) && !stream.is_empty())
+        .then_some(stream)
+}
+
 impl Store {
+    /// A backing index made from the data stream template its stream's name
+    /// matches: the template's settings, mappings and aliases, the timestamp
+    /// field mapped as a date, and `_data_stream_timestamp` switched on, as
+    /// the reference makes one. `None` when no data stream template matches.
+    fn apply_stream_template(&self, stream: &str, _index: &str, body: &Value) -> Option<Value> {
+        let templates = self.templates.read();
+        let (_, flat, composable) = templates
+            .iter()
+            .filter_map(|(name, t)| {
+                let c = t.get("__composable")?;
+                c.get("data_stream")?;
+                let matches = c.get("index_patterns").and_then(|v| v.as_array()).is_some_and(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|p| p == stream || glob_match(p, stream))
+                });
+                matches.then(|| (c.get("priority").and_then(|p| p.as_i64()).unwrap_or(0), name, t))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(a.1)))
+            .map(|(p, _, t)| (p, t.clone(), t.get("__composable").cloned().unwrap_or_default()))?;
+        let field = composable
+            .pointer("/data_stream/timestamp_field/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("@timestamp")
+            .to_string();
+        let mut merged = serde_json::json!({});
+        for key in ["settings", "mappings", "aliases"] {
+            if let Some(v) = flat.get(key) {
+                merged[key] = v.clone();
+            }
+        }
+        if !merged.get("mappings").is_some_and(|m| m.is_object()) {
+            merged["mappings"] = serde_json::json!({});
+        }
+        merged["mappings"]["_data_stream_timestamp"] = serde_json::json!({"enabled": true});
+        if !merged["mappings"].get("properties").is_some_and(|p| p.is_object()) {
+            merged["mappings"]["properties"] = serde_json::json!({});
+        }
+        let path = format!("/mappings/properties/{}", field.replace('.', "/properties/"));
+        if merged.pointer(&path).is_none() {
+            merged["mappings"]["properties"][&field] = serde_json::json!({"type": "date"});
+        }
+        deep_merge(&mut merged, body);
+        Some(merged)
+    }
+
     /// The name the next finished task is reported under.
     pub fn next_task_id(&self) -> String {
         let n = self.task_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;

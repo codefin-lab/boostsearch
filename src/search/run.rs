@@ -915,6 +915,7 @@ pub fn run(
     let pit_ceiling: std::collections::HashMap<String, u64> =
         pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
     let targets = store.resolve_open(expr);
+    store.refresh_for_search(&targets);
     // the result window is a ceiling on what a caller may page through; a
     // walk this server runs for itself -- a geo aggregation reading every
     // matching document -- is not paging for anyone
@@ -1121,7 +1122,7 @@ pub fn run(
         collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
         if names_a_percolate(q) {
-            expand_percolate(store, &targets, q);
+            expand_percolate(store, &targets, q)?;
         }
     }
 
@@ -2196,6 +2197,9 @@ pub(crate) fn finish_search(
     let mut page = page;
     if !join_inner_hits.is_empty() {
         attach_join_inner_hits(store, &targets, &mut page, &join_inner_hits);
+    }
+    if body.get("query").is_some_and(names_a_percolate) {
+        attach_percolate_slots(store, &targets, body, &mut page);
     }
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,

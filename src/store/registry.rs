@@ -8,7 +8,103 @@ impl Default for Store {
     }
 }
 
+/// Milliseconds since this process started, for times kept in an atomic.
+pub(crate) fn process_millis() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// How long an index goes unsearched before it is search-idle.
+const SEARCH_IDLE_AFTER_MS: u64 = 30_000;
+
+impl IdxState {
+    /// The scheduled refresh interval, in milliseconds, and whether it was
+    /// set on the index rather than left at the default; `None` when
+    /// scheduled refreshes are off (`-1`).
+    fn refresh_every(&self) -> Option<(u64, bool)> {
+        match self.setting("refresh_interval") {
+            None => Some((1_000, false)),
+            Some(v) if v.trim() == "-1" => None,
+            Some(v) => {
+                let ms = crate::ism::engine::duration_ms(&serde_json::Value::String(v))?;
+                (ms > 0).then_some((ms as u64, true))
+            }
+        }
+    }
+
+    /// Whether writes are waiting for a refresh to become searchable.
+    fn awaits_refresh(&self) -> bool {
+        !self.pending.is_empty() || self.pending_bytes > 0
+    }
+
+    /// Whether nobody has searched this index for a while.
+    fn search_idle(&self) -> bool {
+        let last = self.last_search.load(std::sync::atomic::Ordering::Relaxed);
+        process_millis().saturating_sub(last) >= SEARCH_IDLE_AFTER_MS
+    }
+}
+
 impl Store {
+    /// The refresh the reference schedules: every `refresh_interval` (1s
+    /// unless the index says otherwise, never at `-1`), an index with writes
+    /// waiting is refreshed, so what was written becomes searchable without
+    /// anyone asking. Nothing did this: a document written without
+    /// `?refresh` was found by a GET and by no search at all, however long
+    /// the caller waited. An index left at the default interval that nobody
+    /// has searched for thirty seconds is search-idle, as the reference has
+    /// it: its refresh waits for the next search (`refresh_for_search`), so
+    /// a node taking a bulk load nobody reads does not commit every second.
+    fn start_scheduled_refresh(&self) {
+        let store = self.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                for name in store.names() {
+                    let Some(st) = store.get(&name) else { continue };
+                    let due = {
+                        let g = st.read();
+                        match g.refresh_every() {
+                            Some((every, explicit)) => {
+                                !g.closed
+                                    && g.awaits_refresh()
+                                    && (explicit || !g.search_idle())
+                                    && g.last_refresh.elapsed().as_millis() as u64 >= every
+                            }
+                            None => false,
+                        }
+                    };
+                    if due {
+                        let mut g = st.write();
+                        if g.awaits_refresh() {
+                            let _ = g.refresh();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// A search is about to read these indices: each is marked searched, and
+    /// one that was search-idle with writes waiting is refreshed first, so the
+    /// search sees them -- the refresh its idleness put off.
+    pub(crate) fn refresh_for_search(&self, names: &[String]) {
+        for name in names {
+            let Some(st) = self.get(name) else { continue };
+            let catch_up = {
+                let g = st.read();
+                let was_idle = g.search_idle();
+                g.last_search.store(process_millis(), std::sync::atomic::Ordering::Relaxed);
+                was_idle && !g.closed && g.awaits_refresh() && g.refresh_every().is_some()
+            };
+            if catch_up {
+                let mut g = st.write();
+                if g.awaits_refresh() {
+                    let _ = g.refresh();
+                }
+            }
+        }
+    }
+
     /// Periodically hand back indexing resources for indices that have gone
     /// quiet. With one index this is invisible; with hundreds it is the
     /// difference between 13 MB per index and nothing.
@@ -46,6 +142,7 @@ impl Store {
     pub fn new() -> Store {
         let store = Store::without_reaper();
         store.start_writer_reaper();
+        store.start_scheduled_refresh();
         store
     }
 
@@ -175,6 +272,7 @@ impl Store {
             }
         }
         store.start_writer_reaper();
+        store.start_scheduled_refresh();
         Ok(store)
     }
 
@@ -707,6 +805,8 @@ impl Store {
             writer_threads,
             writer_budget,
             last_write: std::time::Instant::now(),
+            last_refresh: std::time::Instant::now(),
+            last_search: std::sync::atomic::AtomicU64::new(process_millis()),
             knobs: WriteKnobs::default(),
             reader,
             fields,

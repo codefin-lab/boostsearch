@@ -129,10 +129,31 @@ pub async fn resolve_index(
             json!({"name": a, "indices": idx})
         })
         .collect();
+    // the data streams the name reaches, with their backing indices: a
+    // pattern over stream names listed none, while the streams were there
+    let mut streams: Vec<(String, String)> = store.data_streams().into_iter().collect();
+    streams.sort();
+    let data_streams: Vec<Value> = streams
+        .into_iter()
+        .filter(|(s, _)| {
+            name.split(',').any(|pat| {
+                let pat = pat.trim();
+                pat == "*" || pat == "_all" || pat == s || crate::store::glob_match(pat, s)
+            })
+        })
+        .map(|(s, template)| {
+            let entry = crate::api::datastream::data_stream_entry(&store, &s, &template);
+            json!({
+                "name": s,
+                "backing_indices": store.backing_indices(&s),
+                "timestamp_field": entry.pointer("/timestamp_field/name").cloned().unwrap_or(json!("@timestamp")),
+            })
+        })
+        .collect();
     respond(
         &p,
         json!({
-            "indices": indices, "aliases": alias_list, "data_streams": [],
+            "indices": indices, "aliases": alias_list, "data_streams": data_streams,
         }),
     )
 }

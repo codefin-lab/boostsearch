@@ -232,7 +232,12 @@ fn write_doc_within(
     // a query stored to be percolated is checked now for what it would fail
     // on later
     if let Some(why) = crate::search::percolator_complaint(st, &source) {
-        return Err(err(StatusCode::BAD_REQUEST, "query_shard_exception", why));
+        return Err(crate::api::shared::parse_refusal(
+            "query_shard_exception",
+            &why,
+            &st.name,
+            &st.uuid,
+        ));
     }
     // A mapping learned from documents grew without any ceiling at all: one
     // bulk of documents each naming a field of its own put two hundred
@@ -594,6 +599,7 @@ pub(crate) async fn do_index(
     // one is a new event, never a replacement for an event already there.
     // The reference refuses anything but `create`, in these words, and this
     // took an ordinary index write with an id of the caller's choosing.
+    crate::api::datastream::create_stream_for_write(&store, &index);
     let into_a_stream = !store.backing_indices(&index).is_empty();
     let asked_op = p.get("op_type").map(|v| v.as_str()).unwrap_or(default_op);
     // an append carries no id and is a create whatever the route was; a write
@@ -729,6 +735,10 @@ pub(crate) async fn do_index(
             );
         }
     };
+    if let Some(refusal) = crate::api::datastream::stream_document_refusal(&store, &index, &source)
+    {
+        return refusal;
+    }
     let was_there = store.get(&index).is_some();
     let st = match store.ensure(&index) {
         Ok(s) => s,

@@ -7430,3 +7430,109 @@ table before and after the pass, and when the copies moved it says so, waits
 for green and reads again, up to three times. Run 52's transient was not
 examined against its logs and may be the same thing; it is left open until a
 run shows it with the routing unchanged.
+
+### Ten more examples, and what writing them found
+
+Examples 17 to 26 were written the way 01 to 16 were: each a project of its
+own, run twice against a real node, every answer checked rather than
+printed. Percolation, data streams and templates, search pipelines,
+by-query jobs and tasks, service accounts and the audit log, highlighting
+and positional queries, attachments, aggregation-only reporting, an
+operator's runbook, and routing. `run-all.sh` runs the twenty-two that can
+share a node, three times in a row with nothing failing; 06, 21 and 25 pass
+on nodes of their own. Writing them turned up a long list of places the
+server answers differently from OpenSearch 3.8.0, which is the point of
+writing them against a real node. The first of them are fixed here.
+
+**P1 -- nothing was ever refreshed unless asked.** A document written
+without `?refresh` was found by a GET and by no search at all, for as long as
+anyone waited: seventy-seven seconds in the runbook example, and a count of
+0 against OpenSearch's 1 after two seconds. No scheduled refresh existed.
+One now does: an index with writes waiting is refreshed every
+`refresh_interval` (1s by default, never at `-1`). An index left at the
+default that nobody has searched for thirty seconds is search-idle, as the
+reference has it, and its refresh waits for the next search, which
+refreshes it first -- so a bulk load nobody reads is not committed every
+second.
+
+**P1 -- data streams did not use their templates.** A backing index was
+matched against the templates by its own name, `.ds-metrics-cpu-000001`,
+which no data stream template names, so it came out with no mappings and the
+default settings while `_simulate_index` promised the template's; `host`
+was mapped dynamically as text. It is now made from the template its
+stream's name matches, with `_data_stream_timestamp` switched on and the
+timestamp field mapped as a date, as the reference makes it. A write to a
+name a data stream template matches now creates the stream (it created an
+ordinary index of that name), a document without a single-valued timestamp
+is refused in the reference's words, for a single write and per bulk item,
+`_data_stream` reports each backing index's own uuid, and `_resolve/index`
+lists the data streams it reaches. Each compared against OpenSearch 3.8.0.
+
+**P2 -- percolation.** A `percolate` clause was rewritten into the ids of
+the rules that matched, which dropped everything else: every rule scored
+1.0, no `_percolator_document_slot`, no highlighting, and a missing indexed
+document was an empty answer. Rules now score as their query scored the
+best of the documents, slots and highlights are put on the page's hits
+(`<slot>_<field>` for several documents), a missing document or index is
+the reference's 404, and a stored query naming an unmapped field is refused
+for any leaf query -- only `query_string` was checked -- as
+`mapper_parsing_exception` caused by `query_shard_exception`, in a bulk item
+too. Nine shapes against OpenSearch 3.8.0, scores included: all the same.
+
+**P2 -- a write on a one-node cluster took the replication path.** Whether
+every in-sync copy was this node's compared each id with the first copy
+found here, shard 0's, so on a two-shard index shard 1 was never "here" and
+the write went through the path meant for copies on other nodes. An
+`_update_by_query` on such an index was twice refused with
+`unavailable_shards_exception` on a single node; it has not been reproduced
+since, and three full runs of the examples after the change had no refusal.
+
+**P2 -- a flaky unit test.** The console's server name was derived from the
+clock, which on macOS moves in microseconds, so two names asked for within
+one came out equal. A counter keeps them apart.
+
+**Examples 01-16.** `make clean` failed with no `.env` (`. ./.env || true`
+exits a POSIX shell before `|| true`), and `make run` sent the example to
+port 9200 rather than its own. Both fixed in every Makefile; 06 also sends
+its credentials.
+
+**Also in this commit, not yet proven by the chaos gate:** the P1 of the
+previous entry -- a stray write surviving on a copy after promotion. In
+chaos run 20 a node that had just learned it was no longer the primary, and
+had dropped its copy, finished a write it had in hand, stamped with the
+term it read from the new cluster state; the replica took it, because the
+term was current. A replica now takes an operation in the term it knows
+only from the node holding the primary in that term (or either end of a
+primary being moved), and answers anyone else as a stale primary, which the
+sender reads as its own demotion. The replica's term check was also against
+shard 0 for every shard. A unit test replays run 20's shape; the hundred-run
+hunt was stopped at run 3 to write the examples and has to be run before
+this P1 is called closed.
+
+**Still open, found by the examples** (each with its request and both
+answers in the example's report, to be worked through): routing does not
+narrow a search and `_routing.required` is not enforced; `_mget` ignores
+alias routing and `?routing`; highlighting ignores `fragment_size`,
+`number_of_fragments`, `no_match_size` and per-field tags, marks words
+outside a phrase, and never highlights arrays of objects or spans; `fvh` is
+`unified`; `span_near` ignores `in_order` and refuses `in_order: false`;
+`span_not`, `span_first` over `span_near`, and `span_multi` inside
+`span_near` are wrong; `more_like_this` ignores `minimum_should_match`,
+`max_doc_freq` and `stop_words`; `term` on text ignores term frequency and
+sloppy phrases score as frequency 1; `_termvectors` `ttf`; by-query jobs
+run synchronously, with no task listed while running, `_rethrottle`,
+`_cancel` and `slices` not real; async search, transforms and rollups not
+ported; the `hybrid` query and the normalization processor missing;
+`phase_results_processors` unchecked and `split` a no-op; `top_hits` under
+`rare_terms` or `composite`, `variable_width_histogram`, `histogram` with
+`missing`, `format` on date `min`/`max`, and `doc_count_error_upper_bound`
+on one shard; a `terms` on `_index` under another bucket; `attachment`
+reading only text and Word, and `remove_binary`; bulk without the cluster
+permission, refused bulk items not audited, `securitytenant`; node stats,
+thread pools, slow log and several counters that are placeholders;
+`number_of_shards` changeable on an open index; a `_block/write` that
+settings cannot lift; `strict` reported as `strict_allow_templates`; a node
+that takes more than ten seconds to stop on SIGTERM.
+
+Gates: unit 202, clippy clean, core corpus 1,427/1,427 and phase1 at 100%,
+disk fault 11/11, refusal, DLS, restart, and the three-node failover check.

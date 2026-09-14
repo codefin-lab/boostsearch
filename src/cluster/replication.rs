@@ -441,6 +441,52 @@ async fn fail_copies_written(index: &str, shard: u32, why: &str, also: &[NodeId]
     }
 }
 
+/// Why a replicated batch is not from the primary of the terms it names, if
+/// it is not: an operation in an older term than this copy knows, or in the
+/// same term from a node that does not hold the primary in it. The reason
+/// says "stale primary term", which is what the sender reads as its own
+/// demotion.
+fn not_from_the_primary(index: &str, ops: &[ReplicaOp], sender: &NodeId) -> Option<String> {
+    super::with_state(|s| {
+        for op in ops {
+            let known = s
+                .indices
+                .get(index)
+                .and_then(|m| m.primary_terms.get(&op.shard).copied())
+                .unwrap_or(1);
+            if op.term < known {
+                return Some(format!(
+                    "stale primary term for [{index}][{}]: {} < {known}",
+                    op.shard, op.term
+                ));
+            }
+            if op.term > known {
+                continue;
+            }
+            // a copy that knows of no index by this name has no routing to
+            // judge by (a copy still being created); the term check stands
+            if !s.indices.contains_key(index) {
+                continue;
+            }
+            // while a primary moves, both ends are marked primary
+            let holds = s.routing.shards_of(index).any(|c| {
+                c.shard == op.shard
+                    && c.primary
+                    && (c.node.as_ref() == Some(sender)
+                        || c.relocating_node.as_ref() == Some(sender))
+            });
+            if !holds {
+                return Some(format!(
+                    "stale primary term for [{index}][{}]: {} is not the primary in term {known}",
+                    op.shard,
+                    sender.as_str()
+                ));
+            }
+        }
+        None
+    })
+}
+
 /// A refusal that comes after this node has already written the documents
 /// down. The caller is told the write did not happen; the documents are
 /// here all the same, and if this node is not the primary any more nobody
@@ -724,13 +770,21 @@ pub fn patch_shards(v: &mut Value, acks: &BTreeMap<String, Ack>) {
     }
 }
 
-/// This node's allocation id for an index, when it holds a copy.
-fn here_id(state: &ClusterState, me: &NodeId, index: &str) -> Option<String> {
+/// Whether an allocation id is one of this node's copies of an index.
+///
+/// Asked of the in-sync set to learn whether every copy that must take a
+/// write is here. It compared against the first copy found here, which is
+/// shard 0's: on an index of two shards, shard 1's id was never this node's,
+/// so a write on a node that was the whole cluster took the path meant for
+/// writes with copies elsewhere. That path can refuse a write the quiet path
+/// answers; a `_update_by_query` on a two-shard index of a single node was
+/// seen refused with `unavailable_shards_exception` twice, and not
+/// reproduced since, so this is the likeliest way in and not a proven one.
+fn here_id(state: &ClusterState, me: &NodeId, index: &str, id: &str) -> bool {
     state
         .routing
         .shards_of(index)
-        .find(|c| c.node.as_ref() == Some(me))
-        .and_then(|c| c.allocation_id.clone())
+        .any(|c| c.node.as_ref() == Some(me) && c.allocation_id.as_deref() == Some(id))
 }
 
 /// After a handler wrote: copy out, then say so in the answer.
@@ -791,7 +845,7 @@ pub async fn finish(
                         m.in_sync_allocations
                             .values()
                             .flatten()
-                            .all(|id| Some(id) == here_id(s, &me, &op.index).as_ref())
+                            .all(|id| here_id(s, &me, &op.index, id))
                     })
                     .unwrap_or(true)
         })
@@ -969,8 +1023,36 @@ pub fn install(store: Store) {
                 }
                 // a primary of an older term is no primary: its writes are refused
                 let known_term = super::primary_term(&index, 0);
+                // Nor is a node that is not the primary of the term it names.
+                // The term on an operation is read from the sender's cluster
+                // state as it writes, not kept from when the sender became
+                // the primary -- so a node that had just been told it was no
+                // longer the primary, and had dropped its copy, still wrote a
+                // document in flight, stamped it with the new term, and this
+                // copy took it: the term was current. The node refused its
+                // caller, the copy it reached was not failed, and the document
+                // sat on one copy of two for good (chaos run 20). Within one
+                // term there is one primary, so an operation in the term this
+                // copy knows is taken only from the node that holds the
+                // primary in it, or the node the primary is moving to or from.
+                // An operation in a later term than this copy knows is from a
+                // primary this copy has not heard of yet, and is taken.
+                if let Some(why) = not_from_the_primary(&index, &ops, &e.from) {
+                    if trace_writes() {
+                        for op in &ops {
+                            trace!(
+                                "TRACE replica {} {index}/{} seq={} term={} refused {why}",
+                                from.as_str(),
+                                op.id,
+                                op.seq,
+                                op.term
+                            );
+                        }
+                    }
+                    return e.error(from, &why);
+                }
                 if trace_writes() {
-                    let refused = ops.iter().any(|op| op.term < known_term);
+                    let refused = false;
                     for op in &ops {
                         trace!(
                             "TRACE replica {} {index}/{} seq={} term={} known_term={known_term} {}",
@@ -981,15 +1063,6 @@ pub fn install(store: Store) {
                             if refused { "refused" } else { "taken" }
                         );
                     }
-                }
-                if ops.iter().any(|op| op.term < known_term) {
-                    return e.error(
-                        from,
-                        &format!(
-                            "stale primary term for [{index}]: {} < {known_term}",
-                            ops.iter().map(|o| o.term).min().unwrap_or(0)
-                        ),
-                    );
                 }
                 // the start and end of a new primary's resync
                 if let Some(rs) = v.get("resync") {
@@ -2157,6 +2230,71 @@ mod tests {
         assert_eq!(t, vec![(NodeId("r1".into()), true), (NodeId("r2".into()), false)]);
         // a copy is a copy of the index: any shard's write goes to every copy
         assert_eq!(targets(&s, &NodeId("p".into()), "i", 1), t);
+    }
+
+    #[test]
+    fn a_copy_takes_a_term_only_from_the_primary_of_that_term() {
+        use crate::cluster::state::{IndexMetadata, ShardRouting, ShardState};
+        let mut s = ClusterState::empty("c", "u");
+        let mk = |node: &str, primary: bool, moving: Option<&str>| ShardRouting {
+            index: "i".into(),
+            shard: 0,
+            primary,
+            state: if moving.is_some() { ShardState::Relocating } else { ShardState::Started },
+            node: Some(NodeId(node.into())),
+            relocating_node: moving.map(|m| NodeId(m.into())),
+            allocation_id: Some(node.into()),
+            unassigned: None,
+        };
+        s.routing
+            .indices
+            .entry("i".into())
+            .or_default()
+            .insert(0, vec![mk("p", true, Some("q")), mk("r", false, None)]);
+        s.indices.insert(
+            "i".into(),
+            IndexMetadata {
+                name: "i".into(),
+                uuid: "u".into(),
+                version: 1,
+                mapping_version: 1,
+                settings_version: 1,
+                aliases_version: 1,
+                state: "open".into(),
+                settings: json!({}),
+                mappings: json!({}),
+                aliases: json!({}),
+                number_of_shards: 1,
+                number_of_replicas: 1,
+                primary_terms: BTreeMap::from([(0, 2)]),
+                in_sync_allocations: BTreeMap::new(),
+                creation_date: 0,
+            },
+        );
+        let op = |term: u64| ReplicaOp {
+            index: "i".into(),
+            id: "d".into(),
+            routing: None,
+            version: 1,
+            seq: 0,
+            term,
+            shard: 0,
+            source: Some("{}".into()),
+            doc_term: None,
+        };
+        let from = |n: &str| NodeId(n.into());
+        crate::cluster::with_state_override(s, || {
+            // the primary, and the node it is moving to
+            assert_eq!(not_from_the_primary("i", &[op(2)], &from("p")), None);
+            assert_eq!(not_from_the_primary("i", &[op(2)], &from("q")), None);
+            // the old primary of run 20: the current term, and not its primary
+            let why = not_from_the_primary("i", &[op(2)], &from("x")).unwrap();
+            assert!(why.contains("stale primary term"), "{why}");
+            // an older term from anyone
+            assert!(not_from_the_primary("i", &[op(1)], &from("p")).is_some());
+            // a term this copy has not heard of yet is a primary it has not
+            assert_eq!(not_from_the_primary("i", &[op(3)], &from("x")), None);
+        });
     }
 
     #[test]

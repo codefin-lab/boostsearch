@@ -240,6 +240,7 @@ pub async fn bulk(
             }}));
             continue;
         }
+        crate::api::datastream::create_stream_for_write(&store, &idx);
         let was_there = store.get(&idx).is_some();
         // an alias writes to the index it marks as the write index, and to
         // nowhere else: `ensure` answers with whichever backing index the map
@@ -441,6 +442,15 @@ pub async fn bulk(
                     None => {
                         g.routing.remove(&id);
                     }
+                }
+                // a document a data stream cannot take: no single timestamp
+                if matches!(op.as_str(), "index" | "create")
+                    && let Some(refusal) =
+                        crate::api::datastream::stream_document_refusal(&store, &idx, &src)
+                {
+                    errors = true;
+                    items.push(failed_item(&op, &idx, &id, refusal));
+                    continue;
                 }
                 // a document the mapping cannot accept is one item's failure,
                 // not the whole request's
@@ -803,6 +813,9 @@ fn failed_item(op: &str, index: &str, id: &str, e: Response) -> Value {
                 error["index"] = json!(w.index);
                 error["shard"] = json!(w.shard.to_string());
                 error["index_uuid"] = json!(w.uuid);
+            }
+            if let Some(crate::api::shared::ErrorCause(cause)) = e.extensions().get() {
+                error["caused_by"] = cause.clone();
             }
             json!({ op: {
                 "_index": index, "_id": id, "status": e.status().as_u16(), "error": error

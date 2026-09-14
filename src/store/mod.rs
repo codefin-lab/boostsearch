@@ -446,6 +446,12 @@ pub struct IdxState {
     /// When this index was last written to. A writer holds indexing threads and
     /// an arena, so an index that has gone quiet should not keep one.
     last_write: std::time::Instant,
+    /// When this index was last refreshed, for the scheduled refresh.
+    pub(crate) last_refresh: std::time::Instant,
+    /// When this index was last searched, in milliseconds of the process
+    /// clock: an index nobody searches is search-idle, and its scheduled
+    /// refresh waits for the next search.
+    pub(crate) last_search: std::sync::atomic::AtomicU64,
     /// the settings every write asks about, read once when they change
     /// rather than out of the settings tree for every document
     pub knobs: WriteKnobs,

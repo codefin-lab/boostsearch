@@ -99,6 +99,56 @@ pub fn doc_err(
     r
 }
 
+/// The cause a refusal quotes, kept beside its body, so a bulk item built
+/// from the refusal quotes it too.
+#[derive(Clone, Debug)]
+pub struct ErrorCause(pub Value);
+
+/// A refusal of a document the mapping could not parse, for a reason one
+/// level down: `mapper_parsing_exception` "failed to parse", caused by the
+/// reason itself, which is also the root cause -- the reference's shape.
+pub fn parse_refusal(cause_kind: &str, cause: &str, index: &str, uuid: &str) -> Response {
+    let inner = json!({"type": cause_kind, "reason": cause, "index": index, "index_uuid": uuid});
+    let mut r = (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "error": {"root_cause": [inner.clone()], "type": "mapper_parsing_exception",
+                      "reason": "failed to parse", "caused_by": inner.clone()},
+            "status": 400
+        })),
+    )
+        .into_response();
+    r.extensions_mut().insert(ErrorKind {
+        kind: "mapper_parsing_exception".to_string(),
+        reason: "failed to parse".to_string(),
+    });
+    r.extensions_mut().insert(ErrorCause(inner));
+    r
+}
+
+/// `mapper_parsing_exception` "failed to parse", caused by a reason that is
+/// not the root cause, as the reference answers a document a data stream
+/// cannot take.
+pub fn parse_refusal_caused_by(cause_kind: &str, cause: &str) -> Response {
+    let inner = json!({"type": cause_kind, "reason": cause});
+    let mut r = (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "error": {"root_cause": [{"type": "mapper_parsing_exception", "reason": "failed to parse"}],
+                      "type": "mapper_parsing_exception", "reason": "failed to parse",
+                      "caused_by": inner.clone()},
+            "status": 400
+        })),
+    )
+        .into_response();
+    r.extensions_mut().insert(ErrorKind {
+        kind: "mapper_parsing_exception".to_string(),
+        reason: "failed to parse".to_string(),
+    });
+    r.extensions_mut().insert(ErrorCause(inner));
+    r
+}
+
 /// What an error response says, kept beside its body.
 #[derive(Clone, Debug)]
 pub struct ErrorKind {

@@ -889,22 +889,63 @@ pub(crate) fn attach_join_inner_hits(
 /// `percolate` -- the stored queries a document matches.
 ///
 /// A percolator field holds a query. Asked which of the stored queries a
-/// document would match, each query is run over that document in a scratch
+/// document would match, each query is run over the documents in a scratch
 /// index holding nothing else, and the clause is read as the ids of the
-/// queries that found it.
-pub(crate) fn expand_percolate(store: &Store, targets: &[String], node: &mut Value) {
-    let Some(o) = node.as_object_mut() else { return };
+/// queries that found them -- each scored as its query scored the documents,
+/// since a stored `match` finds one document better than another and the
+/// reference orders the rules that way. Which documents each rule found, and
+/// the highlights, are put on the hits after the search
+/// (`attach_percolate_slots`).
+pub(crate) fn expand_percolate(
+    store: &Store,
+    targets: &[String],
+    node: &mut Value,
+) -> std::result::Result<(), Response> {
+    let Some(o) = node.as_object_mut() else { return Ok(()) };
     for (_, v) in o.iter_mut() {
         match v {
-            Value::Object(_) => expand_percolate(store, targets, v),
-            Value::Array(a) => a.iter_mut().for_each(|x| expand_percolate(store, targets, x)),
+            Value::Object(_) => expand_percolate(store, targets, v)?,
+            Value::Array(a) => {
+                for x in a.iter_mut() {
+                    expand_percolate(store, targets, x)?;
+                }
+            }
             _ => {}
         }
     }
-    let Some(spec) = o.get("percolate").cloned() else { return };
+    let Some(spec) = o.get("percolate").cloned() else { return Ok(()) };
     let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("query").to_string();
-    // the documents to percolate: written into the request, or fetched from
-    // an index by their ids
+    let documents = percolate_documents(store, &spec)?;
+    let matched = percolated(store, targets, &field, &documents);
+    let boost = spec.get("boost").and_then(|b| b.as_f64()).unwrap_or(1.0);
+    let name = spec.get("_name").cloned();
+    o.remove("percolate");
+    // a rule found by no document is no hit; each rule found scores as its
+    // query scored the best of the documents
+    let should: Vec<Value> = matched
+        .iter()
+        .map(|m| {
+            json!({"constant_score": {"filter": {"ids": {"values": [m.id]}},
+                                      "boost": (m.score as f64 * boost).max(0.0)}})
+        })
+        .collect();
+    let mut rewritten = if should.is_empty() {
+        json!({"bool": {"must_not": {"match_all": {}}}})
+    } else {
+        json!({"bool": {"should": should, "minimum_should_match": 1}})
+    };
+    if let Some(name) = name {
+        rewritten["bool"]["_name"] = name;
+    }
+    *node = rewritten;
+    Ok(())
+}
+
+/// The documents a `percolate` clause names: written into it, or read out of
+/// an index by id. A document that is not there is refused, as the reference
+/// refuses it -- an empty answer said no rule matched a document nobody had
+/// looked at.
+fn percolate_documents(store: &Store, spec: &Value) -> std::result::Result<Vec<Value>, Response> {
     let mut documents: Vec<Value> = Vec::new();
     if let Some(one) = spec.get("document") {
         documents.push(one.clone());
@@ -912,54 +953,74 @@ pub(crate) fn expand_percolate(store: &Store, targets: &[String], node: &mut Val
     if let Some(many) = spec.get("documents").and_then(|d| d.as_array()) {
         documents.extend(many.iter().cloned());
     }
-    if let (Some(index), Some(id)) =
+    let (Some(index), Some(id)) =
         (spec.get("index").and_then(|v| v.as_str()), spec.get("id").and_then(|v| v.as_str()))
-        && let Some(st) = store.get(index)
+    else {
+        return Ok(documents);
+    };
+    let Some(st) = store.get(index) else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "index_not_found_exception",
+            format!("no such index [{index}]"),
+        ));
+    };
+    // The document is read out of an index the caller named, which is not
+    // the index being searched: the layer judged the one on the path and
+    // nothing judged this one. A caller could percolate a document out of
+    // an index they may not read and learn its field values from which
+    // queries matched.
+    if crate::security::item_refusal(store, &["indices:data/read/get"], &[index.to_string()])
+        .is_some()
     {
-        // The document is read out of an index the caller named, which is not
-        // the index being searched: the layer judged the one on the path and
-        // nothing judged this one. A caller could percolate a document out of
-        // an index they may not read and learn its field values from which
-        // queries matched.
-        if crate::security::item_refusal(store, &["indices:data/read/get"], &[index.to_string()])
-            .is_some()
-        {
-            documents.push(json!({}));
-        } else {
-            let g = st.read();
-            let searcher = g.reader.searcher();
-            let probe = boostcore::query::TermQuery::new(
-                boostcore::Term::from_field_text(g.fields.id, id),
-                boostcore::schema::IndexRecordOption::Basic,
-            );
-            if let Ok(hits) = searcher
-                .search(&probe, &boostcore::collector::TopDocs::with_limit(1).order_by_score())
-                && let Some((_, addr)) = hits.first()
-                && crate::security::doc_visible(store, &g, id)
-                && let Some((_, mut source)) = source_of(&searcher, &g, *addr)
-            {
-                // and what is hidden from the caller cannot be percolated
-                // against either
-                crate::security::narrow_source(store, &g.name, &mut source);
-                documents.push(source);
-            }
-        }
+        documents.push(json!({}));
+        return Ok(documents);
     }
-    let matched = percolated(store, targets, &field, &documents);
-    o.remove("percolate");
-    *node = json!({"ids": {"values": matched}});
+    let g = st.read();
+    let searcher = g.reader.searcher();
+    let probe = boostcore::query::TermQuery::new(
+        boostcore::Term::from_field_text(g.fields.id, id),
+        boostcore::schema::IndexRecordOption::Basic,
+    );
+    let found = searcher
+        .search(&probe, &boostcore::collector::TopDocs::with_limit(1).order_by_score())
+        .ok()
+        .and_then(|hits| hits.first().map(|(_, addr)| *addr))
+        .filter(|_| crate::security::doc_visible(store, &g, id))
+        .and_then(|addr| source_of(&searcher, &g, addr));
+    match found {
+        Some((_, mut source)) => {
+            // and what is hidden from the caller cannot be percolated
+            // against either
+            crate::security::narrow_source(store, &g.name, &mut source);
+            documents.push(source);
+            Ok(documents)
+        }
+        None => Err(err(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            format!("indexed document [{index}/{id}] couldn't be found"),
+        )),
+    }
 }
 
-/// The ids of the stored queries under `field` that any of the documents
-/// matches.
-fn percolated(store: &Store, targets: &[String], field: &str, documents: &[Value]) -> Vec<String> {
-    if documents.is_empty() {
-        return Vec::new();
-    }
-    // the documents live in a scratch index mapped the way the queries'
-    // index is, less the field that holds the queries themselves
+/// A stored query that found some of the documents, and how well it found
+/// the best of them.
+struct PercolateMatch {
+    id: String,
+    score: f32,
+}
+
+/// The scratch index the documents are percolated in: mapped the way the
+/// queries' index is, less the field that holds the queries themselves.
+fn percolate_scratch(
+    store: &Store,
+    targets: &[String],
+    field: &str,
+    documents: &[Value],
+) -> Option<Store> {
     let scratch = Store::scratch();
-    let Ok(st) = scratch.ensure("_percolate") else { return Vec::new() };
+    let st = scratch.ensure("_percolate").ok()?;
     if let Some(named) = targets.first().and_then(|n| store.get(n)) {
         let mut raw = named.read().mapping.raw.clone();
         if let Some(props) = raw.get_mut("properties").and_then(|p| p.as_object_mut()) {
@@ -977,27 +1038,143 @@ fn percolated(store: &Store, targets: &[String], field: &str, documents: &[Value
         }
         let _ = g.refresh();
     }
-    // every stored query, run over the scratch index; a query is an object
-    // that may index nothing at all, so the documents are read rather than
-    // asked for by the field
+    Some(scratch)
+}
+
+/// Every stored query under `field` in the target indices, by id.
+fn stored_queries(store: &Store, targets: &[String], field: &str) -> Vec<(String, Value)> {
+    // a query is an object that may index nothing at all, so the documents
+    // are read rather than asked for by the field
     let probe = json!({"query": {"match_all": {}}, "size": 10_000, "_source": [field]});
     let Ok(found) = run(store, &targets.join(","), &probe, &Params::new()) else {
         return Vec::new();
     };
+    found
+        .hits
+        .into_iter()
+        .filter_map(|hit| {
+            let id = hit.get("_id").and_then(|v| v.as_str())?.to_string();
+            let stored = hit.pointer(&format!("/_source/{}", field.replace('.', "/")))?.clone();
+            Some((id, stored))
+        })
+        .collect()
+}
+
+/// The stored queries under `field` that any of the documents matches.
+fn percolated(
+    store: &Store,
+    targets: &[String],
+    field: &str,
+    documents: &[Value],
+) -> Vec<PercolateMatch> {
+    if documents.is_empty() {
+        return Vec::new();
+    }
+    let Some(scratch) = percolate_scratch(store, targets, field, documents) else {
+        return Vec::new();
+    };
     let mut matched = Vec::new();
-    for hit in found.hits {
-        let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
-        let Some(stored) = hit.pointer(&format!("/_source/{}", field.replace('.', "/"))) else {
-            continue;
-        };
-        let asked = json!({"query": stored, "size": 0, "track_total_hits": true});
+    for (id, stored) in stored_queries(store, targets, field) {
+        let asked = json!({"query": stored, "size": documents.len(), "_source": false});
         if let Ok(out) = run(&scratch, "_percolate", &asked, &Params::new())
             && out.total > 0
         {
-            matched.push(id.to_string());
+            let score = out.max_score.unwrap_or(0.0);
+            matched.push(PercolateMatch { id, score });
         }
     }
     matched
+}
+
+/// `_percolator_document_slot` and the highlights, on the hits a
+/// `percolate` clause found.
+///
+/// The clause was rewritten into the ids of the rules it matched before the
+/// search, so what each rule found is worked out again here for the page
+/// alone: the slots of the documents it matched, and -- when the request
+/// asks for highlighting -- each of those documents highlighted by the
+/// rule's own query, under the field's name for a single document and under
+/// `<slot>_<field>` for several, as the reference names them.
+pub(crate) fn attach_percolate_slots(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    page: &mut [Value],
+) {
+    let mut specs = Vec::new();
+    if let Some(q) = body.get("query") {
+        collect_percolates(q, &mut specs);
+    }
+    let named_several = specs.len() > 1;
+    for spec in specs {
+        let field = spec.get("field").and_then(|v| v.as_str()).unwrap_or("query").to_string();
+        let Ok(documents) = percolate_documents(store, &spec) else { continue };
+        if documents.is_empty() {
+            continue;
+        }
+        let several = spec.get("documents").is_some();
+        let Some(scratch) = percolate_scratch(store, targets, &field, &documents) else {
+            continue;
+        };
+        let stored: std::collections::HashMap<String, Value> =
+            stored_queries(store, targets, &field).into_iter().collect();
+        let slot_field = match spec.get("name").and_then(|v| v.as_str()) {
+            Some(name) if named_several || spec.get("name").is_some() => {
+                format!("_percolator_document_slot_{name}")
+            }
+            _ => "_percolator_document_slot".to_string(),
+        };
+        for hit in page.iter_mut() {
+            let Some(id) = hit.get("_id").and_then(|v| v.as_str()).map(str::to_string) else {
+                continue;
+            };
+            let Some(query) = stored.get(&id) else { continue };
+            let mut asked = json!({"query": query, "size": documents.len(), "_source": false});
+            if let Some(h) = body.get("highlight") {
+                asked["highlight"] = h.clone();
+            }
+            let Ok(out) = run(&scratch, "_percolate", &asked, &Params::new()) else { continue };
+            let mut slots: Vec<(usize, Option<Value>)> = out
+                .hits
+                .iter()
+                .filter_map(|h| {
+                    let slot = h.get("_id").and_then(|v| v.as_str())?.parse().ok()?;
+                    Some((slot, h.get("highlight").cloned()))
+                })
+                .collect();
+            if slots.is_empty() {
+                continue;
+            }
+            slots.sort_by_key(|(slot, _)| *slot);
+            if !hit.get("fields").is_some_and(|f| f.is_object()) {
+                hit["fields"] = json!({});
+            }
+            hit["fields"][&slot_field] = json!(slots.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+            for (slot, highlight) in slots {
+                let Some(Value::Object(fields)) = highlight else { continue };
+                if !hit.get("highlight").is_some_and(|f| f.is_object()) {
+                    hit["highlight"] = json!({});
+                }
+                for (name, fragments) in fields {
+                    let key = if several { format!("{slot}_{name}") } else { name };
+                    hit["highlight"][key] = fragments;
+                }
+            }
+        }
+    }
+}
+
+fn collect_percolates(node: &Value, out: &mut Vec<Value>) {
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("percolate") {
+                out.push(spec.clone());
+            }
+            o.values().for_each(|v| collect_percolates(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| collect_percolates(v, out)),
+        _ => {}
+    }
 }
 
 /// Whether the query walks a percolator.
@@ -1064,6 +1241,48 @@ fn unmapped_in_query(g: &IdxState, query: &Value) -> Option<String> {
                         return Some(named);
                     }
                 }
+            }
+            // a leaf query names its field as the key of its body, and a
+            // stored query on a field nobody mapped is refused as the
+            // reference refuses it, whatever the query's kind -- only
+            // `query_string` was looked into, and a `term` on a misspelt
+            // field was stored and never matched anything
+            const LEAVES: &[&str] = &[
+                "term",
+                "terms",
+                "match",
+                "match_phrase",
+                "match_phrase_prefix",
+                "match_bool_prefix",
+                "prefix",
+                "wildcard",
+                "regexp",
+                "fuzzy",
+                "range",
+            ];
+            let known = |named: &str| {
+                named.contains('*')
+                    || named.starts_with('_')
+                    || g.mapping.type_of(named).is_some()
+                    || g.mapping.types.keys().any(|k| k.starts_with(&format!("{named}.")))
+            };
+            for leaf in LEAVES {
+                if let Some(Value::Object(body)) = o.get(*leaf) {
+                    for key in body.keys() {
+                        if matches!(key.as_str(), "boost" | "_name") {
+                            continue;
+                        }
+                        if !known(key) {
+                            return Some(key.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(named) =
+                o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
+                && !known(named)
+            {
+                return Some(named.to_string());
             }
             o.values().find_map(|v| unmapped_in_query(g, v))
         }

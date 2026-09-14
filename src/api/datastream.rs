@@ -65,9 +65,49 @@ pub async fn create_data_stream(
     respond(&p, json!({"acknowledged": true}))
 }
 
-pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Value {
-    // the template a stream was made from says which field carries its time
-    let field = store
+/// A write to a name nothing holds, that a data stream template matches,
+/// makes the stream: its first backing index, and the stream in front of it.
+/// It made an ordinary index of the stream's name instead, and the stream
+/// the template described never existed. Whether anything was made.
+pub(crate) fn create_stream_for_write(store: &Store, name: &str) -> bool {
+    if store.exists(name) || store.is_alias(name) || store.data_streams().contains_key(name) {
+        return false;
+    }
+    let Some((template, _)) = data_stream_template(store, name) else { return false };
+    if store.create(&backing_index(name, 1), &json!({})).is_err() {
+        return false;
+    }
+    store.add_data_stream(name, &template);
+    true
+}
+
+/// What a document written into a data stream lacks: the timestamp field,
+/// single-valued. The reference refuses it as a document it cannot parse.
+pub(crate) fn stream_document_refusal(
+    store: &Store,
+    index: &str,
+    source: &Value,
+) -> Option<Response> {
+    let stream = store.stream_behind(index)?;
+    let template = store.data_streams().get(&stream).cloned()?;
+    // read from the template alone: a bulk asks this holding the backing
+    // index's lock, and the stream's entry reads every backing index
+    let field = timestamp_field(store, &template);
+    let value =
+        source.pointer(&format!("/{}", field.replace('.', "/"))).or_else(|| source.get(&field));
+    let single = matches!(value, Some(Value::String(_)) | Some(Value::Number(_)));
+    if single {
+        return None;
+    }
+    Some(crate::api::shared::parse_refusal_caused_by(
+        "illegal_argument_exception",
+        &format!("documents must contain a single-valued timestamp field '{field}' of date type"),
+    ))
+}
+
+/// The field a stream's template says carries its time.
+fn timestamp_field(store: &Store, template: &str) -> String {
+    store
         .get_templates()
         .get(template)
         .and_then(|t| {
@@ -80,7 +120,11 @@ pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Va
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| "@timestamp".to_string());
+        .unwrap_or_else(|| "@timestamp".to_string())
+}
+
+pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Value {
+    let field = timestamp_field(store, template);
     // every backing index the stream has, oldest first, and the generation is
     // the newest of them: it used to say one index and generation 1 whatever
     // had happened, so a stream that had rolled over reported the index it
@@ -97,7 +141,15 @@ pub(crate) fn data_stream_entry(store: &Store, name: &str, template: &str) -> Va
         "timestamp_field": {"name": field},
         "indices": held
             .iter()
-            .map(|n| json!({"index_name": n, "index_uuid": crate::store::index_uuid(n)}))
+            .map(|n| {
+                // the index's own uuid: one made up from the name was the same
+                // for every stream ever made under it, and matched nothing
+                let uuid = store
+                    .get(n)
+                    .map(|st| st.read().uuid.clone())
+                    .unwrap_or_else(|| crate::store::index_uuid(n));
+                json!({"index_name": n, "index_uuid": uuid})
+            })
             .collect::<Vec<_>>(),
         "generation": generation,
         "status": "GREEN",

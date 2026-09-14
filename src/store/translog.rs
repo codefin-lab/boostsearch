@@ -314,6 +314,7 @@ impl IdxState {
 
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
+        self.last_refresh = std::time::Instant::now();
         self.moved_on();
         self.apply_ops(None)?;
         // nothing was ever written, so there is nothing to commit
