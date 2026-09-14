@@ -182,5 +182,8 @@ expect "the task deleted all $cancelled" "$(pick "$WORK/purge-task.json" 'd["res
 
 step "what this example leaves behind, checked rather than assumed"
 expect_docs "$IDX" $((6000 - cancelled)) "parcels, less the purged ones"
+# a task's result is written to .tasks without a refresh, so the purge's may
+# not be searchable yet when the count is asked for straight after it
+quiet POST "/.tasks/_refresh"
 expect_at_least ".tasks" 3 "a result for each job sent off: three per run, kept across runs"
 done_
