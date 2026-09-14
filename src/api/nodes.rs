@@ -573,6 +573,7 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
             "search_pipelines": {
                 "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
                 "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
+                "phase_results_processors": crate::search::pipeline::PHASE_RESULTS_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
             },
             "thread_pool": {},
             // where the other nodes of the cluster reach this one

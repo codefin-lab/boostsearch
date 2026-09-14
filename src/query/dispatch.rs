@@ -681,6 +681,14 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             build(ctx, &inner)?
         }
         "bool" => build_bool(ctx, &body)?,
+        // A hybrid query's parts are scored apart and put together by a
+        // search pipeline, which the search endpoint does before it gets
+        // here. Anywhere else -- a count, a bool that only filters it -- it
+        // matches what any part matches and scores the sum of the parts.
+        "hybrid" => {
+            let plain = crate::search::hybrid::as_bool(&body).map_err(|e| anyhow!(e))?;
+            return build(ctx, &plain);
+        }
         // `common` sorts the words by how many documents hold them: the rare
         // ones are what the query is about, and the common ones only help
         // rank what the rare ones found
@@ -826,6 +834,7 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
         "geo_polygon",
         "geo_shape",
         "has_child",
+        "hybrid",
         "has_parent",
         "ids",
         "intervals",

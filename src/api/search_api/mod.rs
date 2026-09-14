@@ -115,6 +115,28 @@ async fn search_answer(
     {
         return pipeline_failure(&e);
     }
+    // A hybrid query collects each of its queries' best documents apart and
+    // leaves the pipeline to put them together, which is not a search the
+    // ordinary path can run.
+    match crate::search::hybrid::plan(&store, &expr, &body) {
+        Err(r) => return r,
+        Ok(Some(spec)) => {
+            let scoring = pipeline.as_ref().and_then(|pl| pl.scoring());
+            return match crate::search::hybrid::search(&store, &expr, &body, &p, &spec, scoring) {
+                Ok(mut env) => {
+                    if let Some(pl) = &pipeline
+                        && let Err(e) =
+                            crate::search::pipeline::after(pl, &body, &mut env, &request_context)
+                    {
+                        return pipeline_failure(&e);
+                    }
+                    respond(&p, env)
+                }
+                Err(r) => r,
+            };
+        }
+        Ok(None) => {}
+    }
     // A scroll walks the index in an order of its own so that each batch can
     // carry on from where the last one ended. Without one it would have to
     // count from the beginning every time, which costs more with every batch.
@@ -154,7 +176,8 @@ async fn search_answer(
             let n = out.hits.len();
             let mut env = crate::search::envelope(out, &body, &p);
             if let Some(pl) = &pipeline
-                && let Err(e) = crate::search::pipeline::after(pl, &mut env, &request_context)
+                && let Err(e) =
+                    crate::search::pipeline::after(pl, &body, &mut env, &request_context)
             {
                 return pipeline_failure(&e);
             }

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-## `Pipeline <name> could not be found`
+## `Pipeline <name> is not defined`
 
 A 400 on a search that names a pipeline with `?search_pipeline=` means no
 pipeline by that name is stored. Names are exact and case-sensitive. List what
@@ -10,9 +10,9 @@ there is:
 curl -s localhost:9279/_search/pipeline | jq 'keys'
 ```
 
-A missing pipeline named as an index's `index.search.default_pipeline` does
-not fail the search here; it is simply not applied. Check the setting when a
-default seems to do nothing:
+A missing pipeline named as an index's `index.search.default_pipeline` fails
+every search on the index the same way, so a default is deleted after the
+setting that names it, never before. Check the setting:
 
 ```bash
 curl -s 'localhost:9279/books/_settings/index.search.*'
@@ -43,9 +43,11 @@ In order of likelihood:
    `request_processors`, response processors under `response_processors`;
    `filter_query` under `response_processors` is refused with
    `Invalid processor type filter_query`.
-4. It is a processor this server stores but does not run: anything under
-   `phase_results_processors` (the `normalization-processor`), and the `split`
-   response processor. See `design.md`.
+4. It is a `phase_results_processors` entry on a search without a `hybrid`
+   query: those only ever act on a hybrid query's scores.
+5. The search names several indices whose defaults disagree, or none at all
+   (`/_search`): a default applies only when every index that has one agrees,
+   and a search that names no index takes none.
 
 ## The page is shorter than `size`
 
@@ -76,11 +78,13 @@ there, so `ctx._source.query` is null and calling anything on it fails. The
 answer names `processor_type: script` and, if the processor has one, its `tag`
 -- give every processor a tag, it is how the error points at the right one.
 
-## `unknown query [hybrid]`
+## A `hybrid` query answers with scores like `-9549512000`
 
-This server does not implement the `hybrid` query, so the
-`normalization-processor` has nothing to act on. Combine the parts with a
-`bool` and boosts instead; example 05 does that with a `match` and a `knn`.
+The search ran without a pipeline holding a `normalization-processor` or a
+`score-ranker-processor`, so nothing combined the parts: what comes back is
+each sub-query's list as the shard collected it, with marker scores between
+the lists. Name the pipeline, or make it the index default. A `hybrid` query
+paged past the first page also needs `pagination_depth`.
 
 ## Cleaning up
 
