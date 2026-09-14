@@ -75,8 +75,10 @@ pub(crate) fn write_page(
         .unwrap_or_default();
     // a sort answers with no score unless the request asked for one to be
     // kept: `track_scores` says the documents were scored as well as ordered
-    let keep_score =
-        sort_keys.is_empty() || body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
+    // -- or the sort reads the score itself, which it cannot do without one
+    let keep_score = sort_keys.is_empty()
+        || sort_keys.iter().any(|k| k.field == "_score")
+        || body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
     all_hits
         .into_iter()
         .map(|h| {
@@ -695,6 +697,45 @@ pub(crate) fn matched_names(
     out
 }
 
+/// Scores written the way the reference writes them: a score is a 32-bit
+/// float, and Java prints the shortest text that reads back as that float.
+/// Widened to 64 bits first, `0.50652754` came out as `0.5065275430679321`
+/// on every hit, inner hit and explanation.
+pub(crate) fn shorten_scores(v: &mut Value) {
+    fn short(x: &mut Value) {
+        if let Some(f) = x.as_f64()
+            && x.is_f64()
+            && let Ok(back) = format!("{}", f as f32).parse::<f64>()
+            && let Some(n) = serde_json::Number::from_f64(back)
+        {
+            *x = Value::Number(n);
+        }
+    }
+    match v {
+        Value::Object(o) => {
+            for (k, child) in o.iter_mut() {
+                match k.as_str() {
+                    "_score" | "max_score" => short(child),
+                    "_explanation" => shorten_explanation(child),
+                    _ => shorten_scores(child),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(shorten_scores),
+        _ => {}
+    }
+    fn shorten_explanation(e: &mut Value) {
+        if let Some(o) = e.as_object_mut() {
+            if let Some(value) = o.get_mut("value") {
+                short(value);
+            }
+            if let Some(Value::Array(details)) = o.get_mut("details") {
+                details.iter_mut().for_each(shorten_explanation);
+            }
+        }
+    }
+}
+
 /// Assemble the `hits` envelope, honouring track_total_hits and the
 /// `rest_total_hits_as_int` compatibility switch.
 pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
@@ -721,6 +762,7 @@ pub(crate) fn envelope(out: Outcome, body: &Value, p: &Params) -> Value {
         "max_score": out.max_score.map(|s| json!(s)).unwrap_or(Value::Null),
         "hits": out.hits,
     });
+    shorten_scores(&mut hits_obj);
 
     let as_int = p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false);
     let disabled = matches!(track, Some(Value::Bool(false)))

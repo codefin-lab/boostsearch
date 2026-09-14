@@ -21,8 +21,33 @@ pub(crate) fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
         };
         for item in list {
             let sub = build(ctx, &item)?;
-            let sub: Box<dyn Query> =
-                if key == "filter" { Box::new(ConstScore::new(sub, 0.0)) } else { sub };
+            // A clause that matches every document of a segment -- a range
+            // covering all its values, an `exists` on a full column,
+            // `match_all` -- hands BoostCore's boolean an all-documents scorer,
+            // which it drops from the intersection as an optimisation and
+            // with it the clause's score: `must: range` beside a filter
+            // scored 1.0 in one segment and 0.0 in the next, where the
+            // reference scores 1.0 throughout. Behind a constant-score
+            // wrapper the scorer is not recognised, and its score stays.
+            let whole_segment = item.as_object().and_then(|o| {
+                let body =
+                    o.get("range").or_else(|| o.get("exists")).or_else(|| o.get("match_all"))?;
+                // the clause's own boost is the score it stands for, wherever
+                // the body writes it
+                let boost = body
+                    .get("boost")
+                    .or_else(|| {
+                        body.as_object().filter(|b| b.len() == 1)?.values().next()?.get("boost")
+                    })
+                    .and_then(|b| b.as_f64())
+                    .unwrap_or(1.0);
+                Some(boost as boostcore::Score)
+            });
+            let sub: Box<dyn Query> = match whole_segment {
+                _ if key == "filter" => Box::new(ConstScore::new(sub, 0.0)),
+                Some(score) => Box::new(ConstScore::new(sub, score)),
+                None => sub,
+            };
             if occur == Occur::Should {
                 should_count += 1;
             }

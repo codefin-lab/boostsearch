@@ -5,7 +5,9 @@ use super::*;
 pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
     // a date, a number, a boolean or an address is one value, not text to
-    // cut into words: matching it is asking for that value
+    // cut into words: matching it is asking for that value. So is a keyword,
+    // whose term query the reference builds constant-scoring: a `match` on
+    // one scored 0.0763 by BM25 where OpenSearch scores 1.0
     if kind == "match"
         && matches!(
             ctx.mapping.type_of(&field),
@@ -23,6 +25,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                     | "unsigned_long"
                     | "boolean"
                     | "ip"
+                    | "keyword"
             )
         )
         && !val.is_null()

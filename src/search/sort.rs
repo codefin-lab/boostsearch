@@ -11,9 +11,12 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
     let mut out = Vec::new();
     for item in items {
         match item {
+            // `_score` sorts best first unless told otherwise, as the
+            // reference's ScoreSortBuilder does: `"sort": ["_score"]` sorted
+            // worst first here, and dropped the scores with it
             Value::String(f) => out.push(SortKey {
+                desc: f == "_score",
                 field: f,
-                desc: false,
                 mode: None,
                 missing_last: true,
                 nested: None,
@@ -30,8 +33,8 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
                             .get("order")
                             .and_then(|v| v.as_str())
                             .map(|s| s.eq_ignore_ascii_case("desc"))
-                            .unwrap_or(false),
-                        _ => false,
+                            .unwrap_or(field == "_score"),
+                        _ => field == "_score",
                     };
                     let mode =
                         opts.get("mode").and_then(|v| v.as_str()).map(|s| s.to_ascii_lowercase());
