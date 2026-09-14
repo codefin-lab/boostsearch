@@ -569,21 +569,27 @@ fn settles_custom(method: &Method, path: &str) -> Option<(&'static str, String, 
         Method::DELETE => false,
         _ => return None,
     };
-    let (section, name) = match head {
-        "_template" => ("templates", first_segment(rest).0),
-        "_component_template" => ("components", first_segment(rest).0),
-        "_index_template" => ("templates", first_segment(rest).0),
-        "_scripts" => ("scripts", first_segment(rest).0),
+    let ((section, name), after) = match head {
+        "_template" => (("templates", first_segment(rest).0), first_segment(rest).1),
+        "_component_template" => (("components", first_segment(rest).0), first_segment(rest).1),
+        "_index_template" => (("templates", first_segment(rest).0), first_segment(rest).1),
+        "_scripts" => (("scripts", first_segment(rest).0), first_segment(rest).1),
         "_ingest" => {
             let (kind, after) = first_segment(rest);
             if kind != "pipeline" {
                 return None;
             }
-            ("pipelines", first_segment(after).0)
+            (("pipelines", first_segment(after).0), first_segment(after).1)
         }
         _ => return None,
     };
-    if name.is_empty() || name.contains('*') {
+    // `_simulate`, `_execute` and the like are calls, not names: waiting for a
+    // pipeline called `_simulate` to appear held every simulation five seconds
+    if name.is_empty()
+        || name.contains('*')
+        || name.starts_with('_')
+        || first_segment(after).0.starts_with('_')
+    {
         return None;
     }
     Some((section, name.to_string(), present))

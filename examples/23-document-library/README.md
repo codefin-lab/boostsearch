@@ -60,8 +60,9 @@ BS=http://127.0.0.1:9200 examples/23-document-library/run.sh
   `properties: ["content", "content_length"]`, and writes exactly that:
 
   ```json
-  "attachment": {"content": "Rotate every password every ninety days, and report a lost laptop within the hour.",
-                 "content_type": "text/plain; charset=ISO-8859-1", "content_length": 84, "language": "en"},
+  "attachment": {"content_type": "text/plain; charset=ISO-8859-1", "language": "en",
+                 "content": "Rotate every password every ninety days, and report a lost laptop within the hour.",
+                 "content_length": 84},
   "preview":    {"content": "Rotate every passwor", "content_length": 20}
   ```
 
