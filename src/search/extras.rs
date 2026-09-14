@@ -43,7 +43,6 @@ pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
                     "geo_shape" | "geo_bounding_box" | "geo_distance" | "geo_polygon" => {
                         out.geo = true
                     }
-                    "intervals" => out.intervals = true,
                     "distance_feature" => out.distance_feature = true,
                     "_name" => out.named = true,
                     "exists" => {
@@ -68,21 +67,6 @@ pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
             }
         }
         _ => {}
-    }
-}
-
-/// The `intervals` clause of a query: the field it reads and the rule it asks.
-pub(crate) fn find_intervals(node: &Value) -> Option<(String, Value)> {
-    match node {
-        Value::Object(o) => {
-            if let Some(spec) = o.get("intervals").and_then(|v| v.as_object()) {
-                let (field, rule) = spec.iter().next()?;
-                return Some((field.clone(), rule.clone()));
-            }
-            o.values().find_map(find_intervals)
-        }
-        Value::Array(a) => a.iter().find_map(find_intervals),
-        _ => None,
     }
 }
 
@@ -134,22 +118,23 @@ pub(crate) fn parse_time_amount(s: &str) -> Option<f64> {
     )
 }
 
-/// Whether every geo and `intervals` clause in a query sits where narrowing
-/// the whole answer by it means the same thing.
+/// Whether every geo clause in a query sits where narrowing the whole answer
+/// by it means the same thing.
 ///
-/// These two are not built as queries: the query says only that the field is
-/// there, and the real predicate is applied to the candidates afterwards, as
-/// a narrowing of the whole answer. That is only the same thing when the
+/// A geo clause is not built as a query: the query says only that the field
+/// is there, and the real predicate is applied to the candidates afterwards,
+/// as a narrowing of the whole answer. (`intervals` was answered the same way
+/// and is now a query of its own, which may stand anywhere a query can.) That is only the same thing when the
 /// clause is AND-ed with everything else from the root -- inside `should` it
 /// dropped documents that matched a sibling, and inside `must_not` it dropped
 /// every document instead of the ones inside the shape. Only the first clause
 /// of each kind was applied, too, so a second was ignored outright. Where the
 /// shape does not hold, the request is refused rather than answered wrongly.
 pub(crate) fn placement_complaint(query: &Value) -> Option<String> {
-    fn walk(node: &Value, conjunctive: bool, geo: &mut usize, intervals: &mut usize) -> bool {
+    fn walk(node: &Value, conjunctive: bool, geo: &mut usize) -> bool {
         let Some(o) = node.as_object() else {
             return match node {
-                Value::Array(a) => a.iter().all(|v| walk(v, conjunctive, geo, intervals)),
+                Value::Array(a) => a.iter().all(|v| walk(v, conjunctive, geo)),
                 _ => true,
             };
         };
@@ -157,18 +142,14 @@ pub(crate) fn placement_complaint(query: &Value) -> Option<String> {
             *geo += 1;
             return conjunctive;
         }
-        if o.contains_key("intervals") {
-            *intervals += 1;
-            return conjunctive;
-        }
         if let Some(inner) = o.get("bool").and_then(|b| b.as_object()) {
             return inner.iter().all(|(k, v)| {
                 let still = conjunctive && matches!(k.as_str(), "must" | "filter");
-                walk(v, still, geo, intervals)
+                walk(v, still, geo)
             });
         }
         if let Some(inner) = o.get("constant_score").and_then(|c| c.get("filter")) {
-            return walk(inner, conjunctive, geo, intervals);
+            return walk(inner, conjunctive, geo);
         }
         // A `function_score` matches exactly what its inner query matches --
         // the functions move scores and never the set -- so a clause under it
@@ -179,33 +160,31 @@ pub(crate) fn placement_complaint(query: &Value) -> Option<String> {
         if let Some(fs) = o.get("function_score").and_then(|f| f.as_object()) {
             return fs.iter().all(|(k, v)| {
                 let still = conjunctive && matches!(k.as_str(), "query" | "filter");
-                walk(v, still, geo, intervals)
+                walk(v, still, geo)
             });
         }
         if let Some(bs) = o.get("boosting").and_then(|b| b.as_object()) {
             return bs.iter().all(|(k, v)| {
                 let still = conjunctive && k == "positive";
-                walk(v, still, geo, intervals)
+                walk(v, still, geo)
             });
         }
         // anywhere else -- a nested query, a function score, a should -- the
         // clause is no longer a narrowing of the whole answer
-        o.values().all(|v| walk(v, false, geo, intervals))
+        o.values().all(|v| walk(v, false, geo))
     }
-    let (mut geo, mut intervals) = (0usize, 0usize);
-    let placed = walk(query, true, &mut geo, &mut intervals);
+    let mut geo = 0usize;
+    let placed = walk(query, true, &mut geo);
     if !placed {
         return Some(
-            "a geo or intervals clause is answered by narrowing the whole result, so it may \
+            "a geo clause is answered by narrowing the whole result, so it may \
              only stand where it narrows the whole result: at the top of the query, or \
              under `must` or `filter`"
                 .to_string(),
         );
     }
-    if geo > 1 || intervals > 1 {
-        return Some(
-            "only one geo clause and one intervals clause can be answered in a query".to_string(),
-        );
+    if geo > 1 {
+        return Some("only one geo clause can be answered in a query".to_string());
     }
     None
 }
@@ -467,42 +446,6 @@ pub(crate) fn settle_by_value(
                 other => vec![other],
             };
             points.iter().any(|p| point_within(&shape, p))
-        });
-    }
-    // An `intervals` query asks where in a field the words are. The query
-    // built for it matches wherever they merely occur, so the candidates are
-    // read back and their text analysed again to see whether they really do.
-    if let Some((field, rule)) =
-        extras.intervals.then(|| body.get("query").and_then(find_intervals)).flatten()
-    {
-        let path = format!("/{}", field.replace('.', "/"));
-        cands.retain(|c| {
-            let (_, searcher, st) = &searchers[c.shard];
-            let g = st.read();
-            let Some((_, src)) = source_of(searcher, &g, c.addr) else { return true };
-            let src = derived_copy(src, &g.mapping);
-            let Some(text) = src.pointer(&path) else { return false };
-            let text = match text {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let analyse = |t: &str| crate::query::analyze_text(&g.index, t, None);
-            let tokens = analyse(&text);
-            // another field of the same document, read with its own analyzer
-            let elsewhere = |other: &str, words: &str| -> Option<(Vec<String>, Vec<String>)> {
-                let held = src.pointer(&format!("/{}", other.replace('.', "/")))?;
-                let held = match held {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                let named = ["search_analyzer", "analyzer"]
-                    .iter()
-                    .find_map(|key| g.mapping.field_option(other, key))
-                    .and_then(|v| v.as_str().map(|s| s.to_string()));
-                let cut = |t: &str| crate::query::analyze_text(&g.index, t, named.as_deref());
-                Some((cut(&held), cut(words)))
-            };
-            !crate::query::interval_spans(&tokens, &rule, &analyse, &elsewhere).is_empty()
         });
     }
     // `distance_feature` scores by how near a value is to an origin. The

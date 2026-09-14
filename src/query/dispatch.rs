@@ -152,10 +152,27 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     terms.extend(term_for(f, &path, &read));
                 }
             }
-            let exact = any_of(terms);
             // an exact match on a field that is not analysed has nothing to
             // rank by: every match is equally exact, so each scores one
-            if view == View::Raw { Box::new(ConstScore::new(exact, 1.0)) } else { exact }
+            if view == View::Raw {
+                return Ok(Box::new(ConstScore::new(any_of(terms), 1.0)));
+            }
+            // on an analysed field a term scores as the word does in `match`,
+            // how often it stands there included: read without frequencies,
+            // a word twice in a field scored as if it were there once
+            if terms.len() == 1 {
+                Box::new(TermQuery::new(terms.remove(0), IndexRecordOption::WithFreqs))
+            } else {
+                Box::new(BooleanQuery::union(
+                    terms
+                        .into_iter()
+                        .map(|t| {
+                            Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>
+                        })
+                        .collect(),
+                ))
+            }
         }
         "terms" => {
             let (field, vals) = single_key(&body)?;
@@ -466,7 +483,6 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "match_bool_prefix" => build_match_bool_prefix(ctx, &body)?,
         "query_string" | "simple_query_string" => build_query_string(ctx, &body)?,
         "match" | "match_phrase" | "match_phrase_prefix" => build_match(ctx, &kind, &body)?,
-        "span_near" => build_span_near(ctx, &body)?,
         // the functions are applied to the scores after the search; what the
         // query layer answers is the documents the inner query finds
         "function_score" => {
@@ -493,8 +509,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             }
             super::build(ctx, &serde_json::json!({"exists": {"field": field}}))?
         }
-        "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"
-        | "span_multi" => build_span(ctx, q)?,
+        "span_term" | "span_or" | "span_near" | "span_not" | "span_first" | "span_containing"
+        | "span_within" | "span_multi" | "field_masking_span" | "span_field_masking" => {
+            build_span(ctx, q)?
+        }
         "multi_match" => build_multi_match(ctx, &body)?,
         // `combined_fields` treats the fields it names as one field: a term
         // is satisfied by whichever of them holds it, and the operator is
@@ -614,26 +632,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             NESTED_DEPTH.with(|d| d.set(d.get() - 1));
             built?
         }
-        // an `intervals` query is a little language of rules over one field.
-        // Positions are not compared here; each rule is built as the query it
-        // most nearly is, and the shape of the rule tree is kept.
-        "intervals" => {
-            let Some((field, rule)) = body.as_object().and_then(|o| o.iter().next()) else {
-                return Err(anyhow!("[intervals] requires a field"));
-            };
-            // where the words stand is not kept for a field that keeps only
-            // that they are there
-            if ctx.mapping.type_of(field) == Some("match_only_text") {
-                return Err(anyhow!(
-                    "Cannot create intervals over field [{field}] with no positions indexed"
-                ));
-            }
-            // the reference scores an interval by how often it is found,
-            // saturated: w * S / (S + 1). One sighting, which is what nearly
-            // every document has, is a half; the word statistics BM25 reads
-            // are no part of it.
-            Box::new(ConstScore::new(build_interval_rule(ctx, field, rule)?, 0.5))
-        }
+        "intervals" => build_intervals(ctx, &body)?,
         // `terms_set` asks for a number of the listed terms rather than all
         // of them, and how many is read from a field of the document itself
         "terms_set" => {
@@ -819,6 +818,7 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
         "dis_max",
         "distance_feature",
         "exists",
+        "field_masking_span",
         "function_score",
         "fuzzy",
         "geo_bounding_box",

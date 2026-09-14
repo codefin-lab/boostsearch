@@ -1362,7 +1362,7 @@ pub fn run(
     let fanned_out = targets.len() > 1;
     // what the caller may see of each target, worked out here on the
     // request's own task, before any thread that cannot ask
-    // a geo or intervals clause is answered by narrowing the whole result, so
+    // a geo clause is answered by narrowing the whole result, so
     // it may only stand where that means the same thing
     if let Some(q) = body.get("query")
         && let Some(why) = crate::search::extras::placement_complaint(q)
@@ -1509,9 +1509,9 @@ pub fn run(
         apply_indices_boost(store, &mut cands, &searchers, boosts, p)?;
     }
 
-    // a geo shape, an intervals rule or a distance_feature is settled from the
-    // candidates' own values, and what survives is the new total
-    if extras.geo || extras.intervals || extras.distance_feature || extras.nested_query {
+    // a geo shape or a distance_feature is settled from the candidates' own
+    // values, and what survives is the new total
+    if extras.geo || extras.distance_feature || extras.nested_query {
         let before = cands.len();
         settle_by_value(&mut cands, &searchers, body, &extras);
         if cands.len() != before {
