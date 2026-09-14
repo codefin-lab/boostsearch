@@ -7327,3 +7327,34 @@ documents a copy is behind on or disagrees about. An earlier line of this
 entry said the engine logs a fill and no resync; it logs both, and the
 search that said otherwise looked for the word "resync" in a line that does
 not contain it.
+
+### P2 -- `combined_fields` now scores as BM25F, and a long field's average length was short
+
+The documents `combined_fields` finds already matched the reference; now the
+scores do. The reference scores the fields as one pseudo-field: for each
+word, the document frequency is the largest any one field has, the index's
+token count is the fields' counts added up with their weights, a document's
+frequency is its frequencies added up with their weights, and its length is
+its lengths added up with their weights and then put through the one-byte
+length encoding like any other. Worked by hand on three documents those
+rules give 0.5741, 0.4760 and 0.4715 -- OpenSearch 3.8.0's numbers -- and
+`src/query/combined.rs` is those rules, reading BoostCore's per-path counts
+and lengths.
+
+On four hundred documents in three segments the scores were still a
+thousandth low, and so, it turned out, were a plain `match`'s on the same
+field. The per-path token count BM25 divides by was added up from each
+document's length byte, which is lossy above forty or so tokens: 14,190
+where the documents held 14,362, an average of 41.7 where Lucene has 42.2.
+Every score on a field of long values was a little under the reference's.
+The fix is in BoostCore (`b3819c5`): the writer counts a path's tokens as
+they arrive, and a merge carries the exact counts through, less what deleted
+documents held. With it, six `combined_fields` shapes and a plain `match`
+return the reference's top twenty-five with the same scores to three places,
+before a merge, after one, and after deletions -- the one difference left is
+the order of two documents with identical scores, which after a merge is
+Lucene's document order.
+
+That commit is not yet on the fork's remote, so `Cargo.toml` still pins
+`08e39fc` and this build scores long fields a thousandth low as it did
+before. What is committed here needs nothing from it.

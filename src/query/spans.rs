@@ -78,9 +78,15 @@ impl Weight for FirstPositionsWeight {
 }
 
 /// The documents a pass over the positions kept, in order.
-struct KeptDocs {
+pub(crate) struct KeptDocs {
     docs: Vec<boostcore::DocId>,
     at: usize,
+}
+
+impl KeptDocs {
+    pub(crate) fn new(docs: Vec<boostcore::DocId>) -> KeptDocs {
+        KeptDocs { docs, at: 0 }
+    }
 }
 
 impl boostcore::DocSet for KeptDocs {
@@ -241,9 +247,15 @@ impl Weight for SpanUnionWeight {
 }
 
 /// The documents a span union matched, each with the score it was given.
-struct ScoredDocs {
+pub(crate) struct ScoredDocs {
     docs: Vec<(boostcore::DocId, boostcore::Score)>,
     at: usize,
+}
+
+impl ScoredDocs {
+    pub(crate) fn new(docs: Vec<(boostcore::DocId, boostcore::Score)>) -> ScoredDocs {
+        ScoredDocs { docs, at: 0 }
+    }
 }
 
 impl boostcore::DocSet for ScoredDocs {

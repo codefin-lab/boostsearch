@@ -536,29 +536,58 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             if terms.is_empty() {
                 return build(ctx, &serde_json::json!({"match_none": {}}));
             }
-            let per_term: Vec<Value> = terms
+            // each field, where its terms are, and what it weighs
+            let placed: Vec<(Field, String, f32)> = fields
                 .iter()
-                .map(|t| {
-                    serde_json::json!({"multi_match": {
-                        "query": t, "fields": fields.clone(), "type": "best_fields"}})
+                .filter_map(|f| f.as_str())
+                .map(|spec| {
+                    let (name, weight) = match spec.split_once('^') {
+                        Some((n, w)) => (n, w.parse::<f32>().unwrap_or(1.0)),
+                        None => (spec, 1.0),
+                    };
+                    let (f, path, _) = ctx.resolve(name, true);
+                    (f, path, weight)
                 })
                 .collect();
+            if let Some((_, _, w)) = placed.iter().find(|(_, _, w)| *w < 1.0) {
+                return Err(anyhow!("[combined_fields] requires field boosts >= 1.0, got [{w}]"));
+            }
+            let mut words: Vec<Box<dyn Query>> = Vec::new();
+            for t in &terms {
+                let per_field: Vec<(Term, f32)> = placed
+                    .iter()
+                    .map(|(f, path, w)| {
+                        let mut term = Term::from_field_json_path(*f, path, true);
+                        term.append_type_and_str(t);
+                        (term, *w)
+                    })
+                    .collect();
+                words.push(Box::new(crate::query::CombinedTerm::new(per_field)));
+            }
             let and = body
                 .get("operator")
                 .and_then(|v| v.as_str())
                 .map(|o| o.eq_ignore_ascii_case("and"))
                 == Some(true);
-            let mut inner = if and {
-                serde_json::json!({"bool": {"must": per_term}})
+            let occur = if and { Occur::Must } else { Occur::Should };
+            let count = words.len();
+            let clauses: Vec<(Occur, Box<dyn Query>)> =
+                words.into_iter().map(|q| (occur, q)).collect();
+            let wanted = if and {
+                0
             } else {
-                serde_json::json!({"bool": {"should": per_term, "minimum_should_match": 1}})
+                crate::query::bool::msm_required(body.get("minimum_should_match"), count)
+                    .unwrap_or(1)
+                    .max(1)
             };
-            if let Some(m) = body.get("minimum_should_match")
-                && !and
-            {
-                inner["bool"]["minimum_should_match"] = m.clone();
+            let mut q = BooleanQuery::new(clauses);
+            if wanted > 1 {
+                q = BooleanQuery::with_minimum_required_clauses(
+                    q.clauses().iter().map(|(o, c)| (*o, c.box_clone())).collect(),
+                    wanted,
+                );
             }
-            build(ctx, &inner)?
+            Box::new(q)
         }
         // Documents here are stored whole rather than split into a parent and
         // its nested children, so a nested query is its inner query asked
