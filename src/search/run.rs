@@ -992,15 +992,14 @@ pub fn run(
         }
     }
     // an index held closed to readers refuses a search, the way one held
-    // closed to writers refuses a write
+    // closed to writers refuses a write. `read_only` is not such a block: it
+    // stops changes, and a read-only index is searched as any other -- the
+    // reference answers it, and refusing it here refused the one thing a
+    // read-only index is kept for.
     for name in &targets {
         let blocked = store
             .get(name)
-            .map(|st| {
-                let g = st.read();
-                g.setting("blocks.read").as_deref() == Some("true")
-                    || g.setting("blocks.read_only").as_deref() == Some("true")
-            })
+            .map(|st| st.read().setting("blocks.read").as_deref() == Some("true"))
             .unwrap_or(false);
         if blocked {
             return Err(err(
@@ -1483,6 +1482,8 @@ pub fn run(
         }
         searchers.push((o.name, o.searcher, o.st));
     }
+    // the query phase ends here; what follows reads the page back
+    let fetch_started = std::time::Instant::now();
 
     // A wide fan-out leaves one intermediate result per index to combine.
     // Folding them one after another is linear and single-threaded, which at
@@ -1926,6 +1927,7 @@ pub fn run(
         }
         let agg_bytes = agg_acc.as_ref().and_then(|a| postcard::to_allocvec(a).ok());
         let agg_req_json = agg_req.as_ref().and_then(|r| serde_json::to_value(r).ok());
+        note_fetch(store, &targets, body, fetch_started, total);
         return Ok(Outcome {
             took_ms: started.elapsed().as_millis() as u64,
             skipped: 0,
@@ -2027,6 +2029,7 @@ pub(crate) fn finish_search(
     p: &Params,
     f: Finish,
 ) -> std::result::Result<Outcome, Response> {
+    let fetch_started = std::time::Instant::now();
     let Finish {
         started,
         page,
@@ -2216,6 +2219,7 @@ pub(crate) fn finish_search(
     if body.get("query").is_some_and(names_a_percolate) {
         attach_percolate_slots(store, &targets, body, &mut page);
     }
+    note_fetch(store, &targets, body, fetch_started, total);
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,
@@ -2236,6 +2240,42 @@ pub(crate) fn finish_search(
         filtered: dls_applied,
         native: None,
     })
+}
+
+/// The fetch phase of a search -- reading back and filling in the page --
+/// counted for each index searched and for the groups the search named, and
+/// written to the fetch slow log where it took long enough. A page drawn from
+/// several indices is one fetch here, and each of them is counted as having
+/// done it, as each shard of the reference runs a fetch of its own.
+fn note_fetch(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    started: std::time::Instant,
+    total: u64,
+) {
+    let took = started.elapsed().as_nanos() as u64;
+    let groups = crate::search::shard::stats_groups(body);
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        g.counters.search.fetch.add(took);
+        for group in &groups {
+            g.counters.group(group).fetch.add(took);
+        }
+        if !g.knobs.slowlog.fetch.is_off() {
+            crate::store::slowlog::search(
+                &g.knobs.slowlog.fetch,
+                "fetch",
+                name,
+                took,
+                total,
+                &groups,
+                g.shard_count(),
+                body,
+            );
+        }
+    }
 }
 
 /// Run a search whose body defines derived fields of its own.

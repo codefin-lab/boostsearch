@@ -366,6 +366,13 @@ impl IdxState {
     ///
     /// What other shards have queued stays queued, and stays invisible.
     pub fn refresh_shard(&mut self, shard: u64) -> Result<()> {
+        let started = std::time::Instant::now();
+        let done = self.refresh_one_shard(shard);
+        self.counters.refresh.add(started.elapsed().as_nanos() as u64);
+        done
+    }
+
+    fn refresh_one_shard(&mut self, shard: u64) -> Result<()> {
         self.moved_on();
         self.apply_ops(Some(shard))?;
         if let Some(w) = self.writer.as_mut() {
@@ -396,6 +403,22 @@ impl IdxState {
 
     /// Make everything written so far visible to search.
     pub fn refresh(&mut self) -> Result<()> {
+        let started = std::time::Instant::now();
+        let done = self.refresh_everything();
+        self.counters.refresh.add(started.elapsed().as_nanos() as u64);
+        done
+    }
+
+    /// A refresh a caller asked for, which `_stats` counts apart from the
+    /// ones the node does on its own.
+    pub fn refresh_external(&mut self) -> Result<()> {
+        let started = std::time::Instant::now();
+        let done = self.refresh();
+        self.counters.refresh_external.add(started.elapsed().as_nanos() as u64);
+        done
+    }
+
+    fn refresh_everything(&mut self) -> Result<()> {
         self.last_refresh = std::time::Instant::now();
         self.moved_on();
         self.apply_ops(None)?;

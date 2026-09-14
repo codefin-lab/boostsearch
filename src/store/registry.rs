@@ -355,6 +355,11 @@ impl Store {
         Ok(())
     }
 
+    /// Where this node keeps its indices, if it keeps them on disk.
+    pub fn data_dir(&self) -> Option<&FsPath> {
+        self.data_dir.as_deref()
+    }
+
     fn index_path(&self, name: &str) -> Option<PathBuf> {
         // an empty name would join to the data directory itself, and deleting
         // an index must never take the whole data directory with it
@@ -985,12 +990,11 @@ impl Store {
             realtime,
             seq_no: 0,
             applied_term: 0,
-            search_count: std::sync::atomic::AtomicU64::new(0),
+            counters: Default::default(),
             vectors: RwLock::new(Default::default()),
             request_cache_hit: std::sync::atomic::AtomicU64::new(0),
             request_cache_miss: std::sync::atomic::AtomicU64::new(0),
             search_gen: std::sync::atomic::AtomicU64::new(crate::store::next_generation()),
-            search_groups: RwLock::new(HashMap::new()),
             loaded_fielddata: RwLock::new(std::collections::HashSet::new()),
             auto_id: 0,
             dynamic_types: HashMap::new(),
@@ -999,8 +1003,6 @@ impl Store {
             kinds_complete: true,
             has_doc_count: false,
             noop_updates: std::sync::atomic::AtomicU64::new(0),
-            flushes: std::sync::atomic::AtomicU64::new(0),
-            gets: std::sync::atomic::AtomicU64::new(0),
             bytes: std::sync::atomic::AtomicU64::new(0),
             kind_path_buf: String::new(),
             path: None,

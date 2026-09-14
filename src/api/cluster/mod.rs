@@ -254,6 +254,33 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
         (false, false) if unassignable => "yellow",
         (false, false) => "green",
     };
+    // The summary is never greener than an index it summarises. Just after
+    // an index is created the manager has placed the others and not this
+    // one yet: the look above went by what was placed and said green, while
+    // the same answer counted this index's replica as unassigned and
+    // `level=indices` said yellow. Each index is judged here the way its own
+    // entry below judges it, and the worst of them stands.
+    let rank = |s: &str| match s {
+        "red" => 2,
+        "yellow" => 1,
+        _ => 0,
+    };
+    let mut status = status;
+    for name in &names {
+        let own = if live.routing.indices.contains_key(name) {
+            live.health_status(Some(std::slice::from_ref(name)))
+        } else {
+            match store.get(name) {
+                Some(st) if st.read().numeric_setting("number_of_replicas").unwrap_or(1) > 0 => {
+                    "yellow"
+                }
+                _ => "green",
+            }
+        };
+        if rank(own) > rank(status) {
+            status = own;
+        }
+    }
     // an index named in full that the cluster does not know is one the health
     // request would wait for and never see
     let missing = expr

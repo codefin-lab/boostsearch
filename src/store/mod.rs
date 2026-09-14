@@ -15,6 +15,8 @@ mod names;
 pub use names::*;
 
 mod coerce;
+pub mod counters;
+pub mod slowlog;
 pub use coerce::*;
 mod dates;
 pub use dates::*;
@@ -57,6 +59,9 @@ pub struct WriteKnobs {
     /// `index.blocks.read_only`: nothing may be written and the index may
     /// not be deleted
     pub blocks_read_only: bool,
+    /// `index.blocks.read_only_allow_delete`: what `read_only` refuses,
+    /// but as the flood-stage block a full disk puts on, answered 429
+    pub blocks_read_only_allow_delete: bool,
     pub ignore_malformed: bool,
     pub append_only: bool,
     pub nested_limit: u64,
@@ -66,6 +71,9 @@ pub struct WriteKnobs {
     pub sync_interval_ms: u64,
     /// how many shards the index has, which every write is placed by
     pub shards: u64,
+    /// the slow log thresholds, which every search and write compares its
+    /// time against
+    pub slowlog: slowlog::SlowLogKnobs,
 }
 
 /// How much un-refreshed document source may sit in memory before the writer
@@ -516,10 +524,11 @@ pub struct IdxState {
     /// from a newer primary wins whatever version stands here, since a
     /// promoted copy counts versions from what it holds, which may be behind
     pub applied_term: u64,
-    /// number of searches served, reported by _stats. Atomic so counting a
-    /// search never needs a write lock -- taking one here would deadlock any
-    /// caller that already holds the read guard.
-    pub search_count: std::sync::atomic::AtomicU64,
+    /// What the index has been asked to do -- writes, reads, searches,
+    /// refreshes, merges -- and how long it took, reported by `_stats`.
+    /// Atomic, so counting never needs a write lock: taking one here would
+    /// deadlock any caller that already holds the read guard.
+    pub counters: counters::Counters,
     /// The vectors this index holds, which live beside the inverted index
     /// rather than in it: a term dictionary cannot answer "which documents
     /// are near this point".
@@ -538,8 +547,6 @@ pub struct IdxState {
     /// start where the old one started, and inherit answers about documents
     /// that are no longer there.
     pub search_gen: std::sync::atomic::AtomicU64,
-    /// per-group query counts, from the `stats` field of a search body
-    pub search_groups: RwLock<HashMap<String, u64>>,
     /// Fields whose ordinals have been read into memory: sorting on a field
     /// or aggregating over its ordinals loads them, and that is what the
     /// fielddata statistic reports on.
@@ -561,11 +568,6 @@ pub struct IdxState {
     pub has_doc_count: bool,
     /// Updates that changed nothing, which the stats report separately.
     pub noop_updates: std::sync::atomic::AtomicU64,
-    /// how many times this index has been flushed, which `_stats` reports
-    pub flushes: std::sync::atomic::AtomicU64,
-    /// how many documents have been fetched by id, which is what `_stats`
-    /// counts under `get` -- a terms lookup fetches one too
-    pub gets: std::sync::atomic::AtomicU64,
     /// how many bytes of document the index has been given, which is the size
     /// a rollover condition asks about
     pub bytes: std::sync::atomic::AtomicU64,
@@ -1101,6 +1103,15 @@ impl<T> IdxLock<T> {
 
     pub fn write(&self) -> parking_lot::RwLockWriteGuard<'_, T> {
         self.0.write()
+    }
+
+    /// The write lock, if it can be had within `wait`: a node stopping does
+    /// not wait behind a merge that may take minutes.
+    pub fn try_write_for(
+        &self,
+        wait: std::time::Duration,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, T>> {
+        self.0.try_write_for(wait)
     }
 }
 

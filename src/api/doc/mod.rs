@@ -119,8 +119,60 @@ pub fn write_doc_versioned(
     write_doc_within(st, id, source, op_type, raw, forced, None, true)
 }
 
+/// A write, counted into the index's indexing statistics and written to the
+/// indexing slow log when it took long enough. What the server writes for
+/// itself -- a replay, a restore -- is not a write anyone asked for, and is
+/// not counted, as a recovery in the reference is not.
 #[allow(clippy::too_many_arguments)]
 fn write_doc_within(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    forced: Option<u64>,
+    forced_seq: Option<u64>,
+    from_caller: bool,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    if !from_caller {
+        return write_doc_uncounted(st, id, source, op_type, raw, forced, forced_seq, false);
+    }
+    let started = std::time::Instant::now();
+    // the source is copied for the slow log only when the log is on
+    let logged = (!st.knobs.slowlog.index.is_off())
+        .then(|| raw.clone().unwrap_or_else(|| source.to_string()));
+    st.counters.index.current_add(1);
+    let done = write_doc_uncounted(st, id, source, op_type, raw, forced, forced_seq, true);
+    let took = started.elapsed().as_nanos() as u64;
+    st.counters.index.current_add(-1);
+    match &done {
+        Ok(_) => {
+            st.counters.index.add(took);
+            st.counters.last_index_ms.store(
+                crate::store::now_millis().max(0) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if let Some(source) = logged {
+                crate::store::slowlog::indexing(
+                    &st.knobs.slowlog,
+                    &st.name,
+                    &st.uuid,
+                    took,
+                    id,
+                    st.routing.get(id).map(|r| r.as_str()),
+                    &source,
+                );
+            }
+        }
+        Err(_) => {
+            st.counters.index_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    done
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_doc_uncounted(
     st: &mut IdxState,
     id: &str,
     source: Value,
@@ -133,10 +185,7 @@ fn write_doc_within(
     // an index held still takes no writes until it is let go -- from a
     // caller. What the server is putting back is not a caller's write.
     if let Some((kind, why)) = st.change_refusal().filter(|_| from_caller) {
-        let status = match kind {
-            "index_closed_exception" => StatusCode::BAD_REQUEST,
-            _ => StatusCode::FORBIDDEN,
-        };
+        let status = IdxState::refusal_status(kind, &why);
         return Err(err(status, kind, why));
     }
     // an id is carried in the index's terms, which caps how long it may be
@@ -374,10 +423,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     // index refuses it, which is what an operator holding an index still
     // before a snapshot or a shrink is relying on
     if let Some((kind, why)) = st.change_refusal() {
-        let status = match kind {
-            "index_closed_exception" => StatusCode::BAD_REQUEST,
-            _ => StatusCode::FORBIDDEN,
-        };
+        let status = IdxState::refusal_status(kind, &why);
         return (
             json!({
                 "_index": st.name, "_id": id,
@@ -386,6 +432,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
             status,
         );
     }
+    let started = std::time::Instant::now();
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     let shard = st.shard_of_doc(id);
@@ -411,6 +458,9 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
             doc_term: None,
         });
     }
+    // a delete of what is not there is still a delete the index carried out,
+    // and the reference counts it
+    st.counters.delete.add(started.elapsed().as_nanos() as u64);
     let body = json!({
         "_index": st.name,
         "_id": id,
@@ -540,10 +590,12 @@ pub(crate) fn maybe_refresh(
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "translog_exception", why));
     }
     if flag(p, "refresh") {
+        let started = std::time::Instant::now();
         let _ = match shard {
             Some(one) => st.refresh_shard(one),
             None => st.refresh(),
         };
+        st.counters.refresh_external.add(started.elapsed().as_nanos() as u64);
     }
     Ok(())
 }

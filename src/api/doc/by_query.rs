@@ -748,10 +748,7 @@ fn change_refusal_for(store: &Store, expr: &str) -> Option<Response> {
         let Some(st) = store.get(&name) else { continue };
         let refusal = st.read().change_refusal();
         if let Some((kind, why)) = refusal {
-            let status = match kind {
-                "index_closed_exception" => StatusCode::BAD_REQUEST,
-                _ => StatusCode::FORBIDDEN,
-            };
+            let status = crate::store::IdxState::refusal_status(kind, &why);
             return Some(err(status, kind, why));
         }
     }
@@ -1484,9 +1481,20 @@ async fn finish(
         store.remember_task(&name, answer.clone());
         // a task outlives the request that started it, so what it did is kept
         // where anyone can read it back
-        if store.ensure(".tasks").is_ok()
-            && let Some(st) = store.get(".tasks")
-        {
+        // made the way the reference makes it: one shard, and replicas only
+        // where there is a node to hold one -- made with the default replica,
+        // it turned a cluster of one node yellow the first time a task was
+        // kept
+        if !store.exists(".tasks") {
+            let _ = store.create(
+                ".tasks",
+                &json!({"settings": {"index": {
+                    "number_of_shards": "1", "number_of_replicas": "0",
+                    "auto_expand_replicas": "0-1",
+                }}}),
+            );
+        }
+        if let Some(st) = store.get(".tasks") {
             let mut g = st.write();
             let record = json!({
                 "completed": true,
