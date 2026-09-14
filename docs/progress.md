@@ -7253,3 +7253,25 @@ soak, which has not been run. And a 503 seen once in 1,504 corpus sections
 -- a bulk refused on a single node with `no longer the primary`, which is
 this same family on a cluster of one, and which a full run with the cluster
 notes on could not reproduce.
+
+### P2 -- `combined_fields` lost documents, and the reference that should have caught it could not
+
+`combined_fields` was built as a `cross_fields` multi_match, which asks each
+field for the whole query. With `operator: and` a document whose title held
+one word and whose body held the other was dropped, where the query treats
+the fields as one and keeps it. The replay never showed it: OpenSearch 3.1.0
+has no `combined_fields` and refuses it, so the only difference on record was
+"refused there, answered here", and this ledger had filed that under things
+the reference does not do. The query arrived in OpenSearch after 3.1.0 --
+3.8.0 answers it -- and this server reports itself as 3.9.0. Refusing it
+would have matched the wrong reference.
+
+Against 3.8.0 the query is now taken apart by term: each term a disjunction
+over the fields, the terms put together by the operator and
+`minimum_should_match`. Ten shapes -- `or`, `and`, a word no document holds,
+three words, two of three, one field, a boost, nothing matching, nothing left
+after analysis -- return the reference's documents, all ten. The order does
+not match yet: the reference sums term frequencies across the fields and
+scores the sum over a combined length, which needs per-query statistics this
+engine does not gather. Gates unmoved: corpus 1,427/1,427, phase1 398/398,
+unit 198/198, the replays 60/61, 45/45, 36/43.

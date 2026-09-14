@@ -496,12 +496,69 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         "span_term" | "span_or" | "span_not" | "span_first" | "span_containing" | "span_within"
         | "span_multi" => build_span(ctx, q)?,
         "multi_match" => build_multi_match(ctx, &body)?,
-        // combined_fields scores across fields as one; cross_fields is the
-        // closest thing we can assemble from per-field matches
+        // `combined_fields` treats the fields it names as one field: a term
+        // is satisfied by whichever of them holds it, and the operator is
+        // about the terms rather than about any one field.
+        //
+        // This used to be built as a `cross_fields` multi_match, which asks
+        // each field for the whole query and then combines the answers. The
+        // difference is not only the score: with `operator: and`, a document
+        // whose title holds one word and whose body holds the other answers
+        // the reference and was dropped here, because no single field held
+        // both. Measured against OpenSearch 3.8.0 -- 3.1.0 does not have the
+        // query at all, which is why nothing caught this -- the document sets
+        // differed as well as their order.
+        //
+        // So the query is taken apart by term: each term becomes a
+        // disjunction over the fields, and the terms are put together by the
+        // operator. The documents are then the reference's documents. The
+        // score is not: the reference sums the term frequencies across the
+        // fields and scores the sum once, over a combined field length, and
+        // that needs statistics this engine does not gather per query. What
+        // is here scores each term's best field and adds those up, which
+        // ranks nearer than `cross_fields` did and is still an approximation.
+        // `docs/progress.md` says so rather than the name implying otherwise.
         "combined_fields" => {
-            let mut b = body.clone();
-            b["type"] = serde_json::json!("cross_fields");
-            build_multi_match(ctx, &b)?
+            let fields: Vec<Value> =
+                body.get("fields").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+            if fields.is_empty() {
+                return Err(anyhow!("[combined_fields] requires [fields]"));
+            }
+            let text = body.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+            // every field of a combined_fields query has to share an
+            // analyzer for the reference to accept it, so the first names it
+            let first = fields
+                .first()
+                .and_then(|f| f.as_str())
+                .map(|f| f.split('^').next().unwrap_or(f).to_string())
+                .unwrap_or_default();
+            let terms = crate::query::analyze(ctx, crate::query::View::Dyn, &first, text);
+            if terms.is_empty() {
+                return build(ctx, &serde_json::json!({"match_none": {}}));
+            }
+            let per_term: Vec<Value> = terms
+                .iter()
+                .map(|t| {
+                    serde_json::json!({"multi_match": {
+                        "query": t, "fields": fields.clone(), "type": "best_fields"}})
+                })
+                .collect();
+            let and = body
+                .get("operator")
+                .and_then(|v| v.as_str())
+                .map(|o| o.eq_ignore_ascii_case("and"))
+                == Some(true);
+            let mut inner = if and {
+                serde_json::json!({"bool": {"must": per_term}})
+            } else {
+                serde_json::json!({"bool": {"should": per_term, "minimum_should_match": 1}})
+            };
+            if let Some(m) = body.get("minimum_should_match")
+                && !and
+            {
+                inner["bool"]["minimum_should_match"] = m.clone();
+            }
+            build(ctx, &inner)?
         }
         // Documents here are stored whole rather than split into a parent and
         // its nested children, so a nested query is its inner query asked
