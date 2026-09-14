@@ -110,15 +110,18 @@ the neural-search plugin, a pipeline with
 
 combines the scores of the sub-queries of a `hybrid` query -- typically a
 `match` and a `knn` -- after rescaling each to a common range (`min_max` or
-`l2`). This server refuses the `hybrid` query (`unknown query [hybrid]`).
-It stores a pipeline with `phase_results_processors`, but does not check the
-processor names in it and does not run them, so such a pipeline would be
-accepted and then do nothing. The example leaves it out rather than show a
-step that proves nothing. Example 05 mixes words and a vector with a `bool`
-and boosts, which is the form that works here.
+`l2` or `z_score`), or ranks them by reciprocal rank fusion with a
+`score-ranker-processor`. This server runs both the way the plugin does, with
+one difference that follows from how it stores an index: an index is one
+shard here, so the lists the pipeline combines are one per index, where an
+OpenSearch index with several shards collects one per shard and scores each
+with that shard's term statistics. The example leaves hybrid search out
+because the catalogue has only one sensible way to score a title; example 05
+mixes words and a vector, which is where a hybrid query earns its keep.
 
-**The `split` response processor.** It is accepted, but it does not split the
-field: a `"csv": "x,y,z"` comes back unchanged.
+**The `split` response processor.** It turns a delimited string into a list
+(`"csv": "x,y,z"` becomes `["x", "y", "z"]`); nothing in the catalogue is
+stored that way.
 
 ## What would change at scale
 

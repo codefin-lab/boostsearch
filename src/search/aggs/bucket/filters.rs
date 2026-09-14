@@ -28,7 +28,12 @@ pub(crate) fn run_filters_agg(
                     "[filters] cannot be empty",
                 ));
             }
-            o.iter().map(|(k, v)| (Some(k.clone()), v.clone())).collect()
+            // the reference sorts named filters by name when it reads the
+            // request, and answers them in that order
+            let mut named: Vec<(Option<String>, Value)> =
+                o.iter().map(|(k, v)| (Some(k.clone()), v.clone())).collect();
+            named.sort_by(|a, b| a.0.cmp(&b.0));
+            named
         }
         Value::Array(a) => {
             if a.is_empty() {
@@ -177,7 +182,7 @@ pub(crate) fn run_peeled_agg(
     } else if def.get("weighted_avg").is_some() {
         run_weighted_avg(store, targets, query_json, def)
     } else if def.get("variable_width_histogram").is_some() {
-        run_variable_width_histogram(store, targets, query_json, def)
+        run_variable_width_histogram(store, targets, query_json, name, def)
     } else if def.get("auto_date_histogram").is_some() {
         run_auto_date_histogram(store, targets, query_json, def)
     } else if def.get("date_range").is_some() {
@@ -196,8 +201,17 @@ pub(crate) fn run_peeled_agg(
         .unwrap_or(false)
     {
         run_missing_terms_agg(store, targets, query_json, def)
-    } else if def.get("histogram").is_some() {
+    } else if def
+        .pointer("/histogram/field")
+        .and_then(|f| f.as_str())
+        .map(|f| range_field(store, targets, f))
+        .unwrap_or(false)
+    {
         run_range_field_histogram(store, targets, query_json, def)
+    } else if def.get("histogram").is_some() || def.get("range").is_some() {
+        // a histogram or a range BoostCore can bucket, here only because of
+        // what is under it or because of a `missing`
+        run_native_bucket_agg(store, targets, query_json, name, def)
     } else if def.get("ip_range").is_some() {
         run_ip_range_agg(store, targets, query_json, def)
     } else if def.get("adjacency_matrix").is_some() {

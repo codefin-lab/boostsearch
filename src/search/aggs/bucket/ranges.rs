@@ -232,6 +232,119 @@ pub(crate) fn run_range_field_histogram(
     Ok(json!({"buckets": buckets}))
 }
 
+/// A `histogram` or a `range` over an ordinary field, run through BoostCore
+/// from here rather than as part of the whole request.
+///
+/// It lands here when something under it is run a bucket at a time, which
+/// `filtered_count` takes care of, or when it names a `missing` value, which
+/// BoostCore does not read. Those were answered as a histogram over a range
+/// field and as a `filters` with no filters, which is to say with no buckets
+/// and with a refusal. A document with no value stands in with the `missing`
+/// one, so it belongs to whichever bucket that value falls in: the bucket is
+/// counted again over its own documents and those, and a histogram gains the
+/// bucket if it had none there, with the empty ones between.
+pub(crate) fn run_native_bucket_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    name: &str,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let kind = if def.get("histogram").is_some() { "histogram" } else { "range" };
+    let spec = def.get(kind).cloned().unwrap_or_else(|| json!({}));
+    let missing = spec.get("missing").and_then(|m| m.as_f64());
+    let mut native = def.clone();
+    if let Some(o) = native.get_mut(kind).and_then(|s| s.as_object_mut()) {
+        o.remove("missing");
+    }
+    // the keys and counts are BoostCore's; only the name is needed to find them
+    let label = if name.is_empty() { "__native" } else { name };
+    let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let request = json!({ label: native });
+    let (_, res) = filtered_count(store, targets, &query, &Some(request))?;
+    let mut answer = res
+        .and_then(|mut r| r.get_mut(label).map(|v| v.take()))
+        .unwrap_or_else(|| json!({"buckets": []}));
+    let Some(stand_in) = missing else { return Ok(answer) };
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or_default().to_string();
+    let absent = json!({"bool": {"must_not": [{"exists": {"field": field}}]}});
+    let (without, _) = filtered_count(store, targets, &combine(main_query, Some(absent)), &None)?;
+    if without == 0 {
+        return Ok(answer);
+    }
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let recount = |bucket: &mut Value| -> std::result::Result<(), Response> {
+        let Some(filter) = bucket_filter(store, targets, def, bucket) else { return Ok(()) };
+        let narrowed = combine(main_query, Some(filter));
+        let (count, sub) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, false)?;
+        bucket["doc_count"] = json!(count);
+        if let Some(Value::Object(o)) = sub {
+            for (k, v) in o {
+                bucket[k] = v;
+            }
+        }
+        Ok(())
+    };
+    if kind == "range" {
+        if let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut()) {
+            for b in buckets.iter_mut() {
+                let from = b.get("from").and_then(|v| v.as_f64());
+                let to = b.get("to").and_then(|v| v.as_f64());
+                if from.map(|f| stand_in >= f).unwrap_or(true)
+                    && to.map(|t| stand_in < t).unwrap_or(true)
+                {
+                    recount(b)?;
+                }
+            }
+        }
+        return Ok(answer);
+    }
+    let interval = spec.get("interval").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let offset = spec.get("offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let min_doc_count = spec.get("min_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let key = ((stand_in - offset) / interval).floor() * interval + offset;
+    let Some(buckets) = answer.get_mut("buckets").and_then(|b| b.as_array_mut()) else {
+        return Ok(answer);
+    };
+    let mut keys: Vec<f64> =
+        buckets.iter().filter_map(|b| b.get("key").and_then(|k| k.as_f64())).collect();
+    if !keys.contains(&key) {
+        // the buckets between the new one and the rest are there too, empty,
+        // where a histogram shows its empty buckets
+        let mut wanted = vec![key];
+        if min_doc_count == 0
+            && let (Some(lo), Some(hi)) = (keys.first().copied(), keys.last().copied())
+        {
+            let mut at = key + interval;
+            while at < lo {
+                wanted.push(at);
+                at += interval;
+            }
+            let mut at = key - interval;
+            while at > hi {
+                wanted.push(at);
+                at -= interval;
+            }
+        }
+        for k in wanted {
+            buckets.push(json!({"key": k, "doc_count": 0}));
+            keys.push(k);
+        }
+        buckets.sort_by(|a, b| {
+            let k = |v: &Value| v.get("key").and_then(|k| k.as_f64()).unwrap_or(0.0);
+            k(a).total_cmp(&k(b))
+        });
+    }
+    for b in buckets.iter_mut() {
+        let here = b.get("key").and_then(|k| k.as_f64());
+        let empty = b.get("doc_count").and_then(|c| c.as_u64()) == Some(0);
+        if here == Some(key) || empty {
+            recount(b)?;
+        }
+    }
+    Ok(answer)
+}
+
 /// The ranges a request names: a list of them, or one written on its own,
 /// read as a list of one.
 pub(crate) fn ranges_of(spec: &Value) -> Vec<Value> {
@@ -314,52 +427,452 @@ pub(crate) fn run_ip_range_agg(
     Ok(json!({"buckets": buckets}))
 }
 
+/// A bucket of a variable-width histogram as a shard hands it on: where its
+/// values centre, the least and most of them, how many documents it counted,
+/// and which documents those were.
+#[derive(Clone)]
+struct WidthBucket {
+    centroid: f64,
+    min: f64,
+    max: f64,
+    doc_count: u64,
+    docs: Vec<String>,
+}
+
+/// One shard's clustering, the way `VariableWidthHistogramAggregator` does it.
+///
+/// The first `initial_buffer` values are held and then cut into `shard_size`
+/// three quarters equal runs; every later value joins the cluster whose centre
+/// is nearest, unless it is further than twice the average distance between
+/// centres and there is room for another cluster, in which case it starts one.
+/// A document is counted in the bucket its value joined -- except that the
+/// buffered ones are handed to buckets by their place in the buffer rather
+/// than by their place in the sorted run, which is what the reference's merge
+/// map does, and is where their sub-aggregations are counted too.
+fn cluster_one_shard(
+    docs: &[(String, Vec<Vec<Held>>)],
+    missing: Option<f64>,
+    shard_size: usize,
+    buffer_limit: usize,
+) -> Vec<WidthBucket> {
+    let mut counts: Vec<u64> = Vec::new();
+    let mut members: Vec<Vec<String>> = Vec::new();
+    let collect = |counts: &mut Vec<u64>, members: &mut Vec<Vec<String>>, ord: usize, id: &str| {
+        if counts.len() <= ord {
+            counts.resize(ord + 1, 0);
+            members.resize(ord + 1, Vec::new());
+        }
+        counts[ord] += 1;
+        members[ord].push(id.to_string());
+    };
+    // the buckets move as clusters are merged or put in order; the counts and
+    // the documents counted in them move with them
+    let remap = |counts: &mut Vec<u64>,
+                 members: &mut Vec<Vec<String>>,
+                 len: usize,
+                 to: &dyn Fn(usize) -> usize| {
+        let mut new_counts = vec![0u64; len];
+        let mut new_members = vec![Vec::new(); len];
+        for i in 0..counts.len() {
+            if counts[i] == 0 {
+                continue;
+            }
+            let dest = to(i);
+            if dest >= len {
+                continue;
+            }
+            new_counts[dest] += counts[i];
+            new_members[dest].append(&mut members[i]);
+        }
+        *counts = new_counts;
+        *members = new_members;
+    };
+    let mut buffer: Vec<f64> = Vec::new();
+    let mut merging = false;
+    let (mut mins, mut maxes, mut centroids, mut sizes): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) =
+        Default::default();
+    let mut avg_distance = 0.0f64;
+    let update_avg = |centroids: &[f64]| {
+        let n = centroids.len();
+        (centroids[n - 1] - centroids[0]) / (n as f64 - 1.0)
+    };
+    // the buffered values cut into equal runs by value, the first time the
+    // buffer is full or when collection ends before it is
+    let start_merging = |buffer: &[f64],
+                         counts: &mut Vec<u64>,
+                         members: &mut Vec<Vec<String>>,
+                         mins: &mut Vec<f64>,
+                         maxes: &mut Vec<f64>,
+                         centroids: &mut Vec<f64>,
+                         sizes: &mut Vec<f64>|
+     -> f64 {
+        let num_buckets = shard_size * 3 / 4;
+        let mut order: Vec<usize> = (0..buffer.len()).collect();
+        order.sort_by(|a, b| buffer[*a].total_cmp(&buffer[*b]));
+        let per = (buffer.len() as f64 / num_buckets as f64).ceil() as usize;
+        let mut merge_map = vec![0usize; buffer.len()];
+        let mut ord = 0usize;
+        for i in 0..order.len() {
+            let val = buffer[order[i]];
+            merge_map[i] = order[i] / per;
+            if ord == centroids.len() {
+                mins.push(val);
+                maxes.push(val);
+                centroids.push(val);
+                sizes.push(1.0);
+            } else {
+                maxes[ord] = maxes[ord].max(val);
+                mins[ord] = mins[ord].min(val);
+                centroids[ord] = (centroids[ord] * sizes[ord] + val) / (sizes[ord] + 1.0);
+                sizes[ord] += 1.0;
+            }
+            if (i + 1) % per == 0 {
+                ord += 1;
+            }
+        }
+        let len = ord + 1;
+        let map = merge_map.clone();
+        remap(counts, members, len, &|i| map.get(i).copied().unwrap_or(usize::MAX));
+        if buffer.len() > 1 { update_avg(centroids) } else { 0.0 }
+    };
+    for (id, values) in docs {
+        let mut held: Vec<f64> = values[0]
+            .iter()
+            .filter_map(|h| match h {
+                Held::Number(n) => Some(*n),
+                Held::Text(_) => None,
+            })
+            .collect();
+        if held.is_empty()
+            && let Some(m) = missing
+        {
+            held.push(m);
+        }
+        held.sort_by(|a, b| a.total_cmp(b));
+        let mut previous = f64::NEG_INFINITY;
+        for val in held {
+            if val == previous {
+                continue;
+            }
+            previous = val;
+            if !merging {
+                if buffer.len() < buffer_limit {
+                    let ord = buffer.len();
+                    buffer.push(val);
+                    collect(&mut counts, &mut members, ord, id);
+                }
+                if buffer.len() == buffer_limit {
+                    avg_distance = start_merging(
+                        &buffer,
+                        &mut counts,
+                        &mut members,
+                        &mut mins,
+                        &mut maxes,
+                        &mut centroids,
+                        &mut sizes,
+                    );
+                    merging = true;
+                }
+                continue;
+            }
+            let mut ord = nearest(&centroids, val);
+            let distance = (centroids[ord] - val).abs();
+            if distance > 2.0 * avg_distance && centroids.len() < shard_size {
+                mins.push(val);
+                maxes.push(val);
+                centroids.push(val);
+                sizes.push(1.0);
+                let last = centroids.len() - 1;
+                collect(&mut counts, &mut members, last, id);
+                if val > centroids[ord] {
+                    ord += 1;
+                }
+                if ord != last {
+                    for list in [&mut mins, &mut maxes, &mut centroids, &mut sizes] {
+                        let moved = list.remove(last);
+                        list.insert(ord, moved);
+                    }
+                    let n = centroids.len();
+                    remap(&mut counts, &mut members, n, &|i| {
+                        if i < ord {
+                            i
+                        } else if i == n - 1 {
+                            ord
+                        } else {
+                            i + 1
+                        }
+                    });
+                }
+                avg_distance = update_avg(&centroids);
+            } else {
+                maxes[ord] = maxes[ord].max(val);
+                mins[ord] = mins[ord].min(val);
+                centroids[ord] = (centroids[ord] * sizes[ord] + val) / (sizes[ord] + 1.0);
+                sizes[ord] += 1.0;
+                collect(&mut counts, &mut members, ord, id);
+                if ord == 0 || ord == centroids.len() - 1 {
+                    avg_distance = update_avg(&centroids);
+                }
+            }
+        }
+    }
+    if !merging {
+        start_merging(
+            &buffer,
+            &mut counts,
+            &mut members,
+            &mut mins,
+            &mut maxes,
+            &mut centroids,
+            &mut sizes,
+        );
+    }
+    let mut out: Vec<WidthBucket> = (0..centroids.len())
+        .map(|i| WidthBucket {
+            centroid: centroids[i],
+            min: mins[i],
+            max: maxes[i],
+            doc_count: counts.get(i).copied().unwrap_or(0),
+            docs: members.get(i).cloned().unwrap_or_default(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.centroid.total_cmp(&b.centroid));
+    out
+}
+
+/// The centre nearest a value, found the way the reference's binary search
+/// finds it, which settles a tie between two centres its own way.
+fn nearest(centroids: &[f64], value: f64) -> usize {
+    let compare = |i: usize| centroids[i].total_cmp(&value);
+    let closest = |a: usize, b: usize| {
+        if (centroids[a] - value).abs() < (centroids[b] - value).abs() { a } else { b }
+    };
+    let (mut from, mut to) = (0isize, centroids.len() as isize - 1);
+    while from < to {
+        let mid = ((from + to) as usize) >> 1;
+        match compare(mid) {
+            Ordering::Equal => return mid,
+            Ordering::Less => {
+                if (mid as isize) < to {
+                    if compare(mid + 1) == Ordering::Greater {
+                        return closest(mid, mid + 1);
+                    }
+                } else {
+                    return mid;
+                }
+                from = mid as isize + 1;
+            }
+            Ordering::Greater => {
+                if mid as isize > from {
+                    if compare(mid - 1) == Ordering::Less {
+                        return closest(mid, mid - 1);
+                    }
+                } else if mid == 0 {
+                    return mid;
+                }
+                to = mid as isize - 1;
+            }
+        }
+    }
+    from.max(0) as usize
+}
+
+/// The reference's `reduceBucket`: the counts added, the edges widened, and
+/// the centre weighted by the counts, added up in the order given.
+fn merge_width_buckets(buckets: &[&WidthBucket]) -> WidthBucket {
+    let mut out = WidthBucket {
+        centroid: 0.0,
+        min: f64::INFINITY,
+        max: f64::NEG_INFINITY,
+        doc_count: 0,
+        docs: Vec::new(),
+    };
+    let mut sum = 0.0f64;
+    for b in buckets {
+        out.doc_count += b.doc_count;
+        out.min = out.min.min(b.min);
+        out.max = out.max.max(b.max);
+        sum += b.doc_count as f64 * b.centroid;
+        out.docs.extend(b.docs.iter().cloned());
+    }
+    out.centroid = sum / out.doc_count as f64;
+    out
+}
+
+/// Replace each run of buckets named by a `(start, end)` pair with their merge.
+fn merge_width_plan(buckets: &mut Vec<WidthBucket>, plan: &[(usize, usize)]) {
+    for &(start, end) in plan.iter().rev() {
+        if start == end {
+            continue;
+        }
+        let taken: Vec<WidthBucket> = buckets.drain(start + 1..=end).rev().collect();
+        let mut run: Vec<&WidthBucket> = taken.iter().collect();
+        run.push(&buckets[start]);
+        let merged = merge_width_buckets(&run);
+        buckets[start] = merged;
+    }
+}
+
+/// The reference's `reduceBuckets`: the buckets of every list taken in order
+/// of their centres, the ones with the same centre reduced together, and then
+/// the two nearest centres merged until as many are left as were asked for.
+fn reduce_width_buckets(lists: &[Vec<WidthBucket>], want: usize) -> Vec<WidthBucket> {
+    let mut all: Vec<(usize, &WidthBucket)> =
+        lists.iter().enumerate().flat_map(|(s, list)| list.iter().map(move |b| (s, b))).collect();
+    all.sort_by(|a, b| a.1.centroid.total_cmp(&b.1.centroid).then(a.0.cmp(&b.0)));
+    let mut buckets: Vec<WidthBucket> = Vec::new();
+    let mut run: Vec<&WidthBucket> = Vec::new();
+    for (_, b) in all {
+        if run.last().map(|r| r.centroid.total_cmp(&b.centroid) != Ordering::Equal).unwrap_or(false)
+        {
+            buckets.push(merge_width_buckets(&run));
+            run.clear();
+        }
+        run.push(b);
+    }
+    if !run.is_empty() {
+        buckets.push(merge_width_buckets(&run));
+    }
+    let mut ranges: Vec<(usize, usize, f64, u64)> =
+        buckets.iter().enumerate().map(|(i, b)| (i, i, b.centroid, b.doc_count)).collect();
+    while ranges.len() > want {
+        let mut closest = 0usize;
+        let mut smallest = f64::INFINITY;
+        for i in 0..ranges.len() - 1 {
+            let distance = ranges[i + 1].2 - ranges[i].2;
+            if distance < smallest {
+                closest = i;
+                smallest = distance;
+            }
+        }
+        let next = ranges.remove(closest + 1);
+        let here = &mut ranges[closest];
+        here.0 = here.0.min(next.0);
+        here.1 = here.1.max(next.1);
+        if here.3 + next.3 > 0 {
+            here.2 = (here.2 * here.3 as f64 + next.2 * next.3 as f64) / (here.3 + next.3) as f64;
+            here.3 += next.3;
+        }
+    }
+    let plan: Vec<(usize, usize)> = ranges.iter().map(|r| (r.0, r.1)).collect();
+    merge_width_plan(&mut buckets, &plan);
+    buckets
+}
+
 /// `variable_width_histogram`: buckets whose edges follow the data.
 ///
-/// The values are sorted and cut at the widest gaps, which puts the boundaries
-/// where the data is already sparse. Each bucket is keyed by the mean of what
-/// it holds.
+/// A port of OpenSearch's aggregator. Each shard clusters its own values in
+/// the order it holds them (see `cluster_one_shard`), and the shards' buckets
+/// are then merged: the ones with the same centre first, then the two nearest
+/// centres again and again until `buckets` are left, then the ones that start
+/// at the same value, and last any two that overlap are split at the middle of
+/// the overlap. The sorted values were cut at their widest gaps instead, which
+/// found different buckets: five over a price came back as 2652, 137, 1, 134
+/// and 80 documents where the reference answers 2654, 133, 136, 34 and 47.
 pub(crate) fn run_variable_width_histogram(
     store: &Store,
     targets: &[String],
     main_query: &Option<Value>,
+    name: &str,
     def: &Value,
 ) -> std::result::Result<Value, Response> {
     let spec = def.get("variable_width_histogram").cloned().unwrap_or(json!({}));
-    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10).max(1) as usize;
+    let want = spec.get("buckets").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // the reference checks these where it builds the aggregation, on the shard
+    let index = targets.first().cloned().unwrap_or_default();
+    let bad = |reason: String| {
+        crate::search::search_shard_failure("illegal_argument_exception", &reason, &index)
+    };
+    if want == 0 {
+        return Err(bad(format!("[buckets] must be greater than 0 for [{name}]")));
+    }
+    let shard_size = match spec.get("shard_size").and_then(|v| v.as_u64()) {
+        Some(s) if s <= 1 => {
+            return Err(bad(format!("[shard_size] must be greater than 1 for [{name}]")));
+        }
+        Some(s) => s as usize,
+        None => want * 50,
+    };
+    let initial_buffer = match spec.get("initial_buffer").and_then(|v| v.as_u64()) {
+        Some(0) => {
+            return Err(bad(format!("[initial_buffer] must be greater than 0 for [{name}]")));
+        }
+        Some(b) => b as usize,
+        None => (10 * shard_size).min(50_000),
+    };
+    if initial_buffer < want {
+        return Err(bad(format!(
+            "initial_buffer must be at least buckets but was [{initial_buffer}<{want}] for [{name}]"
+        )));
+    }
+    if shard_size * 3 / 4 < want {
+        return Err(bad(format!(
+            "3/4 of shard_size must be at least buckets but was [{}<{want}] for [{name}]",
+            shard_size * 3 / 4
+        )));
+    }
     let (field, missing) = agg_field_and_missing(&spec);
     let query = combine(main_query, None);
-    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
-    if values.is_empty() {
-        return Ok(json!({"buckets": []}));
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let shards = shard_docs(store, targets, &query, &[&field])?;
+    let per_shard: Vec<Vec<WidthBucket>> = shards
+        .iter()
+        .map(|s| cluster_one_shard(&s.docs, missing, shard_size, initial_buffer))
+        .collect();
 
-    // cut where the data is sparsest: the widest gaps between neighbours
-    let mut gaps: Vec<(f64, usize)> =
-        (1..values.len()).map(|i| (values[i] - values[i - 1], i)).collect();
-    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-    let mut cuts: Vec<usize> =
-        gaps.into_iter().take(want.saturating_sub(1)).map(|(_, i)| i).collect();
-    cuts.sort_unstable();
+    // each shard reduces its own buckets before handing them on -- the
+    // reference collects a shard in slices and reduces the slices -- and the
+    // coordinator reduces what the shards handed on
+    let reduced: Vec<Vec<WidthBucket>> =
+        per_shard.into_iter().map(|list| reduce_width_buckets(&[list], want)).collect();
+    let mut buckets = reduce_width_buckets(&reduced, want);
 
-    let mut buckets = Vec::new();
-    let mut start = 0usize;
-    for end in cuts.into_iter().chain(std::iter::once(values.len())) {
-        let slice = &values[start..end];
-        if slice.is_empty() {
-            continue;
+    // then the ones that begin at the same value
+    let mut plan: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < buckets.len() {
+        let mut end = i;
+        while end + 1 < buckets.len() && buckets[end + 1].min == buckets[i].min {
+            end += 1;
         }
-        let sum: f64 = slice.iter().sum();
-        buckets.push(json!({
-            "min": slice[0],
-            "key": sum / slice.len() as f64,
-            "max": slice[slice.len() - 1],
-            "doc_count": slice.len(),
-        }));
-        start = end;
+        plan.push((i, end));
+        i = end + 1;
     }
-    Ok(json!({"buckets": buckets}))
+    merge_width_plan(&mut buckets, &plan);
+
+    // and two that overlap meet halfway
+    for i in 1..buckets.len() {
+        if buckets[i].min < buckets[i - 1].max {
+            buckets[i].min = (buckets[i - 1].max + buckets[i].min) / 2.0;
+            buckets[i - 1].max = buckets[i].min;
+        }
+    }
+
+    let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
+    let format = spec.get("format").and_then(|f| f.as_str()).map(|s| s.to_string());
+    let mut out = Vec::new();
+    for b in &buckets {
+        let mut bucket =
+            json!({"min": b.min, "key": b.centroid, "max": b.max, "doc_count": b.doc_count});
+        if let Some(pattern) = format.as_deref() {
+            for (k, v) in [("min", b.min), ("key", b.centroid), ("max", b.max)] {
+                if let Some(text) = decimal_format(pattern, v) {
+                    bucket[format!("{k}_as_string")] = json!(text);
+                }
+            }
+        }
+        if sub_aggs.is_some() {
+            let narrowed =
+                json!({"bool": {"filter": [query.clone(), {"ids": {"values": b.docs}}]}});
+            let (_, sub) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, false)?;
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    bucket[k] = v;
+                }
+            }
+        }
+        out.push(bucket);
+    }
+    Ok(json!({"buckets": out}))
 }
 
 /// `auto_date_histogram`: pick the smallest rounding that keeps the bucket

@@ -17,6 +17,9 @@ mod pipeline;
 pub(crate) use pipeline::*;
 mod plan;
 pub(crate) use plan::*;
+mod shards;
+pub(crate) use shards::*;
+pub(crate) mod tdigest;
 
 /// The field types a published mapping names: the same walk the aggregations
 /// use, for the parts of the API that read a mapping they do not hold.

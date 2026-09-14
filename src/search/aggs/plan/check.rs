@@ -4,7 +4,54 @@ use super::*;
 
 /// Reject a numeric metric over a string field the way OpenSearch does.
 pub(crate) fn check_agg_types(node: &Value, ctx: &Ctx) -> std::result::Result<(), Response> {
+    check_width_histogram_nesting(node, false)?;
     check_agg_node(node, ctx, "")
+}
+
+/// A variable-width histogram merges its buckets as it collects, which only
+/// works for the one set of buckets a single-bucket parent gives it; the
+/// reference refuses one under anything that makes more than one.
+fn check_width_histogram_nesting(
+    node: &Value,
+    under_many: bool,
+) -> std::result::Result<(), Response> {
+    const MANY: &[&str] = &[
+        "terms",
+        "multi_terms",
+        "rare_terms",
+        "significant_terms",
+        "significant_text",
+        "histogram",
+        "date_histogram",
+        "auto_date_histogram",
+        "variable_width_histogram",
+        "range",
+        "date_range",
+        "ip_range",
+        "geo_distance",
+        "filters",
+        "adjacency_matrix",
+        "composite",
+        "geohash_grid",
+        "geotile_grid",
+    ];
+    let Some(o) = node.as_object() else { return Ok(()) };
+    for def in o.values() {
+        let Some(d) = def.as_object() else { continue };
+        if under_many && d.contains_key("variable_width_histogram") {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                "[variable_width_histogram] cannot be nested inside an aggregation that collects \
+                 more than a single bucket.",
+            ));
+        }
+        if let Some(subs) = d.get("aggs").or_else(|| d.get("aggregations")) {
+            let many = under_many || d.keys().any(|k| MANY.contains(&k.as_str()));
+            check_width_histogram_nesting(subs, many)?;
+        }
+    }
+    Ok(())
 }
 
 /// Numeric parameter bounds OpenSearch enforces; `owner` is the aggregation
@@ -177,6 +224,38 @@ pub(crate) fn check_agg_node(
                 }
             }
         }
+        // Most metadata fields keep no values to aggregate over, and the
+        // reference refuses them on the shard rather than answering with
+        // nothing. An aggregation over `_routing` came back with no buckets.
+        const NO_FIELDDATA: &[&str] =
+            &["_routing", "_ignored", "_version", "_source", "_field_names"];
+        const VALUE_AGGS: &[&str] = &[
+            "terms",
+            "rare_terms",
+            "significant_terms",
+            "cardinality",
+            "value_count",
+            "min",
+            "max",
+            "sum",
+            "avg",
+            "stats",
+            "extended_stats",
+            "percentiles",
+            "histogram",
+            "range",
+        ];
+        if VALUE_AGGS.contains(&name.as_str())
+            && let Some(f) = def.get("field").and_then(|v| v.as_str())
+            && NO_FIELDDATA.contains(&f)
+            && ctx.mapping.type_of(f).is_none()
+        {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("Fielddata is not supported on field [{f}] of type [{f}]"),
+            ));
+        }
         // `terms` is also the name of a query, which appears inside filter
         // aggregations and inside multi_terms; only an object made entirely of
         // terms-aggregation options is one of those
@@ -196,6 +275,8 @@ pub(crate) fn check_agg_node(
             "value_type",
             "format",
             "show_term_doc_count_error",
+            // what the request is given before it is checked, see `normalize_aggs`
+            "segment_size",
         ];
         if name == "terms" && def.get("field").is_none() && def.get("script").is_none() {
             let all_options = def

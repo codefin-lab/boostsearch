@@ -116,7 +116,8 @@ pub(crate) fn run_index_terms_agg(
     let query = combine(main_query, None);
     let mut buckets = Vec::new();
     for name in targets {
-        let (count, sub) = filtered_count(store, std::slice::from_ref(name), &query, &sub_aggs)?;
+        let (count, sub) =
+            count_with_sub_aggs(store, std::slice::from_ref(name), &query, &sub_aggs, false)?;
         if count < min_doc_count {
             continue;
         }

@@ -156,8 +156,121 @@ pub(crate) fn keep_asked_ranges(request: &Value, answer: &mut Value) {
     }
 }
 
-// a metric over a date reads instants, and says what the instant it
-// arrived at is as well as the number behind it
+/// The way a value is written beside the number it is: the `format` an
+/// aggregation names, or a date field's own spelling where it names none.
+enum ValueFormat {
+    Date { pattern: String, nanos: bool },
+    Decimal(String),
+}
+
+impl ValueFormat {
+    fn write(&self, v: f64) -> Option<String> {
+        match self {
+            // the reference turns the double into a long the way Java casts,
+            // which saturates rather than wraps
+            ValueFormat::Date { pattern, nanos } => {
+                let millis = if *nanos { (v / 1e6) as i64 } else { v as i64 };
+                java_date(millis, pattern)
+            }
+            ValueFormat::Decimal(pattern) => decimal_format(pattern, v),
+        }
+    }
+}
+
+/// A date written the way the reference writes an instant, including the
+/// ones past the year 9999 that a sum of dates reaches, which Java prints with
+/// a sign in front of the year.
+fn java_date(millis: i64, pattern: &str) -> Option<String> {
+    let iso = matches!(
+        pattern,
+        "strict_date_optional_time" | "date_optional_time" | "iso8601" | "strict_date_time"
+    );
+    let days = millis.div_euclid(86_400_000);
+    let rest = millis.rem_euclid(86_400_000);
+    // days since the epoch to a civil date, after Howard Hinnant's algorithm
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let year_text = if year > 9999 {
+        format!("+{year}")
+    } else if year < 0 {
+        format!("-{:04}", -year)
+    } else {
+        format!("{year:04}")
+    };
+    if !iso {
+        // a year the calendar library cannot hold is put into the pattern
+        // by hand; any other is the pattern's to write
+        if (0..=9999).contains(&year) {
+            return crate::store::format_millis(millis, pattern);
+        }
+        let mut out = String::new();
+        let mut chars = pattern.chars().peekable();
+        while let Some(c) = chars.next() {
+            let mut run = 1;
+            while chars.peek() == Some(&c) {
+                chars.next();
+                run += 1;
+            }
+            let field = match c {
+                'y' | 'u' => year_text.clone(),
+                'M' => format!("{month:0run$}"),
+                'd' => format!("{day:0run$}"),
+                'H' => format!("{:0run$}", rest / 3_600_000),
+                'm' => format!("{:0run$}", rest / 60_000 % 60),
+                's' => format!("{:0run$}", rest / 1000 % 60),
+                'S' => format!("{:03}", rest % 1000),
+                '\'' => String::new(),
+                other => other.to_string().repeat(run),
+            };
+            out.push_str(&field);
+        }
+        return Some(out);
+    }
+    Some(format!(
+        "{year_text}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3_600_000,
+        rest / 60_000 % 60,
+        rest / 1000 % 60,
+        rest % 1000
+    ))
+}
+
+/// The format an aggregation's values are written in, if any.
+fn value_format(store: &Store, targets: &[String], spec: &Value) -> Option<ValueFormat> {
+    let field = spec
+        .get("field")
+        .or_else(|| spec.pointer("/value/field"))
+        .and_then(|f| f.as_str())
+        .unwrap_or("");
+    let ty = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+    let asked = spec.get("format").and_then(|f| f.as_str()).map(|s| s.to_string());
+    match ty.as_deref() {
+        Some(t @ ("date" | "date_nanos")) => Some(ValueFormat::Date {
+            pattern: asked.unwrap_or_else(|| "strict_date_optional_time".to_string()),
+            nanos: t == "date_nanos",
+        }),
+        _ => asked.map(ValueFormat::Decimal),
+    }
+}
+
+/// Write each metric's value the way its format says, beside the number.
+///
+/// OpenSearch writes `value_as_string` -- and for the stats the `min_as_string`
+/// and the rest -- whenever the value has a format other than the raw one: a
+/// date field always does, and a number does once the request names a
+/// `format`. Only the dates were written here, and always in ISO form, so a
+/// `min` over a date asked for as `yyyy-MM-dd` came back with the full instant
+/// and a `sum` asked for as `0.00` with no text at all.
 pub(crate) fn name_date_metrics(
     store: &Store,
     targets: &[String],
@@ -166,31 +279,106 @@ pub(crate) fn name_date_metrics(
 ) {
     let Some(reqs) = request.as_object() else { return };
     for (name, def) in reqs {
+        const SINGLE: &[&str] =
+            &["avg", "min", "max", "sum", "median_absolute_deviation", "weighted_avg"];
+        const STATS: &[&str] = &["stats", "extended_stats"];
+        const PERCENTS: &[&str] = &["percentiles", "percentile_ranks"];
         let kind = def
             .as_object()
             .and_then(|o| {
                 o.keys().map(|k| k.to_string()).find(|k| {
-                    matches!(
-                        k.as_str(),
-                        "avg" | "min" | "max" | "sum" | "median_absolute_deviation"
-                    )
+                    SINGLE.contains(&k.as_str())
+                        || STATS.contains(&k.as_str())
+                        || PERCENTS.contains(&k.as_str())
+                        || matches!(k.as_str(), "terms" | "range")
                 })
             })
             .unwrap_or_default();
-        if !kind.is_empty() {
-            let field =
-                def.pointer(&format!("/{kind}/field")).and_then(|f| f.as_str()).unwrap_or("");
-            let ty = targets
-                .iter()
-                .filter_map(|n| store.get(n))
-                .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
-            if matches!(ty.as_deref(), Some("date") | Some("date_nanos"))
-                && let Some(v) = answer.pointer(&format!("/{name}/value")).and_then(|v| v.as_f64())
+        let format = def.get(&kind).and_then(|spec| value_format(store, targets, spec));
+        if let (Some(format), Some(node)) = (format.as_ref(), answer.get_mut(name))
+            && let Some(o) = node.as_object_mut()
+        {
+            let number =
+                |o: &serde_json::Map<String, Value>, k: &str| o.get(k).and_then(|v| v.as_f64());
+            if SINGLE.contains(&kind.as_str()) {
+                if let Some(text) = number(o, "value").and_then(|v| format.write(v)) {
+                    o.insert("value_as_string".into(), json!(text));
+                }
+            } else if STATS.contains(&kind.as_str()) {
+                if o.get("count").and_then(|c| c.as_u64()).unwrap_or(0) > 0 {
+                    let mut keys = vec!["min", "max", "avg", "sum"];
+                    if kind == "extended_stats" {
+                        keys.extend([
+                            "sum_of_squares",
+                            "variance",
+                            "variance_population",
+                            "variance_sampling",
+                            "std_deviation",
+                            "std_deviation_population",
+                            "std_deviation_sampling",
+                        ]);
+                    }
+                    for k in keys {
+                        if let Some(text) = number(o, k).and_then(|v| format.write(v)) {
+                            o.insert(format!("{k}_as_string"), json!(text));
+                        }
+                    }
+                    if let Some(Value::Object(bounds)) = o.get("std_deviation_bounds") {
+                        let written: serde_json::Map<String, Value> = bounds
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                Some((k.clone(), json!(format.write(v.as_f64()?)?)))
+                            })
+                            .collect();
+                        o.insert("std_deviation_bounds_as_string".into(), Value::Object(written));
+                    }
+                }
+            } else if PERCENTS.contains(&kind.as_str()) {
+                match o.get_mut("values") {
+                    Some(Value::Object(values)) => {
+                        let mut out = serde_json::Map::new();
+                        for (k, v) in values.iter() {
+                            if k.ends_with("_as_string") {
+                                continue;
+                            }
+                            out.insert(k.clone(), v.clone());
+                            if let Some(text) = v.as_f64().and_then(|n| format.write(n)) {
+                                out.insert(format!("{k}_as_string"), json!(text));
+                            }
+                        }
+                        *values = out;
+                    }
+                    Some(Value::Array(values)) => {
+                        for entry in values.iter_mut() {
+                            if let Some(text) = entry
+                                .get("value")
+                                .and_then(|n| n.as_f64())
+                                .and_then(|n| format.write(n))
+                            {
+                                entry["value_as_string"] = json!(text);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let (ValueFormat::Decimal(_), Some(Value::Array(buckets))) =
+                (format, o.get_mut("buckets"))
             {
-                let millis =
-                    if ty.as_deref() == Some("date_nanos") { (v / 1e6) as i64 } else { v as i64 };
-                if let Some(text) = crate::store::format_millis(millis, "iso8601") {
-                    answer[name.clone()]["value_as_string"] = json!(text);
+                // a number bucketed under a format is named in it too: a
+                // terms key, and the edges of a range
+                for b in buckets.iter_mut().filter_map(|b| b.as_object_mut()) {
+                    let edges: &[&str] = if kind == "terms" { &["key"] } else { &["from", "to"] };
+                    for edge in edges {
+                        let Some(text) = number(b, edge).and_then(|v| format.write(v)) else {
+                            continue;
+                        };
+                        let named = if *edge == "key" {
+                            "key_as_string".to_string()
+                        } else {
+                            format!("{edge}_as_string")
+                        };
+                        b.insert(named, json!(text));
+                    }
                 }
             }
         }
@@ -209,6 +397,70 @@ pub(crate) fn name_date_metrics(
                 }
             }
             _ => name_date_metrics(store, targets, subs, node),
+        }
+    }
+}
+
+/// Put the aggregations in the order the reference answers them in.
+///
+/// OpenSearch gathers the aggregations of every shard by name into a Java
+/// `HashMap` before reducing them, at the top and inside every bucket, and
+/// writes them in the order that map iterates: by the bucket each name's hash
+/// lands in, and by the request between two that share one. The pipelines are
+/// not shard aggregations; they are added after the rest, in the order they
+/// were asked for. Here the aggregations are answered along several paths --
+/// BoostCore's, the ones walked a bucket at a time, the pipelines -- and each
+/// path's answers were laid in as they came, so the names came back in an
+/// order neither the request nor the reference has. What is not an
+/// aggregation -- a bucket's key, its count -- keeps its place in front.
+pub(crate) fn order_as_requested(answer: &mut Value, request: &Value) {
+    let (Some(reqs), Some(o)) = (request.as_object(), answer.as_object_mut()) else { return };
+    let mut rest = serde_json::Map::new();
+    let mut named: Vec<(String, Value)> = Vec::new();
+    for (k, v) in std::mem::take(o) {
+        match reqs.contains_key(&k) {
+            true => named.push((k, v)),
+            false => {
+                rest.insert(k, v);
+            }
+        }
+    }
+    let pipeline = |d: &Value| {
+        is_pipeline_agg(d)
+            || d.as_object()
+                .map(|o| o.keys().any(|k| BUCKET_PIPELINES.contains(&k.as_str())))
+                .unwrap_or(false)
+    };
+    let shard_aggs: Vec<&String> =
+        reqs.iter().filter(|(_, d)| !pipeline(d)).map(|(k, _)| k).collect();
+    // a HashMap starts with sixteen buckets and doubles once it holds more
+    // than three quarters of them
+    let mut table = 16usize;
+    while shard_aggs.len() * 4 > table * 3 {
+        table *= 2;
+    }
+    let slot = |name: &str| -> usize {
+        let h = name.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
+        ((h ^ (h >> 16)) as usize) & (table - 1)
+    };
+    named.sort_by_key(|(k, _)| {
+        let asked = reqs.keys().position(|r| r == k).unwrap_or(usize::MAX);
+        match shard_aggs.contains(&k) {
+            true => (0, slot(k), asked),
+            false => (1, 0, asked),
+        }
+    });
+    rest.extend(named);
+    *o = rest;
+    for (name, def) in reqs {
+        let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")) else { continue };
+        let Some(node) = o.get_mut(name) else { continue };
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => list.iter_mut().for_each(|b| order_as_requested(b, subs)),
+            Some(Value::Object(keyed)) => {
+                keyed.values_mut().for_each(|b| order_as_requested(b, subs))
+            }
+            _ => order_as_requested(node, subs),
         }
     }
 }
@@ -278,15 +530,66 @@ pub(crate) fn apply_bucket_formats(result: &mut Value, req: &Value) {
 }
 
 /// `Value is ##0.0` applied to 50 gives `Value is 50.0`.
+///
+/// Read the way Java's `DecimalFormat` reads a pattern: the zeros before the
+/// point are the fewest integer digits, the zeros after it the fewest
+/// fraction digits and the `#`s the most, a comma sets the grouping, and the
+/// value is rounded half to even. Only the decimals were read, so `000` wrote
+/// 20 as `20` where the reference writes `020`, and `#,##0.0` wrote no comma.
 pub(crate) fn decimal_format(pattern: &str, value: f64) -> Option<String> {
+    // a pattern for negative numbers after `;` is not read; the reference
+    // uses the positive one with a minus sign when it is left out
+    let pattern = pattern.split(';').next().unwrap_or(pattern);
     let start = pattern.find(['#', '0'])?;
     let end = pattern.rfind(['#', '0'])? + 1;
     let (prefix, numeric, suffix) = (&pattern[..start], &pattern[start..end], &pattern[end..]);
-    let decimals = match numeric.split_once('.') {
-        Some((_, frac)) => frac.chars().filter(|c| *c == '0').count(),
-        None => 0,
+    if !value.is_finite() {
+        return Some(if value.is_nan() {
+            "NaN".to_string()
+        } else {
+            format!("{}\u{221e}", if value < 0.0 { "-" } else { "" })
+        });
+    }
+    let value = if prefix.contains('%') || suffix.contains('%') { value * 100.0 } else { value };
+    let (int_part, frac_part) = numeric.split_once('.').unwrap_or((numeric, ""));
+    let min_int = int_part.chars().filter(|c| *c == '0').count();
+    let grouping = int_part.rfind(',').map(|at| int_part[at + 1..].len());
+    let min_frac = frac_part.chars().filter(|c| *c == '0').count();
+    let max_frac = frac_part.chars().filter(|c| matches!(c, '0' | '#')).count();
+    // Rust writes the exact binary value rounded half to even, which is what
+    // `DecimalFormat` does with a double since Java 8
+    let fixed = format!("{:.max_frac$}", value.abs());
+    let (whole, frac) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    let frac = frac.trim_end_matches('0');
+    let frac = if frac.len() < min_frac { format!("{frac:0<min_frac$}") } else { frac.to_string() };
+    let whole = whole.trim_start_matches('0');
+    let whole =
+        if whole.len() < min_int { format!("{whole:0>min_int$}") } else { whole.to_string() };
+    let whole = match grouping.filter(|g| *g > 0) {
+        Some(size) => {
+            let digits: Vec<char> = whole.chars().collect();
+            let mut out = String::new();
+            for (i, c) in digits.iter().enumerate() {
+                if i > 0 && (digits.len() - i).is_multiple_of(size) {
+                    out.push(',');
+                }
+                out.push(*c);
+            }
+            out
+        }
+        None => whole,
     };
-    Some(format!("{prefix}{value:.decimals$}{suffix}"))
+    let mut body = match frac.is_empty() {
+        true => whole,
+        false => format!("{whole}.{frac}"),
+    };
+    // nothing left to write is written as a zero
+    if body.is_empty() {
+        body = "0".to_string();
+    }
+    let negative = value < 0.0 && body.chars().any(|c| c.is_ascii_digit() && c != '0');
+    let sign = if negative { "-" } else { "" };
+    Some(format!("{sign}{prefix}{body}{suffix}"))
 }
 
 /// Write each `terms` bucket key in the spelling its field is read in.
@@ -310,8 +613,19 @@ pub(crate) fn widen_number_keys(
     for (name, def) in reqo {
         let Some(defo) = def.as_object() else { continue };
         let Some(node) = result.get_mut(name) else { continue };
+        // the terms under another bucket are ordered the same way; the
+        // sub-aggregations were looked for on the aggregation itself rather
+        // than in its buckets, so only the top level was ever put in order
         if let Some(sub) = defo.get("aggs").or_else(|| defo.get("aggregations")) {
-            widen_number_keys(node, sub, floating);
+            match node.get_mut("buckets") {
+                Some(Value::Array(list)) => {
+                    list.iter_mut().for_each(|b| widen_number_keys(b, sub, floating))
+                }
+                Some(Value::Object(keyed)) => {
+                    keyed.values_mut().for_each(|b| widen_number_keys(b, sub, floating))
+                }
+                _ => widen_number_keys(node, sub, floating),
+            }
         }
         let Some(terms) = defo.get("terms") else { continue };
         let field = terms.get("field").and_then(|f| f.as_str()).unwrap_or("");
@@ -345,6 +659,58 @@ pub(crate) fn widen_number_keys(
                 _ => na.partial_cmp(&nb).unwrap_or(Ordering::Equal),
             })
         });
+    }
+}
+
+/// Cut each terms answer back to the size it was asked for.
+///
+/// BoostCore was asked for more buckets than wanted, so that a tie at the
+/// last one is settled the reference's way: by count, and then by the smaller
+/// key. What is cut off is counted among the other documents.
+pub(crate) fn cut_terms(result: &mut Value, req: &Value) {
+    let Some(reqo) = req.as_object() else { return };
+    for (name, def) in reqo {
+        let Some(node) = result.get_mut(name) else { continue };
+        if let Some(sub) = def.get("aggs").or_else(|| def.get("aggregations")) {
+            match node.get_mut("buckets") {
+                Some(Value::Array(list)) => list.iter_mut().for_each(|b| cut_terms(b, sub)),
+                Some(Value::Object(keyed)) => keyed.values_mut().for_each(|b| cut_terms(b, sub)),
+                _ => cut_terms(node, sub),
+            }
+        }
+        let Some(terms) = def.get("terms") else { continue };
+        let by_count = match terms.get("order") {
+            None => true,
+            Some(o) => o.get("_count").and_then(|v| v.as_str()) == Some("desc"),
+        };
+        if !by_count || terms.get("include").and_then(|i| i.get("partition")).is_some() {
+            continue;
+        }
+        let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        let Some(Value::Array(buckets)) = node.get_mut("buckets") else { continue };
+        if buckets.len() <= size {
+            continue;
+        }
+        buckets.sort_by(|a, b| {
+            let count = |v: &Value| v.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0);
+            let key = |v: &Value| match v.get("key") {
+                Some(Value::Number(n)) => (None, n.as_f64().unwrap_or(f64::MAX)),
+                Some(Value::String(s)) => (Some(s.clone()), 0.0),
+                _ => (None, f64::MAX),
+            };
+            let (ka, na) = key(a);
+            let (kb, nb) = key(b);
+            count(b).cmp(&count(a)).then_with(|| match (&ka, &kb) {
+                (Some(x), Some(y)) => x.cmp(y),
+                _ => na.partial_cmp(&nb).unwrap_or(Ordering::Equal),
+            })
+        });
+        let cut: u64 = buckets
+            .drain(size..)
+            .map(|b| b.get("doc_count").and_then(|c| c.as_u64()).unwrap_or(0))
+            .sum();
+        let other = node.get("sum_other_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        node["sum_other_doc_count"] = json!(other + cut);
     }
 }
 
@@ -635,5 +1001,54 @@ pub(crate) fn terms_key_view(raw: Value, ty: Option<&str>) -> (Value, Option<Str
             }
         }
         _ => (raw, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decimal_pattern_is_read_the_way_java_reads_it() {
+        // each read back from OpenSearch 3.8
+        assert_eq!(decimal_format("000", 20.0).as_deref(), Some("020"));
+        assert_eq!(decimal_format("00.0", 1.0).as_deref(), Some("01.0"));
+        assert_eq!(decimal_format("#,##0.0", 343.1786085219707).as_deref(), Some("343.2"));
+        assert_eq!(decimal_format("#,##0.0", 1030908.54).as_deref(), Some("1,030,908.5"));
+        assert_eq!(decimal_format("0.000", 0.31).as_deref(), Some("0.310"));
+        assert_eq!(decimal_format("0.000", -0.032998899453124314).as_deref(), Some("-0.033"));
+        assert_eq!(decimal_format("0.00", 1030908.54).as_deref(), Some("1030908.54"));
+        // half to even, on the value the double really holds
+        assert_eq!(decimal_format("0.00", 0.125).as_deref(), Some("0.12"));
+        assert_eq!(decimal_format("0.00", 1.005).as_deref(), Some("1.00"));
+    }
+
+    #[test]
+    fn an_instant_past_the_year_9999_carries_a_sign() {
+        assert_eq!(
+            java_date(5268404129520000, "strict_date_optional_time").as_deref(),
+            Some("+168919-01-30T15:32:00.000Z")
+        );
+        assert_eq!(java_date(5268404129520000, "yyyy-MM-dd").as_deref(), Some("+168919-01-30"));
+        assert_eq!(
+            java_date(1735726920000, "strict_date_optional_time").as_deref(),
+            Some("2025-01-01T10:22:00.000Z")
+        );
+    }
+
+    #[test]
+    fn aggregations_come_back_in_the_order_a_java_hash_map_keeps() {
+        let request = json!({
+            "z": {"sum": {"field": "n"}},
+            "b": {"max": {"field": "n"}},
+            "p": {"max_bucket": {"buckets_path": "t>s"}},
+            "m": {"min": {"field": "n"}},
+            "a": {"avg": {"field": "n"}},
+        });
+        let mut answer = json!({"p": {}, "m": {}, "z": {}, "a": {}, "b": {}});
+        order_as_requested(&mut answer, &request);
+        let names: Vec<&String> =
+            answer.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+        assert_eq!(names, ["a", "b", "z", "m", "p"]);
     }
 }

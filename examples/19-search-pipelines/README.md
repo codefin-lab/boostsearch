@@ -27,12 +27,11 @@ unchanged by every step of this example.
 | 12 | `ignore_failure` on one processor |
 | 13 | `GET _search/pipeline`, `DELETE _search/pipeline/{name}` |
 
-Not here, because this server does not support it: the `hybrid` query, and
-with it the `normalization-processor` (min_max / l2 normalization,
-`arithmetic_mean` with weights). A pipeline carrying one is stored, but a
-`hybrid` query is refused with `unknown query [hybrid]`, so there is nothing
-for the processor to combine. `docs/design.md` says more; the `split` response
-processor is left out for a similar reason.
+Not here: the `hybrid` query and the `normalization-processor` or
+`score-ranker-processor` that combine its parts. The server runs them, but a
+bookshop has no second way of scoring a title worth showing next to the first;
+`docs/design.md` says what a pipeline for one looks like. The `split` response
+processor is left out for the same reason.
 
 ## Running it
 
