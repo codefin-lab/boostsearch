@@ -197,15 +197,23 @@ def main():
         before_full = set(acked)
 
         # the room goes, in one file that is nobody's business but this test's
-        with open(ballast, "wb") as f:
-            block = b"\0" * (1024 * 1024)
-            try:
-                while free_bytes(volume) > 256 * 1024:
-                    f.write(block)
-                    f.flush()
-                    os.fsync(f.fileno())
-            except OSError:
-                pass
+        def fill():
+            # A merge finishing after the fill hands back the files it
+            # replaced: a volume filled once had most of a megabyte again by
+            # the first write, the writes fitted, and nothing was refused. The
+            # room is taken again before every write, down to the last block.
+            with open(ballast, "ab") as f:
+                for size in (1024 * 1024, 64 * 1024, 4096):
+                    block = b"\0" * size
+                    try:
+                        while free_bytes(volume) >= size:
+                            f.write(block)
+                            f.flush()
+                            os.fsync(f.fileno())
+                    except OSError:
+                        pass
+
+        fill()
         left = free_bytes(volume)
         check("the volume is full", left < 2 * 1024 * 1024, f"{left} bytes free")
 
@@ -214,6 +222,7 @@ def main():
         statuses = []
         refused = []
         for k in range(5):
+            fill()
             status, taken = write_batch(100000 + k * 50, 50, acked_while_full, refused)
             statuses.append(status)
         check("the node still answers with the disk full",

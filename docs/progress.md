@@ -7358,3 +7358,59 @@ Lucene's document order.
 That commit is not yet on the fork's remote, so `Cargo.toml` still pins
 `08e39fc` and this build scores long fields a thousandth low as it did
 before. What is committed here needs nothing from it.
+
+### P1 -- a condition on the primary term was refused after a failover, and `_version` went back to 1 after a `kill -9`
+
+**`if_primary_term` after a failover.** Every document answered
+`_primary_term: 1` on a GET, an mget, a search with `seq_no_primary_term` and
+an update, because the term was never kept per document -- it was written as
+1 where it was reported. After the primary was killed and a replica promoted,
+a write answered `_seq_no: 1, _primary_term: 2`, and a client that wrote next
+on the condition it had just been given was refused with a version conflict:
+optimistic concurrency stopped working on the first failover. Each document
+now carries the term it was written in: `IdxState.terms`, a map that holds
+only documents written after term 1, recorded in the translog line, sent to a
+replica with the operation (`ReplicaOp.doc_term`, left out when absent so a
+node that has not been upgraded reads it), and read by every path that reports
+a term and by the conditional-write check. On three nodes with the primary
+killed: a stale term is refused with 409, a document from before the failover
+keeps term 1, and all three copies report the same seq and term after the
+killed node rejoins and after every node is restarted.
+
+**`_version` after a refresh and a `kill -9`.** A document written three
+times, refreshed and killed came back as version 1. The versions map was
+written in full only when an index went quiet or the node stopped cleanly, and
+a refresh commits the documents and truncates the translog -- the one record
+of what the versions had become. Before the translog is truncated, the
+versions and terms that moved since the last full write are now appended to
+`_docmeta.log` and forced to disk, and the log is replayed over the saved maps
+when the index opens. A full write of the maps empties it, and past 64 MiB it
+is replaced by one. When the append fails the translog is kept, and replays
+them. Written four times across two refreshes and killed, the document comes
+back at version 4.
+
+**The disk-full check stopped reaching the fault.** With this change
+`tools/disk_fault_check.py` failed "the full disk actually refused writes":
+250 writes with the disk full, all acknowledged. They were durable -- the
+checks that every acknowledged document survives a `kill -9` passed -- and
+the old binary had passed only by margin. The volume is filled once to under
+256 KiB free, and a merge finishing afterwards hands back the files it
+replaced: before the first write there was 942 KiB free again, and the
+writes fitted. The check now takes the room again before every write, down
+to a 4 KiB block, and both binaries refuse all 250. The branch where a write
+is acknowledged on a full disk and must then be durable is now not reached
+by this check; the soak and chaos runs cover durability of acknowledged
+writes.
+
+Gates: unit tests, clippy with no warnings, phase 3 and phase 1 corpora at
+100%, `disk_fault_check` 11/11 three times, `refusal_check`, `dls_check`,
+`health_check` 9/9, `snapshot_check` 11/11, a five-minute `soak_check` 10/10
+(658,692 documents acknowledged). `tools/cluster_chaos.py` also prints, for a
+copy found behind, how many nodes acknowledged each missing document and
+whether it appears after 0.5, 2 and 5 seconds.
+
+Still open: a write that a demoted primary took in the old term can survive on
+it after promotion (chaos run 20), and a copy is sometimes found behind for a
+few seconds with documents that then arrive at the same sequence number (run
+52) -- whether that is a check that reads too early or a real gap is not yet
+settled. BoostCore `b3819c5` is still unpushed.

@@ -326,8 +326,9 @@ fn write_doc_within(
     st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
     // recorded before it is answered for: the index has it only after a commit
     let routing = st.routing.get(id).cloned();
-    st.log_write(id, routing.as_deref(), version, seq, Some(&raw));
     let term = crate::cluster::primary_term(&st.name, shard as u32);
+    st.set_term(id, term);
+    st.log_write(id, routing.as_deref(), version, seq, term, Some(&raw));
     // the copies hear of it once the request is answered for here
     crate::cluster::replication::record(crate::cluster::replication::ReplicaOp {
         index: st.name.clone(),
@@ -338,6 +339,7 @@ fn write_doc_within(
         term,
         shard: shard as u32,
         source: Some(raw.clone()),
+        doc_term: None,
     });
     st.note_pending(id, Some(raw));
     st.note_pending_seq(id, seq);
@@ -379,7 +381,9 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
         if !st.mapping.vector_fields.is_empty() {
             st.vectors.write().forget(id);
         }
-        st.log_write(id, None, version, seq, None);
+        let term = crate::cluster::primary_term(&st.name, shard as u32);
+        st.set_term(id, 1);
+        st.log_write(id, None, version, seq, term, None);
         st.note_pending(id, None);
         st.note_pending_seq(id, seq);
         crate::cluster::replication::record(crate::cluster::replication::ReplicaOp {
@@ -391,6 +395,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
             term: crate::cluster::primary_term(&st.name, shard as u32),
             shard: shard as u32,
             source: None,
+            doc_term: None,
         });
     }
     let body = json!({
@@ -482,6 +487,10 @@ pub fn recover(store: &Store) {
                     }
                     let seq = rec.get("seq").and_then(|v| v.as_u64());
                     let _ = write_doc_replayed(&mut g, id, source, Some(raw), version, seq);
+                    // the term it was written in, not the term the restarted
+                    // node happens to read now
+                    let term = rec.get("term").and_then(|v| v.as_u64()).unwrap_or(1);
+                    g.set_term(id, term);
                 }
                 _ => {
                     let seq = rec.get("seq").and_then(|v| v.as_u64());
@@ -813,7 +822,7 @@ pub async fn get_doc(
             let mut body = json!({
                 "_index": g.name, "_id": id,
                 "_version": g.version_of(&id),
-                "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
+                "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": g.term_of(&id),
                 "found": true,
             });
             if let Some(r) = g.routing.get(&id) {
@@ -895,7 +904,9 @@ pub async fn delete_doc_route(
             let shard = g.shard_of_doc(&id);
             if existed {
                 g.queue_op_for(&id, shard, crate::store::PendingOp::Delete(id.to_string()));
-                g.log_write(&id, None, version, seq, None);
+                let term = crate::cluster::primary_term(&g.name, shard as u32);
+                g.set_term(&id, 1);
+                g.log_write(&id, None, version, seq, term, None);
                 g.note_pending(&id, None);
                 crate::security::audit_document_written(&g.name, &id, version, None, None, true);
             }
@@ -906,7 +917,8 @@ pub async fn delete_doc_route(
             let mut body = json!({
                 "_index": g.name, "_id": id, "_version": version,
                 "result": if existed { "deleted" } else { "not_found" },
-                "_shards": shards_of(&g), "_seq_no": seq, "_primary_term": 1,
+                "_shards": shards_of(&g), "_seq_no": seq,
+                "_primary_term": crate::cluster::primary_term(&g.name, shard as u32),
             });
             note_forced_refresh(&mut body, &p);
             let status = if existed { StatusCode::OK } else { StatusCode::NOT_FOUND };

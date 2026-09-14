@@ -529,8 +529,29 @@ def main():
         for name in sorted(behind):
             ids = sorted(i for i, ns in missing_from.items() if name in ns and len(ns) < len(holders))
             print(f"  behind on {name}: {ids[:10]}")
+            # who acknowledged the writes this copy was short of, and when --
+            # a primary cannot be short of its own writes, so the node that
+            # answered is most of the explanation
+            by = {}
+            for doc in ids:
+                t, who = load.acked_at.get(doc, (0, "?"))
+                by[who] = by.get(who, 0) + 1
+            print(f"      acknowledged by: {by}")
             for doc in ids[:3] + ids[-2:]:
                 print(f"      {doc}: {where_it_stands(nodes, holders, a.index, doc)}")
+            # and how long it stays short: asked again, a few times
+            for wait in (0.5, 2, 5):
+                time.sleep(wait)
+                still = []
+                for doc in ids[:50]:
+                    try:
+                        n = next(x for x in nodes if x.name == name)
+                        st, body = call(f"http://{n.http}/{a.index}/_doc/{doc}?preference=_local", timeout=10)
+                        if not body.get("found"):
+                            still.append(doc)
+                    except Exception:
+                        still.append(doc)
+                print(f"      after another {wait}s: {len(still)} of {min(len(ids), 50)} still missing on {name}")
     for doc_id in lost_ids[:5]:
         print(f"  LOST {doc_id}: on none of {holders}")
     if lost_ids:

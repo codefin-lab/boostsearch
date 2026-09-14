@@ -485,7 +485,7 @@ pub(crate) fn write_page(
                 .unwrap_or(false)
             {
                 hit["_seq_no"] = json!(h.seq);
-                hit["_primary_term"] = json!(1);
+                hit["_primary_term"] = json!(searchers[h.shard_idx].2.read().term_of(&h.id));
             }
             hit
         })

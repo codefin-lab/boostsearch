@@ -4,6 +4,14 @@ use super::*;
 
 /// Where the document versions are written down, beside the index.
 const VERSIONS: &str = "_versions.bin";
+/// The per-document primary terms. A file of its own rather than a field of
+/// each version: the versions are postcard, which reads a record by its shape,
+/// and a new field would make every versions file written before unreadable.
+pub const TERMS: &str = "_terms.bin";
+/// What moved in the versions and terms since they were last written in full.
+pub const DOC_META_LOG: &str = "_docmeta.log";
+/// Past this the record is replaced by a full write of the maps.
+const DOC_META_LOG_MAX: u64 = 64 * 1024 * 1024;
 
 impl IdxState {
     /// Why this index takes no changes, if it takes none.
@@ -57,6 +65,123 @@ impl IdxState {
         if let Err(e) = write_atomic(&path.join(VERSIONS), &bytes) {
             tracing::error!("index [{}]: could not write the versions: {e}", self.name);
         }
+    }
+
+    pub fn save_terms(&self) {
+        let Some(path) = &self.path else { return };
+        let target = path.join(TERMS);
+        // an index that never failed over has no file, and writes none
+        if self.terms.is_empty() {
+            if target.exists() {
+                let _ = std::fs::remove_file(&target);
+            }
+            return;
+        }
+        let Ok(bytes) = postcard::to_allocvec(&self.terms) else { return };
+        if let Err(e) = write_atomic(&target, &bytes) {
+            tracing::error!("index [{}]: could not write the primary terms: {e}", self.name);
+        }
+    }
+
+    /// Versions and terms written down in full, and the record of what moved
+    /// since then thrown away.
+    pub fn save_doc_meta(&mut self) {
+        self.save_versions();
+        self.save_terms();
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path.join(DOC_META_LOG));
+        }
+        self.meta_dirty.clear();
+    }
+
+    /// Append what moved since the last full write of the versions and terms.
+    ///
+    /// `_version` came back as 1 for a document written three times, after a
+    /// `kill -9` that followed a refresh. A refresh commits the documents and
+    /// throws the translog away, and the versions were written down only when
+    /// an index went quiet or the node shut down cleanly -- rewriting the whole
+    /// map at every refresh is what that avoided. So the translog, the one
+    /// record of what the versions had become, was spent before anything else
+    /// held it. What moved is written here instead, before the translog goes:
+    /// a line per document, forced to disk, replayed over the full maps when
+    /// the index opens. It stays as small as the writes since the last full
+    /// write, and a full write empties it.
+    pub fn append_doc_meta_log(&mut self) -> bool {
+        if self.meta_dirty.is_empty() {
+            return true;
+        }
+        let Some(path) = self.path.clone() else {
+            self.meta_dirty.clear();
+            return true;
+        };
+        let at = path.join(DOC_META_LOG);
+        // a record that has grown past the maps it stands in for is replaced
+        // by the maps
+        if std::fs::metadata(&at).map(|m| m.len()).unwrap_or(0) > DOC_META_LOG_MAX {
+            self.save_doc_meta();
+            return true;
+        }
+        let mut out = String::with_capacity(self.meta_dirty.len() * 48);
+        for id in &self.meta_dirty {
+            let (version, live) = match self.versions.get(id) {
+                Some(m) => (m.version, m.live),
+                None => (1, true),
+            };
+            let line =
+                serde_json::json!({"id": id, "v": version, "live": live, "t": self.term_of(id)});
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+        use std::io::Write;
+        let written =
+            std::fs::OpenOptions::new().create(true).append(true).open(&at).and_then(|mut f| {
+                f.write_all(out.as_bytes())?;
+                f.sync_all()
+            });
+        match written {
+            Ok(()) => {
+                self.meta_dirty.clear();
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    "index [{}]: could not record the versions that moved: {e}",
+                    self.name
+                );
+                false
+            }
+        }
+    }
+
+    /// Replay what moved since the versions and terms were last written down.
+    pub fn replay_doc_meta_log(&mut self, path: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(path.join(DOC_META_LOG)) else { return };
+        for line in text.lines() {
+            // a line the crash cut short is the last one, and is skipped
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let Some(id) = v.get("id").and_then(|x| x.as_str()) else { continue };
+            let version = v.get("v").and_then(|x| x.as_u64()).unwrap_or(1);
+            let live = v.get("live").and_then(|x| x.as_bool()).unwrap_or(true);
+            if version > 1 || !live {
+                self.versions.insert(id.to_string(), DocMeta { version, live });
+            } else {
+                self.versions.remove(id);
+            }
+            let term = v.get("t").and_then(|x| x.as_u64()).unwrap_or(1);
+            if term > 1 {
+                self.terms.insert(id.to_string(), term);
+            } else {
+                self.terms.remove(id);
+            }
+        }
+    }
+
+    /// The per-document primary terms, or none -- every document in term 1.
+    pub fn load_terms(path: &std::path::Path) -> HashMap<String, u64> {
+        std::fs::read(path.join(TERMS))
+            .ok()
+            .and_then(|b| postcard::from_bytes(&b).ok())
+            .unwrap_or_default()
     }
 
     /// The versions as they were written down, if they were.
@@ -186,7 +311,7 @@ impl IdxState {
             // away without writing the meta had a restart hand new writes
             // numbers old documents already carry
             self.save_meta();
-            self.save_versions();
+            self.save_doc_meta();
             self.clear_translog();
         }
         release_freed_memory();

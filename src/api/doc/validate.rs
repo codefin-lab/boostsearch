@@ -91,9 +91,10 @@ pub(crate) fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response>
         ));
     }
     let have = read_seq(st, id).unwrap_or(0);
-    // a shard that has never failed over is on its first term, so any other
-    // term the caller insists on is a term this document was not written in
-    let term_ok = want_term.map(|t| t == 1).unwrap_or(true);
+    // the term this document was written in: a sequence number names a write
+    // only together with the primary term that gave it
+    let have_term = st.term_of(id);
+    let term_ok = want_term.map(|t| t == have_term).unwrap_or(true);
     let want = want_seq.unwrap_or(have);
     if have == want && term_ok {
         return None;
@@ -104,7 +105,7 @@ pub(crate) fn seq_check(st: &IdxState, id: &str, p: &Params) -> Option<Response>
         "version_conflict_engine_exception",
         format!(
             "[{id}]: version conflict, required seqNo [{want}], primary term \
-             [{want_term}]. current document has seqNo [{have}] and primary term [1]"
+             [{want_term}]. current document has seqNo [{have}] and primary term [{have_term}]"
         ),
     ))
 }

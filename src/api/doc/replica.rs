@@ -47,6 +47,8 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
         st.routing.insert(op.id.clone(), r.clone());
     }
     st.set_replicated_version(&op.id, op.version, op.source.is_some(), op.seq);
+    let written_in = op.doc_term.unwrap_or(op.term);
+    st.set_term(&op.id, if op.source.is_some() { written_in } else { 1 });
     let shard = st.shard_of_doc(&op.id);
     match &op.source {
         Some(raw) => {
@@ -67,7 +69,7 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
             }
             st.queue_op_for(&op.id, shard, crate::store::PendingOp::Add(Box::new(doc)));
             st.bytes.fetch_add(raw.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            st.log_write(&op.id, op.routing.as_deref(), op.version, op.seq, Some(raw));
+            st.log_write(&op.id, op.routing.as_deref(), op.version, op.seq, written_in, Some(raw));
             st.note_pending(&op.id, Some(raw.clone()));
             st.note_pending_seq(&op.id, op.seq);
         }
@@ -78,7 +80,7 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
                     st.vectors.write().forget(&op.id);
                 }
             }
-            st.log_write(&op.id, None, op.version, op.seq, None);
+            st.log_write(&op.id, None, op.version, op.seq, written_in, None);
             st.note_pending(&op.id, None);
             st.note_pending_seq(&op.id, op.seq);
         }
@@ -128,6 +130,7 @@ pub fn scan_replicated(
                 term,
                 shard,
                 source: source.clone(),
+                doc_term: Some(st.term_of(id)),
             },
         );
     }
@@ -189,6 +192,7 @@ pub fn scan_replicated(
                 term,
                 shard,
                 source: Some(raw.to_string()),
+                doc_term: Some(st.term_of(id)),
             },
         );
     }

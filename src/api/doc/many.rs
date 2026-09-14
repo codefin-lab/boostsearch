@@ -173,7 +173,7 @@ pub async fn mget(
                 let mut d = json!({
                     "_index": g.name, "_id": id,
                     "_version": g.version_of(&id),
-                    "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1, "found": true
+                    "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": g.term_of(&id), "found": true
                 });
                 if let Some(r) = g.routing.get(&id) {
                     d["_routing"] = json!(r);

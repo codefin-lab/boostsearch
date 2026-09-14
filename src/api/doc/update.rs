@@ -226,7 +226,7 @@ pub async fn update_doc(
         json!({
             "_index": g.name, "_id": id, "_version": g.version_of(&id), "result": "deleted",
             "_shards": {"total": 1, "successful": 1, "failed": 0},
-            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
+            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": g.term_of(&id),
         })
     } else if result == "noop" {
         let version = g.version_of(&id);
@@ -235,7 +235,7 @@ pub async fn update_doc(
             "_shards": {"total": 0, "successful": 0, "failed": 0},
             // an update that changed nothing still reports where the document
             // stands, which is where it already stood
-            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": 1,
+            "_seq_no": read_seq(&g, &id).unwrap_or(0), "_primary_term": g.term_of(&id),
         })
     } else {
         // a document made by an upsert goes in the way a fresh write does:

@@ -28,6 +28,7 @@ impl IdxState {
         routing: Option<&str>,
         version: u64,
         seq: u64,
+        term: u64,
         source: Option<&str>,
     ) {
         use std::io::Write;
@@ -53,6 +54,9 @@ impl IdxState {
         }
         use std::fmt::Write as _;
         let _ = write!(line, ",\"version\":{version},\"seq\":{seq}");
+        if term > 1 {
+            let _ = write!(line, ",\"term\":{term}");
+        }
         line.push_str(",\"source\":");
         match source {
             Some(source) => line.push_str(source),
@@ -135,6 +139,12 @@ impl IdxState {
     pub(crate) fn clear_translog(&mut self) {
         use std::io::Write;
         let Some(dir) = self.path.clone() else { return };
+        // the versions and terms the translog recorded are written down first:
+        // a translog thrown away before that took them with it. When they
+        // cannot be written the translog is kept, and replays them.
+        if !self.append_doc_meta_log() {
+            return;
+        }
         if let Some(log) = self.translog.as_mut() {
             let _ = log.flush();
         }

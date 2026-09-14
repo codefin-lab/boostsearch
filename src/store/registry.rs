@@ -635,6 +635,8 @@ impl Store {
             // the versions come back with the index: without them `_version`
             // started again from one for every document already written
             g.versions = crate::store::IdxState::load_versions(&path);
+            g.terms = crate::store::IdxState::load_terms(&path);
+            g.replay_doc_meta_log(&path);
             g.path = Some(path);
             g.open_translog();
         }
@@ -714,6 +716,8 @@ impl Store {
             aliases,
             closed: false,
             versions: HashMap::new(),
+            terms: HashMap::new(),
+            meta_dirty: Default::default(),
             routing: HashMap::new(),
             uuid,
             allocation_id: None,

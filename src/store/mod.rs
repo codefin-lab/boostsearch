@@ -462,6 +462,22 @@ pub struct IdxState {
     /// Exact record for ids that need one: anything updated past version 1, and
     /// every tombstone. In an append-only workload this stays empty.
     pub versions: HashMap<String, DocMeta>,
+    /// The primary term each document was last written in, for the
+    /// documents whose term is not the first.
+    ///
+    /// `_primary_term` was answered as 1 for every document, and an
+    /// `if_primary_term` other than 1 was refused -- true until the first
+    /// failover and false after it: a write answered `_primary_term: 2`, a
+    /// read of the same document answered 1, and a write conditioned on what
+    /// the first write itself had said was refused as a conflict. The term is
+    /// what tells two writes under one sequence number apart once a primary
+    /// has changed, so it is kept per document. A shard that never fails over
+    /// keeps nothing here.
+    pub terms: HashMap<String, u64>,
+    /// The documents whose version, liveness or term has moved since the
+    /// versions and terms were last written down in full. Written out as a
+    /// small record before the translog is thrown away -- see `doc_meta_log`.
+    pub meta_dirty: std::collections::HashSet<String>,
     /// the routing a document was written with, kept only for the documents
     /// that were given one -- which is the rare case
     pub routing: HashMap<String, String>,

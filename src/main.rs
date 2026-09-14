@@ -685,7 +685,7 @@ async fn shutdown_signal(store: Store) {
             // where each document's version had got to, so that a node
             // started again answers `_version` with the number the documents
             // really carry rather than beginning at one
-            g.save_versions();
+            g.save_doc_meta();
         }
     }
 }

@@ -53,7 +53,7 @@ pub const RECOVERY_SCAN: &str = "internal:index/recovery/scan";
 /// the files of the primary's last commit, and one chunk of one of them
 /// The files an index rewrites in place at every commit, each written whole:
 /// they are not segments, and a recovery reads whatever they say now.
-const REWRITTEN_IN_PLACE: &[&str] = &["_meta.json", "_versions.bin"];
+const REWRITTEN_IN_PLACE: &[&str] = &["_meta.json", "_versions.bin", "_terms.bin", "_docmeta.log"];
 
 pub const RECOVERY_FILES: &str = "internal:index/recovery/files";
 pub const RECOVERY_FILE: &str = "internal:index/recovery/file";
@@ -130,6 +130,13 @@ pub struct ReplicaOp {
     pub shard: u32,
     /// the document, or nothing for a delete
     pub source: Option<String>,
+    /// The term the document itself was written in, where that is not
+    /// `term`. A write carries one term, the primary's, and it is both. A
+    /// recovery page or a resync carries documents written over many terms,
+    /// under the term of the primary sending them -- which is what a copy
+    /// checks for staleness -- and each document's own term is here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_term: Option<u64>,
 }
 
 tokio::task_local! {
@@ -1038,6 +1045,7 @@ pub fn install(store: Store) {
                                     term,
                                     shard: g.shard_of_doc(id) as u32,
                                     source: None,
+                                    doc_term: None,
                                 };
                                 if trace_writes() {
                                     trace!("TRACE trimmed {name}/{id} term={term}");

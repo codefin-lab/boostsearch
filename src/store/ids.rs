@@ -30,6 +30,7 @@ impl IdxState {
         seq: Option<u64>,
     ) -> (u64, u64) {
         self.moved_on();
+        self.meta_dirty.insert(id.to_string());
         let fp = id_fingerprint(id);
         self.versions.insert(id.to_string(), DocMeta { version, live });
         if live {
@@ -50,6 +51,7 @@ impl IdxState {
 
     pub fn bump(&mut self, id: &str, live: bool, existed: bool) -> (u64, u64) {
         self.moved_on();
+        self.meta_dirty.insert(id.to_string());
         let fp = id_fingerprint(id);
         let known = existed || self.versions.contains_key(id);
         let version = if known {
@@ -77,6 +79,7 @@ impl IdxState {
     /// Take the version and sequence number the primary gave a write, for a
     /// copy applying it.
     pub fn set_replicated_version(&mut self, id: &str, version: u64, live: bool, seq: u64) {
+        self.meta_dirty.insert(id.to_string());
         let fp = id_fingerprint(id);
         self.versions.insert(id.to_string(), DocMeta { version, live });
         if live {
@@ -101,6 +104,21 @@ impl IdxState {
     pub fn moved_on(&self) {
         self.search_gen
             .store(crate::store::next_generation(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The primary term a document was last written in.
+    pub fn term_of(&self, id: &str) -> u64 {
+        self.terms.get(id).copied().unwrap_or(1)
+    }
+
+    /// Record the term a document was just written, or deleted, in.
+    pub fn set_term(&mut self, id: &str, term: u64) {
+        self.meta_dirty.insert(id.to_string());
+        if term <= 1 {
+            self.terms.remove(id);
+        } else {
+            self.terms.insert(id.to_string(), term);
+        }
     }
 
     pub fn version_of(&self, id: &str) -> u64 {
