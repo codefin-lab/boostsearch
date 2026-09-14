@@ -17,8 +17,9 @@ pub fn derived_values(source: &Value, mapping: &Mapping) -> Vec<(String, Value)>
         let Ok(compiled) = crate::painless::contexts::Compiled::of(script, &|_| None) else {
             continue;
         };
-        let mut runner =
-            crate::painless::contexts::Runner::new(&compiled.params).with_source_param(source);
+        let mut runner = crate::painless::contexts::Runner::new(&compiled.params)
+            .with_source_param(source)
+            .with_doc(source, mapping);
         if runner.run(&compiled.script).is_err() {
             continue;
         }
@@ -79,8 +80,9 @@ pub fn derived_text_of(source: &Value, mapping: &Mapping, name: &str) -> Option<
     let (_, def) = mapping.derived_fields().iter().find(|(n, _)| n == name)?;
     let script = def.get("script")?;
     let compiled = crate::painless::contexts::Compiled::of(script, &|_| None).ok()?;
-    let mut runner =
-        crate::painless::contexts::Runner::new(&compiled.params).with_source_param(source);
+    let mut runner = crate::painless::contexts::Runner::new(&compiled.params)
+        .with_source_param(source)
+        .with_doc(source, mapping);
     runner.run(&compiled.script).ok()?;
     let mut values: Vec<Value> =
         runner.emitted.borrow().iter().map(|v| v.to_json()).filter(|v| !v.is_null()).collect();
@@ -100,8 +102,9 @@ fn derived_values_raw(source: &Value, mapping: &Mapping) -> Vec<(String, Value)>
         let Ok(compiled) = crate::painless::contexts::Compiled::of(script, &|_| None) else {
             continue;
         };
-        let mut runner =
-            crate::painless::contexts::Runner::new(&compiled.params).with_source_param(source);
+        let mut runner = crate::painless::contexts::Runner::new(&compiled.params)
+            .with_source_param(source)
+            .with_doc(source, mapping);
         if runner.run(&compiled.script).is_err() {
             continue;
         }

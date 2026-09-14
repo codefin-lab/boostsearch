@@ -91,18 +91,37 @@ pub(crate) fn default_routing_shards(shards: u64) -> u64 {
 /// -- every one made before this -- is folded by its shard count, as it was
 /// written, so none of its documents moves.
 pub(crate) fn routing_shard_in(routing: &str, shards: u64, routing_shards: Option<u64>) -> u64 {
+    routing_shard_offset(routing, 0, shards, routing_shards)
+}
+
+/// The reference's Murmur3 hash of a routing value or an id: UTF-16, low
+/// byte first, seed zero.
+pub(crate) fn routing_hash(routing: &str) -> i32 {
+    let mut bytes = Vec::with_capacity(routing.len() * 2);
+    for c in routing.encode_utf16() {
+        bytes.push((c & 0xff) as u8);
+        bytes.push((c >> 8) as u8);
+    }
+    murmur3_x86_32(&bytes, 0)
+}
+
+/// The shard a routing value lands on once a partition offset is added to
+/// its hash, which is how an index with `routing_partition_size` spreads one
+/// routing value over several shards. The addition wraps the way a Java
+/// `int` does, since the reference adds before it folds.
+pub(crate) fn routing_shard_offset(
+    routing: &str,
+    offset: i32,
+    shards: u64,
+    routing_shards: Option<u64>,
+) -> u64 {
     let shards = shards.max(1);
+    let hash = routing_hash(routing).wrapping_add(offset) as i64;
     match routing_shards {
         Some(rns) if rns >= shards && rns % shards == 0 => {
-            let mut bytes = Vec::with_capacity(routing.len() * 2);
-            for c in routing.encode_utf16() {
-                bytes.push((c & 0xff) as u8);
-                bytes.push((c >> 8) as u8);
-            }
-            let hash = murmur3_x86_32(&bytes, 0) as i64;
             (hash.rem_euclid(rns as i64) as u64) / (rns / shards)
         }
-        _ => routing_shard(routing, shards),
+        _ => hash.rem_euclid(shards as i64) as u64,
     }
 }
 
@@ -125,6 +144,30 @@ mod routing_shard_tests {
             let rns = Some(default_routing_shards(shards));
             let got: Vec<u64> = keys.iter().map(|k| routing_shard_in(k, shards, rns)).collect();
             assert_eq!(got, want, "{shards} shards");
+        }
+    }
+
+    #[test]
+    fn routing_values_land_where_opensearch_3_8_puts_them() {
+        // read back from OpenSearch 3.8.0 with `explain` on a four-shard index
+        let rns = Some(default_routing_shards(4));
+        for (routing, shard) in [
+            ("acme", 3),
+            ("globex", 3),
+            ("hooli", 3),
+            ("initech", 0),
+            ("stark", 0),
+            ("umbrella", 2),
+            ("wayne", 1),
+        ] {
+            assert_eq!(routing_shard_offset(routing, 0, 4, rns), shard, "{routing}");
+        }
+        // with `routing_partition_size: 2` both partitions of these fold into
+        // one shard, which is where every document routed by them was
+        for (routing, shard) in [("wayne", 1), ("xyz", 2)] {
+            for offset in 0..2 {
+                assert_eq!(routing_shard_offset(routing, offset, 4, rns), shard, "{routing}");
+            }
         }
     }
 

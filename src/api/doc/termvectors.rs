@@ -28,8 +28,16 @@ pub async fn termvectors(
             "Validation Failed: 1: id is missing;",
         );
     };
-    let source =
-        read_source_as_asked(&g, &id, &p).filter(|_| crate::security::doc_visible(&store, &g, &id));
+    // a document named by id is looked for on the shard its routing names,
+    // which a mapping requiring routing will not guess at
+    if parts.get(1).is_some()
+        && let Some(refusal) = read_routing_refusal(&g, &id, &p)
+    {
+        return refusal;
+    }
+    let source = read_source_as_asked(&g, &id, &p)
+        .filter(|_| routing_matches(&g, &id, &p))
+        .filter(|_| crate::security::doc_visible(&store, &g, &id));
     let Some(source) = source else {
         return respond(
             &p,

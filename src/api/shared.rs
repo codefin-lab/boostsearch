@@ -99,6 +99,35 @@ pub fn doc_err(
     r
 }
 
+/// Why a request by id without a routing value is refused where the mapping
+/// requires one, as the reference words it -- which names no index uuid.
+pub fn routing_missing_cause(index: &str, id: &str) -> Value {
+    json!({
+        "type": "routing_missing_exception",
+        "reason": format!("routing is required for [{index}]/[{id}]"),
+        "index": index,
+        "index_uuid": "_na_",
+    })
+}
+
+/// The same refusal as a whole answer.
+pub fn routing_missing(index: &str, id: &str) -> Response {
+    cause_refusal(StatusCode::BAD_REQUEST, routing_missing_cause(index, id))
+}
+
+/// A refusal whose cause is written out in full, answered with that cause
+/// at the top and as the root cause.
+pub fn cause_refusal(status: StatusCode, cause: Value) -> Response {
+    let kind = cause.get("type").and_then(|v| v.as_str()).unwrap_or("exception").to_string();
+    let reason = cause.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut error = cause.clone();
+    error["root_cause"] = json!([cause]);
+    let mut r =
+        (status, axum::Json(json!({"error": error, "status": status.as_u16()}))).into_response();
+    r.extensions_mut().insert(ErrorKind { kind, reason });
+    r
+}
+
 /// The cause a refusal quotes, kept beside its body, so a bulk item built
 /// from the refusal quotes it too.
 #[derive(Clone, Debug)]
@@ -366,6 +395,11 @@ pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
                 s => s.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(s)),
             };
         }
+    }
+    // `explain` on the URL asks what the body's `explain` asks: each hit's
+    // explanation, and the shard that answered for it
+    if let (Some(v), None) = (p.get("explain"), body.get("explain")) {
+        body["explain"] = json!(v != "false");
     }
     if let Some(s) = p.get("sort")
         && body.get("sort").is_none()

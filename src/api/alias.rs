@@ -322,7 +322,9 @@ pub(crate) async fn put_alias_inner(
             o.remove(*k);
         }
     }
-    if let Some(refusal) = two_write_indices(&store, &name, &def, &targets) {
+    if let Some(refusal) = two_write_indices(&store, &name, &def, &targets)
+        .or_else(|| several_index_routings(&name, &def))
+    {
         return refusal;
     }
     for n in targets {
@@ -378,6 +380,22 @@ pub(crate) fn two_write_indices(
             StatusCode::BAD_REQUEST,
             "illegal_argument_exception",
             format!("alias [{alias}] has more than one write index [{}]", writers.join(",")),
+        )
+    })
+}
+
+/// A write through an alias goes to exactly one shard, so the routing it
+/// writes with is one value: a search may name several, an index may not.
+fn several_index_routings(alias: &str, def: &Value) -> Option<Response> {
+    let routing = crate::store::normalize_alias(def)
+        .get("index_routing")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    routing.contains(',').then(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!("alias [{alias}] has several index routing values associated with it"),
         )
     })
 }
@@ -519,7 +537,9 @@ pub async fn update_aliases(
                         o.remove(k);
                     }
                 }
-                if let Some(refusal) = two_write_indices(&store, a, &def, &indices) {
+                if let Some(refusal) = two_write_indices(&store, a, &def, &indices)
+                    .or_else(|| several_index_routings(a, &def))
+                {
                     return refusal;
                 }
             }

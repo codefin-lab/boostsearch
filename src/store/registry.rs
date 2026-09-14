@@ -480,6 +480,157 @@ impl Store {
         }
     }
 
+    /// The `index_routing` of an alias, as the index a write through it goes
+    /// to holds it; nothing for a name that is not an alias or an alias
+    /// without one.
+    pub fn alias_index_routing(&self, name: &str) -> Option<String> {
+        if !self.is_alias(name) {
+            return None;
+        }
+        let target = self.write_target(name).or_else(|| self.resolve(name).into_iter().next())?;
+        let st = self.get(&target)?;
+        let g = st.read();
+        g.aliases
+            .get(name)
+            .and_then(|d| d.get("index_routing"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// The shards a search over this expression asks, for each index the
+    /// routing or the preference narrows; an index missing from the answer
+    /// is searched whole.
+    ///
+    /// The routing values are worked out as the reference's
+    /// `resolveSearchRouting` does: an index named outright, or reached
+    /// through an alias with no `search_routing`, takes the request's
+    /// routing; an alias with one takes its own values, cut down to those
+    /// the request also names -- and where none are left, the index is
+    /// searched whole, as it is there. `preference=_shards:` then keeps only
+    /// the shards it lists.
+    pub fn search_narrowing(
+        &self,
+        expr: &str,
+        routing: Option<&str>,
+        preference: Option<&str>,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let split = |s: &str| -> BTreeSet<String> {
+            s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+        };
+        let asked: Option<BTreeSet<String>> = routing.map(split).filter(|s| !s.is_empty());
+        let mut routings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut unrouted: BTreeSet<String> = BTreeSet::new();
+        let parts: Vec<String> = match expr.trim() {
+            "" | "_all" | "*" => self.names(),
+            e => e
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty() && !p.starts_with('-'))
+                .collect(),
+        };
+        for part in parts {
+            if !part.contains('*') && self.is_alias(&part) {
+                for index in self.resolve(&part) {
+                    if unrouted.contains(&index) {
+                        continue;
+                    }
+                    let own: BTreeSet<String> = self
+                        .get(&index)
+                        .and_then(|st| {
+                            st.read()
+                                .aliases
+                                .get(&part)
+                                .and_then(|d| d.get("search_routing"))
+                                .and_then(|v| v.as_str())
+                                .map(split)
+                        })
+                        .unwrap_or_default();
+                    if own.is_empty() {
+                        unrouted.insert(index.clone());
+                        match &asked {
+                            Some(r) => {
+                                routings.insert(index, r.clone());
+                            }
+                            None => {
+                                routings.remove(&index);
+                            }
+                        }
+                        continue;
+                    }
+                    let entry = routings.entry(index.clone()).or_default();
+                    entry.extend(own);
+                    if let Some(r) = &asked {
+                        entry.retain(|v| r.contains(v));
+                    }
+                    if entry.is_empty() {
+                        routings.remove(&index);
+                    }
+                }
+                continue;
+            }
+            for index in self.resolve(&part) {
+                if unrouted.insert(index.clone()) {
+                    match &asked {
+                        Some(r) => {
+                            routings.insert(index, r.clone());
+                        }
+                        None => {
+                            routings.remove(&index);
+                        }
+                    }
+                }
+            }
+        }
+        let preferred: Option<BTreeSet<u64>> = preference.and_then(|p| {
+            p.split('|').find_map(|one| {
+                one.strip_prefix("_shards:").map(|list| {
+                    list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect()
+                })
+            })
+        });
+        let mut out = BTreeMap::new();
+        let mut consider: BTreeSet<String> = routings.keys().cloned().collect();
+        if preferred.is_some() {
+            consider.extend(self.resolve(if expr.trim().is_empty() { "_all" } else { expr }));
+        }
+        for index in consider {
+            let Some(st) = self.get(&index) else { continue };
+            let g = st.read();
+            let count = g.shard_count().max(1);
+            let mut shards: BTreeSet<u64> = match routings.get(&index) {
+                Some(values) => values.iter().flat_map(|r| g.shards_for_routing(r)).collect(),
+                None => (0..count).collect(),
+            };
+            if let Some(keep) = &preferred {
+                shards.retain(|s| keep.contains(s));
+            }
+            if shards.len() as u64 != count {
+                out.insert(index, shards);
+            }
+        }
+        out
+    }
+
+    /// The refusal a read of one document through an alias over several
+    /// indices gets, which has no one index to read from.
+    pub fn single_index_refusal(&self, name: &str) -> Option<String> {
+        if !self.is_alias(name) {
+            return None;
+        }
+        let mut behind = self.resolve(name);
+        if behind.len() < 2 {
+            return None;
+        }
+        behind.sort();
+        behind.reverse();
+        Some(format!(
+            "alias [{name}] has more than one index associated with it [{}], can't execute a \
+             single index op",
+            behind.join(", ")
+        ))
+    }
+
     /// Resolve an index expression (`test`, `test*`, `_all`, `a,b`) to concrete indices.
     /// Which indices a name or pattern addresses.
     ///
@@ -862,6 +1013,8 @@ impl Store {
         };
         st.apply_analysis();
         st.refresh_knobs();
+        // an index opened from disk holds the routing of its documents in them
+        st.load_routing();
         // the name is claimed under the same lock that answers whether it is
         // taken: two creates of one index were both answered "created", the
         // second replaced the first in the map, and the writes the first had

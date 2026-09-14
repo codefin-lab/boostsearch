@@ -284,9 +284,87 @@ pub(crate) fn refuse_unless_alias(store: &Store, index: &str, p: &Params) -> Opt
 /// written under? A document reached by the wrong routing is, to the caller,
 /// not there at all: in a real cluster the request would have gone to a shard
 /// that never held it.
+///
+/// It is the shard that has to agree, not the value: the request goes to the
+/// shard its routing names and looks the id up there, so a routing that
+/// happens to land on the same shard -- any routing at all, in an index of
+/// one shard -- finds the document, as it does in the reference.
 pub(crate) fn routing_matches(st: &IdxState, id: &str, p: &Params) -> bool {
-    match st.routing.get(id) {
-        Some(have) => p.get("routing").map(|want| want == have).unwrap_or(false),
-        None => true,
+    let asked = p.get("routing").map(|s| s.as_str()).filter(|r| !r.is_empty());
+    st.shard_of(id, asked) == st.shard_of_doc(id)
+}
+
+/// The routing a write by id carries once the name it was addressed to has
+/// had its say: an alias with an `index_routing` supplies one, and refuses a
+/// request that names a different one.
+pub(crate) fn write_routing(
+    store: &Store,
+    name: &str,
+    asked: Option<String>,
+) -> std::result::Result<Option<String>, Response> {
+    routing_through(name, store.alias_index_routing(name), asked)
+}
+
+/// The same, with the alias's index routing already looked up -- which a
+/// bulk does once per name rather than once per item, since the lookup
+/// reads every index.
+pub(crate) fn routing_through(
+    name: &str,
+    alias_routing: Option<String>,
+    asked: Option<String>,
+) -> std::result::Result<Option<String>, Response> {
+    let asked = asked.filter(|r| !r.is_empty());
+    let Some(alias_routing) = alias_routing else { return Ok(asked) };
+    match asked {
+        Some(r) if r != alias_routing => Err(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Alias [{name}] has index routing associated with it [{alias_routing}], and was \
+                 provided with routing value [{r}], rejecting operation"
+            ),
+        )),
+        _ => Ok(Some(alias_routing)),
     }
+}
+
+/// The routing a read by id carries: what the request named, or what the
+/// alias it was addressed to searches with, where that is a single value.
+pub(crate) fn read_routing(store: &Store, name: &str, p: &Params) -> Params {
+    let mut p = p.clone();
+    if p.get("routing").map(|r| r.is_empty()).unwrap_or(true)
+        && let Some(r) = store.alias_index_routing(name)
+    {
+        p.insert("routing".into(), r);
+    }
+    p
+}
+
+/// Why an operation by id may not go ahead with the routing it has: the
+/// mapping requires one and there is none, or the index is partitioned and
+/// its mapping does not require one.
+pub(crate) fn routing_refusal(st: &IdxState, id: &str, routing: Option<&str>) -> Option<Response> {
+    let required = st.routing_required();
+    if st.partition_size() > 1 && !required {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "mapping type [_doc] must have routing required for partitioned index [{}]",
+                st.name
+            ),
+        ));
+    }
+    if required && routing.map(|r| r.is_empty()).unwrap_or(true) {
+        return Some(crate::api::shared::routing_missing(&st.name, id));
+    }
+    None
+}
+
+/// The same, for a read or a delete, which only ever refuses a missing
+/// routing: the partition rule is about where a write goes.
+pub(crate) fn read_routing_refusal(st: &IdxState, id: &str, p: &Params) -> Option<Response> {
+    let routing = p.get("routing").map(|s| s.as_str()).filter(|r| !r.is_empty());
+    (st.routing_required() && routing.is_none())
+        .then(|| crate::api::shared::routing_missing(&st.name, id))
 }

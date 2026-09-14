@@ -18,6 +18,8 @@ pub(crate) use dispatch::*;
 
 mod script;
 pub(crate) use script::*;
+mod shards;
+pub(crate) use shards::OnShards;
 
 mod analyze;
 pub(crate) use analyze::*;

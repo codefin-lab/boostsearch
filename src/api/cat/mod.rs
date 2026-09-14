@@ -300,8 +300,20 @@ pub(crate) async fn cat_by_name(
             let forwarded = crate::cluster::forward::answering_forward();
             let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
             for n in names {
-                let local_docs =
-                    store.get(&n).map(|st| st.read().reader.searcher().num_docs()).unwrap_or(0);
+                // each shard holds the documents routed to it, and its share
+                // of the index's bytes is its share of the documents
+                let per_shard =
+                    store.get(&n).map(|st| st.read().docs_per_shard()).unwrap_or_default();
+                let local_docs: u64 = per_shard.iter().sum();
+                let docs_on = |shard: u32| per_shard.get(shard as usize).copied().unwrap_or(0);
+                let bytes_on = |shard: u32| match local_docs {
+                    0 if shard == 0 => store.index_size(&n),
+                    0 => 0,
+                    total => {
+                        (store.index_size(&n) as u128 * docs_on(shard) as u128 / total as u128)
+                            as u64
+                    }
+                };
                 let mut copies: Vec<&crate::cluster::state::ShardRouting> =
                     live.routing.shards_of(&n).collect();
                 copies.sort_by_key(|c| (c.shard, !c.primary));
@@ -316,8 +328,11 @@ pub(crate) async fn cat_by_name(
                     let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
                     for shard in 0..shards {
                         let mut row = blank(&n, shard, "p", "STARTED", "");
-                        row[4].1 = if shard == 0 { local_docs.to_string() } else { "0".into() };
-                        row[5].1 = "0b".into();
+                        row[4].1 = docs_on(shard).to_string();
+                        row[5].1 = crate::api::shared::sized(
+                            p.get("bytes").map(|s| s.as_str()),
+                            bytes_on(shard),
+                        );
                         row[6].1 = "127.0.0.1".into();
                         row[7].1 = me.id.as_str().into();
                         row[8].1 = me.name.clone();
@@ -357,10 +372,10 @@ pub(crate) async fn cat_by_name(
                         // holding one can answer for it; a copy elsewhere is
                         // that node's row to write
                         if here {
-                            row[4].1 = local_docs.to_string();
+                            row[4].1 = docs_on(c.shard).to_string();
                             row[5].1 = crate::api::shared::sized(
                                 p.get("bytes").map(|s| s.as_str()),
-                                store.index_size(&n),
+                                bytes_on(c.shard),
                             );
                         } else if clustered {
                             continue;
