@@ -15,12 +15,13 @@ curl -s localhost:9283/_ingest/pipeline/_simulate -H 'content-type: application/
 Note the `tr -d '\n'`: `base64` on some systems wraps its output every 76
 characters, and a newline inside a JSON string is not valid JSON.
 
-## `field [data] is not a valid base64 value`
+## `Illegal base64 character 2d`
 
 The bytes were sent as they are, or the base64 was URL-safe (`-` and `_` rather
-than `+` and `/`). The processor wants standard base64.
+than `+` and `/`). The processor wants standard base64, and names the first
+character it could not read in hexadecimal: `2d` is `-`, `a` is a newline.
 
-## `field [data] doesn't exist`
+## `field [data] not present as part of path [data]`
 
 The document was written without a file -- typically one that only needed a
 field changed. `library-extract` requires `data`; that is deliberate, so a

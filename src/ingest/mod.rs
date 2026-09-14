@@ -468,6 +468,10 @@ pub struct IngestError {
     /// under the first rather than dropping: a pipeline with two processors
     /// given parameters they do not take is refused naming both
     pub suppressed: Vec<Value>,
+    /// what went wrong underneath, where the reference wraps one exception
+    /// in another: a file the attachment processor could not read is a parse
+    /// failure caused by the parser's own
+    pub caused_by: Option<Value>,
 }
 
 impl IngestError {
@@ -482,6 +486,7 @@ impl IngestError {
             doc_back: None,
             nested: false,
             suppressed: Vec::new(),
+            caused_by: None,
         }
     }
 
@@ -501,6 +506,7 @@ impl IngestError {
             doc_back: None,
             nested: false,
             suppressed: Vec::new(),
+            caused_by: None,
         }
     }
 
@@ -524,12 +530,21 @@ impl IngestError {
         if !self.suppressed.is_empty() {
             c["suppressed"] = json!(self.suppressed);
         }
+        if let Some(cause) = &self.caused_by {
+            c["caused_by"] = cause.clone();
+        }
         c
     }
 
     pub fn body(&self) -> Value {
         let mut top = self.cause_json();
-        top["root_cause"] = json!([self.cause_json()]);
+        // the root cause is the outer exception as the reference reports it,
+        // without the chain under it
+        let mut root = self.cause_json();
+        if let Some(o) = root.as_object_mut() {
+            o.remove("caused_by");
+        }
+        top["root_cause"] = json!([root]);
         // the order OpenSearch writes: root_cause first
         let mut ordered = Map::new();
         ordered.insert("root_cause".into(), top["root_cause"].clone());
@@ -733,6 +748,14 @@ fn allowed_parameters(kind: &str) -> Option<&'static [&'static str]> {
         }
         "dot_expander" => &["field", "path"],
         "sort" => &["field", "order", "target_field"],
+        "attachment" => &[
+            "field",
+            "target_field",
+            "properties",
+            "indexed_chars",
+            "indexed_chars_field",
+            "ignore_missing",
+        ],
         _ => return None,
     })
 }

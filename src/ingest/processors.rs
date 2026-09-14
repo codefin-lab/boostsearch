@@ -325,6 +325,28 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
         "fail" => {
             c.str_req("message")?;
         }
+        "attachment" => {
+            field_required(&c)?;
+            c.int_opt("indexed_chars")?;
+            c.bool_opt("ignore_missing", false)?;
+            if let Some(props) = c.strings_opt("properties")? {
+                for p in props {
+                    if !super::attachment::PROPERTIES.contains(&p.to_lowercase().as_str()) {
+                        let valid: Vec<String> = super::attachment::PROPERTIES
+                            .iter()
+                            .map(|v| v.to_uppercase())
+                            .collect();
+                        return Err(c.wrong(
+                            "properties",
+                            format!(
+                                "[properties] illegal field option [{p}]. valid values are [{}]",
+                                valid.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         "pipeline" => {
             c.str_req("name")?;
         }
@@ -352,6 +374,7 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                     doc_back: None,
                     nested: false,
                     suppressed: Vec::new(),
+                    caused_by: None,
                 })?;
             }
         }
@@ -418,6 +441,48 @@ pub(crate) fn condition_holds(
     let out =
         runner.run(&compiled.script).map_err(|e| IngestError::of("script_exception", e.message))?;
     Ok(out.truthy().unwrap_or(false))
+}
+
+/// Why a path leads to nothing, in the words the reference's document uses
+/// when it walks the path an element at a time.
+fn unresolved(doc: &IngestDoc, path: &str) -> String {
+    let stripped = path.strip_prefix("_source.").unwrap_or(path);
+    let (mut context, rest) = match stripped.strip_prefix("_ingest.") {
+        Some(r) => (Value::Object(doc.ingest.clone()), r),
+        None => (doc.source.clone(), stripped),
+    };
+    for element in rest.split('.') {
+        context = match context {
+            Value::Null => {
+                return format!("cannot resolve [{element}] from null as part of path [{path}]");
+            }
+            Value::Object(mut m) => match m.remove(element) {
+                Some(v) => v,
+                None => return format!("field [{element}] not present as part of path [{path}]"),
+            },
+            Value::Array(mut a) => match element.parse::<i64>() {
+                Err(_) => {
+                    return format!(
+                        "[{element}] is not an integer, cannot be used as an index as part of path [{path}]"
+                    );
+                }
+                Ok(i) if i < 0 || i as usize >= a.len() => {
+                    return format!(
+                        "[{i}] is out of bounds for array with length [{}] as part of path [{path}]",
+                        a.len()
+                    );
+                }
+                Ok(i) => a.swap_remove(i as usize),
+            },
+            other => {
+                return format!(
+                    "cannot resolve [{element}] from object of type [{}] as part of path [{path}]",
+                    type_name(&other)
+                );
+            }
+        };
+    }
+    format!("field [{path}] not present as part of path [{path}]")
 }
 
 fn no_field(field: &str) -> IngestError {
@@ -1428,24 +1493,65 @@ fn run_body(
             let properties = c.strings_opt("properties")?;
             // how much of a file is read. A field may carry the number for
             // one document, which is how a large file is read further than
-            // the pipeline's own ceiling
-            let mut limit = c.get("indexed_chars").and_then(|v| v.as_i64()).unwrap_or(100_000);
-            if let Some(from) = c.str_opt("indexed_chars_field")?
-                && let Some(n) = doc.get(&from).and_then(|v| v.as_i64())
-            {
-                limit = n;
+            // the pipeline's own ceiling; a field that is not there leaves
+            // the ceiling as it is, and one that is not a whole number is an
+            // error
+            let mut limit = c.int_opt("indexed_chars")?.unwrap_or(100_000);
+            if let Some(from) = c.str_opt("indexed_chars_field")? {
+                match doc.get(&from) {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Number(n))
+                        if n.as_i64().is_some_and(|v| i32::try_from(v).is_ok()) =>
+                    {
+                        limit = n.as_i64().unwrap_or(limit);
+                    }
+                    Some(other) => {
+                        let kind = match &other {
+                            Value::Number(n) if n.is_i64() || n.is_u64() => "java.lang.Long",
+                            v => type_name(v),
+                        };
+                        return Err(IngestError::illegal(format!(
+                            "field [{from}] of type [{kind}] cannot be cast to [java.lang.Integer]"
+                        )));
+                    }
+                }
             }
-            let limit = if limit < 0 { usize::MAX } else { limit as usize };
-            let Some(encoded) = string_at(&doc, &field, ignore_missing)? else {
-                return Ok(Some(doc));
+            let limit = usize::try_from(limit).ok();
+            let bytes = match doc.get(&field) {
+                None => {
+                    if ignore_missing {
+                        return Ok(Some(doc));
+                    }
+                    return Err(IngestError::illegal(unresolved(&doc, &field)));
+                }
+                Some(Value::Null) => {
+                    if ignore_missing {
+                        return Ok(Some(doc));
+                    }
+                    return Err(IngestError::illegal(format!(
+                        "field [{field}] is null, cannot parse."
+                    )));
+                }
+                Some(Value::String(encoded)) => {
+                    super::attachment::java_base64(&encoded).map_err(IngestError::illegal)?
+                }
+                Some(other) => {
+                    return Err(IngestError::illegal(format!(
+                        "Content field [{field}] of unknown type [{}], must be string or byte array",
+                        type_name(&other)
+                    )));
+                }
             };
-            use base64::Engine;
-            let bytes =
-                base64::engine::general_purpose::STANDARD.decode(encoded.trim()).map_err(|_| {
-                    IngestError::illegal(format!("field [{field}] is not a valid base64 value"))
-                })?;
-            let found = super::attachment::extract(&bytes, limit);
-            let written = super::attachment::fields(&found, &found.content, properties.as_deref());
+            let found = super::attachment::extract(&bytes, limit).map_err(|cause| IngestError {
+                caused_by: Some(json!({"type": cause.kind, "reason": cause.reason})),
+                ..IngestError::parse(
+                    format!("Error parsing document in field [{field}]"),
+                    None,
+                    None,
+                    None,
+                )
+            })?;
+            let written = super::attachment::fields(&found, properties.as_deref());
             doc.set(&target, written).map_err(IngestError::illegal)?;
         }
         "geoip" => {
