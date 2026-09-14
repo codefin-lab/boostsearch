@@ -197,11 +197,21 @@ pub(crate) fn substitute_unusable_missing(body: &mut Value, ctx: &Ctx) {
 pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     match node {
         Value::Object(o) => {
+            // `_seq_no` is kept in a column of its own under another name
+            if o.get("field").and_then(|f| f.as_str()) == Some("_seq_no")
+                && ctx.mapping.type_of("_seq_no").is_none()
+            {
+                o.insert("field".into(), json!("_seq"));
+            }
             if let Some(Value::String(f)) = o.get("field") {
                 // a field already named as the column it lives in is left as
                 // it is; naming one that way is how a caller asks for the
-                // analysed view rather than the stored one
-                if f.starts_with(&format!("{}.", crate::store::DYN))
+                // analysed view rather than the stored one. `_id` has a column
+                // of its own outside `_raw`, which is where a terms
+                // aggregation over it reads the ids.
+                if f == "_id"
+                    || f == "_seq"
+                    || f.starts_with(&format!("{}.", crate::store::DYN))
                     || f.starts_with(&format!("{}.", crate::store::RAW))
                     || f.starts_with(&format!("{}.", crate::store::FIELDDATA))
                 {
@@ -262,7 +272,48 @@ pub(crate) fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>,
         }
         // `_term` and `_time` are the old spellings of `_key`, kept working
         // for the aggregations that were named before it was renamed
+        // BoostCore reads `shard_size` as a cut made in every segment, which a
+        // shard of OpenSearch never makes: one shard counts every term exactly
+        // and cuts only the list it hands on. A `shard_size: 3` over an index
+        // of several segments counted a region 292 times where it holds 569
+        // documents. BoostCore is asked to keep enough of each segment to
+        // count exactly, and the shards' cuts are made afterwards, from the
+        // documents (see `shard_terms_bounds`).
+        if let Some(Value::Object(terms)) = d.get_mut("terms") {
+            let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10);
+            terms.remove("shard_size");
+            // Where the counts tie at the last bucket shown, OpenSearch shows
+            // the smaller keys, and BoostCore whichever it met first. It is
+            // asked for some more than were wanted, and the answer is cut back
+            // once the buckets are in the reference's order (`cut_terms`).
+            let by_count = match terms.get("order") {
+                None => true,
+                Some(o) => o.get("_count").and_then(|v| v.as_str()) == Some("desc"),
+            };
+            let partitioned = terms.get("include").and_then(|i| i.get("partition")).is_some();
+            if by_count && !partitioned && size < 65_536 {
+                terms.insert("size".into(), json!(size + 100));
+            }
+            terms.insert(
+                "segment_size".into(),
+                json!(size.saturating_mul(10).clamp(65_536, u32::MAX as u64)),
+            );
+        }
         for agg in d.values_mut() {
+            // A list of orders whose tie-break is the key ascending is the one
+            // order before it: that tie-break is the one every terms answer
+            // is put in anyway. BoostCore takes a single order, and refused
+            // the list.
+            if let Some(Value::Array(list)) = agg.get("order") {
+                let tie_break = |o: &Value| {
+                    o.get("_key").and_then(|v| v.as_str()) == Some("asc")
+                        && o.as_object().map(|m| m.len()) == Some(1)
+                };
+                if !list.is_empty() && list.iter().skip(1).all(tie_break) {
+                    let first = list[0].clone();
+                    agg["order"] = first;
+                }
+            }
             let Some(order) = agg.get_mut("order").and_then(|o| o.as_object_mut()) else {
                 continue;
             };

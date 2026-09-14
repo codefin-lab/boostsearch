@@ -114,27 +114,34 @@ pub(crate) fn run_hdr_percentiles(
     let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
 
     let query = combine(main_query, None);
-    let values = collect_field_values(store, targets, &query, &field, missing)?;
-    // without `hdr`, OpenSearch keeps a t-digest, which for the counts these
-    // aggregations see holds every value and reports the one at the rank the
-    // percentile names
     let hdr = spec.get("hdr").is_some();
-    let mut sorted = values.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let at = |p: f64| -> Option<f64> {
-        if sorted.is_empty() {
-            return None;
-        }
-        // the value whose place that share of the way through is reached,
-        // counted the way OpenSearch counts it
-        let at = ((p / 100.0) * sorted.len() as f64).floor() as usize;
-        sorted.get(at.min(sorted.len() - 1)).copied()
-    };
     let mut hist = crate::hdr::HdrHistogram::default();
-    for v in &values {
-        hist.record(*v);
+    // Without `hdr`, OpenSearch estimates with a t-digest, and the value it
+    // reports is the sketch's rather than the one at the rank. The value at
+    // the rank was reported here, which is the true median -- 72.87 over the
+    // sales of example 24 where the reference answers 72.45.
+    let mut digest: Option<crate::search::aggs::tdigest::MergingDigest> = None;
+    if hdr {
+        for v in collect_field_values(store, targets, &query, &field, missing)? {
+            hist.record(v);
+        }
+    } else {
+        let compression = spec
+            .pointer("/tdigest/compression")
+            .or_else(|| spec.get("compression"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0);
+        digest = Some(percentile_digest(store, targets, &query, &field, missing, compression)?);
     }
-    let value_at = |p: f64| if hdr { hist.value_at(p) } else { at(p) };
+    let value_at = |p: f64| -> Option<f64> {
+        match digest.as_ref() {
+            None => hist.value_at(p),
+            Some(d) => {
+                let mut d = d.clone();
+                (d.size() > 0.0).then(|| d.quantile(p / 100.0)).filter(|v| !v.is_nan())
+            }
+        }
+    };
 
     if keyed {
         let mut map = serde_json::Map::new();
@@ -359,8 +366,96 @@ pub(crate) fn run_mad_agg(
     }
     let (field, missing) = agg_field_and_missing(&spec);
     let query = combine(main_query, None);
-    let mut values = collect_field_values(store, targets, &query, &field, missing)?;
-    Ok(json!({ "value": crate::hdr::median_absolute_deviation(&mut values) }))
+    let compression = spec.get("compression").and_then(|v| v.as_f64()).unwrap_or(1000.0);
+    // The deviation is the reference's estimate from its t-digest, worked out
+    // where the sketch is: on the shard when there is one shard, whose answer
+    // is carried as it is, and on the merged sketch when there are several.
+    let shards = shard_sketches(store, targets, &query, &field, missing, compression)?;
+    let value = match shards.len() {
+        0 => None,
+        1 => shards.into_iter().next().and_then(|mut s| s.median_absolute_deviation()),
+        _ => {
+            let mut merged = MergingDigest::new(compression);
+            for mut s in shards {
+                // each shard answered before its sketch was sent
+                let _ = s.median_absolute_deviation();
+                let mut sent = s.round_trip();
+                merged.add_digest(&mut sent);
+            }
+            merged.median_absolute_deviation()
+        }
+    };
+    Ok(json!({ "value": value }))
+}
+
+use crate::search::aggs::tdigest::MergingDigest;
+
+/// One t-digest per shard that holds any of the values, each fed the values
+/// in the order the shard holds its documents.
+fn shard_sketches(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+    field: &str,
+    missing: Option<f64>,
+    compression: f64,
+) -> std::result::Result<Vec<MergingDigest>, Response> {
+    let mut out = Vec::new();
+    for shard in shard_docs(store, targets, query, &[field])? {
+        // a shard with nothing to add still answers, with an empty sketch
+        let mut digest = MergingDigest::new(compression);
+        for (_, values) in &shard.docs {
+            let mut numbers: Vec<f64> = values[0]
+                .iter()
+                .filter_map(|h| match h {
+                    Held::Number(n) => Some(*n),
+                    Held::Text(_) => None,
+                })
+                .collect();
+            if numbers.is_empty()
+                && let Some(m) = missing
+            {
+                numbers.push(m);
+            }
+            numbers.sort_by(|a, b| a.total_cmp(b));
+            for n in numbers {
+                digest.add(n, 1);
+            }
+        }
+        out.push(digest);
+    }
+    Ok(out)
+}
+
+/// The sketch a `percentiles` aggregation reads its answer from, after the
+/// journey the reference's takes: from a single shard it arrives serialised
+/// and read back; from several, each arrives that way, they are merged, and
+/// the merged sketch is serialised and read back once more.
+fn percentile_digest(
+    store: &Store,
+    targets: &[String],
+    query: &Value,
+    field: &str,
+    missing: Option<f64>,
+    compression: f64,
+) -> std::result::Result<MergingDigest, Response> {
+    let shards = shard_sketches(store, targets, query, field, missing, compression)?;
+    Ok(match shards.len() {
+        0 => MergingDigest::new(compression),
+        1 => shards
+            .into_iter()
+            .next()
+            .map(|mut s| s.round_trip())
+            .unwrap_or_else(|| MergingDigest::new(compression)),
+        _ => {
+            let mut merged = MergingDigest::new(compression);
+            for mut s in shards {
+                let mut sent = s.round_trip();
+                merged.add_digest(&mut sent);
+            }
+            merged.round_trip()
+        }
+    })
 }
 
 /// The metric aggregations that take a value per document, where the value is

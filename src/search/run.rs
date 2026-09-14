@@ -2154,6 +2154,15 @@ pub(crate) fn finish_search(
         }
     }
     check_max_buckets(store, &aggs)?;
+    if let (Some(a), Some(req)) =
+        (aggs.as_mut(), body.get("aggs").or_else(|| body.get("aggregations")))
+    {
+        if !weighted {
+            let base = query_json.clone().unwrap_or_else(|| json!({"match_all": {}}));
+            shard_terms_bounds(store, &targets, &base, req, a)?;
+        }
+        order_as_requested(a, req);
+    }
 
     let agg_forces_all = body
         .get("aggs")
