@@ -9,12 +9,12 @@ or `auto_date_histogram` to mean anything. So `data/make-sales.py` writes
 
 | Shape in the data | The step that finds it |
 |---|---|
-| north is the busiest region, central the smallest | 3, 5, 6 |
-| central and south discount deeply, west hardly at all | 12, 14 |
-| November and December sell more | 5, 8, 16 |
-| three products sold once or twice all year | 7 |
-| one sale in five was never rated; most used no coupon | 15 |
-| a few orders are for 10 or 20 units | 11, 13 |
+| north is the busiest region, central the smallest | 3, 5, 7 |
+| central and south discount deeply, west hardly at all | 13, 15 |
+| November and December sell more | 5, 9, 17 |
+| three products sold once or twice all year | 8 |
+| one sale in five was never rated; most used no coupon | 16 |
+| a few orders are for 10 or 20 units | 12, 14 |
 
 The output is committed as well as the generator, for two reasons. The run
 should not depend on the Python on the machine producing the same floats, and
@@ -53,19 +53,25 @@ repeated page would show as a wrong total.
 
 The trade: a `composite` cannot be ordered by a metric. It pages in key order
 only. "Top five pairs by revenue" is a `terms` or `multi_terms` question (step
-6); "all of them" is a `composite` question.
+7); "all of them" is a `composite` question.
 
-## A summary index, because transforms are not there
+## A summary index kept by a transform, and a rollup beside it
 
-OpenSearch would do step 4 with `_plugins/_transform`: a job that runs the same
-composite aggregation in pages and writes each bucket as a document into a
-target index, continuously if asked. `_plugins/_rollup` does the same with a
-fixed set of metrics and can be searched through the original index name.
+Step 4 is a transform. It runs the composite aggregation of step 3 in pages,
+turns each bucket into a document -- the group keys under the names the
+transform gives them, and each aggregation's result under its own name -- and
+writes it into `sales-monthly` under an id hashed from the key. The id is what
+makes the job safe to run again: 240 buckets are 240 documents however many
+times it runs. A plain transform runs once and turns itself off; a
+`continuous` one would run on every tick of its schedule and recompute only the
+groups that new sales fall into.
 
-This node answers both with `501`, so the example does the job in the open: page
-the composite, turn each bucket into a document with an id built from its key,
-bulk it. The id makes the write idempotent -- run it twice and there are still
-240 documents -- which is the property a real transform job needs too.
+The summary index is made before the transform runs, with a strict mapping of
+its own: `month` is a date (the transform writes the bucket key in
+milliseconds), and the `transform._id` and `transform._doc_count` fields the
+transform adds to every document are named. Left to make the index itself, the
+transform would map `month` as a number, and step 5's `date_histogram` over it
+would be refused.
 
 Step 5 is the reason to bother. The same request against 240 documents gives
 the same regional totals as against 3,004. At a year of real sales the ratio
@@ -73,10 +79,21 @@ is closer to a million to one, and a dashboard that reads the summary stays
 fast however long the history gets. What is given up is detail: the summary
 cannot answer "the biggest single order", because no single order is in it.
 
+Step 6 is the other shape of the same idea. A rollup keeps a fixed set of
+metrics -- a sum, a minimum, a maximum, a count, and an average kept as its sum
+and count so that averages can be combined -- and its index is searched with
+the request the raw index would be sent. The search is rewritten against the
+rollup documents, and a bucket counts the sales its documents stand for. The
+difference from a transform is in what the reader has to know: a transform's
+summary is an index of its own, with its own field names, while a rollup is
+asked the question the raw data is asked. The price is that a rollup answers
+only what its dimensions and metrics can: a `terms` on a field that is not a
+dimension, a `top_hits`, or any `size` above 0 is refused, in so many words.
+
 ## `filters` buckets overlap; `range` buckets do not
 
-`range` (step 9) puts each document in at most one bucket, because the ranges
-are contiguous and `from` is inclusive, `to` exclusive. `filters` (step 13)
+`range` (step 10) puts each document in at most one bucket, because the ranges
+are contiguous and `from` is inclusive, `to` exclusive. `filters` (step 14)
 tests every filter against every document independently. Nine sales are both
 bulk and deeply discounted and are counted in both buckets, so the buckets sum
 to 3,013. `other_bucket_key` collects only what matched none of them.
@@ -89,7 +106,7 @@ exclude earlier ones in each later filter.
 
 Aggregations run over what the query matched. `global` is the one exception:
 its sub-aggregations see every document in the index, whatever the query said.
-Step 14 uses it to put central's numbers and the company's in one answer, which
+Step 15 uses it to put central's numbers and the company's in one answer, which
 is what a "this region against the average" panel needs.
 
 `global` ignores the query, but not the index: a search across several indices
@@ -108,7 +125,7 @@ The same parameter on `terms` makes absence a bucket of its own, which is how
 
 ## A scripted `terms` key, and its cost
 
-Step 16 buckets by a quarter computed in Painless from `sold_at`. It works on
+Step 17 buckets by a quarter computed in Painless from `sold_at`. It works on
 any field the documents already have, with no reindex, which is why it is
 useful for a question someone thought of today.
 
@@ -122,7 +139,7 @@ fail it.
 ## Estimates
 
 `percentiles` and `median_absolute_deviation` are computed from a t-digest
-sketch, not by sorting. Step 11's median is 72.87 here, 72.45 in OpenSearch,
+sketch, not by sorting. Step 12's median is 72.87 here, 72.45 in OpenSearch,
 and 72.82 counted exactly. `cardinality` is likewise approximate above its
 `precision_threshold`. Put exact numbers in a financial report; put sketches
 on a dashboard.
@@ -135,9 +152,10 @@ on a dashboard.
   `composite` pages through every bucket exactly, whatever the shard count;
   `rare_terms` keeps its own approximation, a filter per shard that can
   occasionally call a term rare when it is not.
-- **The summary is written by a job, not a script.** It runs on a schedule, on
-  new data only (a range on `sold_at` since the last run), and the id scheme
-  makes a rerun safe.
+- **The summary keeps up by itself.** A `continuous` transform runs on its
+  schedule and recomputes only the groups that sales written since its last run
+  fall into; a `continuous` rollup rolls up each day once the day is over, and
+  its `delay` leaves time for late sales to arrive.
 - **Time zones.** Months and quarters here are UTC. A business reports in its
   own time zone, and `date_histogram`, `composite` and `date_range` all take
   `time_zone`; without it, a sale late on 31 December in New York lands in

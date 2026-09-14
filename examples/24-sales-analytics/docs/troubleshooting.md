@@ -46,9 +46,33 @@ curl -s localhost:9284/sales/_search -H 'content-type: application/json' \
 
 ## `sales-monthly` holds a different number of documents from 240
 
-The summary ids are `region|category|month`, so a rerun overwrites rather than
-adds. More than 240 means the index was not deleted and the id scheme changed;
-fewer means a composite page was lost. `make clean` and run again.
+The transform names each document by a hash of its key, so a rerun overwrites
+rather than adds. Fewer than 240 means the run has not finished: ask what it is
+doing,
+
+```bash
+curl -s localhost:9284/_plugins/_transform/sales-monthly/_explain | jq
+```
+
+and read `status` and `failure_reason`. `failed` with a reason about the
+source index means `sales` was not there when the job ran.
+
+## The transform or the rollup never finishes
+
+A job runs on its schedule, and the first run of one written with a
+`start_time` of now is a whole period away. `run.sh` sets the start to just
+under a minute ago so that the first run is a second or two off. Written by
+hand, either wait the minute or do the same. A job that has been stopped with
+`_stop` does not run until `_start`.
+
+## A search of `sales-daily-rollup` answers 400
+
+A rollup index answers only what its job kept. The reason says which part of
+the request it could not answer: `Rollup search must have size explicitly set
+to 0`, `The top_hits aggregation is not currently supported in rollups`, or
+`Could not find a rollup job that can answer this query because [missing field
+channel]` for a field the job has no dimension or metric for. Search `sales`
+for those.
 
 ## `strict_dynamic_mapping_exception` on the bulk
 
@@ -62,23 +86,17 @@ A path names a sibling aggregation inside the same bucket. `margin_pct` is a
 `bucket_script` result, so it can be used by the selector and the sort that
 follow it, but not by an aggregation outside `regions`.
 
-## `_plugins/_transform` or `_plugins/_rollup` answers 501
-
-Not implemented on this node. Step 4 builds the same summary by paging a
-composite and writing the buckets back; `design.md` says what a transform job
-would add.
-
 ## `top_metrics` answers 400
 
 Not implemented on this node. `top_hits` with `size: 1` and a `sort` gives the
-same answer with more around it (step 10).
+same answer with more around it (step 11).
 
 ## `top_hits` under `rare_terms` or `composite` answers 400
 
 On this node `top_hits` inside those two aggregations needs a `sort` and then
 refuses `_source`; without `_source` it answers with hits that carry no
 document. Inside `terms` and `multi_terms` it works. Use a `min` or `max`
-sub-aggregation for a single value (step 7 uses `sum` and `min`), or run a
+sub-aggregation for a single value (step 8 uses `sum` and `min`), or run a
 second search filtered to the bucket's key.
 
 ## A median that is not the median
@@ -89,6 +107,6 @@ second search filtered to the bucket's key.
 ## Cleaning up
 
 ```bash
-make clean          # deletes sales and sales-monthly
-rm -f /tmp/sales-24-buckets.ndjson /tmp/sales-24-monthly.ndjson
+make clean          # deletes both jobs, sales, sales-monthly and sales-daily-rollup
+rm -f /tmp/sales-24-buckets.ndjson
 ```

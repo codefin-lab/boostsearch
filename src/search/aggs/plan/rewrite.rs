@@ -427,6 +427,18 @@ pub(crate) fn inject_doc_count_helpers(node: &mut Value) {
 pub(crate) fn apply_doc_counts(node: &mut Value) {
     match node {
         Value::Object(o) => {
+            // only a terms answer is ordered by its counts, and only one
+            // that was in count order before the correction is put back in
+            // it: a histogram's buckets are in the order of their keys, and
+            // sorting them by count scrambled every weighted histogram
+            let by_count = o.contains_key("sum_other_doc_count")
+                && o.get("buckets").and_then(|b| b.as_array()).is_some_and(|buckets| {
+                    buckets.windows(2).all(|w| {
+                        let get =
+                            |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        get(&w[0]) >= get(&w[1])
+                    })
+                });
             if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
                 for b in buckets.iter_mut() {
                     let sum = b.pointer(&format!("/{DC_SUM}/value")).and_then(|v| v.as_f64());
@@ -442,7 +454,7 @@ pub(crate) fn apply_doc_counts(node: &mut Value) {
                 }
                 // the correction can reorder buckets a count-ordered agg sorted
                 // before it was applied
-                if let Some(Value::Array(buckets)) = o.get_mut("buckets") {
+                if by_count && let Some(Value::Array(buckets)) = o.get_mut("buckets") {
                     buckets.sort_by(|a, b| {
                         let get =
                             |v: &Value| v.get("doc_count").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -460,6 +472,50 @@ pub(crate) fn apply_doc_counts(node: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Put the buckets of a terms aggregation ordered by its keys back in key
+/// order, once the counts that weight them have been corrected.
+///
+/// Correcting the counts sorts by count wherever the buckets were in count
+/// order, and buckets that were in key order with every count the same look
+/// exactly like that: a terms aggregation ordered by `_key` over documents that
+/// each stand for several came back ordered by what they stood for.
+pub(crate) fn restore_key_orders(result: &mut Value, request: &Value) {
+    let Some(asked) = request.as_object() else { return };
+    for (name, def) in asked {
+        let Some(answer) = result.get_mut(name) else { continue };
+        let order = def.pointer("/terms/order").cloned();
+        let by_key = order.as_ref().and_then(|o| {
+            let one = match o {
+                Value::Array(list) => list.first()?.clone(),
+                other => other.clone(),
+            };
+            let (k, dir) = one.as_object()?.iter().next()?;
+            matches!(k.as_str(), "_key" | "_term").then(|| dir.as_str() == Some("desc"))
+        });
+        let sub = def.get("aggs").or_else(|| def.get("aggregations"));
+        if let Some(Value::Array(buckets)) = answer.get_mut("buckets") {
+            if let Some(desc) = by_key {
+                buckets.sort_by(|a, b| {
+                    let ord = match (&a["key"], &b["key"]) {
+                        (Value::Number(x), Value::Number(y)) => x
+                            .as_f64()
+                            .unwrap_or(0.0)
+                            .partial_cmp(&y.as_f64().unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                        (x, y) => x.as_str().unwrap_or("").cmp(y.as_str().unwrap_or("")),
+                    };
+                    if desc { ord.reverse() } else { ord }
+                });
+            }
+            if let Some(sub) = sub {
+                for b in buckets.iter_mut() {
+                    restore_key_orders(b, sub);
+                }
+            }
+        }
     }
 }
 

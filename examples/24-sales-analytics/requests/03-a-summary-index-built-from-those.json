@@ -14,7 +14,7 @@
       },
       "month": {
         "type": "date",
-        "format": "yyyy-MM"
+        "format": "strict_date_optional_time||epoch_millis"
       },
       "orders": {
         "type": "long"
@@ -24,6 +24,16 @@
       },
       "revenue": {
         "type": "double"
+      },
+      "transform": {
+        "properties": {
+          "_id": {
+            "type": "keyword"
+          },
+          "_doc_count": {
+            "type": "long"
+          }
+        }
       }
     }
   }

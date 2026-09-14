@@ -94,6 +94,12 @@ pub(crate) fn build_range_field_query(
 
 pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, spec) = single_key(body)?;
+    // every document carries the sequence number of the write that made it,
+    // and asking for the ones written after a point is how a continuous
+    // transform finds what changed since it last looked
+    if field == "_seq_no" {
+        return Ok(seq_no_range(ctx, &spec));
+    }
     if let Some(r) = build_range_field_query(ctx, &field, &spec) {
         return r;
     }
@@ -465,4 +471,32 @@ pub(crate) fn bound_term(
         _ => return Bound::Unbounded,
     }
     if *inclusive { Bound::Included(t) } else { Bound::Excluded(t) }
+}
+
+/// A range over the sequence numbers documents were written with.
+fn seq_no_range(ctx: &Ctx, spec: &Value) -> Box<dyn Query> {
+    use std::ops::Bound;
+    let number = |key: &str| {
+        spec.get(key).filter(|v| !v.is_null()).and_then(|v| {
+            v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).or_else(|| v.as_str()?.parse().ok())
+        })
+    };
+    // a bound below zero reaches every document, and one that excludes
+    // everything below zero as well
+    let term = |n: i64| boostcore::Term::from_field_u64(ctx.fields.seq, n.max(0) as u64);
+    let lower = match (number("gte").or_else(|| number("from")), number("gt")) {
+        (Some(n), _) if n <= 0 => Bound::Unbounded,
+        (Some(n), _) => Bound::Included(term(n)),
+        (None, Some(n)) if n < 0 => Bound::Unbounded,
+        (None, Some(n)) => Bound::Excluded(term(n)),
+        _ => Bound::Unbounded,
+    };
+    let upper = match (number("lte").or_else(|| number("to")), number("lt")) {
+        (Some(n), _) if n < 0 => return Box::new(boostcore::query::EmptyQuery),
+        (Some(n), _) => Bound::Included(term(n)),
+        (None, Some(n)) if n <= 0 => return Box::new(boostcore::query::EmptyQuery),
+        (None, Some(n)) => Bound::Excluded(term(n)),
+        _ => Bound::Unbounded,
+    };
+    Box::new(boostcore::query::FastFieldRangeQuery::new(lower, upper))
 }

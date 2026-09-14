@@ -120,7 +120,14 @@ impl BlockStats {
             }
             let from = first as u32 * BLOCK;
             let to = (b as u32 * BLOCK).min(self.num_docs);
-            col.get_docids_for_value_range(lo..=hi, from..to, out);
+            // The columnar writes its matches over the vector it is handed
+            // rather than after what is already there, so a second run of
+            // partial blocks erased the first: a range whose matches fell in
+            // two runs separated by a skipped block lost every match of the
+            // earlier one. Each run fills a vector of its own.
+            let mut run: Vec<DocId> = Vec::new();
+            col.get_docids_for_value_range(lo..=hi, from..to, &mut run);
+            out.extend(run);
         }
         (skipped, whole)
     }
@@ -243,5 +250,59 @@ impl Weight for BlockRangeQuery {
             return Ok(docs.into_iter().filter(|d| alive.is_alive(*d)).count() as u32);
         }
         Ok(self.docids(reader).len() as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boostcore::columnar::{ColumnIndex, ColumnValues};
+    use std::ops::{Range, RangeInclusive};
+
+    /// Values held the way the bit-packed codec holds them, down to how it
+    /// hands matches back: written over the vector it is given, from the start.
+    struct Packed(Vec<u64>);
+
+    impl ColumnValues<u64> for Packed {
+        fn get_val(&self, idx: u32) -> u64 {
+            self.0[idx as usize]
+        }
+        fn get_row_ids_for_value_range(
+            &self,
+            range: RangeInclusive<u64>,
+            rows: Range<u32>,
+            hits: &mut Vec<u32>,
+        ) {
+            hits.clear();
+            hits.extend(rows.filter(|r| range.contains(&self.0[*r as usize])));
+        }
+        fn min_value(&self) -> u64 {
+            self.0.iter().copied().min().unwrap_or(0)
+        }
+        fn max_value(&self) -> u64 {
+            self.0.iter().copied().max().unwrap_or(0)
+        }
+        fn num_vals(&self) -> u32 {
+            self.0.len() as u32
+        }
+    }
+
+    #[test]
+    fn matches_in_runs_of_blocks_apart_are_all_found() {
+        // a block of small values, a block of large ones the range skips, and
+        // another block of small values: two runs of partial blocks
+        let values: Vec<u64> = (0..3 * BLOCK as u64)
+            .map(|i| {
+                if (BLOCK as u64..2 * BLOCK as u64).contains(&i) { 1_000_000 + i } else { i % 700 }
+            })
+            .collect();
+        let expected = values.iter().filter(|v| (100..=150).contains(*v)).count();
+        let col = Column { index: ColumnIndex::Full, values: std::sync::Arc::new(Packed(values)) };
+        let stats = BlockStats::build(&col, 3 * BLOCK);
+        let mut out = Vec::new();
+        let (skipped, _) = stats.docids_in_range(&col, 100, 150, true, &mut out);
+        assert_eq!(skipped, 1);
+        assert_eq!(out.len(), expected);
+        assert!(out.iter().any(|d| *d < BLOCK) && out.iter().any(|d| *d >= 2 * BLOCK));
     }
 }

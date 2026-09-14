@@ -195,7 +195,80 @@ pub(crate) fn run_composite_agg(
     // can be walked and each step counted through the ordinary query path.
     let mut flat: Vec<Value> = Vec::new();
     let mut held_back: Option<Value> = None;
-    if let Some(at) = sources.iter().position(|s| s.date) {
+    // A source asking for a bucket of the documents that have no value for it
+    // splits the documents in two: those with a value, bucketed by every
+    // source as usual, and those without, bucketed by the other sources with
+    // this one's key missing. It used to be answered with a single bucket
+    // whose every key was missing, which dropped the documents that lacked
+    // one field but had the others -- a transform grouping by region and day
+    // lost every sale with no region -- and a date source took documents
+    // without a date out of the answer altogether.
+    if let Some(at) = sources.iter().position(|s| s.missing_bucket) {
+        let list: Vec<Value> =
+            spec.get("sources").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let field = sources[at].field.clone();
+        let name = sources[at].name.clone();
+        // the inner answers keep their keys as numbers; the page is formatted
+        // here, once it is sorted
+        fn inner_source(e: &mut Value) -> Option<&mut serde_json::Map<String, Value>> {
+            e.as_object_mut()?
+                .values_mut()
+                .next()?
+                .as_object_mut()?
+                .values_mut()
+                .next()?
+                .as_object_mut()
+        }
+        let unformatted: Vec<Value> = list
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if let Some(o) = inner_source(&mut e) {
+                    o.remove("format");
+                }
+                e
+            })
+            .collect();
+        let mut with = unformatted.clone();
+        if let Some(o) = with.get_mut(at).and_then(inner_source) {
+            o.insert("missing_bucket".into(), json!(false));
+        }
+        let present = combine(main_query, Some(json!({"exists": {"field": field}})));
+        let mut inner = json!({"composite": {"sources": with, "size": 65_536}});
+        if let Some(sub) = sub_aggs.as_ref() {
+            inner["aggs"] = sub.clone();
+        }
+        let answer = run_composite_agg(store, targets, &Some(present), &inner, weighted)?;
+        flat.extend(answer["buckets"].as_array().cloned().unwrap_or_default());
+        let absent = combine(
+            main_query,
+            Some(json!({"bool": {"must_not": [{"exists": {"field": field}}]}})),
+        );
+        let others: Vec<Value> =
+            unformatted.into_iter().enumerate().filter(|(i, _)| *i != at).map(|(_, v)| v).collect();
+        if others.is_empty() {
+            let (count, sub) = count_with_sub_aggs(store, targets, &absent, &sub_aggs, weighted)?;
+            if count > 0 {
+                let mut b = json!({"key": {name.clone(): Value::Null}, "doc_count": count});
+                if let Some(Value::Object(o)) = sub {
+                    for (k, v) in o {
+                        b[k] = v;
+                    }
+                }
+                flat.push(b);
+            }
+        } else {
+            let mut inner = json!({"composite": {"sources": others, "size": 65_536}});
+            if let Some(sub) = sub_aggs.as_ref() {
+                inner["aggs"] = sub.clone();
+            }
+            let answer = run_composite_agg(store, targets, &Some(absent), &inner, weighted)?;
+            for mut b in answer["buckets"].as_array().cloned().unwrap_or_default() {
+                b["key"][name.clone()] = Value::Null;
+                flat.push(b);
+            }
+        }
+    } else if let Some(at) = sources.iter().position(|s| s.date) {
         let source = &sources[at];
         let field = source.node.pointer("/histogram/field").and_then(|f| f.as_str()).unwrap_or("");
         let step =
@@ -343,26 +416,18 @@ pub(crate) fn run_composite_agg(
             apply_doc_counts(&mut res);
         }
         flatten_composite(&res, 0, &sources, &mut serde_json::Map::new(), &mut flat);
-        // a source may ask for a bucket of the documents that have no value
-        // for it at all, which no terms aggregation will ever produce
-        for source in sources.iter().filter(|s| s.missing_bucket) {
-            let absent = json!({"bool": {"must_not": [{"exists": {"field": source.field}}]}});
-            let narrowed = combine(main_query, Some(absent));
-            let (count, sub) = count_with_sub_aggs(store, targets, &narrowed, &sub_aggs, weighted)?;
-            if count == 0 {
-                continue;
-            }
-            let mut key = serde_json::Map::new();
-            for other in &sources {
-                key.insert(other.name.clone(), Value::Null);
-            }
-            let mut b = json!({"key": Value::Object(key), "doc_count": count});
-            if let Some(Value::Object(o)) = sub {
-                for (k, v) in o {
-                    b[k] = v;
+    }
+    // a key names its sources in the order the request gave them, whichever
+    // of them was bucketed first
+    for b in flat.iter_mut() {
+        if let Some(key) = b.get("key").and_then(|k| k.as_object()) {
+            let mut ordered = serde_json::Map::new();
+            for source in &sources {
+                if let Some(v) = key.get(&source.name) {
+                    ordered.insert(source.name.clone(), v.clone());
                 }
             }
-            flat.push(b);
+            b["key"] = Value::Object(ordered);
         }
     }
     // whether a date bucket comes back counted in milliseconds or in

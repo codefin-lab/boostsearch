@@ -744,6 +744,35 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
                 }
                 _ => "cluster:admin/opendistro/ism/policy/write".to_string(),
             },
+            // the plugin's own transport actions for its jobs, so a role
+            // written for the reference grants the same things here
+            ("_transform", _) => {
+                let tail = rest.last().copied().unwrap_or("");
+                let verb = match (tail, m) {
+                    ("_start", _) => "start",
+                    ("_stop", _) => "stop",
+                    ("_explain", _) => "explain",
+                    ("_preview", _) => "preview",
+                    (_, "DELETE") => "delete",
+                    ("_transform", "GET" | "HEAD") => "get_transforms",
+                    (_, "GET" | "HEAD") => "get",
+                    _ => "index",
+                };
+                format!("cluster:admin/opendistro/transform/{verb}")
+            }
+            ("_rollup", _) => {
+                let tail = rest.last().copied().unwrap_or("");
+                let verb = match (tail, m) {
+                    ("_start", _) => "start",
+                    ("_stop", _) => "stop",
+                    ("_explain", _) => "explain",
+                    (_, "DELETE") => "delete",
+                    ("jobs", "GET" | "HEAD") => "search",
+                    (_, "GET" | "HEAD") => "get",
+                    _ => "index",
+                };
+                format!("cluster:admin/opendistro/rollup/{verb}")
+            }
             // warming an index's vectors is done to that index, not to the
             // plugin's statistics
             ("_knn", _) if rest.get(2) == Some(&"warmup") => "indices:admin/knn/warmup".to_string(),

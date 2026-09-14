@@ -269,7 +269,11 @@ fn write_doc_uncounted(
         }
         with.to_string()
     };
-    st.has_doc_count |= source.get("_doc_count").is_some();
+    if !st.has_doc_count && source.get("_doc_count").is_some() {
+        st.has_doc_count = true;
+        // written down now, so that a restart still weights the buckets
+        st.save_meta();
+    }
     if let Err(field) = st.mapping.apply_dynamic_templates(&source) {
         // the refusal names the mode the mapping is in: `strict` and
         // `strict_allow_templates` both refuse here, and a caller reading

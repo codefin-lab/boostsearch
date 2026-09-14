@@ -1,4 +1,4 @@
-INDICES = sales sales-monthly
+INDICES = sales sales-monthly sales-daily-rollup
 
 .POSIX:
 .PHONY: help run serve check clean data
@@ -30,5 +30,10 @@ data:
 
 clean:
 	@sh -c 'if [ -f .env ]; then . ./.env; fi; \
+B=$${BS:-http://127.0.0.1:9284}; \
+curl -sS -X POST "$$B/_plugins/_transform/sales-monthly/_stop" > /dev/null 2>&1; \
+curl -sS -X DELETE "$$B/_plugins/_transform/sales-monthly?force=true" > /dev/null 2>&1; \
+curl -sS -X POST "$$B/_plugins/_rollup/jobs/sales-daily/_stop" > /dev/null 2>&1; \
+curl -sS -X DELETE "$$B/_plugins/_rollup/jobs/sales-daily" > /dev/null 2>&1; \
 for i in $(INDICES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9284}/$$i" > /dev/null 2>&1 || true; done; \
-echo "deleted: $(INDICES)"'
+echo "deleted: the transform sales-monthly, the rollup job sales-daily, $(INDICES)"'

@@ -409,6 +409,37 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_ism/change_policy/{index}", post(api::ism::change_policy))
         .route("/_plugins/_ism/retry/{index}", post(api::ism::retry_policy))
         .route("/_plugins/_ism/explain", get(api::ism::explain))
+        .route("/_plugins/_transform", get(api::transform::get_transform))
+        .route("/_plugins/_transform/_preview", post(api::transform::preview_transform))
+        .route(
+            "/_plugins/_transform/{id}",
+            put(api::transform::put_transform)
+                .get(api::transform::get_transform)
+                .delete(api::transform::delete_transform),
+        )
+        .route("/_plugins/_transform/{id}/_start", post(api::transform::start_transform))
+        .route("/_plugins/_transform/{id}/_stop", post(api::transform::stop_transform))
+        .route("/_plugins/_transform/{id}/_explain", get(api::transform::explain_transform))
+        .route("/_plugins/_rollup/jobs", get(api::rollup::get_rollup))
+        .route(
+            "/_plugins/_rollup/jobs/{id}",
+            put(api::rollup::put_rollup)
+                .get(api::rollup::get_rollup)
+                .delete(api::rollup::delete_rollup),
+        )
+        .route("/_plugins/_rollup/jobs/{id}/_start", post(api::rollup::start_rollup))
+        .route("/_plugins/_rollup/jobs/{id}/_stop", post(api::rollup::stop_rollup))
+        .route("/_plugins/_rollup/jobs/{id}/_explain", get(api::rollup::explain_rollup))
+        .route("/_opendistro/_rollup/jobs", get(api::rollup::get_rollup))
+        .route(
+            "/_opendistro/_rollup/jobs/{id}",
+            put(api::rollup::put_rollup)
+                .get(api::rollup::get_rollup)
+                .delete(api::rollup::delete_rollup),
+        )
+        .route("/_opendistro/_rollup/jobs/{id}/_start", post(api::rollup::start_rollup))
+        .route("/_opendistro/_rollup/jobs/{id}/_stop", post(api::rollup::stop_rollup))
+        .route("/_opendistro/_rollup/jobs/{id}/_explain", get(api::rollup::explain_rollup))
         .route("/_plugins/_sql", post(api::sql::sql))
         .route("/_plugins/_sql/_explain", post(api::sql::explain_sql))
         .route("/_plugins/_sql/stats", get(api::sql::stats).post(api::sql::stats))
@@ -543,6 +574,22 @@ async fn main() -> anyhow::Result<()> {
                     // a tick reads and writes indices, which is work for a
                     // blocking thread rather than for the runtime
                     let _ = tokio::task::spawn_blocking(move || ism::engine::tick(&store)).await;
+                }
+            }
+        });
+    }
+    // Transforms and rollups keep schedules of their own, down to the minute,
+    // so they are looked at every second rather than on the ISM interval. A
+    // job that is running holds the loop until it finishes, which is what
+    // keeps a job from running twice at once.
+    {
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if cluster::is_cluster_manager() {
+                    let store = store.clone();
+                    let _ = tokio::task::spawn_blocking(move || ism::jobs::tick(&store)).await;
                 }
             }
         });

@@ -17,6 +17,10 @@ use crate::store::Store;
 
 pub mod actions;
 pub mod engine;
+pub mod jobs;
+pub mod rollup;
+pub mod rollup_search;
+pub mod transform;
 
 /// Where policies and the state of each managed index are kept.
 pub const CONFIG_INDEX: &str = ".opendistro-ism-config";

@@ -37,7 +37,7 @@ security, snapshots, index management, the cluster, SQL and PPL.
 | [21](21-service-accounts-and-audit/) | Machines that log in, and a record of it | 9281 | least-privilege roles, `authinfo`, password rotation, the audit log |
 | [22](22-contract-clause-search/) | Finding the clause, and showing where it is | 9282 | three highlighters, spans and intervals, `more_like_this`, `_explain` |
 | [23](23-document-library/) | Files in, searchable text out | 9283 | `attachment`, `foreach`, `dissect`, verbose simulate, default and final pipelines |
-| [24](24-sales-analytics/) | A sales report from aggregations alone | 9284 | `composite` export, `multi_terms`, `rare_terms`, bucket scripts and selectors |
+| [24](24-sales-analytics/) | A sales report from aggregations alone | 9284 | `composite` export, a transform and a rollup, `multi_terms`, `rare_terms`, bucket scripts and selectors |
 | [25](25-operations-runbook/) | The questions an operator asks at 3 a.m. | 9285 | health, `_cat`, allocation explain, blocks, force merge, stats |
 | [26](26-tenants-by-routing/) | Many small customers in one index | 9286 | custom routing, filtered aliases with routing, `preference`, `terms` lookup |
 

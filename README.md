@@ -106,7 +106,7 @@ ceiling.
 | **Cluster** | consensus, allocation, replication, peer recovery, cross-node search; checked in a seeded simulation and against real nodes with real partitions |
 | **Security** | TLS, users and roles, API keys, document- and field-level security inside the query rather than in front of it, SAML, OIDC, LDAP, the audit log |
 | **Snapshots** | filesystem, URL, S3, Google Cloud Storage and Azure repositories |
-| **Index management** | ISM policies, transitions, rollover, snapshot management |
+| **Index management** | ISM policies, transitions, rollover, snapshot management, transforms, rollups and searching a rollup index |
 | **Vector search** | six distance spaces, exact and HNSW, filtered search, the k-NN API |
 | **SQL and PPL** | both languages, in jdbc, json, csv, raw and table shapes |
 

@@ -140,7 +140,29 @@ async fn search_answer(
     // is the same question with the same answer every time it is asked, and a
     // dashboard asks it once per panel per viewer. What was worked out before
     // is handed back, and the time it took to hand back is the time it took.
-    let targets = store.resolve(&expr);
+    let mut targets = store.resolve(&expr);
+    // An index a rollup job wrote is searched through the job that wrote it:
+    // the request is rewritten against the rollup documents, refused where
+    // they cannot answer it, and a rollup index searched beside raw indices
+    // answers as a shard that failed.
+    let mut expr = expr;
+    let mut rollup_plan: Option<Value> = None;
+    let mut rollup_failures: Vec<Value> = Vec::new();
+    match crate::ism::rollup_search::intercept(&store, &targets, &body, &p) {
+        Some(crate::ism::rollup_search::Intercepted::Refused { reason, indices }) => {
+            return crate::ism::rollup_search::refusal(&reason, &indices);
+        }
+        Some(crate::ism::rollup_search::Intercepted::Rewritten { body: rewritten, plan }) => {
+            body = rewritten;
+            rollup_plan = Some(plan);
+        }
+        Some(crate::ism::rollup_search::Intercepted::Mixed { others, failures }) => {
+            expr = others.join(",");
+            targets = others;
+            rollup_failures = failures;
+        }
+        None => {}
+    }
     let cache_key = crate::search::request_cache::cacheable(&store, &targets, &body, &p)
         .then(|| crate::search::request_cache::key(&store, &expr, &targets, &body, &p));
     if let Some(k) = &cache_key {
@@ -163,6 +185,18 @@ async fn search_answer(
         Ok(out) => {
             let n = out.hits.len();
             let mut env = crate::search::envelope(out, &body, &p);
+            if let Some(plan) = &rollup_plan {
+                crate::ism::rollup_search::finish(&mut env, plan);
+            }
+            if !rollup_failures.is_empty() {
+                let failed = rollup_failures.len() as u64;
+                let shards = &mut env["_shards"];
+                shards["total"] = json!(shards["total"].as_u64().unwrap_or(0) + failed);
+                shards["failed"] = json!(shards["failed"].as_u64().unwrap_or(0) + failed);
+                let mut list = shards["failures"].as_array().cloned().unwrap_or_default();
+                list.extend(rollup_failures.iter().cloned());
+                shards["failures"] = Value::Array(list);
+            }
             if let Some(pl) = &pipeline
                 && let Err(e) =
                     crate::search::pipeline::after(pl, &body, &mut env, &request_context)

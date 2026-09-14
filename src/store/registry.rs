@@ -220,6 +220,8 @@ impl Store {
                 meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
             let kept_seq = meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
             let kept_closed = meta.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let kept_doc_count =
+                meta.get("has_doc_count").and_then(|v| v.as_bool()).unwrap_or(false);
             match store.open_index(name, &body, entry.path()) {
                 Ok(()) => {
                     // Rebuild the id table in the background: startup no longer
@@ -232,6 +234,7 @@ impl Store {
                             // an index closed before the node stopped comes
                             // back closed
                             g.closed = kept_closed;
+                            g.has_doc_count |= kept_doc_count;
                             if let Some(v) = learned.0.and_then(|v| serde_json::from_value(v).ok())
                             {
                                 g.dynamic_types = v;
@@ -338,6 +341,7 @@ impl Store {
             g.allocation_id =
                 meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
             g.seq_no = g.seq_no.max(meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0));
+            g.has_doc_count |= meta.get("has_doc_count").and_then(|v| v.as_bool()).unwrap_or(false);
             let (reader, id_field) = (g.realtime.clone(), g.fields.id);
             let scanned = IdxState::scan_ids(&reader, id_field);
             g.absorb_ids(scanned);

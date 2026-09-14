@@ -264,6 +264,10 @@ impl IdxState {
             // again from zero would hand new writes numbers old documents
             // already carry, and a recovery pages by sequence number
             "seq_no": self.seq_no,
+            // whether a document here stands for several: a rollup index
+            // counted its buckets by documents rather than by what they stand
+            // for once the node had been restarted
+            "has_doc_count": self.has_doc_count,
         });
         let at = path.join("_meta.json");
         if let Err(e) = write_atomic(&at, meta.to_string().as_bytes()) {

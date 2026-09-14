@@ -87,51 +87,96 @@ impl Mapping {
             return Ok(());
         }
         let Some(obj) = source.as_object() else { return Ok(()) };
-        for (name, value) in obj {
-            if name.starts_with('_') || self.types.contains_key(name) {
-                continue;
-            }
-            if self.raw.pointer(&format!("/properties/{name}")).is_some() {
-                continue;
-            }
-            let kind = json_mapping_type(value);
-            let mut matched = false;
-            for t in &templates {
-                let Some(spec) = t.as_object().and_then(|o| o.values().next()) else { continue };
-                let pattern = spec.get("match").and_then(|v| v.as_str()).unwrap_or("*");
-                if !glob_match(pattern, name) {
-                    continue;
-                }
-                if let Some(mt) = spec.get("match_mapping_type").and_then(|v| v.as_str())
-                    && mt != "*"
-                    && mt != kind
-                {
-                    continue;
-                }
-                if let Some(m) = spec.get("mapping") {
-                    self.insert_property(name, m.clone());
-                }
-                matched = true;
-                break;
-            }
-            if !matched && dynamic.starts_with("strict") {
-                return Err(name.clone());
-            }
+        let mut claimed: Vec<(String, Value)> = Vec::new();
+        let refused = self.claim_by_templates(
+            obj,
+            "",
+            &templates,
+            dynamic.starts_with("strict"),
+            &mut claimed,
+        );
+        // A template is matched against the field where it stands: its own
+        // name for `match`, its whole dotted path for `path_match`. They were
+        // matched against top-level names only, with `path_match` not read at
+        // all -- so a template for `*.date_histogram` claimed every number in
+        // a rollup index as a date -- and a field written with a dotted name
+        // was mapped under that dotted name instead of as the objects it
+        // names, which is how OpenSearch maps it.
+        for (path, mapping) in claimed {
+            self.insert_path(&path, mapping);
         }
-        Ok(())
+        match refused {
+            Some(name) => Err(name),
+            None => Ok(()),
+        }
     }
 
-    fn insert_property(&mut self, name: &str, def: Value) {
-        if !self.raw.is_object() {
-            self.raw = serde_json::json!({});
+    /// The fields under one object that a template claims, with the mapping
+    /// it gives them; and, where the mapping is strict, the first top-level
+    /// field no template claims.
+    fn claim_by_templates(
+        &self,
+        node: &Map<String, Value>,
+        prefix: &str,
+        templates: &[Value],
+        strict: bool,
+        out: &mut Vec<(String, Value)>,
+    ) -> Option<String> {
+        let mut refused = None;
+        for (name, value) in node {
+            if prefix.is_empty() && name.starts_with('_') {
+                continue;
+            }
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+            // a value that is nothing teaches nothing: the field is mapped
+            // when a value turns up
+            let leaf = match value {
+                Value::Null => continue,
+                Value::Array(items) => match items.iter().find(|v| !v.is_null()) {
+                    Some(first) => first,
+                    None => continue,
+                },
+                other => other,
+            };
+            let known =
+                self.types.contains_key(&path) || self.raw.pointer(&pointer_of(&path)).is_some();
+            if let Value::Object(inner) = leaf {
+                // an object nobody mapped may be claimed whole by a template
+                // for objects; otherwise what is under it is looked at in turn
+                if !known {
+                    if let Some(mapping) = template_for(templates, &path, "object") {
+                        if !mapping.is_null() {
+                            out.push((path.clone(), mapping));
+                        }
+                        continue;
+                    }
+                    // a strict mapping refuses an object it does not know
+                    if strict && prefix.is_empty() && refused.is_none() {
+                        refused = Some(name.clone());
+                    }
+                }
+                if !matches!(
+                    self.types.get(&path).map(|s| s.as_str()),
+                    Some("flat_object" | "nested" | "percolator")
+                ) && let Some(r) = self.claim_by_templates(inner, &path, templates, false, out)
+                {
+                    refused.get_or_insert(r);
+                }
+                continue;
+            }
+            if known {
+                continue;
+            }
+            match template_for(templates, &path, json_mapping_type(leaf)) {
+                Some(mapping) if mapping.is_null() => {}
+                Some(mapping) => out.push((path.clone(), mapping)),
+                None if strict && prefix.is_empty() && refused.is_none() => {
+                    refused = Some(name.clone());
+                }
+                None => {}
+            }
         }
-        let props = entry_of(&mut self.raw, "properties", || serde_json::json!({}));
-        if let Some(o) = props.as_object_mut() {
-            o.insert(name.to_string(), def.clone());
-            let mut one = Map::new();
-            one.insert(name.to_string(), def);
-            flatten_props(&one, "", &mut self.types);
-        }
+        refused
     }
 
     /// Note the fields a document maps dynamically.
@@ -834,6 +879,35 @@ pub(crate) fn flatten_props(
 }
 
 /// The JSON pointer to a field's own mapping entry.
+/// The mapping the first template that claims a field gives it: matched by
+/// the field's own name for `match` and `unmatch`, by its whole dotted path
+/// for `path_match` and `path_unmatch`, and by the kind of value it holds.
+fn template_for(templates: &[Value], path: &str, kind: &str) -> Option<Value> {
+    let own_name = path.rsplit('.').next().unwrap_or(path);
+    for t in templates {
+        let Some(spec) = t.as_object().and_then(|o| o.values().next()) else { continue };
+        let text = |key: &str| spec.get(key).and_then(|v| v.as_str());
+        if !glob_match(text("match").unwrap_or("*"), own_name) {
+            continue;
+        }
+        if text("unmatch").is_some_and(|u| glob_match(u, own_name)) {
+            continue;
+        }
+        if text("path_match").is_some_and(|pm| !glob_match(pm, path)) {
+            continue;
+        }
+        if text("path_unmatch").is_some_and(|pu| glob_match(pu, path)) {
+            continue;
+        }
+        if text("match_mapping_type").is_some_and(|mt| mt != "*" && mt != kind) {
+            continue;
+        }
+        // a template with no mapping claims the field and maps nothing
+        return Some(spec.get("mapping").cloned().unwrap_or(Value::Null));
+    }
+    None
+}
+
 fn pointer_of(path: &str) -> String {
     format!("/properties/{}", path.replace('.', "/properties/"))
 }
@@ -929,4 +1003,28 @@ pub struct Views {
     pub untouched: bool,
     /// the analysed words again, in a column, for sorting and aggregating
     pub fielddata: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn templates_match_by_path_and_map_dotted_names_as_objects() {
+        let mut m = Mapping::from_body(&json!({"dynamic_templates": [
+            {"strings": {"match_mapping_type": "string", "mapping": {"type": "keyword"}}},
+            {"date_histograms": {"path_match": "*.date_histogram", "mapping": {"type": "date"}}},
+        ]}));
+        let doc = json!({"t.date_histogram": 1735689600000_i64, "k.terms": "a", "v.sum": 1.5,
+            "empty.date_histogram": null});
+        assert!(m.apply_dynamic_templates(&doc).is_ok());
+        m.learn_dynamic(&doc);
+        assert_eq!(m.type_of("t.date_histogram"), Some("date"));
+        assert_eq!(m.type_of("k.terms"), Some("keyword"));
+        // a number no template's path reaches is mapped the ordinary way
+        assert_eq!(m.type_of("v.sum"), Some("float"));
+        // and a value that is nothing maps nothing
+        assert_eq!(m.type_of("empty.date_histogram"), None);
+        assert!(m.raw.pointer("/properties/t/properties/date_histogram").is_some());
+    }
 }

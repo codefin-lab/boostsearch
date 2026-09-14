@@ -1,0 +1,45 @@
+{
+  "rollup": {
+    "enabled": true,
+    "description": "sales by day and region",
+    "schedule": {
+      "interval": {
+        "period": 1,
+        "unit": "Minutes",
+        "start_time": 0
+      }
+    },
+    "source_index": "sales",
+    "target_index": "sales-daily-rollup",
+    "page_size": 100,
+    "dimensions": [
+      {
+        "date_histogram": {
+          "source_field": "sold_at",
+          "fixed_interval": "1d"
+        }
+      },
+      {
+        "terms": {
+          "source_field": "region"
+        }
+      }
+    ],
+    "metrics": [
+      {
+        "source_field": "revenue",
+        "metrics": [
+          {
+            "sum": {}
+          },
+          {
+            "avg": {}
+          },
+          {
+            "value_count": {}
+          }
+        ]
+      }
+    ]
+  }
+}

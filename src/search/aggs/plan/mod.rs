@@ -123,6 +123,9 @@ pub(crate) fn finalise_aggs(
                 }
                 if weighted {
                     apply_doc_counts(&mut v);
+                    if let Some(req) = agg_json.as_ref() {
+                        restore_key_orders(&mut v, req);
+                    }
                 }
                 apply_bucket_orders(&mut v, bucket_orders);
                 apply_partitions(&mut v, partitions);
@@ -155,6 +158,12 @@ pub(crate) fn run_peeled_aggs(
         // what the request attached to the aggregation travels with its answer
         let own_meta = def.get("meta").cloned();
         let mut v = run_peeled_agg(store, targets, query_json, name, def, weighted)?;
+        // an aggregation answered on its own still carries the counts that
+        // weight its buckets; a calendar histogram over documents that each
+        // stand for several counted each once and showed the helpers
+        if weighted {
+            apply_doc_counts(&mut v);
+        }
         if let Some(m) = own_meta {
             v["meta"] = m;
         }

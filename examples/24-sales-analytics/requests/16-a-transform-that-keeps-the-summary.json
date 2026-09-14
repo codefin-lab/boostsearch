@@ -1,0 +1,52 @@
+{
+  "transform": {
+    "enabled": true,
+    "description": "sales by region, category and month",
+    "schedule": {
+      "interval": {
+        "period": 1,
+        "unit": "Minutes",
+        "start_time": 0
+      }
+    },
+    "source_index": "sales",
+    "target_index": "sales-monthly",
+    "page_size": 100,
+    "groups": [
+      {
+        "terms": {
+          "source_field": "region"
+        }
+      },
+      {
+        "terms": {
+          "source_field": "category"
+        }
+      },
+      {
+        "date_histogram": {
+          "source_field": "sold_at",
+          "target_field": "month",
+          "calendar_interval": "1M"
+        }
+      }
+    ],
+    "aggregations": {
+      "orders": {
+        "value_count": {
+          "field": "order_id"
+        }
+      },
+      "units": {
+        "sum": {
+          "field": "quantity"
+        }
+      },
+      "revenue": {
+        "sum": {
+          "field": "revenue"
+        }
+      }
+    }
+  }
+}
