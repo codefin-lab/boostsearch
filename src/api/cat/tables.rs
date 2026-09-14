@@ -522,25 +522,49 @@ pub async fn cat_thread_pool(patterns: Option<Path<String>>, Query(p): Query<Par
     cat_render_cols(CAT_THREAD_POOL_COLS, rows, &p)
 }
 
-/// `_cat/tasks` -- the request asking is itself a task, which is the one row
-/// every caller of this endpoint sees.
+/// `_cat/tasks` -- every task running on the node, the request asking among
+/// them.
 pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) -> Response {
-    let opaque = headers.get("x-opaque-id").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let mut row = vec![
-        ("action", "cluster:monitor/tasks/lists".to_string()),
-        ("task_id", "node-0:1".to_string()),
-        ("parent_task_id", "-".to_string()),
-        ("type", "transport".to_string()),
-        ("start_time", "0".to_string()),
-        ("timestamp", "00:00:00".to_string()),
-        ("running_time", "0s".to_string()),
-        ("ip", "127.0.0.1".to_string()),
-        ("node", "boostsearch".to_string()),
-    ];
-    row.push(("description", "-".to_string()));
-    // the header a caller tags its request with comes back on the task, which
-    // is how they find their own among everyone's
-    row.push(("x_opaque_id", if opaque.is_empty() { "-".to_string() } else { opaque }));
+    let _me = crate::tasks::register(crate::tasks::NewTask {
+        action: "cluster:monitor/tasks/lists",
+        description: String::new(),
+        cancellable: false,
+        parent: None,
+        headers: crate::tasks::headers_of(&headers),
+    });
+    let me = crate::cluster::identity();
+    let rows: Vec<Vec<(&str, String)>> = crate::tasks::running()
+        .iter()
+        .map(|task| {
+            let start = task.start_millis;
+            let clock = start / 1000 % 86_400;
+            let text = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
+            // the header a caller tags its request with comes back on the
+            // task, which is how they find their own among everyone's
+            let opaque = task.headers.get("X-Opaque-Id").and_then(|v| v.as_str()).unwrap_or("");
+            vec![
+                ("action", task.action.clone()),
+                ("task_id", task.name()),
+                (
+                    "parent_task_id",
+                    task.parent
+                        .map(|n| format!("{}:{n}", me.id.as_str()))
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                ("type", "transport".to_string()),
+                ("start_time", start.to_string()),
+                (
+                    "timestamp",
+                    format!("{:02}:{:02}:{:02}", clock / 3600, clock / 60 % 60, clock % 60),
+                ),
+                ("running_time", crate::tasks::time_text(task.running_nanos())),
+                ("ip", me.host.clone()),
+                ("node", me.name.clone()),
+                ("description", text(&task.description)),
+                ("x_opaque_id", text(opaque)),
+            ]
+        })
+        .collect();
     let detailed = p.get("detailed").map(|v| v != "false").unwrap_or(false);
     let mut defaults: Vec<&str> = vec![
         "action",
@@ -556,7 +580,7 @@ pub async fn cat_tasks(headers: axum::http::HeaderMap, Query(p): Query<Params>) 
     if detailed {
         defaults.push("description");
     }
-    let rows = cat_only_default(vec![row], &defaults, &p);
+    let rows = cat_only_default(rows, &defaults, &p);
     cat_render_cols(CAT_TASKS_COLS, rows, &p)
 }
 

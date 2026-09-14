@@ -264,6 +264,8 @@ pub(crate) fn search_one_shard(
         _ => None,
     });
 
+    // what the collection took, which a profile reports as its collectors'
+    let collecting = std::time::Instant::now();
     let searched = if want == 0 {
         // `size: 0` asks for counts and aggregations only. Collecting a
         // page anyway means scoring and heap-ordering every match for a
@@ -395,6 +397,7 @@ pub(crate) fn search_one_shard(
             (c, cands, agg)
         })
     };
+    let collected_nanos = collecting.elapsed().as_nanos() as u64;
     let (count, shard_cands, shard_agg) = match searched {
         Ok(v) => v,
         Err(e) => return Err(search_error_response(&e.to_string(), name)),
@@ -408,31 +411,53 @@ pub(crate) fn search_one_shard(
     let mut shard_profile = None;
     // a profile is asked for by the request, not by the aggregations: a
     // search with no aggregations still has a shard to report on
-    if profiling && this_agg.is_none() {
-        shard_profile = Some(json!({
-            "id": "[boostsearch][0]",
-            "searches": [],
-            "aggregations": [],
-        }));
-    }
-    if let (Some(a), true) = (this_agg, profiling) {
-        let ctxp = AggContextParams::new(Default::default(), g.index.tokenizers().clone());
-        let (res, prof) =
-            profiled_agg_search(&searcher, &q, a.clone(), ctxp, &ctx, agg_request_json.as_ref());
-        shard_profile = Some(prof);
-        match res {
-            Ok(res) => {
-                agg_acc = Some(res);
-                agg_req = Some(a);
+    if profiling {
+        let (mut entries, mut agg_nanos) = (Vec::new(), 0u64);
+        if let Some(a) = this_agg {
+            let (res, profiled, nanos) = profiled_agg_search(
+                &searcher,
+                q.as_ref(),
+                a.clone(),
+                &ctx,
+                agg_request_json.as_ref(),
+            );
+            match res {
+                Ok(res) => {
+                    agg_acc = Some(res);
+                    agg_req = Some(a);
+                }
+                Err(e) => {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "aggregation_execution_exception",
+                        e.to_string(),
+                    ));
+                }
             }
-            Err(e) => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "aggregation_execution_exception",
-                    e.to_string(),
-                ));
-            }
+            (entries, agg_nanos) = (profiled, nanos);
         }
+        let agg_names: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.get("description").and_then(|d| d.as_str()).map(String::from))
+            .collect();
+        let searches = search_profile(
+            &searcher,
+            &ctx,
+            query_json,
+            (sort_keys.is_empty() && page_want > 0, !sort_keys.is_empty()),
+            collected_nanos,
+            &agg_names,
+            agg_nanos,
+            page_want,
+        );
+        // the index's profile, shared out between its shards once the whole
+        // search is done -- see `split_by_shard`
+        shard_profile = Some(json!({
+            "_index": g.name,
+            "_shares": matched_by_shard(&searcher, &g, q.as_ref()),
+            "searches": [searches],
+            "aggregations": entries,
+        }));
     }
 
     Ok(Some(ShardOut {

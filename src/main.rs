@@ -299,6 +299,12 @@ fn app(store: Store) -> Router {
         .route("/_boost/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
         .route("/_script_language", get(api::script_languages))
+        .route("/_plugins/_asynchronous_search", post(api::submit_async_search))
+        .route("/_plugins/_asynchronous_search/stats", get(api::async_search_stats))
+        .route(
+            "/_plugins/_asynchronous_search/{id}",
+            get(api::get_async_search).delete(api::delete_async_search),
+        )
         .route("/_tasks/_cancel", post(api::cancel_tasks))
         .route("/_tasks/{id}/_cancel", post(api::cancel_tasks))
         .route("/_tasks", get(api::list_tasks))

@@ -4,8 +4,22 @@
 //! run a query, take what it found, and write. They answer with the same
 //! tally -- how many were looked at, how many were written, and what went
 //! wrong -- so the tally is built once here.
+//!
+//! A walk is a task. It reads what its query found, then writes it a batch at
+//! a time, holding to the rate it was given between batches, and stops when it
+//! is cancelled. Each batch runs off the request runtime and takes an index's
+//! lock only for the writes themselves: a walk that held its thread, or the
+//! lock, for the whole of its run kept a single write, a bulk or a count
+//! waiting seconds behind it, where OpenSearch lets them in between the
+//! walk's batches. A walk asked not to be waited for hands back its task id at
+//! once and leaves its result in `.tasks`.
 
 use super::*;
+use crate::tasks::{NewTask, Task};
+use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// One document, as the walk saw it.
 pub(crate) struct Seen {
@@ -14,6 +28,36 @@ pub(crate) struct Seen {
     source: Value,
     /// where the document stood when the walk read it
     seq_no: Option<u64>,
+}
+
+/// Which of the three walks a request is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Update,
+    Delete,
+    Reindex,
+}
+
+impl Kind {
+    /// The action the walk's task runs under, as OpenSearch names it.
+    fn action(self) -> &'static str {
+        match self {
+            Kind::Update => "indices:data/write/update/byquery",
+            Kind::Delete => "indices:data/write/delete/byquery",
+            Kind::Reindex => "indices:data/write/reindex",
+        }
+    }
+
+    /// The figures the answer to a waited-for walk leaves out: a delete says
+    /// nothing of documents made or changed, and an update makes none. The
+    /// task's status and its stored result carry every figure.
+    fn unsaid(self) -> &'static [&'static str] {
+        match self {
+            Kind::Delete => &["created", "updated"],
+            Kind::Update => &["created"],
+            Kind::Reindex => &[],
+        }
+    }
 }
 
 /// What a walk over a query's results did.
@@ -26,14 +70,9 @@ pub(crate) struct Tally {
     pub noops: usize,
     pub version_conflicts: usize,
     pub failures: Vec<Value>,
-    /// a delete-by-query, which says nothing of documents made or changed
-    pub deleting: bool,
-    /// an update-by-query, which makes no documents and does not say it did
-    pub updating: bool,
 }
 
 impl Tally {
-    /// A document that was written to since the walk read it.
     /// What a refused write really was.
     ///
     /// These walks pass no version and no `if_seq_no`, so a version conflict
@@ -68,7 +107,9 @@ impl Tally {
         }));
     }
 
-    fn note_conflict(&mut self, seen: &Seen) {
+    /// A document that was written to since the walk read it, standing now
+    /// at `now`.
+    fn note_conflict(&mut self, seen: &Seen, now: u64) {
         let id = &seen.id;
         let seq = seen.seq_no.unwrap_or(0);
         self.failures.push(json!({
@@ -76,61 +117,50 @@ impl Tally {
             "cause": {
                 "type": "version_conflict_engine_exception",
                 "reason": format!(
-                    "[{id}]: version conflict, required seqNo [{seq}], primary term [1]"
+                    "[{id}]: version conflict, required seqNo [{seq}], primary term [1]. \
+                     current document has seqNo [{now}] and primary term [1]"
                 ),
                 "index": seen.index, "shard": "0", "index_uuid": "_na_",
             },
         }));
     }
 
-    /// The answer OpenSearch gives for a walk of this kind.
-    fn answer(&self, took: u128, batches: usize) -> Value {
-        let mut out = self.answer_all(took, batches);
-        if self.deleting
-            && let Some(o) = out.as_object_mut()
-        {
-            o.remove("created");
-            o.remove("updated");
-        }
-        if self.updating
-            && let Some(o) = out.as_object_mut()
-        {
-            o.remove("created");
-        }
-        out
-    }
-
-    fn answer_all(&self, took: u128, batches: usize) -> Value {
-        json!({
-            "took": took as u64,
-            "timed_out": false,
-            "total": self.total,
-            "updated": self.updated,
-            "created": self.created,
-            "deleted": self.deleted,
-            "batches": batches,
-            "version_conflicts": self.version_conflicts,
-            "noops": self.noops,
-            "retries": {"bulk": 0, "search": 0},
-            "throttled_millis": 0,
-            "requests_per_second": -1.0,
-            "throttled_until_millis": 0,
-            "failures": self.failures,
-        })
+    /// Add what one batch did to what the walk had done before it. The total
+    /// is the walk's, set once when it has read what it will write.
+    fn absorb(&mut self, batch: Tally) {
+        self.created += batch.created;
+        self.updated += batch.updated;
+        self.deleted += batch.deleted;
+        self.noops += batch.noops;
+        self.version_conflicts += batch.version_conflicts;
+        self.failures.extend(batch.failures);
     }
 }
 
 /// Every document a query finds, as `(index, id, source)`.
 ///
 /// The walk reads them all before it writes any: writing while the reader is
-/// still open would have it read what the walk itself had just written.
+/// still open would have it read what the walk itself had just written. With
+/// no limit named, the limit is everything the query matches -- a walk that
+/// stopped at the first ten thousand left the rest of an index unchanged and
+/// said it was done.
 fn found(
     store: &Store,
     expr: &str,
     body: &Value,
-    limit: usize,
+    limit: Option<usize>,
 ) -> std::result::Result<Vec<Seen>, Response> {
     let query = body.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
+    let limit = match limit {
+        Some(n) => n,
+        None => {
+            let counted = json!({"query": query, "size": 0, "track_total_hits": true});
+            crate::search::run(store, expr, &counted, &Params::new())?.total as usize
+        }
+    };
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     // the sequence number each document stood at is what makes a write
     // conditional: one written since is a conflict, not a document to write
     let mut request =
@@ -170,17 +200,15 @@ fn found(
 ///
 /// The request may say it in the URL or in the body, and the body may spell
 /// it `size`, which is the older name for the same thing.
-fn max_docs(p: &Params, body: &Value) -> usize {
-    p.get("max_docs")
-        .or_else(|| p.get("size"))
-        .and_then(|v| v.parse::<usize>().ok())
-        .or_else(|| {
+fn max_docs(p: &Params, body: &Value) -> Option<usize> {
+    p.get("max_docs").or_else(|| p.get("size")).and_then(|v| v.parse::<usize>().ok()).or_else(
+        || {
             body.get("max_docs")
                 .or_else(|| body.get("size"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize)
-        })
-        .unwrap_or(10_000)
+        },
+    )
 }
 
 /// How many documents the walk reads before it writes them.
@@ -680,20 +708,6 @@ fn remote_failure(reason: String) -> Response {
     err(StatusCode::INTERNAL_SERVER_ERROR, "connect_exception", reason)
 }
 
-/// Whether the request asked for the walk to be done in the background.
-///
-/// Nothing here takes long enough to need it, so the walk is done and the
-/// task it would have been is reported as finished.
-fn as_task(p: &Params) -> bool {
-    p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false)
-}
-
-/// The name a finished task is reported under.
-fn task_name(store: &Store) -> String {
-    let seq = store.next_task_id();
-    format!("{}:{}", crate::store::index_uuid("node"), seq)
-}
-
 /// Why a walk that writes may not run over these indices, if it may not.
 fn change_refusal_for(store: &Store, expr: &str) -> Option<Response> {
     for name in store.resolve(expr) {
@@ -710,13 +724,1236 @@ fn change_refusal_for(store: &Store, expr: &str) -> Option<Response> {
     None
 }
 
+/// A rate as a request writes it: a positive number of documents a second,
+/// or anything else for no limit at all.
+fn rate_of(written: Option<&str>) -> f64 {
+    match written.and_then(|v| v.parse::<f64>().ok()) {
+        Some(r) if r > 0.0 => r,
+        _ => f64::INFINITY,
+    }
+}
+
+/// A rate as OpenSearch writes it back, where no limit is `-1`.
+fn rate_json(rate: f64) -> Value {
+    if rate.is_finite() { json!(rate) } else { json!(-1.0) }
+}
+
+/// How fast a walk may go, and the wait it is in between batches, if any.
+struct Throttle {
+    rate: f64,
+    /// when the wait in progress ends, and how long it was set for
+    due: Option<(Instant, Duration)>,
+}
+
+impl Throttle {
+    /// How long the next batch waits: a batch of `size` documents started at
+    /// `start` has earned the next one its turn after `size / rate` seconds,
+    /// less however long the batch itself took.
+    fn wait_after(&self, start: Instant, size: usize) -> Duration {
+        if !self.rate.is_finite() || size == 0 {
+            return Duration::ZERO;
+        }
+        let earned = Duration::try_from_secs_f64(size as f64 / self.rate).unwrap_or(FOREVER);
+        match start.checked_add(earned) {
+            Some(at) => at.saturating_duration_since(Instant::now()),
+            None => FOREVER,
+        }
+    }
+}
+
+/// A wait long enough to be no limit at all, which a rate as small as the
+/// suite's `0.00000001` asks for.
+const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
+
+/// The figures of a walk, or of one slice of it, at one moment.
+#[derive(Clone, Default)]
+struct Figures {
+    slice_id: Option<usize>,
+    total: u64,
+    updated: u64,
+    created: u64,
+    deleted: u64,
+    batches: u64,
+    version_conflicts: u64,
+    noops: u64,
+    throttled_nanos: u64,
+    rate: f64,
+    canceled: Option<String>,
+    throttled_until_nanos: u64,
+}
+
+impl Figures {
+    /// The figures in the order OpenSearch writes a walk's status. `human`
+    /// adds the two waits written out, which a stored result carries.
+    fn write(&self, human: bool) -> serde_json::Map<String, Value> {
+        let mut o = serde_json::Map::new();
+        if let Some(id) = self.slice_id {
+            o.insert("slice_id".into(), json!(id));
+        }
+        o.insert("total".into(), json!(self.total));
+        o.insert("updated".into(), json!(self.updated));
+        o.insert("created".into(), json!(self.created));
+        o.insert("deleted".into(), json!(self.deleted));
+        o.insert("batches".into(), json!(self.batches));
+        o.insert("version_conflicts".into(), json!(self.version_conflicts));
+        o.insert("noops".into(), json!(self.noops));
+        o.insert("retries".into(), json!({"bulk": 0, "search": 0}));
+        if human {
+            o.insert("throttled".into(), json!(crate::tasks::time_text(self.throttled_nanos)));
+        }
+        o.insert("throttled_millis".into(), json!(self.throttled_nanos / 1_000_000));
+        o.insert("requests_per_second".into(), rate_json(self.rate));
+        if let Some(why) = &self.canceled {
+            o.insert("canceled".into(), json!(why));
+        }
+        if human {
+            o.insert(
+                "throttled_until".into(),
+                json!(crate::tasks::time_text(self.throttled_until_nanos)),
+            );
+        }
+        o.insert("throttled_until_millis".into(), json!(self.throttled_until_nanos / 1_000_000));
+        o
+    }
+
+    /// Fold a finished slice into the walk's figures.
+    fn add(&mut self, other: &Figures) {
+        self.total += other.total;
+        self.updated += other.updated;
+        self.created += other.created;
+        self.deleted += other.deleted;
+        self.batches += other.batches;
+        self.version_conflicts += other.version_conflicts;
+        self.noops += other.noops;
+        self.throttled_nanos += other.throttled_nanos;
+        self.rate += other.rate;
+        self.throttled_until_nanos = self.throttled_until_nanos.max(other.throttled_until_nanos);
+        if self.canceled.is_none() {
+            self.canceled = other.canceled.clone();
+        }
+    }
+}
+
+/// What one walk, or one slice of a walk, has done so far.
+///
+/// Shared between the walk, which adds to it a batch at a time, and whoever
+/// asks the task how it is getting on.
+struct Progress {
+    slice_id: Option<usize>,
+    tally: parking_lot::Mutex<Tally>,
+    batches: AtomicU64,
+    throttle: parking_lot::Mutex<Throttle>,
+    throttled_nanos: AtomicU64,
+    canceled: parking_lot::Mutex<Option<String>>,
+    /// woken when the rate changes, so a wait set at the old rate is judged
+    /// again at the new one
+    wake: tokio::sync::Notify,
+}
+
+impl Progress {
+    fn new(slice_id: Option<usize>, rate: f64) -> Arc<Progress> {
+        Arc::new(Progress {
+            slice_id,
+            tally: parking_lot::Mutex::new(Tally::default()),
+            batches: AtomicU64::new(0),
+            throttle: parking_lot::Mutex::new(Throttle { rate, due: None }),
+            throttled_nanos: AtomicU64::new(0),
+            canceled: parking_lot::Mutex::new(None),
+            wake: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn figures(&self) -> Figures {
+        let t = self.tally.lock();
+        let th = self.throttle.lock();
+        let until = th
+            .due
+            .map(|(at, _)| at.saturating_duration_since(Instant::now()).as_nanos() as u64)
+            .unwrap_or(0);
+        Figures {
+            slice_id: self.slice_id,
+            total: t.total as u64,
+            updated: t.updated as u64,
+            created: t.created as u64,
+            deleted: t.deleted as u64,
+            batches: self.batches.load(Ordering::Relaxed),
+            version_conflicts: t.version_conflicts as u64,
+            noops: t.noops as u64,
+            throttled_nanos: self.throttled_nanos.load(Ordering::Relaxed),
+            rate: th.rate,
+            canceled: self.canceled.lock().clone(),
+            throttled_until_nanos: until,
+        }
+    }
+
+    /// A new rate, as OpenSearch applies one: a slower rate waits for the
+    /// next batch, and a faster one shortens the wait already under way in
+    /// proportion -- to nothing, when the limit is lifted.
+    fn set_rate(&self, written: f64) {
+        let rate = if written > 0.0 { written } else { f64::INFINITY };
+        let mut th = self.throttle.lock();
+        let old = th.rate;
+        th.rate = rate;
+        if rate > old
+            && let Some((at, _)) = th.due
+        {
+            let now = Instant::now();
+            let left = at.saturating_duration_since(now);
+            let scaled = match rate.is_finite() {
+                true => {
+                    Duration::try_from_secs_f64(left.as_secs_f64() * old / rate).unwrap_or(FOREVER)
+                }
+                false => Duration::ZERO,
+            };
+            th.due = Some((now.checked_add(scaled).unwrap_or(at), scaled));
+        }
+        drop(th);
+        self.wake.notify_one();
+    }
+
+    /// Wait until the rate lets the next batch start, given when the last one
+    /// started and how many documents it held. Answers false if the task was
+    /// cancelled while it waited.
+    async fn wait_turn(&self, task: &Task, start: Instant, size: usize) -> bool {
+        // worked out and set under one hold of the lock, so a new rate
+        // arriving in between cannot be missed by a wait set at the old one
+        {
+            let mut th = self.throttle.lock();
+            let wait = th.wait_after(start, size);
+            if !wait.is_zero() {
+                th.due =
+                    Some((Instant::now().checked_add(wait).unwrap_or_else(Instant::now), wait));
+            }
+        }
+        loop {
+            let Some((at, _)) = self.throttle.lock().due else { break };
+            if task.is_cancelled() {
+                self.throttle.lock().due = None;
+                return false;
+            }
+            let now = Instant::now();
+            if now >= at {
+                break;
+            }
+            // the wait is woken early by a new rate or a cancel, and never
+            // sleeps longer than a minute at a stretch: a far deadline is
+            // judged again rather than handed to the timer whole
+            let until = at.min(now + Duration::from_secs(60));
+            tokio::select! {
+                _ = tokio::time::sleep_until(until.into()) => {}
+                _ = self.wake.notified() => {}
+                _ = task.wake.notified() => {}
+            }
+        }
+        // the wait counts once it has been served, at the length it ended up
+        // being: a wait cut short by lifting the limit counts for nothing
+        if let Some((_, served)) = self.throttle.lock().due.take() {
+            self.throttled_nanos.fetch_add(served.as_nanos() as u64, Ordering::Relaxed);
+        }
+        !task.is_cancelled()
+    }
+}
+
+impl crate::tasks::Work for Progress {
+    fn status(&self) -> Option<Value> {
+        Some(Value::Object(self.figures().write(false)))
+    }
+
+    fn rethrottle(&self, rate: f64) {
+        self.set_rate(rate);
+    }
+}
+
+/// A walk split into slices, as its task reports it.
+///
+/// Its status is the sum of the slices that have finished, with each slice's
+/// own figures beside it and `null` for a slice still running -- which is
+/// how OpenSearch reports a sliced walk, rather than a running total.
+struct Sliced {
+    slices: Vec<Arc<Progress>>,
+    finished: parking_lot::Mutex<Vec<Option<Figures>>>,
+}
+
+impl crate::tasks::Work for Sliced {
+    fn status(&self) -> Option<Value> {
+        let done = self.finished.lock();
+        let mut sum = Figures::default();
+        for f in done.iter().flatten() {
+            sum.add(f);
+        }
+        let mut o = sum.write(false);
+        let each: Vec<Value> = done
+            .iter()
+            .map(|f| f.as_ref().map(|f| Value::Object(f.write(false))).unwrap_or(Value::Null))
+            .collect();
+        o.insert("slices".into(), json!(each));
+        Some(Value::Object(o))
+    }
+
+    /// The new rate is shared between the slices still running.
+    fn rethrottle(&self, rate: f64) {
+        let done = self.finished.lock();
+        let running: Vec<&Arc<Progress>> = self
+            .slices
+            .iter()
+            .zip(done.iter())
+            .filter(|(_, d)| d.is_none())
+            .map(|(s, _)| s)
+            .collect();
+        if running.is_empty() {
+            return;
+        }
+        let each = if rate > 0.0 { rate / running.len() as f64 } else { f64::INFINITY };
+        for slice in running {
+            slice.set_rate(each);
+        }
+    }
+}
+
+/// A walk that has been judged worth running.
+struct Walk {
+    kind: Kind,
+    store: Store,
+    p: Params,
+    body: Value,
+    /// the search it reads with: the body of a by-query walk, the `source`
+    /// of a reindex
+    search: Value,
+    /// the indices it reads
+    read: String,
+    batch: usize,
+    proceed: bool,
+    /// the caller, whose filters and permissions the walk's reads and writes
+    /// run under on whatever thread they run on
+    caller: Option<crate::security::Caller>,
+}
+
+impl Walk {
+    /// The task's description, in OpenSearch's words.
+    fn description(&self) -> String {
+        let read = format!("[{}]", self.read.split(',').collect::<Vec<_>>().join(", "));
+        let script = self
+            .body
+            .get("script")
+            .map(|s| format!(" updated with {}", script_text(s)))
+            .unwrap_or_default();
+        match self.kind {
+            Kind::Update => format!("update-by-query {read}{script}"),
+            Kind::Delete => format!("delete-by-query {read}"),
+            Kind::Reindex => {
+                let to = self.body.pointer("/dest/index").and_then(|v| v.as_str()).unwrap_or("");
+                let from = match self.search.pointer("/remote/host").and_then(|v| v.as_str()) {
+                    Some(host) => format!("[host={host}]{read}"),
+                    None => read,
+                };
+                format!("reindex from {from}{script} to [{to}]")
+            }
+        }
+    }
+
+    /// How many documents the walk may write, if the request said.
+    fn wanted(&self) -> Option<usize> {
+        max_docs(&self.p, &self.body)
+    }
+}
+
+/// A script as Java prints one, which is how a task describes what it runs.
+fn script_text(spec: &Value) -> String {
+    let (kind, lang, code) = match spec {
+        Value::String(s) => ("inline", "painless".to_string(), s.clone()),
+        other => {
+            let stored = other.get("id").and_then(|v| v.as_str());
+            let code = other
+                .get("source")
+                .or_else(|| other.get("inline"))
+                .and_then(|v| v.as_str())
+                .or(stored)
+                .unwrap_or_default()
+                .to_string();
+            let lang = match stored {
+                Some(_) => other.get("lang").and_then(|v| v.as_str()).unwrap_or("null"),
+                None => other.get("lang").and_then(|v| v.as_str()).unwrap_or("painless"),
+            };
+            (if stored.is_some() { "stored" } else { "inline" }, lang.to_string(), code)
+        }
+    };
+    let params: Vec<String> = spec
+        .get("params")
+        .and_then(|v| v.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| match v {
+            Value::String(s) => format!("{k}={s}"),
+            other => format!("{k}={other}"),
+        })
+        .collect();
+    format!(
+        "Script{{type={kind}, lang='{lang}', idOrCode='{code}', options={{}}, params={{{}}}}}",
+        params.join(", ")
+    )
+}
+
+/// Run `f` as the caller of the request that started the walk.
+fn as_caller<R>(caller: Option<crate::security::Caller>, f: impl FnOnce() -> R) -> R {
+    match caller {
+        Some(c) => crate::security::layer::CALLER.sync_scope(c, f),
+        None => f(),
+    }
+}
+
+/// Everything a walk's query found, read before anything is written.
+fn read_walk(walk: &Walk) -> std::result::Result<Vec<Seen>, Response> {
+    match walk.search.get("remote") {
+        Some(remote) if walk.kind == Kind::Reindex => found_remote(
+            remote,
+            &walk.read,
+            &walk.search,
+            walk.wanted().unwrap_or(usize::MAX),
+            walk.batch,
+        ),
+        // the walk reads everything it will write in one search, which is
+        // past the result window a caller's search is held to: the window
+        // bounds what a caller may ask the node to hold, and a walk the node
+        // runs for itself holds it a batch at a time on the way out
+        _ => crate::search::as_the_server(|| {
+            found(&walk.store, &walk.read, &walk.search, walk.wanted())
+        }),
+    }
+}
+
+/// The slice a document falls in, the way OpenSearch divides a scroll.
+///
+/// With no more slices than shards, a slice takes whole shards. With more, each
+/// shard's documents are shared between the slices that shard holds, by a hash
+/// of the id.
+fn slice_of(store: &Store, seen: &Seen, max: usize) -> usize {
+    let (shard, shards) = store
+        .get(&seen.index)
+        .map(|st| {
+            let g = st.read();
+            (g.shard_of_doc(&seen.id) as usize, (g.shard_count() as usize).max(1))
+        })
+        .unwrap_or((0, 1));
+    if max <= shards {
+        return shard % max;
+    }
+    let mut in_shard = max / shards;
+    if max % shards > shard {
+        in_shard += 1;
+    }
+    let hash = seen
+        .id
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    shard + shards * (hash % in_shard as u64) as usize
+}
+
+/// How many slices a request asked for, with `auto` one per shard of what it
+/// reads.
+fn slices_asked(store: &Store, p: &Params, read: &str) -> usize {
+    match p.get("slices").map(|v| v.as_str()) {
+        Some("auto") => store
+            .resolve(read)
+            .iter()
+            .filter_map(|name| store.get(name))
+            .map(|st| st.read().shard_count() as usize)
+            .min()
+            .unwrap_or(1)
+            .max(1),
+        Some(n) => n.parse::<usize>().ok().filter(|n| *n > 0).unwrap_or(1),
+        None => 1,
+    }
+}
+
+/// How a batch left the walk.
+enum After {
+    /// on to the next batch
+    Go,
+    /// the batch is done and the walk stops here: something in it failed, or
+    /// conflicted when the walk was told to abort on a conflict
+    Stop,
+    /// the walk cannot go on at all, and this is the error that says why
+    Fail(Response),
+}
+
+/// What a slice keeps from one batch to the next.
+#[derive(Default)]
+struct Written {
+    /// the indices written to, refreshed at the end when the request asked
+    touched: BTreeSet<String>,
+    /// the destinations a reindex script named that have been judged for
+    /// this caller: judged once per name, not once per document
+    judged: HashSet<String>,
+}
+
+/// How a walk ended.
+enum Ended {
+    Done { took: u128, figures: Figures, slices: Option<Vec<Figures>>, failures: Vec<Value> },
+    Failed(Response),
+}
+
+/// Run a walk to its end.
+async fn drive(walk: Arc<Walk>, task: Arc<Task>, slices: usize, rate: f64) -> Ended {
+    let started = Instant::now();
+    // what the walk will report is in place before it reads anything: a
+    // rethrottle or a cancel that arrives while the documents are still being
+    // read -- which a reindex from another cluster can take a while over --
+    // found no work to change, and the walk went on at the rate it was given
+    let each_rate = if rate.is_finite() { rate / slices.max(1) as f64 } else { rate };
+    let progresses: Vec<Arc<Progress>> = match slices {
+        0 | 1 => vec![Progress::new(None, rate)],
+        n => (0..n).map(|i| Progress::new(Some(i), each_rate)).collect(),
+    };
+    let sliced = Arc::new(Sliced {
+        slices: progresses.clone(),
+        finished: parking_lot::Mutex::new(vec![None; progresses.len()]),
+    });
+    match slices {
+        0 | 1 => task.attach(progresses[0].clone()),
+        _ => task.attach(sliced.clone()),
+    }
+    let reader = walk.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        as_caller(reader.caller.clone(), || read_walk(&reader))
+    })
+    .await;
+    let hits = match read {
+        Ok(Ok(hits)) => hits,
+        Ok(Err(e)) => return Ended::Failed(e),
+        Err(e) => return Ended::Failed(remote_failure(format!("{e}"))),
+    };
+    if slices <= 1 {
+        let progress = progresses[0].clone();
+        let end = run_slice(walk.clone(), progress.clone(), task.clone(), hits).await;
+        refresh_touched(&walk, &end.written).await;
+        if let Some(failed) = end.failed {
+            return Ended::Failed(failed);
+        }
+        return Ended::Done {
+            took: started.elapsed().as_millis(),
+            figures: progress.figures(),
+            slices: None,
+            failures: std::mem::take(&mut progress.tally.lock().failures),
+        };
+    }
+    // each slice is a task of its own under the walk's, with its share of the
+    // documents and of the rate
+    let mut parts: Vec<Vec<Seen>> = (0..slices).map(|_| Vec::new()).collect();
+    for seen in hits {
+        let at = slice_of(&walk.store, &seen, slices);
+        parts[at].push(seen);
+    }
+    let mut running = Vec::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        let child = crate::tasks::register(NewTask {
+            action: walk.kind.action(),
+            description: task.description.clone(),
+            cancellable: true,
+            parent: Some(task.id),
+            headers: task.headers.clone(),
+        });
+        child.attach(progresses[i].clone());
+        let (walk, progress, sliced) = (walk.clone(), progresses[i].clone(), sliced.clone());
+        running.push(tokio::spawn(async move {
+            let end = run_slice(walk, progress.clone(), child.0.clone(), part).await;
+            sliced.finished.lock()[i] = Some(progress.figures());
+            drop(child);
+            end
+        }));
+    }
+    let mut failed = None;
+    let mut written = Written::default();
+    for handle in running {
+        match handle.await {
+            Ok(end) => {
+                written.touched.extend(end.written.touched);
+                if failed.is_none() {
+                    failed = end.failed;
+                }
+            }
+            Err(e) => {
+                failed.get_or_insert_with(|| remote_failure(format!("{e}")));
+            }
+        }
+    }
+    refresh_touched(&walk, &written).await;
+    if let Some(failed) = failed {
+        return Ended::Failed(failed);
+    }
+    let mut figures = Figures::default();
+    let mut failures = Vec::new();
+    for p in &progresses {
+        figures.add(&p.figures());
+        failures.extend(std::mem::take(&mut p.tally.lock().failures));
+    }
+    Ended::Done {
+        took: started.elapsed().as_millis(),
+        figures,
+        slices: Some(progresses.iter().map(|p| p.figures()).collect()),
+        failures,
+    }
+}
+
+/// How one slice ended.
+struct SliceEnd {
+    failed: Option<Response>,
+    written: Written,
+}
+
+/// Write one slice's documents, a batch at a time.
+async fn run_slice(
+    walk: Arc<Walk>,
+    progress: Arc<Progress>,
+    task: Arc<Task>,
+    hits: Vec<Seen>,
+) -> SliceEnd {
+    progress.tally.lock().total = hits.len();
+    let mut left = hits.into_iter();
+    let mut written = Written::default();
+    let mut last = (Instant::now(), 0usize);
+    let mut failed = None;
+    loop {
+        let batch: Vec<Seen> = left.by_ref().take(walk.batch).collect();
+        // the wait comes before every read of a batch, the empty one that
+        // ends the walk included, as it does in OpenSearch
+        if !progress.wait_turn(&task, last.0, last.1).await {
+            *progress.canceled.lock() = Some("by user request".into());
+            break;
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let started = Instant::now();
+        let size = batch.len();
+        progress.batches.fetch_add(1, Ordering::Relaxed);
+        // what the batch writes is copied to the index's other copies once
+        // the batch is done, as a request's writes are
+        let writes: crate::cluster::replication::Writes = Default::default();
+        let (w, noted) = (walk.clone(), writes.clone());
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut tally = Tally::default();
+            let after = crate::cluster::replication::WRITES.sync_scope(noted, || {
+                as_caller(w.caller.clone(), || write_batch(&w, &mut written, batch, &mut tally))
+            });
+            (after, tally, written)
+        })
+        .await;
+        let (after, tally, back) = match joined {
+            Ok(done) => done,
+            Err(e) => {
+                failed = Some(remote_failure(format!("{e}")));
+                written = Written::default();
+                break;
+            }
+        };
+        written = back;
+        progress.tally.lock().absorb(tally);
+        let ops = std::mem::take(&mut *writes.lock());
+        if !ops.is_empty() {
+            let refresh = walk.p.get("refresh").cloned().unwrap_or_default();
+            let _ =
+                crate::cluster::replication::finish(StatusCode::OK.into_response(), ops, &refresh)
+                    .await;
+        }
+        last = (started, size);
+        match after {
+            After::Go => {}
+            After::Stop => break,
+            After::Fail(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    SliceEnd { failed, written }
+}
+
+/// Refresh what a walk wrote, when the request asked for it.
+///
+/// A walk used to refresh whatever it touched whether asked or not, so a
+/// search straight after it saw its writes -- and a second walk started
+/// before anything refreshed saw none of the conflicts it should have.
+async fn refresh_touched(walk: &Walk, written: &Written) {
+    if !flag(&walk.p, "refresh") {
+        return;
+    }
+    // what the walk was pointed at is refreshed whether or not it wrote
+    // anything there: a walk whose every document conflicted still leaves
+    // the caller's next search seeing the writes it conflicted with
+    let mut names = written.touched.clone();
+    match walk.kind {
+        Kind::Reindex => {
+            if let Some(to) = walk.body.pointer("/dest/index").and_then(|v| v.as_str()) {
+                names.extend(walk.store.resolve(to));
+            }
+        }
+        _ => names.extend(walk.store.resolve(&walk.read)),
+    }
+    let store = walk.store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for name in names {
+            if let Some(st) = store.get(&name) {
+                let _ = st.write().refresh();
+            }
+        }
+    })
+    .await;
+}
+
+/// One batch, written.
+fn write_batch(walk: &Walk, written: &mut Written, batch: Vec<Seen>, tally: &mut Tally) -> After {
+    let after = match walk.kind {
+        Kind::Delete => delete_batch(walk, written, batch, tally),
+        Kind::Update => update_batch(walk, written, batch, tally),
+        Kind::Reindex => reindex_batch(walk, written, batch, tally),
+    };
+    // a batch is answered for like a bulk: what it wrote is on disk before
+    // the walk counts it done
+    for name in &written.touched {
+        if let Some(st) = walk.store.get(name)
+            && let Err(why) = st.write().sync_translog()
+        {
+            return After::Fail(err(StatusCode::INTERNAL_SERVER_ERROR, "translog_exception", why));
+        }
+    }
+    after
+}
+
+/// The script a walk runs, compiled for one batch. Painless values are not
+/// shared between threads, and a batch may run on any of them; the request
+/// compiled it once already to refuse one that does not compile.
+fn batch_script(
+    walk: &Walk,
+) -> std::result::Result<Option<crate::painless::contexts::Compiled>, Response> {
+    match walk.body.get("script") {
+        Some(spec) => {
+            match crate::painless::contexts::Compiled::of(spec, &|id| walk.store.stored_script(id))
+            {
+                Ok(c) => Ok(Some(c)),
+                Err(e) if e.kind == "compile error" => Err(crate::api::compile_failure(e)),
+                Err(e) => Err(crate::api::script_failure(e)),
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn now_millis_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// A conflict found at the write: counted, and a failure that stops the walk
+/// after this batch unless the walk was told to proceed.
+fn conflicted(walk: &Walk, tally: &mut Tally, seen: &Seen, now: u64, after: &mut After) {
+    tally.version_conflicts += 1;
+    if !walk.proceed {
+        tally.note_conflict(seen, now);
+        *after = After::Stop;
+    }
+}
+
+fn delete_batch(walk: &Walk, written: &mut Written, batch: Vec<Seen>, tally: &mut Tally) -> After {
+    let mut after = After::Go;
+    for seen in batch {
+        let Some(st) = walk.store.get(&seen.index) else { continue };
+        let mut g = st.write();
+        if let Some(now) = written_since(&g, &seen) {
+            conflicted(walk, tally, &seen, now, &mut after);
+            continue;
+        }
+        let (_, status) = delete_doc(&mut g, &seen.id);
+        written.touched.insert(seen.index.clone());
+        if status == StatusCode::OK {
+            tally.deleted += 1;
+        } else {
+            tally.noops += 1;
+        }
+    }
+    after
+}
+
+fn update_batch(walk: &Walk, written: &mut Written, batch: Vec<Seen>, tally: &mut Tally) -> After {
+    let script = match batch_script(walk) {
+        Ok(s) => s,
+        Err(e) => return After::Fail(e),
+    };
+    // `?pipeline=` names one every rewritten document goes through
+    let through = walk.p.get("pipeline").cloned();
+    let mut after = After::Go;
+    for seen in batch {
+        let Some(st) = walk.store.get(&seen.index) else { continue };
+        // the script sees the document in `ctx` and may change it, leave it,
+        // or have it deleted. It runs with no lock on the index: a script is
+        // the slow part of a walk, and a write waiting for the lock waited
+        // for every script before it.
+        let mut next = seen.source.clone();
+        let mut op = "index";
+        if let Some(compiled) = &script {
+            let (name, version) = {
+                let g = st.read();
+                (g.name.clone(), g.version_of(&seen.id))
+            };
+            let ctx = crate::painless::contexts::update_ctx(
+                &name,
+                &seen.id,
+                version,
+                &seen.source,
+                now_millis_i64(),
+                "index",
+            );
+            let mut runner =
+                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
+            if let Err(e) = runner.run(&compiled.script) {
+                return After::Fail(crate::search::search_script_failure_partial(e, &seen.index));
+            }
+            match scripted_change(&ctx, &seen.id) {
+                Ok((changed_op, source)) => {
+                    op = changed_op;
+                    next = source;
+                }
+                Err(reason) => {
+                    return After::Fail(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        reason,
+                    ));
+                }
+            }
+        }
+        match op {
+            "noop" => {
+                tally.noops += 1;
+                continue;
+            }
+            "delete" => {
+                let mut g = st.write();
+                if let Some(now) = written_since(&g, &seen) {
+                    conflicted(walk, tally, &seen, now, &mut after);
+                    continue;
+                }
+                let _ = crate::api::doc::delete_doc(&mut g, &seen.id);
+                written.touched.insert(seen.index.clone());
+                tally.deleted += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // a document rewritten in place is written the way any document is,
+        // so a pipeline the request named runs over it -- before the lock is
+        // taken, since a pipeline may read the store
+        if let Some(named) = &through {
+            match crate::api::ingest::ingest_for_write(
+                &walk.store,
+                &seen.index,
+                &seen.id,
+                next,
+                Some(named),
+                None,
+            ) {
+                Ok(Some(doc)) => next = doc.source,
+                Ok(None) => {
+                    tally.noops += 1;
+                    continue;
+                }
+                Err(e) => {
+                    tally.failures.push(json!({
+                        "index": seen.index, "id": seen.id, "status": 400,
+                        "cause": {"type": e.kind, "reason": e.reason},
+                    }));
+                    after = After::Stop;
+                    continue;
+                }
+            }
+        }
+        let mut g = st.write();
+        // what the script produced was computed from the version this walk
+        // read: a document written since is a conflict, not one to overwrite
+        if let Some(now) = written_since(&g, &seen) {
+            conflicted(walk, tally, &seen, now, &mut after);
+            continue;
+        }
+        written.touched.insert(seen.index.clone());
+        match write_doc_raw(&mut g, &seen.id, next, "index", None) {
+            Ok(_) => tally.updated += 1,
+            Err(refusal) => {
+                // the refusal is reported as itself, and a failure ends the
+                // walk once its batch is done, as a failed bulk item does in
+                // OpenSearch whether or not the walk was told to proceed: a
+                // document that was not written is not one that was right
+                let before = tally.failures.len();
+                tally.note_refusal(&seen.index, &seen.id, &refusal, walk.proceed);
+                if tally.failures.len() > before {
+                    after = After::Stop;
+                }
+            }
+        }
+    }
+    after
+}
+
+fn reindex_batch(walk: &Walk, written: &mut Written, batch: Vec<Seen>, tally: &mut Tally) -> After {
+    let store = &walk.store;
+    let script = match batch_script(walk) {
+        Ok(s) => s,
+        Err(e) => return After::Fail(e),
+    };
+    let source = &walk.search;
+    let dest = walk.body.get("dest").cloned().unwrap_or_else(|| json!({}));
+    let remote = source.get("remote");
+    let from = &walk.read;
+    let Some(to_named) = dest.get("index").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+        return After::Stop;
+    };
+    // a document may be written only where it is not already, if asked
+    let create_only = dest.get("op_type").and_then(|v| v.as_str()) == Some("create");
+    let kept = source.get("_source").cloned();
+    // `dest.pipeline` names a pipeline every document goes through on the way
+    // in, the same one an index request would name in its URL
+    let through = dest.get("pipeline").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // where a destination names a routing, it decides which shard each
+    // document lands on: `=value` writes them all under one, `discard` drops
+    // the one the source carried, and `keep` leaves it as it stands
+    let routing = dest.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // the destination the request named was judged before the walk began
+    written.judged.insert(to_named.clone());
+    let mut after = After::Go;
+    for seen in batch {
+        let mut document = seen.source.clone();
+        if let Some(fields) = kept.as_ref() {
+            document = only_these(&document, fields);
+        }
+        // the script may send the document elsewhere, rename it, route it,
+        // or say it is not to be written at all
+        let mut to = to_named.clone();
+        let mut id = seen.id.clone();
+        let mut scripted_routing: Option<String> = None;
+        let mut op_asked = "index";
+        if let Some(compiled) = &script {
+            let ctx = crate::painless::contexts::update_ctx(
+                &to,
+                &id,
+                1,
+                &document,
+                now_millis_i64(),
+                "index",
+            );
+            let mut runner =
+                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
+            if let Err(e) = runner.run(&compiled.script) {
+                return After::Fail(crate::search::search_script_failure_partial(e, &seen.index));
+            }
+            let extra = crate::painless::contexts::ctx_extra_keys(&ctx);
+            if let Some(junk) = extra.first() {
+                return After::Fail(err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("Invalid fields added to context [{junk}]"),
+                ));
+            }
+            let (op, src, changed_id, changed_routing) =
+                match crate::painless::contexts::read_ctx(&ctx) {
+                    Ok(read) => read,
+                    Err(reason) => {
+                        return After::Fail(err(
+                            StatusCode::BAD_REQUEST,
+                            "illegal_argument_exception",
+                            reason,
+                        ));
+                    }
+                };
+            if let crate::painless::Value::Map(m) = &ctx
+                && let Some(index_now) =
+                    crate::painless::value::map_get(m, &crate::painless::Value::str("_index"))
+            {
+                let named = index_now.as_text();
+                // a script may name another destination per document, and
+                // that one is judged too -- once per name, not once per
+                // document
+                if named != to && !written.judged.contains(&named) {
+                    // and it may not be the index being read: the request's
+                    // own destination is checked against that before the walk
+                    // begins, and a script naming the source went round it --
+                    // rewriting in place the very thing the check exists for
+                    if remote.is_none() && store.resolve(from).contains(&named) {
+                        tally.failures.push(json!({
+                            "index": named, "id": seen.id, "status": 400,
+                            "cause": {
+                                "type": "action_request_validation_exception",
+                                "reason": format!(
+                                    "Validation Failed: 1: reindex cannot write into an index \
+                                     its reading from [{named}];"
+                                ),
+                            },
+                        }));
+                        continue;
+                    }
+                    if let Some(why) = crate::security::item_refusal(
+                        store,
+                        &["indices:data/write/index"],
+                        &crate::security::layer::indices_for_expr(store, &named),
+                    ) {
+                        tally.failures.push(json!({
+                            "index": named, "id": seen.id, "status": 403,
+                            "cause": {"type": "security_exception", "reason": why},
+                        }));
+                        continue;
+                    }
+                    written.judged.insert(named.clone());
+                }
+                to = named;
+            }
+            match op.as_str() {
+                "noop" => {
+                    tally.noops += 1;
+                    continue;
+                }
+                "delete" => {
+                    // the document deleted is the one the script named
+                    let target = changed_id.clone().unwrap_or_else(|| id.clone());
+                    let mut done = false;
+                    if let Some(st) = store.get(&to) {
+                        let (answer, status) =
+                            crate::api::doc::delete_doc(&mut st.write(), &target);
+                        done = status.is_success();
+                        written.touched.insert(to.clone());
+                        if !done {
+                            tally.failures.push(json!({
+                                "index": to, "id": target,
+                                "status": status.as_u16(),
+                                "cause": answer.get("error").cloned().unwrap_or(json!({})),
+                            }));
+                        }
+                    }
+                    if !done {
+                        continue;
+                    }
+                    tally.deleted += 1;
+                    continue;
+                }
+                "index" | "create" => op_asked = if op == "create" { "create" } else { "index" },
+                other => {
+                    return After::Fail(err(
+                        StatusCode::BAD_REQUEST,
+                        "illegal_argument_exception",
+                        format!(
+                            "Operation type [{other}] not allowed, only [noop, index, delete] \
+                             are allowed"
+                        ),
+                    ));
+                }
+            }
+            document = src;
+            if let Some(new_id) = changed_id {
+                id = new_id;
+            } else if let crate::painless::Value::Map(m) = &ctx
+                && crate::painless::value::map_get(m, &crate::painless::Value::str("_id"))
+                    .map(|v| v.is_null())
+                    .unwrap_or(false)
+            {
+                // an id set to nothing asks for one to be made up
+                id = String::new();
+            }
+            scripted_routing = changed_routing;
+        }
+        // a document written by a walk is written the way any document is, so
+        // the pipelines that would have run over it run over it here too: the
+        // one the request named, and whatever the destination's own settings
+        // and templates say. A processor that drops the document drops it
+        // from the walk as well.
+        match crate::api::ingest::ingest_for_write(
+            store,
+            &to,
+            &id,
+            document.clone(),
+            through.as_deref(),
+            None,
+        ) {
+            Ok(Some(piped)) => document = piped.source,
+            Ok(None) => {
+                tally.noops += 1;
+                continue;
+            }
+            Err(e) => {
+                tally.failures.push(json!({
+                    "index": to, "id": seen.id, "status": 400,
+                    "cause": {"type": e.kind, "reason": e.reason},
+                }));
+                after = After::Stop;
+                continue;
+            }
+        }
+        // the destination is made on the first document written to it, so a
+        // script that sends every document elsewhere, or drops them all,
+        // leaves no empty index behind
+        let st = match store.get(&to) {
+            Some(st) => st,
+            None => match store.ensure(&to) {
+                Ok(st) => st,
+                Err(_) => continue,
+            },
+        };
+        let mut g = st.write();
+        written.touched.insert(to.clone());
+        if id.is_empty() {
+            id = g.next_auto_id();
+        }
+        if let Some(r) = scripted_routing {
+            g.routing.insert(id.clone(), r);
+        }
+        match routing.as_deref() {
+            Some("discard") => {
+                g.routing.remove(&id);
+            }
+            Some(named) if named.starts_with('=') => {
+                g.routing.insert(id.clone(), named[1..].to_string());
+            }
+            _ => {}
+        }
+        let existed = crate::api::doc::exists_doc(&g, &id);
+        let op = if create_only || op_asked == "create" { "create" } else { "index" };
+        match write_doc_raw(&mut g, &id, document, op, None) {
+            Ok(_) if existed => tally.updated += 1,
+            Ok(_) => tally.created += 1,
+            Err(refusal) => {
+                // what the destination refused, said as itself. A copy that
+                // was not written is not a copy that was already there, and
+                // a destination held still refused every one of them while
+                // the answer said `version_conflicts` and `failures: []`.
+                let before = tally.failures.len();
+                tally.note_refusal(&to, &seen.id, &refusal, walk.proceed);
+                if tally.failures.len() > before {
+                    after = After::Stop;
+                }
+            }
+        }
+    }
+    after
+}
+
+/// Start a walk: as a task that answers its id at once, or one the request
+/// waits for.
+async fn launch(walk: Walk, headers: &HeaderMap) -> Response {
+    let slices = match walk.search.get("remote") {
+        Some(_) => 1,
+        None => slices_asked(&walk.store, &walk.p, &walk.read),
+    };
+    let rate = rate_of(walk.p.get("requests_per_second").map(|s| s.as_str()));
+    let background = as_task(&walk.p);
+    let task = crate::tasks::register(NewTask {
+        action: walk.kind.action(),
+        description: walk.description(),
+        cancellable: true,
+        parent: None,
+        headers: crate::tasks::headers_of(headers),
+    });
+    let (p, kind, store, name) = (walk.p.clone(), walk.kind, walk.store.clone(), task.name());
+    let walk = Arc::new(walk);
+    // the walk runs as a task of its own, so it goes on to its end however
+    // the request that started it ends -- a caller who hangs up has not
+    // cancelled anything
+    let job = tokio::spawn(async move {
+        let ended = drive(walk, task.0.clone(), slices, rate).await;
+        if background {
+            keep_result(&store, &task, ended).await;
+            return None;
+        }
+        Some(ended)
+    });
+    if background {
+        return respond(&p, json!({ "task": name }));
+    }
+    match job.await {
+        Ok(Some(Ended::Done { took, figures, slices, failures })) => {
+            let human = flag(&p, "human");
+            let mut answer = serde_json::Map::new();
+            answer.insert("took".into(), json!(took as u64));
+            answer.insert("timed_out".into(), json!(false));
+            answer.extend(figures.write(human));
+            if let Some(slices) = slices {
+                let each: Vec<Value> = slices
+                    .iter()
+                    .map(|f| {
+                        let mut o = f.write(human);
+                        for unsaid in kind.unsaid() {
+                            o.shift_remove(*unsaid);
+                        }
+                        Value::Object(o)
+                    })
+                    .collect();
+                answer.insert("slices".into(), json!(each));
+            }
+            for unsaid in kind.unsaid() {
+                answer.shift_remove(*unsaid);
+            }
+            // the walk answers with the worst status among its failures, as
+            // OpenSearch's does: a conflict is a 409, a document the mapping
+            // would not take a 400
+            let worst = failures
+                .iter()
+                .filter_map(|f| f.get("status").and_then(|v| v.as_u64()))
+                .max()
+                .and_then(|s| StatusCode::from_u16(s as u16).ok())
+                .filter(|s| s.as_u16() > 200)
+                .unwrap_or(StatusCode::OK);
+            answer.insert("failures".into(), json!(failures));
+            let mut response = respond(&p, Value::Object(answer));
+            *response.status_mut() = worst;
+            response
+        }
+        Ok(Some(Ended::Failed(e))) => e,
+        Ok(None) => err(StatusCode::INTERNAL_SERVER_ERROR, "exception", "the walk ended unseen"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "exception", format!("{e}")),
+    }
+}
+
+/// Whether the request asked for the walk to be done in the background.
+fn as_task(p: &Params) -> bool {
+    p.get("wait_for_completion").map(|v| v == "false").unwrap_or(false)
+}
+
+/// Keep what a walk sent off as a task did, where its id finds it.
+///
+/// A task outlives the request that started it, so its result is written to
+/// `.tasks` -- the task as it finished, and the answer or the error -- and a
+/// caller asking for it later reads it back from there, as from OpenSearch.
+async fn keep_result(store: &Store, task: &Task, ended: Ended) {
+    let mut record = serde_json::Map::new();
+    record.insert("completed".into(), json!(true));
+    record.insert("task".into(), task.info(true, false));
+    match ended {
+        Ended::Done { took, figures, slices, failures } => {
+            let mut answer = serde_json::Map::new();
+            answer.insert("took".into(), json!(took as u64));
+            answer.insert("timed_out".into(), json!(false));
+            answer.extend(figures.write(true));
+            if let Some(slices) = slices {
+                let each: Vec<Value> =
+                    slices.iter().map(|f| Value::Object(f.write(true))).collect();
+                answer.insert("slices".into(), json!(each));
+            }
+            answer.insert("failures".into(), json!(failures));
+            record.insert("response".into(), Value::Object(answer));
+        }
+        Ended::Failed(e) => {
+            // the error is kept as the answer said it, without its status
+            let bytes = axum::body::to_bytes(e.into_body(), usize::MAX).await.unwrap_or_default();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
+            record.insert("error".into(), body.get("error").cloned().unwrap_or(body));
+        }
+    }
+    crate::api::store_task_result(store, &task.name(), Value::Object(record)).await;
+}
+
 pub async fn delete_by_query(
     State(store): State<Store>,
     Path(index): Path<String>,
     Query(p): Query<Params>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
@@ -735,52 +1972,32 @@ pub async fn delete_by_query(
             "Validation Failed: 1: query is missing;",
         );
     }
-    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
-        Ok(hits) => hits,
-        Err(e) => return e,
-    };
     if let Some(failure) = too_few_copies(&store, &index, &p) {
-        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
-        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
+        return unavailable(failure);
     }
-    let mut tally = Tally { total: hits.len(), deleting: true, ..Default::default() };
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
-    // `?pipeline=` names one every rewritten document goes through
-    let _through = p.get("pipeline").cloned();
-    for seen in hits {
-        let Some(st) = store.get(&seen.index) else { continue };
-        let mut g = st.write();
-        if moved_on(&g, &seen) {
-            tally.version_conflicts += 1;
-            if !proceed {
-                tally.note_conflict(&seen);
-                break;
-            }
-            continue;
-        }
-        let (_, status) = delete_doc(&mut g, &seen.id);
-        if status == StatusCode::OK {
-            tally.deleted += 1;
-        } else {
-            tally.noops += 1;
-        }
-    }
-    for name in store.resolve(&index) {
-        if let Some(st) = store.get(&name) {
-            let _ = st.write().refresh();
-        }
-    }
-    finish(&store, tally, started, &p, &index, batch_size(&p, &body)).await
+    let walk = Walk {
+        kind: Kind::Delete,
+        batch: batch_size(&p, &body),
+        search: body.clone(),
+        read: index,
+        body,
+        store,
+        p,
+        proceed,
+        caller: crate::security::layer::current_caller(),
+    };
+    launch(walk, &headers).await
 }
 
 pub async fn update_by_query(
     State(store): State<Store>,
     Path(index): Path<String>,
     Query(p): Query<Params>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     if let Some(complaint) = complaint(&p, &body).or_else(|| search_complaint(&body)) {
         return complaint;
@@ -789,154 +2006,40 @@ pub async fn update_by_query(
         return refusal;
     }
     // a script says what to change; without one the walk rewrites each
-    // document as it stands, which is what gives it a new version
-    let script = match body.get("script") {
-        Some(spec) => {
-            match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
-                Ok(c) => Some(c),
-                Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
-                Err(e) => return crate::api::script_failure(e),
-            }
+    // document as it stands, which is what gives it a new version. One that
+    // does not compile is refused before anything is read.
+    if let Some(spec) = body.get("script") {
+        match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
+            Ok(_) => {}
+            Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
+            Err(e) => return crate::api::script_failure(e),
         }
-        None => None,
-    };
-    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
-        Ok(hits) => hits,
-        Err(e) => return e,
-    };
-    if let Some(failure) = too_few_copies(&store, &index, &p) {
-        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
-        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
     }
-    let mut tally = Tally { total: hits.len(), updating: true, ..Default::default() };
+    if let Some(failure) = too_few_copies(&store, &index, &p) {
+        return unavailable(failure);
+    }
     let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed")
         || p.get("conflicts").map(|v| v == "proceed").unwrap_or(false);
-    // `?pipeline=` names one every rewritten document goes through
-    let through = p.get("pipeline").cloned();
-    for seen in hits {
-        let Some(st) = store.get(&seen.index) else { continue };
-        let mut g = st.write();
-        if moved_on(&g, &seen) {
-            tally.version_conflicts += 1;
-            if !proceed {
-                tally.note_conflict(&seen);
-                break;
-            }
-            continue;
-        }
-        // the script sees the document in `ctx` and may change it, leave
-        // it, or have it deleted
-        let mut next = seen.source.clone();
-        let mut op = "index";
-        if let Some(compiled) = &script {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let ctx = crate::painless::contexts::update_ctx(
-                &g.name,
-                &seen.id,
-                g.version_of(&seen.id),
-                &seen.source,
-                now,
-                "index",
-            );
-            let mut runner =
-                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
-            if let Err(e) = runner.run(&compiled.script) {
-                return crate::search::search_script_failure_partial(e, &seen.index);
-            }
-            match scripted_change(&ctx, &seen.id) {
-                Ok((changed_op, source)) => {
-                    op = changed_op;
-                    next = source;
-                }
-                Err(reason) => {
-                    return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
-                }
-            }
-        }
-        match op {
-            "noop" => {
-                tally.noops += 1;
-                continue;
-            }
-            "delete" => {
-                let _ = crate::api::doc::delete_doc(&mut g, &seen.id);
-                tally.deleted += 1;
-                continue;
-            }
-            _ => {}
-        }
-        // a document rewritten in place is written the way any document is,
-        // so a pipeline the request named runs over it. The index is held for
-        // writing here, and a pipeline may read the store, so it runs with
-        // the lock let go and taken again.
-        if let Some(named) = &through {
-            drop(g);
-            let piped = crate::api::ingest::ingest_for_write(
-                &store,
-                &seen.index,
-                &seen.id,
-                next,
-                Some(named),
-                None,
-            );
-            g = st.write();
-            // the document may have been written while the guard was let go,
-            // and what the script produced was computed from the version this
-            // walk read: writing it now would undo that write without a word
-            if moved_on(&g, &seen) {
-                tally.version_conflicts += 1;
-                if !proceed {
-                    tally.note_conflict(&seen);
-                    break;
-                }
-                continue;
-            }
-            match piped {
-                Ok(Some(doc)) => next = doc.source,
-                Ok(None) => {
-                    tally.noops += 1;
-                    continue;
-                }
-                Err(e) => {
-                    tally.failures.push(json!({
-                        "index": seen.index, "id": seen.id, "status": 400,
-                        "cause": {"type": e.kind, "reason": e.reason},
-                    }));
-                    continue;
-                }
-            }
-        }
-        match write_doc_raw(&mut g, &seen.id, next, "index", None) {
-            Ok(_) => tally.updated += 1,
-            Err(refusal) => {
-                // the refusal is reported as itself, whether or not the
-                // caller asked to proceed: a document that was not written
-                // is not a document that was already right
-                tally.note_refusal(&seen.index, &seen.id, &refusal, proceed);
-                if !proceed {
-                    break;
-                }
-            }
-        }
-    }
-    drop(script);
-    for name in store.resolve(&index) {
-        if let Some(st) = store.get(&name) {
-            let _ = st.write().refresh();
-        }
-    }
-    finish(&store, tally, started, &p, &index, batch_size(&p, &body)).await
+    let walk = Walk {
+        kind: Kind::Update,
+        batch: batch_size(&p, &body),
+        search: body.clone(),
+        read: index,
+        body,
+        store,
+        p,
+        proceed,
+        caller: crate::security::layer::current_caller(),
+    };
+    launch(walk, &headers).await
 }
 
 pub async fn reindex(
     State(store): State<Store>,
     Query(p): Query<Params>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    let started = std::time::Instant::now();
     let body: Value = parse_body(&body).unwrap_or(json!({}));
     if let Some(complaint) = reindex_complaint(&body) {
         return complaint;
@@ -944,16 +2047,13 @@ pub async fn reindex(
     if let Some(complaint) = complaint(&p, &body) {
         return complaint;
     }
-    let script = match body.get("script") {
-        Some(spec) => {
-            match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
-                Ok(c) => Some(c),
-                Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
-                Err(e) => return crate::api::script_failure(e),
-            }
+    if let Some(spec) = body.get("script") {
+        match crate::painless::contexts::Compiled::of(spec, &|id| store.stored_script(id)) {
+            Ok(_) => {}
+            Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
+            Err(e) => return crate::api::script_failure(e),
         }
-        None => None,
-    };
+    }
     let source = body.get("source").cloned().unwrap_or_else(|| json!({}));
     let dest = body.get("dest").cloned().unwrap_or_else(|| json!({}));
     let remote = source.get("remote").cloned();
@@ -1005,37 +2105,6 @@ pub async fn reindex(
     if let Some(refused) = change_refusal_for(&store, &to) {
         return refused;
     }
-    let wanted = max_docs(&p, &body);
-    let hits = match &remote {
-        // reading another cluster is waiting on a socket, and waiting on a
-        // socket from inside a request handler is how a node stops answering:
-        // the wait holds a worker, and what it is waiting for may be this
-        // node itself. So it happens off the runtime.
-        Some(remote) => {
-            let (remote, from, source) = (remote.clone(), from.clone(), source.clone());
-            let batch = batch_size(&p, &source);
-            let read = tokio::task::spawn_blocking(move || {
-                found_remote(&remote, &from, &source, wanted, batch)
-            })
-            .await;
-            match read {
-                Ok(Ok(hits)) => hits,
-                Ok(Err(e)) => return e,
-                Err(e) => return remote_failure(format!("{e}")),
-            }
-        }
-        None => match found(&store, &from, &source, wanted) {
-            Ok(hits) => hits,
-            Err(e) => return e,
-        },
-    };
-    // a document may be written only where it is not already, if asked
-    let create_only = dest.get("op_type").and_then(|v| v.as_str()) == Some("create");
-    let conflicts_proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed");
-    let kept = source.get("_source").cloned();
-    // `dest.pipeline` names a pipeline every document goes through on the way
-    // in, the same one an index request would name in its URL
-    let through = dest.get("pipeline").and_then(|v| v.as_str()).map(|s| s.to_string());
     // a destination that is not there yet is created, unless the cluster was
     // told which names may be created on the fly
     if store.get(&to).is_none()
@@ -1045,235 +2114,36 @@ pub async fn reindex(
     }
     // with a script, the destination is made only when a document is
     // written to it: the script may send them all elsewhere, or drop them
-    if script.is_none() && store.ensure(&to).is_err() {
+    if body.get("script").is_none() && store.ensure(&to).is_err() {
         return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", "cannot open dest");
     }
     if let Some(failure) = too_few_copies(&store, &to, &p) {
-        let tally = Tally { total: hits.len(), failures: vec![failure], ..Default::default() };
-        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(tally.answer(0, 1))).into_response();
+        return unavailable(failure);
     }
-    let mut tally = Tally { total: hits.len(), ..Default::default() };
-    // every index a document was written to is refreshed at the end; a
-    // script may have sent some elsewhere
-    let mut written: Vec<String> = vec![to.clone()];
-    // the destinations already judged for this caller: the one the request
-    // named is judged above, and each one a script names is judged once
-    let mut judged: std::collections::HashSet<String> = std::collections::HashSet::new();
-    judged.insert(to.clone());
-    // where a destination names a routing, it decides which shard each
-    // document lands on: `=value` writes them all under one, `discard` drops
-    // the one the source carried, and `keep` leaves it as it stands
-    let routing = dest.get("routing").and_then(|v| v.as_str()).map(|s| s.to_string());
-    for seen in hits {
-        let mut document = seen.source.clone();
-        if let Some(fields) = kept.as_ref() {
-            document = only_these(&document, fields);
-        }
-        // the script may send the document elsewhere, rename it, route it,
-        // or say it is not to be written at all
-        let mut to = to.clone();
-        let mut id = seen.id.clone();
-        let mut scripted_routing: Option<String> = None;
-        let mut op_asked = "index";
-        if let Some(compiled) = &script {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let ctx = crate::painless::contexts::update_ctx(&to, &id, 1, &document, now, "index");
-            let mut runner =
-                crate::painless::contexts::Runner::new(&compiled.params).with_ctx(ctx.clone());
-            if let Err(e) = runner.run(&compiled.script) {
-                return crate::search::search_script_failure_partial(e, &seen.index);
-            }
-            let extra = crate::painless::contexts::ctx_extra_keys(&ctx);
-            if let Some(junk) = extra.first() {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "illegal_argument_exception",
-                    format!("Invalid fields added to context [{junk}]"),
-                );
-            }
-            let (op, src, changed_id, changed_routing) =
-                match crate::painless::contexts::read_ctx(&ctx) {
-                    Ok(read) => read,
-                    Err(reason) => {
-                        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", reason);
-                    }
-                };
-            if let crate::painless::Value::Map(m) = &ctx
-                && let Some(index_now) =
-                    crate::painless::value::map_get(m, &crate::painless::Value::str("_index"))
-            {
-                let named = index_now.as_text();
-                // the destination the request named was judged before the
-                // walk began; a script may name another one per document,
-                // and that one is judged too -- once per name, not once per
-                // document
-                if named != to && !judged.contains(&named) {
-                    // and it may not be the index being read: the request's
-                    // own destination is checked against that before the walk
-                    // begins, and a script naming the source went round it --
-                    // rewriting in place the very thing the check exists for
-                    if remote.is_none() && store.resolve(&from).contains(&named) {
-                        tally.failures.push(json!({
-                            "index": named, "id": seen.id, "status": 400,
-                            "cause": {
-                                "type": "action_request_validation_exception",
-                                "reason": format!(
-                                    "Validation Failed: 1: reindex cannot write into an index \
-                                     its reading from [{named}];"
-                                ),
-                            },
-                        }));
-                        continue;
-                    }
-                    if let Some(why) = crate::security::item_refusal(
-                        &store,
-                        &["indices:data/write/index"],
-                        &crate::security::layer::indices_for_expr(&store, &named),
-                    ) {
-                        tally.failures.push(json!({
-                            "index": named, "id": seen.id, "status": 403,
-                            "cause": {"type": "security_exception", "reason": why},
-                        }));
-                        continue;
-                    }
-                    judged.insert(named.clone());
-                }
-                to = named;
-            }
-            match op.as_str() {
-                "noop" => {
-                    tally.noops += 1;
-                    continue;
-                }
-                "delete" => {
-                    // the document deleted is the one the script named
-                    let target = changed_id.clone().unwrap_or_else(|| id.clone());
-                    let mut done = false;
-                    if let Some(st) = store.get(&to) {
-                        let (answer, status) =
-                            crate::api::doc::delete_doc(&mut st.write(), &target);
-                        done = status.is_success();
-                        if !done {
-                            tally.failures.push(json!({
-                                "index": to, "id": target,
-                                "status": status.as_u16(),
-                                "cause": answer.get("error").cloned().unwrap_or(json!({})),
-                            }));
-                        }
-                    }
-                    if !done {
-                        continue;
-                    }
-                    tally.deleted += 1;
-                    continue;
-                }
-                "index" | "create" => op_asked = if op == "create" { "create" } else { "index" },
-                other => {
-                    return err(
-                        StatusCode::BAD_REQUEST,
-                        "illegal_argument_exception",
-                        format!(
-                            "Operation type [{other}] not allowed, only [noop, index, delete] \
-                             are allowed"
-                        ),
-                    );
-                }
-            }
-            document = src;
-            if let Some(new_id) = changed_id {
-                id = new_id;
-            } else if let crate::painless::Value::Map(m) = &ctx
-                && crate::painless::value::map_get(m, &crate::painless::Value::str("_id"))
-                    .map(|v| v.is_null())
-                    .unwrap_or(false)
-            {
-                // an id set to nothing asks for one to be made up
-                id = String::new();
-            }
-            scripted_routing = changed_routing;
-        }
-        // a document written by a walk is written the way any document is, so
-        // the pipelines that would have run over it run over it here too: the
-        // one the request named, and whatever the destination's own settings
-        // and templates say. A processor that drops the document drops it
-        // from the walk as well.
-        match crate::api::ingest::ingest_for_write(
-            &store,
-            &to,
-            &id,
-            document.clone(),
-            through.as_deref(),
-            None,
-        ) {
-            Ok(Some(piped)) => document = piped.source,
-            Ok(None) => {
-                tally.noops += 1;
-                continue;
-            }
-            Err(e) => {
-                tally.failures.push(json!({
-                    "index": to, "id": seen.id, "status": 400,
-                    "cause": {"type": e.kind, "reason": e.reason},
-                }));
-                continue;
-            }
-        }
-        // the destination is made on the first document written to it, so a
-        // script that sends every document elsewhere, or drops them all,
-        // leaves no empty index behind
-        let st = match store.get(&to) {
-            Some(st) => st,
-            None => match store.ensure(&to) {
-                Ok(st) => st,
-                Err(_) => continue,
-            },
-        };
-        let mut g = st.write();
-        if !written.contains(&to) {
-            written.push(to.clone());
-        }
-        if id.is_empty() {
-            id = g.next_auto_id();
-        }
-        if let Some(r) = scripted_routing {
-            g.routing.insert(id.clone(), r);
-        }
-        match routing.as_deref() {
-            Some("discard") => {
-                g.routing.remove(&id);
-            }
-            Some(named) if named.starts_with('=') => {
-                g.routing.insert(id.clone(), named[1..].to_string());
-            }
-            _ => {}
-        }
-        let existed = crate::api::doc::exists_doc(&g, &id);
-        let op = if create_only || op_asked == "create" { "create" } else { "index" };
-        match write_doc_raw(&mut g, &id, document, op, None) {
-            Ok(_) if existed => tally.updated += 1,
-            Ok(_) => tally.created += 1,
-            Err(refusal) => {
-                // what the destination refused, said as itself. A copy that
-                // was not written is not a copy that was already there, and
-                // a destination held still refused every one of them while
-                // the answer said `version_conflicts` and `failures: []`.
-                tally.note_refusal(&to, &seen.id, &refusal, conflicts_proceed);
-                if !conflicts_proceed {
-                    break;
-                }
-            }
-        }
-    }
-    for name in &written {
-        if let Some(st) = store.get(name) {
-            let _ = st.write().refresh();
-        }
-    }
-    drop(script);
-    finish(&store, tally, started, &p, &from, batch_size(&p, &source)).await
+    let proceed = body.get("conflicts").and_then(|v| v.as_str()) == Some("proceed");
+    let walk = Walk {
+        kind: Kind::Reindex,
+        batch: batch_size(&p, &source),
+        search: source,
+        read: from,
+        body,
+        store,
+        p,
+        proceed,
+        caller: crate::security::layer::current_caller(),
+    };
+    launch(walk, &headers).await
+}
+
+/// The answer to a walk that could not have the copies it asked for.
+fn unavailable(failure: Value) -> Response {
+    let figures = Figures { batches: 1, rate: f64::INFINITY, ..Default::default() };
+    let mut answer = serde_json::Map::new();
+    answer.insert("took".into(), json!(0));
+    answer.insert("timed_out".into(), json!(false));
+    answer.extend(figures.write(false));
+    answer.insert("failures".into(), json!([failure]));
+    (StatusCode::SERVICE_UNAVAILABLE, axum::Json(Value::Object(answer))).into_response()
 }
 
 /// Whether the write can meet the number of copies the caller asked for.
@@ -1347,11 +2217,12 @@ pub(crate) fn auto_create_complaint(store: &Store, name: &str) -> Option<Respons
     ))
 }
 
-/// Whether the document has been written to since the walk read it.
-fn moved_on(g: &IdxState, seen: &Seen) -> bool {
+/// Whether the document has been written to since the walk read it: the
+/// sequence number it stands at now, if that is not the one the walk read.
+fn written_since(g: &IdxState, seen: &Seen) -> Option<u64> {
     match (seen.seq_no, read_seq(g, &seen.id)) {
-        (Some(saw), Some(now)) => saw != now,
-        _ => false,
+        (Some(saw), Some(now)) if saw != now => Some(now),
+        _ => None,
     }
 }
 
@@ -1377,121 +2248,6 @@ fn only_these(document: &Value, fields: &Value) -> Value {
         Value::Null => json!({}),
         kept => kept,
     }
-}
-
-/// The answer, or the name of the task it would have been.
-async fn finish(
-    store: &Store,
-    tally: Tally,
-    started: std::time::Instant,
-    p: &Params,
-    read: &str,
-    per_batch: usize,
-) -> Response {
-    // the walk reads a page at a time, and says how many pages it read
-    let batches = tally.total.div_ceil(per_batch).max(1);
-    // a walk told how many documents a second it may write waits between its
-    // batches until it has held to that rate
-    let rate = p.get("requests_per_second").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0);
-    let throttled_millis = match rate > 0.0 {
-        true => ((batches - 1) as f64 * per_batch as f64 / rate * 1000.0) as u64,
-        false => 0,
-    };
-    // a walk that is being waited for holds to the rate before it answers; a
-    // walk running as a task is left to be rethrottled instead
-    if throttled_millis > 0 && !as_task(p) {
-        tokio::time::sleep(std::time::Duration::from_millis(throttled_millis)).await;
-    }
-    let mut answer = tally.answer(started.elapsed().as_millis(), batches);
-    answer["throttled_millis"] = json!(throttled_millis);
-    answer["requests_per_second"] = json!(rate);
-    // a walk asked to be sliced is one walk here, and says so slice by slice
-    // `auto` means one slice per shard of the index the walk read
-    let asked = match p.get("slices").map(|v| v.as_str()) {
-        Some("auto") => store
-            .resolve(read)
-            .first()
-            .and_then(|name| store.get(name))
-            .map(|st| st.read().shard_count() as usize)
-            .filter(|n| *n > 1),
-        other => other.and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1),
-    };
-    if let Some(slices) = asked {
-        let each: Vec<Value> = (0..slices)
-            .map(|slice| {
-                json!({
-                    "slice_id": slice, "total": 0, "updated": 0, "created": 0, "deleted": 0,
-                    "batches": 0, "version_conflicts": 0, "noops": 0,
-                    "retries": {"bulk": 0, "search": 0}, "throttled_millis": 0,
-                    "requests_per_second": -1.0, "throttled_until_millis": 0, "failures": [],
-                })
-            })
-            .collect();
-        answer["slices"] = json!(each);
-    }
-    if as_task(p) {
-        let name = task_name(store);
-        store.remember_task(&name, answer.clone());
-        // a task outlives the request that started it, so what it did is kept
-        // where anyone can read it back
-        if store.ensure(".tasks").is_ok()
-            && let Some(st) = store.get(".tasks")
-        {
-            let mut g = st.write();
-            let record = json!({
-                "completed": true,
-                "task": {
-                    "node": "node-0", "id": 1, "type": "transport",
-                    "action": "indices:data/write/by_query", "description": name,
-                    "start_time_in_millis": 0, "running_time_in_nanos": 0, "cancellable": true,
-                },
-                "response": answer,
-            });
-            let _ = write_doc_raw(&mut g, &name, record, "index", None);
-            let _ = g.refresh();
-        }
-        return axum::Json(json!({ "task": name })).into_response();
-    }
-    // a walk that could not write what it found says so in its status
-    // A walk that could not write what it found says so in its status -- but
-    // 409 is the answer to a version conflict, not to every refusal: a
-    // mapping that would not take a document is a failure listed in the body
-    // with the status the write had, and the walk itself answers 200.
-    let conflicted =
-        tally.failures.iter().any(|f| f.get("status").and_then(|v| v.as_u64()) == Some(409));
-    let status = if conflicted { StatusCode::CONFLICT } else { StatusCode::OK };
-    (status, axum::Json(answer)).into_response()
-}
-
-/// `_rethrottle` -- nothing here is throttled, so there is nothing to change.
-pub async fn rethrottle(
-    State(store): State<Store>,
-    Path(id): Path<String>,
-    Query(p): Query<Params>,
-) -> Response {
-    let answer = store.task_answer(&id).unwrap_or_else(|| json!({}));
-    respond(
-        &p,
-        json!({
-            "nodes": {
-                "node-0": {
-                    "name": "boostsearch", "transport_address": "127.0.0.1:9300",
-                    "host": "127.0.0.1", "ip": "127.0.0.1:9300", "roles": ["data"],
-                    "tasks": {
-                        id.clone(): {
-                            "node": "node-0", "id": 1, "type": "transport",
-                            "action": "indices:data/write/by_query",
-                            "status": answer,
-                            "description": id,
-                            "start_time_in_millis": 0, "running_time_in_nanos": 0,
-                            "cancellable": true,
-                        }
-                    },
-                }
-            },
-            "node_failures": [],
-        }),
-    )
 }
 
 /// What an update script asked for: the operation and the document as it

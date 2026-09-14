@@ -24,9 +24,11 @@ pub fn read_seq(st: &IdxState, id: &str) -> Option<u64> {
         return Some(*seq);
     }
     let searcher = st.realtime.searcher();
-    let q = TermQuery::new(Term::from_field_text(st.fields.id, id), IndexRecordOption::Basic);
-    let hits = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
-    let (_, addr) = hits.first()?;
+    // the id is looked up in each segment's terms directly: a search for it
+    // was handed to the search pool and waited on, which cost a thread
+    // hand-off per document -- a millisecond each, most of what a walk over
+    // twenty thousand documents spent
+    let addr = crate::store::alive_address(&searcher, st.fields.id, id)?;
     // read from the column rather than the stored document: `_seq` is wanted
     // on every hit that asks for it, and a stored copy would be paid for on
     // every write to serve the far rarer read
