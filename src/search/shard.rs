@@ -651,7 +651,10 @@ fn phase_failure_of(e: Response, index: &str) -> Response {
     let Some(what) = e.extensions().get::<crate::api::shared::ErrorKind>().cloned() else {
         return e;
     };
-    if !what.reason.contains("is not supported for aggregation") {
+    if !what.reason.contains("is not supported for aggregation")
+        && !what.reason.starts_with("Fielddata is not supported on field")
+        && !what.reason.starts_with("[variable_width_histogram] cannot be nested")
+    {
         return e;
     }
     let detail = json!({"type": what.kind, "reason": what.reason});

@@ -67,8 +67,11 @@ pub(crate) fn run_rare_terms_agg(
     };
     let include = listed("include");
     let exclude = listed("exclude");
-    let mut node = json!({"terms": terms});
-    if let Some(sa) = sub_aggs {
+    let mut node = json!({"terms": terms.clone()});
+    // what BoostCore cannot run is run once the rare buckets are known, rather
+    // than in every bucket of the terms aggregation they are picked from
+    let (peeled_subs, plain_subs) = split_peelable(&sub_aggs, store, targets);
+    if let Some(sa) = plain_subs {
         node["aggs"] = sa;
     }
     let mut request = json!({"__rare": node});
@@ -133,6 +136,16 @@ pub(crate) fn run_rare_terms_agg(
             (x, y) => x.to_string().cmp(&y.to_string()),
         })
     });
+    if let Some(peeled) = peeled_subs.as_ref().and_then(|p| p.as_object()) {
+        let as_terms = json!({"terms": terms});
+        for b in buckets.iter_mut() {
+            let Some(filter) = bucket_filter(store, targets, &as_terms, b) else { continue };
+            let narrowed = Some(json!({"bool": {"filter": [query.clone(), filter]}}));
+            for (n, d) in peeled {
+                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            }
+        }
+    }
     Ok(json!({"buckets": buckets}))
 }
 

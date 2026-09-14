@@ -119,6 +119,7 @@ pub(crate) fn finalise_aggs(
                         })
                         .collect();
                     widen_number_keys(&mut v, req, &floating);
+                    cut_terms(&mut v, req);
                 }
                 if weighted {
                     apply_doc_counts(&mut v);
@@ -417,6 +418,14 @@ pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> b
         "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
+        // `_index` is not a column but a property of the whole index, so a
+        // terms over it is counted here whatever it sits under; left to
+        // BoostCore under another bucket, it found no column and no buckets
+        || def.pointer("/terms/field").and_then(|f| f.as_str()) == Some("_index")
+        // BoostCore's histogram and range read no `missing`, so the documents
+        // without a value went uncounted
+        || def.pointer("/histogram/missing").is_some()
+        || def.pointer("/range/missing").is_some()
         // an analysed field buckets what the analyser made of the text, which
         // lives in the term dictionary rather than in a column of values
         || def
@@ -541,7 +550,206 @@ pub(crate) fn count_with_sub_aggs(
     Ok((count, Some(Value::Object(merged))))
 }
 
+/// What was taken out from under one of BoostCore's bucket aggregations: the
+/// sub-aggregations run here, a bucket at a time, and the same for the
+/// bucket aggregations still inside it.
+struct HeldBack {
+    peeled: Vec<(String, Value)>,
+    inner: Vec<(String, HeldBack)>,
+}
+
+/// Take the sub-aggregations BoostCore cannot run out from under the bucket
+/// aggregations it can, at any depth, and say what was taken from where.
+fn hold_back_peeled(
+    node: &mut Value,
+    store: &Store,
+    targets: &[String],
+) -> Vec<(String, HeldBack)> {
+    let Some(map) = node.as_object_mut() else { return Vec::new() };
+    let mut out = Vec::new();
+    for (name, def) in map.iter_mut() {
+        let Some(d) = def.as_object_mut() else { continue };
+        let key = match (d.contains_key("aggs"), d.contains_key("aggregations")) {
+            (true, _) => "aggs",
+            (false, true) => "aggregations",
+            _ => continue,
+        };
+        let Some(Value::Object(subs)) = d.get_mut(key) else { continue };
+        let names: Vec<String> = subs
+            .iter()
+            .filter(|(_, s)| peelable(s, store, targets))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let peeled: Vec<(String, Value)> =
+            names.iter().filter_map(|n| subs.shift_remove(n).map(|v| (n.clone(), v))).collect();
+        let empty = subs.is_empty();
+        let inner = match d.get_mut(key) {
+            Some(rest) => hold_back_peeled(rest, store, targets),
+            None => Vec::new(),
+        };
+        if empty {
+            d.remove(key);
+        }
+        if !peeled.is_empty() || !inner.is_empty() {
+            out.push((name.clone(), HeldBack { peeled, inner }));
+        }
+    }
+    out
+}
+
+/// The query that picks out the documents of one bucket BoostCore made.
+///
+/// A key is enough to name a `terms` bucket, and the edges a `histogram` or a
+/// `range` one; a value the request said to stand in for a missing one also
+/// takes in the documents that have none.
+pub(crate) fn bucket_filter(
+    store: &Store,
+    targets: &[String],
+    def: &Value,
+    bucket: &Value,
+) -> Option<Value> {
+    let (kind, spec) = def.as_object()?.iter().find(|(k, _)| {
+        matches!(String::as_str(k), "terms" | "histogram" | "date_histogram" | "range")
+    })?;
+    let field = spec.get("field")?.as_str()?.to_string();
+    let ty = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()));
+    let span = |gte: Option<f64>, lt: Option<f64>| {
+        let mut clause = serde_json::Map::new();
+        if let Some(v) = gte {
+            clause.insert("gte".into(), json!(v));
+        }
+        if let Some(v) = lt {
+            clause.insert("lt".into(), json!(v));
+        }
+        if matches!(ty.as_deref(), Some("date" | "date_nanos")) {
+            clause.insert("format".into(), json!("epoch_millis"));
+        }
+        json!({"range": {field.clone(): Value::Object(clause)}})
+    };
+    let (filter, stand_in) = match kind.as_str() {
+        "terms" => {
+            let key = bucket.get("key")?;
+            let filter = match ty.as_deref() {
+                Some("date" | "date_nanos") => {
+                    let ms = key.as_f64()?;
+                    json!({"range": {field.clone(): {"gte": ms, "lte": ms, "format": "epoch_millis"}}})
+                }
+                Some("boolean") => json!({"term": {field.clone(): key.as_u64()? != 0}}),
+                _ => json!({"term": {field.clone(): key}}),
+            };
+            let stands_in = spec.get("missing").map(|m| {
+                let shown = bucket.get("key_as_string").cloned().unwrap_or_else(|| key.clone());
+                m == key || *m == shown || m.as_f64().is_some() && m.as_f64() == key.as_f64()
+            });
+            (filter, stands_in.unwrap_or(false))
+        }
+        "histogram" | "date_histogram" => {
+            let key = bucket.get("key")?.as_f64()?;
+            let step = match kind.as_str() {
+                "histogram" => spec.get("interval")?.as_f64()?,
+                _ => fixed_step_ms(spec)? as f64,
+            };
+            let filter = span(Some(key), Some(key + step));
+            let stands_in =
+                spec.get("missing").and_then(|m| m.as_f64()).map(|m| m >= key && m < key + step);
+            (filter, stands_in.unwrap_or(false))
+        }
+        _ => {
+            let from = bucket.get("from").and_then(|v| v.as_f64());
+            let to = bucket.get("to").and_then(|v| v.as_f64());
+            let filter = span(from, to);
+            let stands_in = spec
+                .get("missing")
+                .and_then(|m| m.as_f64())
+                .map(|m| from.map(|f| m >= f).unwrap_or(true) && to.map(|t| m < t).unwrap_or(true));
+            (filter, stands_in.unwrap_or(false))
+        }
+    };
+    Some(match stand_in {
+        true => json!({"bool": {"should": [
+            filter,
+            {"bool": {"must_not": [{"exists": {"field": field}}]}},
+        ], "minimum_should_match": 1}}),
+        false => filter,
+    })
+}
+
+/// Run what `hold_back_peeled` took out, in each bucket it was taken from.
+fn fill_held_back(
+    store: &Store,
+    targets: &[String],
+    base: &Value,
+    answer: &mut Value,
+    request: &Value,
+    held: &[(String, HeldBack)],
+) -> std::result::Result<(), Response> {
+    for (name, back) in held {
+        let Some(def) = request.get(name) else { continue };
+        let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+        let Some(node) = answer.get_mut(name) else { continue };
+        let fill = |bucket: &mut Value| -> std::result::Result<(), Response> {
+            let Some(filter) = bucket_filter(store, targets, def, bucket) else { return Ok(()) };
+            let narrowed = json!({"bool": {"filter": [base.clone(), filter]}});
+            for (n, d) in &back.peeled {
+                bucket[n.clone()] =
+                    run_peeled_agg(store, targets, &Some(narrowed.clone()), n, d, false)?;
+            }
+            if let Some(subs) = subs {
+                fill_held_back(store, targets, &narrowed, bucket, subs, &back.inner)?;
+            }
+            Ok(())
+        };
+        match node.get_mut("buckets") {
+            Some(Value::Array(list)) => {
+                for b in list.iter_mut() {
+                    fill(b)?;
+                }
+            }
+            Some(Value::Object(keyed)) => {
+                for b in keyed.values_mut() {
+                    fill(b)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Count what a query matches and run the aggregations under it.
+///
+/// BoostCore runs them, except for what sits under one of its bucket
+/// aggregations and is not its to run -- a `top_hits`, a `rare_terms`, any of
+/// the aggregations this engine walks itself. Those were handed to BoostCore
+/// with the rest, which refused a `top_hits` without a `sort` and answered one
+/// with a sort with hits that held no document, so under a `rare_terms` or a
+/// `composite` a `top_hits` did not work at all. They are taken out first and
+/// run afterwards in each bucket, narrowed to that bucket's documents.
 pub(crate) fn filtered_count(
+    store: &Store,
+    targets: &[String],
+    query_json: &Value,
+    sub_aggs: &Option<Value>,
+) -> std::result::Result<(u64, Option<Value>), Response> {
+    let Some(asked) = sub_aggs.as_ref() else {
+        return boostcore_count(store, targets, query_json, sub_aggs);
+    };
+    let mut plain = asked.clone();
+    let held = hold_back_peeled(&mut plain, store, targets);
+    if held.is_empty() {
+        return boostcore_count(store, targets, query_json, sub_aggs);
+    }
+    let (count, mut out) = boostcore_count(store, targets, query_json, &Some(plain))?;
+    if let Some(answer) = out.as_mut() {
+        fill_held_back(store, targets, query_json, answer, asked, &held)?;
+    }
+    Ok((count, out))
+}
+
+fn boostcore_count(
     store: &Store,
     targets: &[String],
     query_json: &Value,

@@ -194,6 +194,7 @@ pub(crate) fn run_composite_agg(
     // some of the segments. The span is known from the extremes, so the grid
     // can be walked and each step counted through the ordinary query path.
     let mut flat: Vec<Value> = Vec::new();
+    let mut held_back: Option<Value> = None;
     if let Some(at) = sources.iter().position(|s| s.date) {
         let source = &sources[at];
         let field = source.node.pointer("/histogram/field").and_then(|f| f.as_str()).unwrap_or("");
@@ -320,7 +321,10 @@ pub(crate) fn run_composite_agg(
         }
     } else {
         // nest the sources outermost-first; the innermost carries the sub-aggs
-        let mut request = sub_aggs.clone().unwrap_or_else(|| json!({}));
+        // BoostCore can run, and the rest wait for the page to be settled
+        let (peeled, plain) = split_peelable(&sub_aggs, store, targets);
+        held_back = peeled;
+        let mut request = plain.unwrap_or_else(|| json!({}));
         for (i, source) in sources.iter().enumerate().rev() {
             let mut node = source.node.clone();
             if request.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
@@ -398,6 +402,36 @@ pub(crate) fn run_composite_agg(
     }
     let _more = flat.len() > size;
     flat.truncate(size);
+    // a `top_hits` and the like, run in each bucket of the page: the bucket is
+    // the documents holding every value its key names
+    if let Some(peeled) = held_back.as_ref().and_then(|p| p.as_object()) {
+        let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+        for b in flat.iter_mut() {
+            let mut filters = vec![base.clone()];
+            for source in &sources {
+                let value = b.pointer(&format!("/key/{}", source.name)).cloned();
+                let filter = match value {
+                    None | Some(Value::Null) => {
+                        Some(json!({"bool": {"must_not": [{"exists": {"field": source.field}}]}}))
+                    }
+                    Some(key) => {
+                        let def = match source.node.get("histogram") {
+                            Some(h) => json!({"histogram": h}),
+                            None => json!({"terms": {"field": source.field}}),
+                        };
+                        bucket_filter(store, targets, &def, &json!({"key": key}))
+                    }
+                };
+                filters.extend(filter);
+            }
+            let narrowed = Some(json!({"bool": {"filter": filters}}));
+            for (n, d) in peeled {
+                if b.get(n).is_none() {
+                    b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+                }
+            }
+        }
+    }
     // a source that says how it wants its key written gets it written that way,
     // which happens once the page is settled so ordering stays numeric
     for source in &sources {
@@ -414,6 +448,21 @@ pub(crate) fn run_composite_agg(
                 b["key"][source.name.clone()] = json!(text);
             }
         }
+    }
+    // A key names its sources in the order the request lists them. A date
+    // source is walked first whatever its place, and the key was built with
+    // it in front, so a `region, category, month` composite answered
+    // `month, region, category`.
+    for b in flat.iter_mut() {
+        let Some(key) = b.get_mut("key").and_then(|k| k.as_object_mut()) else { continue };
+        let mut ordered = serde_json::Map::new();
+        for source in &sources {
+            if let Some(v) = key.remove(&source.name) {
+                ordered.insert(source.name.clone(), v);
+            }
+        }
+        ordered.extend(std::mem::take(key));
+        *key = ordered;
     }
     let mut out = json!({"buckets": flat});
     // the marker for the next page is where this one ended, whether or not
