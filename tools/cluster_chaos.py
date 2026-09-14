@@ -450,52 +450,83 @@ def main():
                 pass
     time.sleep(2)
     # the check: every acknowledged document, on every copy
-    holders = copy_holders(nodes, a.index)
-    print(f"{load.attempted} writes attempted, {len(load.acked)} acknowledged, {load.errors} refused or failed; {load.reads} reads, {load.read_errors} failed; copies on {holders}")
-    lost = 0
-    wrong = 0
-    checked = 0
-    unread = 0
-    lost_ids = []
-    # doc id -> the holders that do not have it
-    missing_from = {}
-    if not holders:
-        # nobody to ask is not "nothing lost": the listing failed, and the
-        # verdict below would be a verdict over zero documents
-        print("RESULT UNKNOWN: no node reports a started copy of the index; the lost-write check did not run")
-        return 2
-    for n in nodes:
-        if n.name not in holders:
-            continue
+    #
+    # A GET with preference=_local on a node whose copy is taken away while
+    # the check reads it answers 404 until the copy is gone and then forwards
+    # to a copy elsewhere, so the check read hundreds of documents as missing
+    # that were never missing (run 45 of r41hunt: publication timed out after
+    # the load stopped, the manager moved the replica, and 239 documents were
+    # "behind" and all there half a second later). Which copies exist is
+    # taken again after the pass, and a pass the copies moved under is
+    # thrown away and read again once the cluster is green.
+    def placement():
+        n = any_up(nodes)
+        if not n:
+            return None
         try:
-            call(f"http://{n.http}/{a.index}/_refresh", "POST", timeout=10)
-            st, c = call(f"http://{n.http}/{a.index}/_count?preference=_local", timeout=10)
-            print(f"  {n.name}: _count {c.get('count')} against {len(load.acked)} acknowledged")
-        except Exception as e:
-            print(f"  {n.name}: count failed: {e}")
-        for doc_id, value in load.acked.items():
-            checked += 1
+            st, rt = call(f"http://{n.http}/_cluster/state/routing_table/{a.index}", timeout=10)
+            shards = rt["routing_table"]["indices"][a.index]["shards"]
+            return sorted(
+                (c.get("node"), c.get("state"), bool(c.get("primary")), (c.get("allocation_id") or {}).get("id") or "")
+                for copies in shards.values() for c in copies
+            )
+        except Exception:
+            return None
+
+    for attempt in range(3):
+        before = placement()
+        holders = copy_holders(nodes, a.index)
+        print(f"{load.attempted} writes attempted, {len(load.acked)} acknowledged, {load.errors} refused or failed; {load.reads} reads, {load.read_errors} failed; copies on {holders}")
+        lost = 0
+        wrong = 0
+        checked = 0
+        unread = 0
+        lost_ids = []
+        # doc id -> the holders that do not have it
+        missing_from = {}
+        if not holders:
+            # nobody to ask is not "nothing lost": the listing failed, and the
+            # verdict below would be a verdict over zero documents
+            print("RESULT UNKNOWN: no node reports a started copy of the index; the lost-write check did not run")
+            return 2
+        for n in nodes:
+            if n.name not in holders:
+                continue
             try:
-                st, body = call(f"http://{n.http}/{a.index}/_doc/{doc_id}?preference=_local", timeout=10)
-                if not body.get("found"):
-                    missing_from.setdefault(doc_id, []).append(n.name)
-                    if lost <= 5:
-                        print(f"  LOST {doc_id} on {n.name}")
-                elif body.get("_source", {}).get("v") != value:
-                    wrong += 1
-                    if wrong <= 5:
-                        print(f"  WRONG {doc_id} on {n.name}: {body.get('_source')} against v={value}")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    missing_from.setdefault(doc_id, []).append(n.name)
-                else:
+                call(f"http://{n.http}/{a.index}/_refresh", "POST", timeout=10)
+                st, c = call(f"http://{n.http}/{a.index}/_count?preference=_local", timeout=10)
+                print(f"  {n.name}: _count {c.get('count')} against {len(load.acked)} acknowledged")
+            except Exception as e:
+                print(f"  {n.name}: count failed: {e}")
+            for doc_id, value in load.acked.items():
+                checked += 1
+                try:
+                    st, body = call(f"http://{n.http}/{a.index}/_doc/{doc_id}?preference=_local", timeout=10)
+                    if not body.get("found"):
+                        missing_from.setdefault(doc_id, []).append(n.name)
+                        if lost <= 5:
+                            print(f"  LOST {doc_id} on {n.name}")
+                    elif body.get("_source", {}).get("v") != value:
+                        wrong += 1
+                        if wrong <= 5:
+                            print(f"  WRONG {doc_id} on {n.name}: {body.get('_source')} against v={value}")
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        missing_from.setdefault(doc_id, []).append(n.name)
+                    else:
+                        unread += 1
+                        if unread <= 5:
+                            print(f"  read of {doc_id} on {n.name}: http {e.code}")
+                except Exception as e:
                     unread += 1
                     if unread <= 5:
-                        print(f"  read of {doc_id} on {n.name}: http {e.code}")
-            except Exception as e:
-                unread += 1
-                if unread <= 5:
-                    print(f"  read of {doc_id} on {n.name}: {e}")
+                        print(f"  read of {doc_id} on {n.name}: {e}")
+        after = placement()
+        if before is not None and before == after:
+            break
+        print(f"  the copies moved while they were being read ({before} -> {after}); reading again")
+        wait_green(nodes, a.index, 60)
+        time.sleep(2)
     if samples:
         first = samples[0][1]
         last = samples[-1][1]

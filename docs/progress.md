@@ -7414,3 +7414,19 @@ it after promotion (chaos run 20), and a copy is sometimes found behind for a
 few seconds with documents that then arrive at the same sequence number (run
 52) -- whether that is a check that reads too early or a real gap is not yet
 settled. BoostCore `b3819c5` is still unpushed.
+
+### Tooling -- a copy moved during the check was read as a copy behind
+
+Run 45 of the hundred-run hunt ended "copies behind: {'n2': 239}", every one
+of them present half a second later at the same sequence number. The node
+logs say why: after the load stopped, a cluster-state publication timed out
+(the gates of the previous entry were running on the same machine), the
+manager stepped down and was re-elected, n2's replica was dropped and a new
+one filled on n3 -- while the check was reading n2 document by document. A
+GET with `preference=_local` on a node losing its copy answers 404 and then
+forwards to a copy elsewhere, so the check counted a window of documents as
+missing that no copy lacked. `tools/cluster_chaos.py` now takes the routing
+table before and after the pass, and when the copies moved it says so, waits
+for green and reads again, up to three times. Run 52's transient was not
+examined against its logs and may be the same thing; it is left open until a
+run shows it with the routing unchanged.
