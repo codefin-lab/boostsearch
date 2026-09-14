@@ -37,8 +37,9 @@ pub async fn flush(
     for n in targets {
         if let Some(st) = store.get(&n) {
             let mut g = st.write();
+            let started = std::time::Instant::now();
             let _ = g.refresh();
-            g.flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            g.counters.flush.add(started.elapsed().as_nanos() as u64);
         }
     }
     respond(&p, json!({"_shards": tally}))
@@ -48,7 +49,7 @@ pub async fn refresh_all(State(store): State<Store>, Query(p): Query<Params>) ->
     let names = store.names();
     for n in &names {
         if let Some(st) = store.get(n) {
-            let _ = st.write().refresh();
+            let _ = st.write().refresh_external();
         }
     }
     respond(&p, json!({"_shards": shards_over(&store, &names)}))
@@ -68,7 +69,7 @@ pub async fn refresh_index(
     let tally = shards_over(&store, &targets);
     for n in targets {
         if let Some(st) = store.get(&n) {
-            let _ = st.write().refresh();
+            let _ = st.write().refresh_external();
         }
     }
     respond(&p, json!({"_shards": tally}))
@@ -123,6 +124,7 @@ pub async fn force_merge(
         .sum();
     let max_segments: usize =
         p.get("max_num_segments").and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+    let expunge = p.get("only_expunge_deletes").map(|v| v != "false").unwrap_or(false);
 
     // merging is work rather than waiting: on the runtime's own thread it
     // would hold a worker for as long as the merge takes, and the requests
@@ -135,20 +137,49 @@ pub async fn force_merge(
             if g.refresh().is_err() {
                 continue;
             }
-            loop {
-                let ids: Vec<boostcore::index::SegmentId> = g
-                    .index
-                    .searchable_segment_metas()
-                    .unwrap_or_default()
+            // each pass leaves fewer segments or fewer deletes; a writer that
+            // somehow does neither is not asked forever
+            for _pass in 0..64 {
+                let metas = g.index.searchable_segment_metas().unwrap_or_default();
+                // A segment holding deleted documents is rewritten without
+                // them when the merge asks for one segment or for the deletes
+                // to go, even when it is already the only one: the reference
+                // does, and a segment left alone went on reporting a deleted
+                // document that `_stats` had stopped counting.
+                let batch: Vec<boostcore::index::SegmentId> = if expunge
+                    || metas.len() <= max_segments
+                {
+                    if !(expunge || max_segments == 1) {
+                        break;
+                    }
+                    let with_deletes: Vec<_> =
+                        metas.iter().filter(|m| m.num_deleted_docs() > 0).map(|m| m.id()).collect();
+                    if with_deletes.is_empty() {
+                        break;
+                    }
+                    // with one segment asked for, everything goes into it
+                    if max_segments == 1 && !expunge {
+                        metas.iter().map(|m| m.id()).collect()
+                    } else {
+                        with_deletes
+                    }
+                } else {
+                    // merge the whole set down in one step; BoostCore handles
+                    // the rest
+                    let take = metas.len() - max_segments + 1;
+                    metas.iter().take(take).map(|m| m.id()).collect()
+                };
+                let searcher = g.reader.searcher();
+                let merged_away: Vec<_> = searcher
+                    .segment_readers()
                     .iter()
-                    .map(|m| m.id())
+                    .filter(|r| batch.contains(&r.segment_id()))
                     .collect();
-                if ids.len() <= max_segments {
-                    break;
-                }
-                // merge the whole set down in one step; BoostCore handles the rest
-                let take = ids.len() - max_segments + 1;
-                let batch: Vec<_> = ids.into_iter().take(take).collect();
+                let docs: u64 = merged_away.iter().map(|r| r.max_doc() as u64).sum();
+                let before: u64 = merged_away.iter().map(|r| g.segment_bytes(r)).sum();
+                drop(merged_away);
+                drop(searcher);
+                let started = std::time::Instant::now();
                 let merged = match g.writer() {
                     Ok(w) => w.merge(&batch).wait().is_ok(),
                     Err(_) => false,
@@ -156,7 +187,16 @@ pub async fn force_merge(
                 if !merged {
                     break;
                 }
+                g.counters.merge.add(started.elapsed().as_nanos() as u64);
+                g.counters.merge_docs.fetch_add(docs, std::sync::atomic::Ordering::Relaxed);
+                g.counters.merge_bytes.fetch_add(before, std::sync::atomic::Ordering::Relaxed);
                 let _ = g.refresh();
+                // an expunge rewrites each segment once; asking again would
+                // find the rewritten ones clean and stop, but a segment the
+                // writer could not clean would be merged forever
+                if expunge {
+                    break;
+                }
             }
         }
     })
@@ -219,7 +259,7 @@ pub async fn segments(
                     "generation": i,
                     "num_docs": reader.num_docs(),
                     "deleted_docs": reader.num_deleted_docs(),
-                    "size_in_bytes": 0,
+                    "size_in_bytes": g.segment_bytes(reader),
                     "memory_in_bytes": 0,
                     "committed": true,
                     "search": true,

@@ -164,6 +164,14 @@ pub async fn add_block(
     Path((index, block)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    // the flood-stage block is the node's to put on, when a disk fills
+    if block == "read_only_allow_delete" {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: read_only_allow_delete block is for internal use only;",
+        );
+    }
     let targets = store.resolve(&index);
     if targets.is_empty() {
         return no_such_index(&index);
@@ -176,8 +184,13 @@ pub async fn add_block(
         if !settings.is_object() {
             settings = json!({});
         }
+        // the block is the setting `index.blocks.<block>`, held in the one
+        // shape: a copy under another name was a block the settings API
+        // could set to false while this one went on refusing writes
+        let key = format!("blocks.{block}");
+        crate::store::clear_index_setting(&mut settings, &key);
         let slot = entry_of(&mut settings, "index", || json!({}));
-        crate::store::deep_merge(slot, &json!({format!("blocks.{block}"): "true"}));
+        crate::store::deep_merge(slot, &json!({key: "true"}));
         g.settings = settings;
         g.refresh_knobs();
         g.apply_analysis();

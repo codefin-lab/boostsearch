@@ -25,7 +25,9 @@ pub async fn cat_segments(
             );
         }
         let searcher = g.reader.searcher();
+        let unit = p.get("bytes").map(|s| s.to_string());
         for (i, reader) in searcher.segment_readers().iter().enumerate() {
+            let size = g.segment_bytes(reader);
             rows.push(vec![
                 ("index", n.clone()),
                 ("shard", "0".to_string()),
@@ -38,7 +40,7 @@ pub async fn cat_segments(
                 ("generation", i.to_string()),
                 ("docs.count", reader.num_docs().to_string()),
                 ("docs.deleted", reader.num_deleted_docs().to_string()),
-                ("size", "0b".to_string()),
+                ("size", crate::api::shared::sized(unit.as_deref(), size)),
                 ("size.memory", "0".to_string()),
                 ("committed", "true".to_string()),
                 ("searchable", "true".to_string()),
@@ -76,11 +78,219 @@ pub async fn cat_segments(
     cat_render_cols(CAT_SEGMENT_COLS, rows, &p)
 }
 
+/// How a statistic is written in a `_cat` cell.
+#[derive(Clone, Copy)]
+enum Cell {
+    Count,
+    Bytes,
+    Millis,
+}
+
+/// The `_cat/indices` columns read off an index's statistics, in the
+/// reference's order: the column, its primaries twin, where the value is in
+/// `_stats`, and how it is written. They were missing -- `h=segments.count`
+/// answered with nothing -- and a caller watching an index from a shell
+/// reads them here rather than out of `_stats`.
+const INDEX_STAT_COLS: &[(&str, &str, &str, Cell)] = &[
+    ("completion.size", "pri.completion.size", "/completion/size_in_bytes", Cell::Bytes),
+    (
+        "fielddata.memory_size",
+        "pri.fielddata.memory_size",
+        "/fielddata/memory_size_in_bytes",
+        Cell::Bytes,
+    ),
+    ("fielddata.evictions", "pri.fielddata.evictions", "/fielddata/evictions", Cell::Count),
+    (
+        "query_cache.memory_size",
+        "pri.query_cache.memory_size",
+        "/query_cache/memory_size_in_bytes",
+        Cell::Bytes,
+    ),
+    ("query_cache.evictions", "pri.query_cache.evictions", "/query_cache/evictions", Cell::Count),
+    (
+        "request_cache.memory_size",
+        "pri.request_cache.memory_size",
+        "/request_cache/memory_size_in_bytes",
+        Cell::Bytes,
+    ),
+    (
+        "request_cache.evictions",
+        "pri.request_cache.evictions",
+        "/request_cache/evictions",
+        Cell::Count,
+    ),
+    (
+        "request_cache.hit_count",
+        "pri.request_cache.hit_count",
+        "/request_cache/hit_count",
+        Cell::Count,
+    ),
+    (
+        "request_cache.miss_count",
+        "pri.request_cache.miss_count",
+        "/request_cache/miss_count",
+        Cell::Count,
+    ),
+    ("flush.total", "pri.flush.total", "/flush/total", Cell::Count),
+    ("flush.total_time", "pri.flush.total_time", "/flush/total_time_in_millis", Cell::Millis),
+    ("get.current", "pri.get.current", "/get/current", Cell::Count),
+    ("get.time", "pri.get.time", "/get/time_in_millis", Cell::Millis),
+    ("get.total", "pri.get.total", "/get/total", Cell::Count),
+    ("get.exists_time", "pri.get.exists_time", "/get/exists_time_in_millis", Cell::Millis),
+    ("get.exists_total", "pri.get.exists_total", "/get/exists_total", Cell::Count),
+    ("get.missing_time", "pri.get.missing_time", "/get/missing_time_in_millis", Cell::Millis),
+    ("get.missing_total", "pri.get.missing_total", "/get/missing_total", Cell::Count),
+    (
+        "indexing.delete_current",
+        "pri.indexing.delete_current",
+        "/indexing/delete_current",
+        Cell::Count,
+    ),
+    (
+        "indexing.delete_time",
+        "pri.indexing.delete_time",
+        "/indexing/delete_time_in_millis",
+        Cell::Millis,
+    ),
+    ("indexing.delete_total", "pri.indexing.delete_total", "/indexing/delete_total", Cell::Count),
+    (
+        "indexing.index_current",
+        "pri.indexing.index_current",
+        "/indexing/index_current",
+        Cell::Count,
+    ),
+    (
+        "indexing.index_time",
+        "pri.indexing.index_time",
+        "/indexing/index_time_in_millis",
+        Cell::Millis,
+    ),
+    ("indexing.index_total", "pri.indexing.index_total", "/indexing/index_total", Cell::Count),
+    ("indexing.index_failed", "pri.indexing.index_failed", "/indexing/index_failed", Cell::Count),
+    ("merges.current", "pri.merges.current", "/merges/current", Cell::Count),
+    ("merges.current_docs", "pri.merges.current_docs", "/merges/current_docs", Cell::Count),
+    (
+        "merges.current_size",
+        "pri.merges.current_size",
+        "/merges/current_size_in_bytes",
+        Cell::Bytes,
+    ),
+    ("merges.total", "pri.merges.total", "/merges/total", Cell::Count),
+    ("merges.total_docs", "pri.merges.total_docs", "/merges/total_docs", Cell::Count),
+    ("merges.total_size", "pri.merges.total_size", "/merges/total_size_in_bytes", Cell::Bytes),
+    ("merges.total_time", "pri.merges.total_time", "/merges/total_time_in_millis", Cell::Millis),
+    ("refresh.total", "pri.refresh.total", "/refresh/total", Cell::Count),
+    ("refresh.time", "pri.refresh.time", "/refresh/total_time_in_millis", Cell::Millis),
+    (
+        "refresh.external_total",
+        "pri.refresh.external_total",
+        "/refresh/external_total",
+        Cell::Count,
+    ),
+    (
+        "refresh.external_time",
+        "pri.refresh.external_time",
+        "/refresh/external_total_time_in_millis",
+        Cell::Millis,
+    ),
+    ("refresh.listeners", "pri.refresh.listeners", "/refresh/listeners", Cell::Count),
+    ("search.fetch_current", "pri.search.fetch_current", "/search/fetch_current", Cell::Count),
+    ("search.fetch_time", "pri.search.fetch_time", "/search/fetch_time_in_millis", Cell::Millis),
+    ("search.fetch_total", "pri.search.fetch_total", "/search/fetch_total", Cell::Count),
+    ("search.open_contexts", "pri.search.open_contexts", "/search/open_contexts", Cell::Count),
+    ("search.query_current", "pri.search.query_current", "/search/query_current", Cell::Count),
+    ("search.query_time", "pri.search.query_time", "/search/query_time_in_millis", Cell::Millis),
+    ("search.query_total", "pri.search.query_total", "/search/query_total", Cell::Count),
+    ("search.query_failed", "pri.search.query_failed", "/search/query_failed", Cell::Count),
+    ("search.scroll_current", "pri.search.scroll_current", "/search/scroll_current", Cell::Count),
+    ("search.scroll_time", "pri.search.scroll_time", "/search/scroll_time_in_millis", Cell::Millis),
+    ("search.scroll_total", "pri.search.scroll_total", "/search/scroll_total", Cell::Count),
+    (
+        "search.point_in_time_current",
+        "pri.search.point_in_time_current",
+        "/search/point_in_time_current",
+        Cell::Count,
+    ),
+    (
+        "search.point_in_time_time",
+        "pri.search.point_in_time_time",
+        "/search/point_in_time_time_in_millis",
+        Cell::Millis,
+    ),
+    (
+        "search.point_in_time_total",
+        "pri.search.point_in_time_total",
+        "/search/point_in_time_total",
+        Cell::Count,
+    ),
+    ("segments.count", "pri.segments.count", "/segments/count", Cell::Count),
+    ("segments.memory", "pri.segments.memory", "/segments/memory_in_bytes", Cell::Bytes),
+    (
+        "segments.index_writer_memory",
+        "pri.segments.index_writer_memory",
+        "/segments/index_writer_memory_in_bytes",
+        Cell::Bytes,
+    ),
+    (
+        "segments.version_map_memory",
+        "pri.segments.version_map_memory",
+        "/segments/version_map_memory_in_bytes",
+        Cell::Bytes,
+    ),
+    (
+        "segments.fixed_bitset_memory",
+        "pri.segments.fixed_bitset_memory",
+        "/segments/fixed_bit_set_memory_in_bytes",
+        Cell::Bytes,
+    ),
+    ("warmer.current", "pri.warmer.current", "/warmer/current", Cell::Count),
+    ("warmer.total", "pri.warmer.total", "/warmer/total", Cell::Count),
+    ("warmer.total_time", "pri.warmer.total_time", "/warmer/total_time_in_millis", Cell::Millis),
+    ("suggest.current", "pri.suggest.current", "/search/suggest_current", Cell::Count),
+    ("suggest.time", "pri.suggest.time", "/search/suggest_time_in_millis", Cell::Millis),
+    ("suggest.total", "pri.suggest.total", "/search/suggest_total", Cell::Count),
+];
+
+/// The statistics columns of one `_cat/indices` row; blank for an index with
+/// no statistics here -- a closed one, or one held by another node.
+fn index_stat_columns(stats: Option<&Value>, unit: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut out = Vec::with_capacity(INDEX_STAT_COLS.len() * 2 + 4);
+    let num = |ptr: &str| stats.and_then(|s| s.pointer(ptr)).and_then(|v| v.as_u64());
+    for (name, pri, ptr, cell) in INDEX_STAT_COLS {
+        let text = num(ptr)
+            .map(|v| match cell {
+                Cell::Count => v.to_string(),
+                Cell::Bytes => crate::api::shared::sized(unit, v),
+                Cell::Millis => crate::api::shared::time_value_text(v * 1_000_000),
+            })
+            .unwrap_or_default();
+        out.push((*name, text.clone()));
+        out.push((*pri, text));
+    }
+    let memory = num("/segments/memory_in_bytes").map(|v| crate::api::shared::sized(unit, v));
+    out.push(("memory.total", memory.clone().unwrap_or_default()));
+    out.push(("pri.memory.total", memory.unwrap_or_default()));
+    out.push(("search.throttled", if stats.is_some() { "false".into() } else { String::new() }));
+    let last = num("/indexing/max_last_index_request_timestamp").filter(|v| *v > 0);
+    out.push(("last_index_request_timestamp", last.map(|v| v.to_string()).unwrap_or_default()));
+    out
+}
+
 pub async fn cat_indices(
     State(store): State<Store>,
     index: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
+    if p.contains_key("help") {
+        let mut all: Vec<&str> = CAT_INDEX_COLS.to_vec();
+        for (name, pri, _, _) in INDEX_STAT_COLS {
+            all.push(name);
+            all.push(pri);
+        }
+        all.extend(["memory.total", "pri.memory.total", "search.throttled"]);
+        all.push("last_index_request_timestamp");
+        return cat_help(&all);
+    }
     // one node holding every shard it was given is green, so any other health
     // asked for selects nothing rather than being an error
     if let Some(h) = p.get("health")
@@ -119,6 +329,9 @@ pub async fn cat_indices(
     let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
     let show_hidden = named_outright || asked_for_hidden || dot_pattern;
     let mut rows = Vec::new();
+    // the columns read off an index's statistics are worked out only when a
+    // caller names its columns; the default table does not show them
+    let wants_stats = p.get("h").map(|h| !h.is_empty()).unwrap_or(false);
     // `bytes` asks for the sizes as plain numbers in the unit it names
     let unit = p.get("bytes").map(|s| s.to_string());
     let sized = |bytes: u64| crate::api::shared::sized(unit.as_deref(), bytes);
@@ -164,6 +377,13 @@ pub async fn cat_indices(
             }
         }
         let Some(st) = store.get(&n) else {
+            // A node alone holds every index there is, so one the published
+            // state names and this node does not hold is one on its way out:
+            // the backing indices of a data stream just deleted were listed
+            // here for a moment while `GET` already answered 404.
+            if !clustered {
+                continue;
+            }
             // an index of the cluster whose copies are on other nodes: what
             // the manager published is what there is to say about it here
             let Some(m) = published.indices.get(&n) else { continue };
@@ -194,6 +414,9 @@ pub async fn cat_indices(
                 ("creation.date", "0".to_string()),
                 ("creation.date.string", String::new()),
             ]);
+            if wants_stats && let Some(row) = rows.last_mut() {
+                row.extend(index_stat_columns(None, unit.as_deref()));
+            }
             continue;
         };
         let g = st.read();
@@ -215,10 +438,15 @@ pub async fn cat_indices(
         }
         // a closed index has no shard open to count, so those columns are
         // blank rather than zero
-        let docs = g.reader.searcher().num_docs();
+        let searcher = g.reader.searcher();
+        let docs = searcher.num_docs();
+        // what `_stats` and `_cat/segments` count as deleted: the documents
+        // still in a segment that a merge has not yet rewritten
+        let deleted: u64 =
+            searcher.segment_readers().iter().map(|r| r.num_deleted_docs() as u64).sum();
         let bytes_on_disk = store.index_size(&g.name);
         let count = |v: String| if g.closed { String::new() } else { v };
-        rows.push(vec![
+        let mut row = vec![
             ("health", health),
             ("status", if g.closed { "close".into() } else { "open".to_string() }),
             ("index", g.name.clone()),
@@ -227,13 +455,20 @@ pub async fn cat_indices(
             ("pri", g.numeric_setting("number_of_shards").unwrap_or(1).to_string()),
             ("rep", g.numeric_setting("number_of_replicas").unwrap_or(0).to_string()),
             ("docs.count", count(docs.to_string())),
-            ("docs.deleted", count("0".to_string())),
+            ("docs.deleted", count(deleted.to_string())),
             ("store.size", count(sized(bytes_on_disk))),
             ("pri.store.size", count(sized(bytes_on_disk))),
             // when the index was made, as the epoch and as text
             ("creation.date", g.created_millis().to_string()),
             ("creation.date.string", g.created_string()),
-        ]);
+        ];
+        if wants_stats {
+            let stats = (!g.closed).then(|| {
+                crate::api::index_stats(&g, bytes_on_disk, None, &p, Some(&store.request_cache))
+            });
+            row.extend(index_stat_columns(stats.as_ref(), unit.as_deref()));
+        }
+        rows.push(row);
     }
     rows.sort_by(|a, b| a[2].1.cmp(&b[2].1));
     let rows = cat_only_default(
@@ -260,7 +495,7 @@ pub async fn cat_indices(
 /// One node holds every shard, and the disk figures describe the machine it
 /// is running on rather than a share of a cluster.
 pub async fn cat_allocation(
-    State(_store): State<Store>,
+    State(store): State<Store>,
     node: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
@@ -288,20 +523,32 @@ pub async fn cat_allocation(
     };
     // `bytes` asks for the sizes as plain numbers in that unit rather than as
     // text a person would read
-    let raw = p.contains_key("bytes");
-    let size = |human: &str, bytes: u64| if raw { bytes.to_string() } else { human.to_string() };
+    let unit = p.get("bytes").map(|s| s.to_string());
+    let size = |bytes: u64| crate::api::shared::sized(unit.as_deref(), bytes);
+    // the disk this node keeps its data on, measured; another node's disk is
+    // its own to report, and is left blank rather than made up
+    let disk =
+        crate::api::sysinfo::disk(&store.data_dir().map(|d| d.to_path_buf()).unwrap_or_else(
+            || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+        ));
+    let on_disk: u64 = store.names().iter().map(|n| store.index_size(n)).sum();
     let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
     for n in live.nodes.values().filter(|n| n.is_data() && wanted(n)) {
         let count =
             live.routing.on_node(&n.id).filter(|c| c.state != ShardState::Unassigned).count();
         let ip = n.transport_address.split(':').next().unwrap_or("").to_string();
+        let (total, avail) = match (&disk, n.id == me.id) {
+            (Some(d), true) => (d.total, d.available),
+            _ => (0, 0),
+        };
+        let known = |v: String| if total > 0 { v } else { String::new() };
         rows.push(vec![
             ("shards", count.to_string()),
-            ("disk.indices", size("0b", 0)),
-            ("disk.used", size("1gb", 1_073_741_824)),
-            ("disk.avail", size("1gb", 1_073_741_824)),
-            ("disk.total", size("2gb", 2_147_483_648)),
-            ("disk.percent", "50".to_string()),
+            ("disk.indices", known(size(on_disk))),
+            ("disk.used", known(size(total.saturating_sub(avail)))),
+            ("disk.avail", known(size(avail))),
+            ("disk.total", known(size(total))),
+            ("disk.percent", known(crate::api::sysinfo::percent(total - avail, total).to_string())),
             ("host", ip.clone()),
             ("ip", ip),
             ("node", n.name.clone()),
@@ -492,25 +739,32 @@ pub async fn cat_thread_pool(patterns: Option<Path<String>>, Query(p): Query<Par
                 continue;
             }
         }
+        // what the pool has done, counted as requests pass through it; see
+        // `pools` for what each column means on this node
+        let counted = crate::api::pools::POOLS.iter().find(|x| x.name == *name);
+        let of = |f: fn(&crate::api::pools::Pool) -> u64| counted.map(f).unwrap_or(0).to_string();
+        let me = crate::cluster::identity();
+        let (host, port) =
+            me.transport_address.rsplit_once(':').unwrap_or((me.host.as_str(), "9300"));
         rows.push(vec![
-            ("node_name", "boostsearch".to_string()),
-            ("node_id", "node-0".to_string()),
-            ("id", "node-0".to_string()),
+            ("node_name", me.name.clone()),
+            ("node_id", me.id.as_str().to_string()),
+            ("id", me.id.as_str().to_string()),
             ("pid", std::process::id().to_string()),
-            ("host", "127.0.0.1".to_string()),
-            ("ip", "127.0.0.1".to_string()),
-            ("port", "9300".to_string()),
-            ("ephemeral_node_id", "_na_".to_string()),
+            ("host", host.to_string()),
+            ("ip", host.to_string()),
+            ("port", port.to_string()),
+            ("ephemeral_node_id", me.ephemeral_id.as_str().to_string()),
             ("name", name.to_string()),
             ("type", kind.to_string()),
-            ("active", "0".to_string()),
-            ("pool_size", "1".to_string()),
-            ("size", "1".to_string()),
-            ("queue", "0".to_string()),
+            ("active", of(crate::api::pools::Pool::active)),
+            ("pool_size", of(crate::api::pools::Pool::threads)),
+            ("size", of(crate::api::pools::Pool::size)),
+            ("queue", of(crate::api::pools::Pool::queue)),
             ("queue_size", "-1".to_string()),
-            ("rejected", "0".to_string()),
-            ("largest", "0".to_string()),
-            ("completed", "0".to_string()),
+            ("rejected", of(crate::api::pools::Pool::rejected)),
+            ("largest", of(crate::api::pools::Pool::largest)),
+            ("completed", of(crate::api::pools::Pool::completed)),
             ("core", "1".to_string()),
             ("max", "1".to_string()),
             ("keep_alive", "5m".to_string()),

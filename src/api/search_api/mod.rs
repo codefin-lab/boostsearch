@@ -83,20 +83,8 @@ async fn search_answer(
     if !split.remote.is_empty() {
         return across_clusters(&store, split, &expr, body, &p).await;
     }
-    // `stats: [name]` tags the query so _stats can report per-group counts
-    if let Some(groups) = body.get("stats").and_then(|v| v.as_array()) {
-        let names: Vec<String> =
-            groups.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect();
-        for n in store.resolve(&expr) {
-            if let Some(st) = store.get(&n) {
-                let g = st.read();
-                let mut m = g.search_groups.write();
-                for name in &names {
-                    *m.entry(name.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
+    // `stats: [name]` tags the query so _stats can report per-group counts;
+    // the shards count them as they search
     note_fielddata(&store, &expr, &body);
     if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;

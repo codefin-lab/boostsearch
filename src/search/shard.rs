@@ -57,9 +57,99 @@ pub(crate) struct ShardOut {
     pub(crate) profile: Option<Value>,
 }
 
-/// Search one index, as one shard of the whole request.
+/// The groups a search names in `stats`, which `_stats?groups=` reports on.
+pub(crate) fn stats_groups(body: &Value) -> Vec<String> {
+    match body.get("stats") {
+        Some(Value::Array(a)) => a.iter().filter_map(|g| g.as_str().map(String::from)).collect(),
+        Some(Value::String(s)) => s.split(',').map(|g| g.trim().to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Search one index, as one shard of the whole request: its query phase,
+/// counted into the index's search statistics and the groups the search
+/// named, and written to the search slow log when it took long enough.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_one_shard(
+    store: &Store,
+    shard_idx: usize,
+    name: &str,
+    body: &Value,
+    query_json: &Option<Value>,
+    sort_keys: &[SortKey],
+    search_after: &Option<Vec<SortValue>>,
+    pit_ceiling: &std::collections::HashMap<String, u64>,
+    agg_json: &Option<Value>,
+    filters_aggs: &[(String, Value)],
+    page_want: usize,
+    fanned_out: bool,
+    views: &crate::security::view::Views,
+) -> std::result::Result<Option<ShardOut>, Response> {
+    let Some(st) = store.get(name) else { return Ok(None) };
+    let started = std::time::Instant::now();
+    let groups = stats_groups(body);
+    let out = {
+        let g = st.read();
+        g.counters.search.query.current_add(1);
+        for group in &groups {
+            g.counters.group(group).query.current_add(1);
+        }
+        drop(g);
+        query_shard(
+            store,
+            shard_idx,
+            name,
+            body,
+            query_json,
+            sort_keys,
+            search_after,
+            pit_ceiling,
+            agg_json,
+            filters_aggs,
+            page_want,
+            fanned_out,
+            views,
+        )
+    };
+    let took = started.elapsed().as_nanos() as u64;
+    let g = st.read();
+    let c = &g.counters;
+    c.search.query.current_add(-1);
+    for group in &groups {
+        c.group(group).query.current_add(-1);
+    }
+    match &out {
+        Ok(Some(o)) => {
+            c.search.query.add(took);
+            for group in &groups {
+                c.group(group).query.add(took);
+            }
+            if !g.knobs.slowlog.query.is_off() {
+                crate::store::slowlog::search(
+                    &g.knobs.slowlog.query,
+                    "query",
+                    name,
+                    took,
+                    o.count as u64,
+                    &groups,
+                    g.shard_count(),
+                    body,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => {
+            c.search.query_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for group in &groups {
+                c.group(group).query_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_shard(
     store: &Store,
     shard_idx: usize,
     name: &str,
@@ -108,7 +198,6 @@ pub(crate) fn search_one_shard(
         _ => sort_keys,
     };
     let g = st.read();
-    g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut shards = 0u64;
     let mut cands: Vec<Cand> = Vec::new();
     let mut agg_acc: Option<IntermediateAggregationResults> = None;

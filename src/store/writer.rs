@@ -33,6 +33,20 @@ impl IdxState {
                 format!("index [{}] blocked by: [FORBIDDEN/5/index read-only (api)];", self.name),
             ));
         }
+        // the block a node puts on an index whose disk is past the flood
+        // stage: a refusal to be retried once space is freed, which is why
+        // it is a 429 and says so, where the read-only block it was reported
+        // as is a 403 a client does not retry
+        if self.knobs.blocks_read_only_allow_delete {
+            return Some((
+                "cluster_block_exception",
+                format!(
+                    "index [{}] blocked by: [TOO_MANY_REQUESTS/12/disk usage exceeded flood-stage \
+                     watermark, index has read-only-allow-delete block];",
+                    self.name
+                ),
+            ));
+        }
         if self.knobs.blocks_write {
             return Some((
                 "cluster_block_exception",
@@ -40,6 +54,38 @@ impl IdxState {
             ));
         }
         None
+    }
+
+    /// The status a refusal from `change_refusal` is answered with.
+    pub fn refusal_status(kind: &str, why: &str) -> axum::http::StatusCode {
+        match kind {
+            "index_closed_exception" => axum::http::StatusCode::BAD_REQUEST,
+            _ if why.contains("TOO_MANY_REQUESTS/") => axum::http::StatusCode::TOO_MANY_REQUESTS,
+            _ => axum::http::StatusCode::FORBIDDEN,
+        }
+    }
+
+    /// The blocks on this index that stop its metadata changing -- its
+    /// settings, its mapping -- as the reference writes them, with the status
+    /// the refusal carries. `read_only`, `read_only_allow_delete` and
+    /// `metadata` are those blocks; `write` stops documents only.
+    pub fn metadata_blocks(&self) -> Vec<(&'static str, u16)> {
+        let on = |k: &str| self.setting(k).as_deref() == Some("true");
+        let mut out = Vec::new();
+        if on("blocks.metadata") {
+            out.push(("FORBIDDEN/9/index metadata (api)", 403));
+        }
+        if on("blocks.read_only") {
+            out.push(("FORBIDDEN/5/index read-only (api)", 403));
+        }
+        if on("blocks.read_only_allow_delete") {
+            out.push((
+                "TOO_MANY_REQUESTS/12/disk usage exceeded flood-stage watermark, index has \
+                 read-only-allow-delete block",
+                429,
+            ));
+        }
+        out
     }
 
     /// Persist the learned field information next to the index so a reopen does
@@ -247,6 +293,28 @@ impl IdxState {
             }
         }
         out
+    }
+
+    /// What one segment takes: its files on disk, or for an index held in
+    /// memory what the segment's structures add up to.
+    pub fn segment_bytes(&self, reader: &boostcore::SegmentReader) -> u64 {
+        let Some(dir) = &self.path else {
+            return reader.space_usage().map(|u| u.total().get_bytes()).unwrap_or(0);
+        };
+        let id = reader.segment_id();
+        self.index
+            .searchable_segment_metas()
+            .unwrap_or_default()
+            .iter()
+            .find(|m| m.id() == id)
+            .map(|m| {
+                m.list_files()
+                    .iter()
+                    .filter_map(|f| std::fs::metadata(dir.join(f)).ok())
+                    .map(|md| md.len())
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     pub fn has_writer(&self) -> bool {

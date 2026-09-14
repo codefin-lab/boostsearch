@@ -57,6 +57,34 @@ pub fn expand_dotted_properties(node: &mut Value) {
 }
 
 /// Recursive object merge; `patch` wins on conflict.
+/// Take one index setting out of an index's settings in every shape it may
+/// be held in: under `index` or not, nested, dotted, or any mix of the two --
+/// `{"index": {"blocks": {"write": "true"}}}`, `{"index": {"blocks.write":
+/// "true"}}` and `{"index.blocks.write": "true"}` are one setting.
+pub fn clear_index_setting(settings: &mut Value, key: &str) {
+    fn remove(node: &mut Value, segs: &[&str]) {
+        let Some(map) = node.as_object_mut() else { return };
+        for i in 1..=segs.len() {
+            let head = segs[..i].join(".");
+            if i == segs.len() {
+                map.remove(&head);
+            } else if let Some(child) = map.get_mut(&head) {
+                remove(child, &segs[i..]);
+                // an object emptied here held nothing but this setting
+                if child.as_object().map(|o| o.is_empty()).unwrap_or(false) && head != "index" {
+                    map.remove(&head);
+                }
+            }
+        }
+    }
+    let key = key.strip_prefix("index.").unwrap_or(key);
+    let segs: Vec<&str> = key.split('.').collect();
+    let mut under_index = vec!["index"];
+    under_index.extend(segs.iter().copied());
+    remove(settings, &under_index);
+    remove(settings, &segs);
+}
+
 pub fn deep_merge(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
