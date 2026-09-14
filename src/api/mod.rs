@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 mod alias;
+pub mod json_position;
 // The handlers are re-exported flat, so the routing table reads as one list
 // and the module a handler lives in is a detail of where to find it.
 pub use alias::*;

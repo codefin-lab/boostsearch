@@ -15,6 +15,57 @@ pub async fn search(
     Query(p): Query<Params>,
     body: String,
 ) -> Response {
+    let raw = body.clone();
+    let answer = search_answer(State(store), index, Query(p), body).await;
+    with_position(answer, &raw).await
+}
+
+/// A refusal to parse a field, given the place in the body the reference
+/// would name. See `json_position`.
+async fn with_position(answer: Response, raw: &str) -> Response {
+    if answer.status() != StatusCode::BAD_REQUEST {
+        return answer;
+    }
+    let (parts, body) = answer.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 1024 * 1024).await else {
+        return err(StatusCode::BAD_REQUEST, "parsing_exception", "failed to parse the request");
+    };
+    let rebuilt = |bytes: axum::body::Bytes| {
+        let mut parts = parts.clone();
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        Response::from_parts(parts, axum::body::Body::from(bytes))
+    };
+    let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) else { return rebuilt(bytes) };
+    let is_it =
+        v.pointer("/error/type").and_then(|t| t.as_str()) == Some("x_content_parse_exception");
+    let reason = v.pointer("/error/reason").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    // `[terms] failed to parse field [exclude]`, and not one already placed
+    let named =
+        reason.strip_prefix('[').and_then(|r| r.split_once("] failed to parse field [")).and_then(
+            |(owner, rest)| rest.strip_suffix(']').map(|f| (owner.to_string(), f.to_string())),
+        );
+    let Some((owner, field)) = named.filter(|_| is_it) else { return rebuilt(bytes) };
+    let Some((line, col)) = crate::api::json_position::locate(raw, &owner, &field) else {
+        return rebuilt(bytes);
+    };
+    let placed = format!("[{line}:{col}] {reason}");
+    v["error"]["reason"] = json!(placed);
+    if let Some(roots) = v.pointer_mut("/error/root_cause").and_then(|r| r.as_array_mut()) {
+        for root in roots {
+            if root.get("reason").and_then(|r| r.as_str()) == Some(reason.as_str()) {
+                root["reason"] = json!(placed);
+            }
+        }
+    }
+    rebuilt(serde_json::to_vec(&v).unwrap_or_default().into())
+}
+
+async fn search_answer(
+    State(store): State<Store>,
+    index: Option<Path<String>>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_default();
     let mut body = match parse_body(&body) {
         Ok(b) => b,

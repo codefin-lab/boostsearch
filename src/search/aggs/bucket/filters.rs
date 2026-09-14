@@ -92,7 +92,7 @@ pub(crate) fn run_filters_agg(
 }
 
 /// How many objects sit at a nested path across the documents a query finds.
-fn nested_object_count(
+pub(crate) fn nested_object_count(
     store: &Store,
     targets: &[String],
     query_json: &Option<Value>,
@@ -608,11 +608,21 @@ pub(crate) fn run_sampler_agg(
     let field = spec.get("field").and_then(|v| v.as_str()).map(|s| s.to_string());
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
 
+    // `shard_size` is a count per shard: the sample is the best `shard_size`
+    // documents of each shard, and a two-shard index samples twice as many.
+    // It was taken as a count for the whole request, so the sub-aggregations
+    // of a sampler over two shards counted half of what the reference counts.
+    let shards: usize = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count() as usize)
+        .sum::<usize>()
+        .max(1);
     let mut probe = json!({
         "query": main_query.clone().unwrap_or_else(|| json!({"match_all": {}})),
         // more than the sample keeps: the ones a crowded value pushes out have
         // to come from somewhere
-        "size": (most.max(1) * per_value.max(1)).saturating_mul(10).min(10_000),
+        "size": (most.max(1) * per_value.max(1) * shards).saturating_mul(10).min(10_000),
         "_source": false,
     });
     // a derived field is made from the whole source
@@ -627,9 +637,18 @@ pub(crate) fn run_sampler_agg(
     }
     let found = run(store, &targets.join(","), &probe, &Params::new())?;
     let mut kept: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // what each shard has kept, and each value within a shard: a diversified
+    // sampler's `max_docs_per_value` is a shard's rule too
+    let mut per_shard: std::collections::HashMap<(String, u64), usize> = Default::default();
+    let mut seen: std::collections::HashMap<(String, u64, String), usize> =
+        std::collections::HashMap::new();
     for hit in &found.hits {
         let Some(id) = hit.get("_id").and_then(|v| v.as_str()) else { continue };
+        let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let shard = store.get(&index).map(|st| st.read().shard_of_doc(id)).unwrap_or(0);
+        if per_shard.get(&(index.clone(), shard)).copied().unwrap_or(0) >= most {
+            continue;
+        }
         if let (Some(field), true) = (field.as_deref(), diversified.is_some()) {
             let made = derived_in
                 .as_ref()
@@ -643,16 +662,14 @@ pub(crate) fn run_sampler_agg(
                     other => other.to_string(),
                 })
                 .unwrap_or_default();
-            let count = seen.entry(value).or_insert(0);
+            let count = seen.entry((index.clone(), shard, value)).or_insert(0);
             if *count >= per_value {
                 continue;
             }
             *count += 1;
         }
         kept.push(id.to_string());
-        if kept.len() >= most {
-            break;
-        }
+        *per_shard.entry((index, shard)).or_insert(0) += 1;
     }
     // what the sample holds is what the sub-aggregations are asked about
     let narrowed = json!({"ids": {"values": kept}});

@@ -143,6 +143,9 @@ pub(crate) fn run_rare_terms_agg(
 /// foreground a term takes up than of the background, multiplied by the ratio
 /// between the two, so that a term has to be both commoner *and* markedly
 /// commoner to score well.
+/// How many documents of each shard hold each term, by (index, shard).
+type ByShard = std::collections::HashMap<(String, u64), std::collections::HashMap<String, u64>>;
+
 pub(crate) fn run_significant_terms(
     store: &Store,
     targets: &[String],
@@ -319,8 +322,103 @@ pub(crate) fn run_significant_terms(
     let (fg_total, fg) = counted(&query)?;
     let (bg_total, bg) = counted(&json!({"match_all": {}}))?;
     let read = |res: &Vec<(Value, u64)>| -> Vec<(Value, u64)> { res.clone() };
-    let background: std::collections::HashMap<String, u64> =
+    let mut background: std::collections::HashMap<String, u64> =
         read(&bg).into_iter().map(|(k, c)| (k.to_string(), c)).collect();
+
+    // The background as the reference reads it, which is not a plain count
+    // of documents, in two ways -- and both decide the score, not only the
+    // number printed beside it.
+    //
+    // The size of the background is Lucene's count of documents, and a
+    // nested object is a document there. An index of sixty documents each
+    // holding two nested objects has a background of a hundred and eighty,
+    // and every JLH score is taken over that: `red`, nine of twenty in the
+    // foreground and twenty-six of the index, scores 0.9519 over 180 and
+    // 0.0173 over 60 -- and the buckets came back in a different order.
+    let nested_objects: u64 = targets
+        .iter()
+        .filter_map(|n| store.get(n).map(|st| (n.clone(), st)))
+        .map(|(name, st)| {
+            let paths: Vec<String> = {
+                let g = st.read();
+                g.mapping
+                    .types
+                    .keys()
+                    .filter(|k| g.mapping.type_of(k) == Some("nested"))
+                    .cloned()
+                    .collect()
+            };
+            paths
+                .iter()
+                .map(|path| nested_object_count(store, std::slice::from_ref(&name), &None, path))
+                .sum::<u64>()
+        })
+        .sum();
+    let bg_total = bg_total + nested_objects;
+
+    // And a term's background frequency is summed over the shards that
+    // returned the term, which are the shards where the term is in the
+    // foreground. A shard holding a term only among documents the query did
+    // not match sends no bucket for it, and its background count for the term
+    // is never added: `blue` is in nine documents, three of them in the
+    // foreground and all three on one shard, and the reference reports a
+    // background of six. Over one shard this is the plain count.
+    let shards: u64 = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .map(|st| st.read().shard_count())
+        .max()
+        .unwrap_or(1);
+    if shards > 1 && !analysed && string_field {
+        let where_held = |q: &Value| -> std::result::Result<ByShard, Response> {
+            let found = crate::search::walk_every_hit_of(
+                store,
+                targets,
+                q,
+                false,
+                Some(json!([field.clone()])),
+            )?;
+            let mut out: ByShard = std::collections::HashMap::new();
+            for hit in &found.hits {
+                let index = hit.get("_index").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = hit.get("_id").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(st) = store.get(&index) else { continue };
+                let shard = st.read().shard_of_doc(id);
+                let held = hit.pointer(&format!("/_source/{}", field.replace('.', "/")));
+                let values: Vec<&Value> = match held {
+                    Some(Value::Array(a)) => a.iter().collect(),
+                    Some(Value::Null) | None => Vec::new(),
+                    Some(one) => vec![one],
+                };
+                let mut once: std::collections::HashSet<String> = Default::default();
+                for v in values {
+                    let key = match v {
+                        Value::String(t) => Value::String(t.clone()).to_string(),
+                        other => Value::String(other.to_string()).to_string(),
+                    };
+                    if once.insert(key.clone()) {
+                        *out.entry((index.clone(), shard)).or_default().entry(key).or_insert(0) +=
+                            1;
+                    }
+                }
+            }
+            Ok(out)
+        };
+        let fg_by_shard = where_held(&query)?;
+        let bg_by_shard = where_held(&json!({"match_all": {}}))?;
+        for (key, value) in background.iter_mut() {
+            *value = bg_by_shard
+                .iter()
+                .filter(|(at, _)| {
+                    fg_by_shard
+                        .get(*at)
+                        .map(|t| t.get(key).copied().unwrap_or(0) > 0)
+                        .unwrap_or(false)
+                })
+                .map(|(_, terms)| terms.get(key).copied().unwrap_or(0))
+                .sum();
+        }
+    }
 
     let ip_field = targets
         .iter()

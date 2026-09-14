@@ -87,6 +87,55 @@ pub(crate) fn date_histogram_keys(
 /// range filter run through the ordinary query path, which also means
 /// sub-aggregations come for free. The cost is one search per bucket, which
 /// suits the handful of buckets a calendar histogram usually spans.
+/// A bound the aggregation's own format will not read.
+///
+/// The reference finds this on the shard, while it builds the aggregation, so
+/// it answers the way it answers any failure there: `search_phase_execution_
+/// exception`, the failure grouped under `failed_shards`, and the parse error
+/// with the two causes under it -- the formatter's complaint, and Java's own
+/// words for how far into the text it got. This answered the parse error bare,
+/// and a client reading `error.type` saw a different refusal.
+fn bound_refused(targets: &[String], text: &str, pattern: &str) -> Response {
+    let said = format!("failed to parse date field [{text}] with format [{pattern}]");
+    // `Text '2026-01-01' could not be parsed, unparsed text found at index 7`:
+    // how much of the text the pattern did read, which is the longest start
+    // of it the pattern accepts
+    let read = (1..text.len()).rev().find(|&k| {
+        text.is_char_boundary(k) && crate::store::parse_with_pattern(&text[..k], pattern).is_some()
+    });
+    let java = match read {
+        Some(k) => format!("Text '{text}' could not be parsed, unparsed text found at index {k}"),
+        None => format!("Text '{text}' could not be parsed at index 0"),
+    };
+    let detail = json!({
+        "type": "parse_exception",
+        "reason": format!("{said}: [{said}]"),
+        "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": said,
+            "caused_by": {"type": "date_time_parse_exception", "reason": java},
+        },
+    });
+    let root = json!({"type": "parse_exception", "reason": format!("{said}: [{said}]")});
+    let body = json!({
+        "error": {
+            "root_cause": [root],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [{
+                "shard": 0,
+                "index": targets.first().cloned().unwrap_or_default(),
+                "node": crate::cluster::identity().id.as_str(),
+                "reason": detail,
+            }],
+        },
+        "status": 400,
+    });
+    axum::response::IntoResponse::into_response((StatusCode::BAD_REQUEST, axum::Json(body)))
+}
+
 pub(crate) fn run_calendar_histogram(
     store: &Store,
     targets: &[String],
@@ -211,11 +260,7 @@ pub(crate) fn run_calendar_histogram(
             && !pattern.contains("epoch")
         {
             let Some(dt) = crate::store::parse_with_pattern(text, pattern) else {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "parse_exception",
-                    format!("failed to parse date field [{text}] with format [{pattern}]"),
-                ));
+                return Err(bound_refused(targets, text, pattern));
             };
             return Ok(Some(dt.unix_timestamp_nanos() as f64));
         }

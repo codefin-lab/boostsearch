@@ -262,6 +262,41 @@ def copy_holders(nodes, index):
         return []
 
 
+def where_it_stands(nodes, holders, index, doc_id):
+    """What each copy says about one document: its sequence number, the
+    primary term it was written in, and its version -- or that it is not
+    there. A copy short of a document is only half a finding; which numbers
+    the documents around the gap carry is what says why the gap is there."""
+    out = []
+    for n in nodes:
+        if n.name not in holders:
+            continue
+        try:
+            st, body = call(f"http://{n.http}/{index}/_doc/{doc_id}?preference=_local", timeout=10)
+            if body.get("found"):
+                out.append(f"{n.name}: seq={body.get('_seq_no')} term={body.get('_primary_term')} v={body.get('_version')}")
+            else:
+                out.append(f"{n.name}: absent")
+        except Exception as e:
+            out.append(f"{n.name}: ? ({type(e).__name__})")
+    return "; ".join(out)
+
+
+def seq_span(nodes, holders, index):
+    """The highest sequence number each copy holds."""
+    out = []
+    for n in nodes:
+        if n.name not in holders:
+            continue
+        try:
+            st, r = call(f"http://{n.http}/{index}/_search?preference=_local", "POST",
+                         {"size": 0, "aggs": {"hi": {"max": {"field": "_seq_no"}}}}, timeout=10)
+            out.append(f"{n.name}: max seq {(r.get('aggregations') or {}).get('hi', {}).get('value')}")
+        except Exception as e:
+            out.append(f"{n.name}: ? ({type(e).__name__})")
+    return "; ".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default="./target/release/boostsearch")
@@ -494,6 +529,8 @@ def main():
         for name in sorted(behind):
             ids = sorted(i for i, ns in missing_from.items() if name in ns and len(ns) < len(holders))
             print(f"  behind on {name}: {ids[:10]}")
+            for doc in ids[:3] + ids[-2:]:
+                print(f"      {doc}: {where_it_stands(nodes, holders, a.index, doc)}")
     for doc_id in lost_ids[:5]:
         print(f"  LOST {doc_id}: on none of {holders}")
     if lost_ids:
@@ -595,7 +632,7 @@ def main():
                 print(f"    on {one} and not {other}: {len(seen[one] - seen[other])} {only_here}")
                 print(f"    on {other} and not {one}: {len(seen[other] - seen[one])} {only_there}")
                 for doc in only_here[:3] + only_there[:3]:
-                    print(f"      {doc}: acknowledged={doc in load.acked}")
+                    print(f"      {doc}: acknowledged={doc in load.acked}; {where_it_stands(nodes, list(seen), a.index, doc)}")
     elif len(counts) > 1:
         print(f"  copies agree: {counts}")
     print(f"checked {checked} copies of acknowledged documents: {lost} lost, {wrong} wrong")

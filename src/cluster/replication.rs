@@ -1512,9 +1512,14 @@ pub async fn seed_replica(
     }
     if notes {
         let after = store.get(index).map(|st| st.read().live_ids.len()).unwrap_or(0);
+        // the sequence number the copy stands at once filled, and the primary's
+        // at the moment it was asked: a copy that stands above documents it
+        // does not hold is a copy the next catch-up will walk past them
+        let at_seq = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
         eprintln!(
-            "boostsearch: {} filled [{index}] as {allocation_id}: {before} documents here before, {after} after ({})",
+            "boostsearch: {} filled [{index}] as {allocation_id} from {}: {before} documents here before, {after} after, seq_no {at_seq} ({})",
             super::clock().wall(),
+            primary.as_str(),
             match &r {
                 Ok(()) => "done".to_string(),
                 Err(why) => why.clone(),
@@ -1701,6 +1706,9 @@ pub async fn catch_up_by_scan(
     let primary = primary.clone();
     let mut from_seq = from;
     let mut tries = 0;
+    let mut pages = 0usize;
+    let mut applied_total = 0usize;
+    let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
     // A copy the manager has just placed is known to the primary only once
     // the primary has taken the publication that placed it; a write it took
     // before then went to the copies it knew, not to this one, and if the
@@ -1762,6 +1770,8 @@ pub async fn catch_up_by_scan(
         .await
         .unwrap_or_else(|e| Err(format!("recovery apply panicked: {e}")));
         applied?;
+        pages += 1;
+        applied_total += v.get("ops").and_then(|o| o.as_array()).map(|a| a.len()).unwrap_or(0);
         match next {
             Some(n) if n > from_seq => from_seq = n,
             _ if routes_here => break,
@@ -1774,6 +1784,13 @@ pub async fn catch_up_by_scan(
             }
             _ => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
         }
+    }
+    if notes {
+        eprintln!(
+            "boostsearch: {} caught [{index}] up from {} starting at seq {from}: {applied_total} documents in {pages} pages, stopped at seq {from_seq}",
+            super::clock().wall(),
+            primary.as_str()
+        );
     }
     // what came in is searchable on the copy once it is refreshed
     let store = store.clone();
@@ -1911,8 +1928,9 @@ pub async fn resync(
     }
     if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
         eprintln!(
-            "boostsearch: sent {sent} documents of [{index}][{shard}] to {} copies in term {term}",
-            to.len()
+            "boostsearch: sent {sent} documents of [{index}][{shard}] to {} copies in term {term}, the primary at seq {}",
+            to.len(),
+            store.get(index).map(|st| st.read().seq_no).unwrap_or(0)
         );
     }
     if !missed.is_empty() {

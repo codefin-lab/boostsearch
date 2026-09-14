@@ -7275,3 +7275,55 @@ not match yet: the reference sums term frequencies across the fields and
 scores the sum over a combined length, which needs per-query statistics this
 engine does not gather. Gates unmoved: corpus 1,427/1,427, phase1 398/398,
 unit 198/198, the replays 60/61, 45/45, 36/43.
+
+### Four more of the aggregation corpus, and what the rest are
+
+**P2 -- `significant_terms` scored over the wrong background.** The
+reference's JLH score is taken over Lucene's count of documents, and a nested
+object is a document there: an index of sixty documents holding two nested
+objects each has a background of a hundred and eighty. `red`, nine of twenty
+in the foreground and twenty-six of the index, scores 0.9519 over 180 and
+0.0173 over 60 -- and the buckets came back in another order. The background
+now counts nested objects. The second difference was stranger and just as
+deterministic: a term's background frequency is summed over the shards that
+returned the term, which are the shards where it is in the foreground, so a
+shard holding a term only among documents the query did not match adds
+nothing. `blue` is in nine documents and the reference reports six. On a
+multi-shard index the background is now read shard by shard the same way.
+Every score in four foregrounds and two fields now matches to the fourth
+place; one tie of two equal scores comes back in the other order, which is
+where two floating-point sums meet, not a rule.
+
+**P2 -- `sampler` sampled per request.** `shard_size` is per shard; over two
+shards the reference samples twenty documents where this sampled ten, and
+every sub-aggregation under it counted half.
+
+**P2 -- two refusals in the wrong shape.** A `terms` aggregation mixing a
+pattern and a list is refused with the place the parser had reached --
+`[1:91] [terms] failed to parse field [exclude]` -- and this gave the words
+with no place. `src/api/json_position.rs` walks the body again for a refusal
+that names a field and reports the position the reference's parser does: the
+closing bracket of an array, the first character of anything else, lines
+counted. A bound `extended_bounds` cannot read in the aggregation's own
+format is found on a shard there, and is answered as a shard failure --
+`search_phase_execution_exception` with the parse error and its two causes,
+down to Java's own `unparsed text found at index 7`; this answered the parse
+error bare.
+
+The aggregations corpus reads 40 of 43. The three left are `percentiles`,
+`percentile_ranks` and `cardinality` with a `precision_threshold`, and they
+are not bugs to close: t-digest and HyperLogLog are approximations whose
+answers depend on the order values arrive and on how the sketch is built,
+and two implementations of the same sketch agree about the shape of the
+answer and not about its fourth decimal. The canonical corpus reads 164 of
+183.
+
+The cluster notes are also in this commit, behind `BOOSTSEARCH_CLUSTER_DEBUG`:
+a fill says which node it came from and at what sequence number the copy
+stands, a catch-up where it started and stopped, a translog replay where it
+left the counter, and a resync at what number the new primary stands.
+`tools/cluster_chaos.py` prints each copy's `_seq_no` and term for the
+documents a copy is behind on or disagrees about. An earlier line of this
+entry said the engine logs a fill and no resync; it logs both, and the
+search that said otherwise looked for the word "resync" in a line that does
+not contain it.

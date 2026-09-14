@@ -497,7 +497,10 @@ pub fn recover(store: &Store) {
             // committing puts them in the index, which is what makes the
             // record spent
             let _ = st.write().refresh();
-            tracing::warn!("index [{name}]: recovered {replayed} writes from the translog");
+            let at = st.read().seq_no;
+            tracing::warn!(
+                "index [{name}]: recovered {replayed} writes from the translog, seq_no now {at}"
+            );
         }
     }
 }
