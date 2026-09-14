@@ -1709,13 +1709,57 @@ pub fn run(
     }
 
     // now, and only now, read stored fields -- for at most `size` documents
+    let setting_up = std::time::Instant::now();
     let track_scores = !sort_keys.is_empty()
         && body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut all_hits: Vec<Hit> = Vec::new();
+    // a profile asks what each part of reading the hits back cost, and on
+    // which shard; the loop reads them the same way either way
+    let profiling_fetch = !shard_profiles.is_empty();
+    let mut readers_seen: std::collections::HashSet<(usize, u64)> = Default::default();
+    let fetch_setup = setting_up.elapsed().as_nanos() as u64;
     for c in cands.into_iter().skip(from).take(size) {
         let (name, searcher, st) = &searchers[c.shard];
+        let reading = std::time::Instant::now();
         let g = st.read();
-        let Some((id, mut src)) = source_of(searcher, &g, c.addr) else { continue };
+        let got_reader = reading.elapsed().as_nanos() as u64;
+        let found = match profiling_fetch {
+            false => source_of(searcher, &g, c.addr),
+            true => {
+                let t = std::time::Instant::now();
+                let doc: Option<TantivyDocument> = searcher.doc(c.addr).ok();
+                let stored = t.elapsed().as_nanos() as u64;
+                let t = std::time::Instant::now();
+                let found = doc.and_then(|doc| {
+                    let id = doc.get_first(g.fields.id)?.as_str()?.to_string();
+                    let src =
+                        serde_json::from_str(doc.get_first(g.fields.source)?.as_str()?).ok()?;
+                    Some((id, src))
+                });
+                let parsed = t.elapsed().as_nanos() as u64;
+                if let Some((id, _)) = &found {
+                    let shard = g.shard_of_doc(id);
+                    note_fetch_part(&mut shard_profiles, name, shard, "load_stored_fields", stored);
+                    note_fetch_part(&mut shard_profiles, name, shard, "load_source", parsed);
+                    // the reader, the visitor and the sub-phases are made
+                    // once for each shard the page reads from
+                    if readers_seen.insert((c.shard, shard)) {
+                        let t = std::time::Instant::now();
+                        let _ = searcher.segment_reader(c.addr.segment_ord).max_doc();
+                        let visitor = t.elapsed().as_nanos() as u64;
+                        for (part, nanos) in [
+                            ("get_next_reader", got_reader),
+                            ("create_stored_fields_visitor", visitor),
+                            ("build_sub_phase_processors", fetch_setup),
+                        ] {
+                            note_fetch_part(&mut shard_profiles, name, shard, part, nanos);
+                        }
+                    }
+                }
+                found
+            }
+        };
+        let Some((id, mut src)) = found else { continue };
         // `_ignored` travels inside the stored source but belongs on the hit
         let ignored = src.as_object_mut().and_then(|o| o.remove("_ignored"));
         let version = g.version_of(&id);
@@ -1831,6 +1875,7 @@ pub fn run(
     // the order each hit's write arrived in: what a coordinator merging
     // pages from several nodes breaks ties by
     let seqs: Vec<u64> = all_hits.iter().map(|h| h.seq).collect();
+    let dressing = std::time::Instant::now();
     let page = write_page(
         store,
         &targets,
@@ -1849,6 +1894,11 @@ pub fn run(
         &extras,
         &mut script_error,
     );
+    // dressing the page is the fetch's sub-phases, for a profile
+    let dressed = dressing.elapsed().as_nanos() as u64;
+    for profile in shard_profiles.iter_mut() {
+        profile["_dressing"] = json!(dressed);
+    }
     if let Some(failed) = script_error {
         return Err(failed);
     }
@@ -2059,7 +2109,31 @@ pub(crate) fn finish_search(
         join_inner_hits,
     } = f;
     let targets: Vec<String> = targets.to_vec();
-    let filters_results = run_peeled_aggs(store, &targets, &query_json, &filters_aggs, weighted)?;
+    let profiling = p.get("profile").map(|v| v == "true").unwrap_or(false)
+        || body.get("profile").and_then(|v| v.as_bool()).unwrap_or(false);
+    // a profile reports each of the engine's own aggregations with its own
+    // time, so they are worked out one at a time and each is timed
+    let (filters_results, peeled_nanos) = match profiling {
+        false => {
+            (run_peeled_aggs(store, &targets, &query_json, &filters_aggs, weighted)?, Vec::new())
+        }
+        true => {
+            let (mut results, mut nanos) = (Vec::new(), Vec::new());
+            for one in &filters_aggs {
+                let t = std::time::Instant::now();
+                let answered = run_peeled_aggs(
+                    store,
+                    &targets,
+                    &query_json,
+                    std::slice::from_ref(one),
+                    weighted,
+                )?;
+                nanos.push((one.0.clone(), t.elapsed().as_nanos() as u64));
+                results.extend(answered);
+            }
+            (results, nanos)
+        }
+    };
 
     let aggs = finalise_aggs(
         store,
@@ -2083,10 +2157,15 @@ pub(crate) fn finish_search(
         Some(base)
     };
 
-    if p.get("profile").map(|v| v == "true").unwrap_or(false)
-        || body.get("profile").and_then(|v| v.as_bool()).unwrap_or(false)
-    {
-        own_agg_profiles(&filters_aggs, &filters_results, &query_json, &mut shard_profiles);
+    if profiling {
+        own_agg_profiles(
+            &filters_aggs,
+            &filters_results,
+            &peeled_nanos,
+            total,
+            &query_json,
+            &mut shard_profiles,
+        );
     }
 
     // the profile is written while the aggregation runs, before there are any
@@ -2217,8 +2296,18 @@ pub(crate) fn finish_search(
     // `profile` also asks what the fetch cost: reading each hit back, and the
     // sub-phases that filled it in
     if !shard_profiles.is_empty() {
-        let nanos = started.elapsed().as_nanos().max(1) as u64;
-        fetch_profiles(&mut shard_profiles, body, &extras, &named, size, page.len() as u64, nanos);
+        let dressed = shard_profiles
+            .iter()
+            .filter_map(|s| s.get("_dressing").and_then(|v| v.as_u64()))
+            .max()
+            .unwrap_or(0);
+        let fetched = if size == 0 { 0 } else { page.len() as u64 };
+        fetch_profiles(&mut shard_profiles, body, &extras, &named, dressed, fetched, &peeled_nanos);
+        for profile in shard_profiles.iter_mut() {
+            if let Some(o) = profile.as_object_mut() {
+                o.shift_remove("_dressing");
+            }
+        }
     }
 
     let mut page = page;
@@ -2243,7 +2332,8 @@ pub(crate) fn finish_search(
         // is most of the way an aggregation is asked for.
         max_score: if size == 0 { None } else { max_score },
         aggs,
-        profile: (!shard_profiles.is_empty()).then(|| json!({"shards": shard_profiles})),
+        profile: (!shard_profiles.is_empty())
+            .then(|| json!({"shards": split_by_shard(shard_profiles)})),
         suggest,
         failures,
         filtered: dls_applied,

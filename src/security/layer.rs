@@ -749,6 +749,15 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             ("_knn", _) if rest.get(2) == Some(&"warmup") => "indices:admin/knn/warmup".to_string(),
             ("_knn", "GET" | "HEAD") => "cluster:admin/knn/stats".to_string(),
             ("_knn", _) => "cluster:admin/knn/model/write".to_string(),
+            // a submitted search is judged here as the plugin's own action,
+            // and its index again by the handler, as the search it runs
+            ("_asynchronous_search", _) => match (rest.get(2).copied(), m) {
+                (Some("stats"), _) => "cluster:admin/opendistro/asynchronous_search/stats",
+                (None, _) => "cluster:admin/opendistro/asynchronous_search/submit",
+                (Some(_), "DELETE") => "cluster:admin/opendistro/asynchronous_search/delete",
+                (Some(_), _) => "cluster:admin/opendistro/asynchronous_search/get",
+            }
+            .to_string(),
             ("_query", "GET" | "HEAD") => {
                 "cluster:admin/opensearch/ql/datasources/read".to_string()
             }

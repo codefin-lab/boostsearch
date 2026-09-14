@@ -336,38 +336,6 @@ impl Store {
         deep_merge(&mut merged, body);
         Some(merged)
     }
-
-    /// The name the next finished task is reported under.
-    pub fn next_task_id(&self) -> String {
-        let n = self.task_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        format!("node-0:{n}")
-    }
-
-    /// Keep what a task answered, for the caller that comes back for it.
-    ///
-    /// A node that ran a task an hour ago is not holding its answer for a
-    /// caller who was never going to come back: the answers are dropped when
-    /// they are old, and the newest are kept when there are too many.
-    pub fn remember_task(&self, name: &str, answer: Value) {
-        let mut held = self.tasks.write();
-        let now = std::time::Instant::now();
-        held.retain(|_, (at, _)| now.duration_since(*at) < TASK_ANSWER_TTL);
-        while held.len() >= MAX_TASK_ANSWERS {
-            let Some(oldest) = held.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            held.remove(&oldest);
-        }
-        held.insert(name.to_string(), (now, answer));
-    }
-
-    /// What a task answered, if this node ran it and still holds the answer.
-    pub fn task_answer(&self, name: &str) -> Option<Value> {
-        let held = self.tasks.read();
-        let (at, answer) = held.get(name)?;
-        (std::time::Instant::now().duration_since(*at) < TASK_ANSWER_TTL).then(|| answer.clone())
-    }
 }
 
 impl Store {

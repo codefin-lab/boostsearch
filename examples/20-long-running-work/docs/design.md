@@ -68,8 +68,9 @@ every run.
 | Already written | stays written | stays written |
 | Right for | a job whose partial result would be wrong | a job that can be run again |
 
-Neither rolls anything back; there is no transaction. Step 8 stops after 107
-parcels, and those 107 have `checked_at` set. `proceed` is right for the
+Neither rolls anything back; there is no transaction. Step 8 stops once the
+first batch -- a thousand parcels -- has been written, and every parcel of that
+batch that did not conflict has `checked_at` set. `proceed` is right for the
 repricing because it is idempotent: the forty parcels it skipped still carry
 the old fee, and running it again picks them up. A job that is not idempotent
 -- add 35 to every fee -- must not be rerun blindly after a partial run, with
@@ -115,32 +116,22 @@ search is slow" becomes "the wildcard clause on shard 1 is slow".
 
 ## Where this node differs, and what was left out of `run.sh`
 
-Everything above is how OpenSearch behaves. This node answers the same
-endpoints, but for these parts its answers are not yet the same, so `run.sh`
-does not print them as if they were:
+This node answers the endpoints above the way OpenSearch does: jobs sent off
+run in the background and show `completed: false` while they do, `_rethrottle`
+and `_tasks/<id>/_cancel` act on the running task, `slices` makes sub-tasks
+with their own counts, and asynchronous search and `profile` answer in the
+plugin's and the reference's shapes. They are still not in `run.sh`, because
+what they print depends on timing -- how far a job has got when it is asked,
+how long a clause took -- and a run's output is meant to read the same twice.
 
-- **A job sent off is finished before its id comes back.** The request with
-  `wait_for_completion=false` returns when the job is done; `_tasks/<id>` is
-  never `completed: false`, and `_tasks?actions=*byquery` never lists a running
-  job (step 9 runs it only once nothing should be running). A throttled job sent
-  off is not held to its rate at all, though its result reports the
-  `throttled_millis` it would have waited. A waited-for job (step 5) is held to
-  it.
-- **`_rethrottle`** answers 200 with the task's finished result under a node
-  named `node-0`, and changes nothing.
-- **`_tasks/<id>/_cancel`** answers `{"nodes":{},"node_failures":[],"tasks":[]}`
-  with 200 for any id, known or not.
-- **`slices`** does one walk; the totals are right, but every entry under
-  `slices` reports zeros.
-- **Asynchronous search** answers 501, `not_implemented_exception`.
-- **`profile`** reports one shard however many there are, `searches: []` (no
-  query timing at all), the same total time for each `terms` aggregation, and
-  zeros for a `date_histogram`.
-- **Result details**: the task's `description` is its own id rather than what
-  the job does, `start_time_in_millis` is 0, `action` is
-  `indices:data/write/by_query` for both job kinds (so `actions=*byquery` would
-  not match it), and a by-query job refreshes the index when it finishes even
-  without `?refresh`.
+Two things differ in detail:
+
+- **`profile` per shard.** This node holds every shard of an index in one
+  reader, so it times each phase once, over the whole index. Each shard's entry
+  carries its own document counts, and the index's times shared out by the
+  documents each shard matched.
+- **Asynchronous search results** are kept in the node's memory until their
+  `keep_alive` runs out, not in an index, so they do not survive a restart.
 
 ## What would change at scale
 

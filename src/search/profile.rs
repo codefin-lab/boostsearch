@@ -1,123 +1,704 @@
 //! What a search cost, in the shape OpenSearch reports it.
+//!
+//! OpenSearch profiles each shard: the query as the tree of Lucene queries it
+//! was rewritten into, each timed; the collectors; each aggregation with its
+//! own phases; and the fetch. This node holds every shard of an index in one
+//! reader, so each phase is timed once, over the whole index, and every
+//! figure here is a measurement of the work named. Where the reference reports
+//! a shard this node did not search on its own, the index's measurements are
+//! shared between its shards by the documents each shard contributed: the
+//! counts are each shard's own, and the times are the index's in proportion
+//! to them -- see `split_by_shard`.
 
 use super::*;
+use std::time::Instant;
 
-/// Run an aggregation with the phase boundaries laid bare.
+/// One timed part of a profiled phase, segment by segment.
+#[derive(Default, Clone)]
+struct Part {
+    /// time spent in each segment, in nanoseconds
+    nanos: Vec<u64>,
+    /// how many times the part ran in each segment
+    counts: Vec<u64>,
+}
+
+impl Part {
+    fn add(&mut self, nanos: u64, count: u64) {
+        self.nanos.push(nanos);
+        self.counts.push(count);
+    }
+
+    fn total(&self) -> u64 {
+        self.nanos.iter().sum()
+    }
+
+    fn count(&self) -> u64 {
+        self.counts.iter().sum()
+    }
+}
+
+/// Write a part into a breakdown: its time and count, and -- for the parts
+/// timed per segment, as concurrent segment search times them per slice --
+/// the least, most and mean across the segments.
+fn write_part(
+    out: &mut std::collections::BTreeMap<String, Value>,
+    name: &str,
+    part: &Part,
+    sliced: bool,
+    sliced_counts: bool,
+) {
+    out.insert(name.to_string(), json!(part.total()));
+    out.insert(format!("{name}_count"), json!(part.count()));
+    if !sliced {
+        return;
+    }
+    let spread = |values: &[u64]| -> (u64, u64, u64) {
+        match values.is_empty() {
+            true => (0, 0, 0),
+            false => (
+                *values.iter().min().unwrap_or(&0),
+                *values.iter().max().unwrap_or(&0),
+                values.iter().sum::<u64>() / values.len() as u64,
+            ),
+        }
+    };
+    let (min, max, avg) = spread(&part.nanos);
+    out.insert(format!("min_{name}"), json!(min));
+    out.insert(format!("max_{name}"), json!(max));
+    out.insert(format!("avg_{name}"), json!(avg));
+    if sliced_counts {
+        let (min, max, avg) = spread(&part.counts);
+        out.insert(format!("min_{name}_count"), json!(min));
+        out.insert(format!("max_{name}_count"), json!(max));
+        out.insert(format!("avg_{name}_count"), json!(avg));
+    }
+}
+
+/// The least, most and mean time of the segments, as a profile's slice
+/// figures.
+fn slice_figures(entry: &mut Value, per_segment: &[u64]) {
+    let (min, max, avg) = match per_segment.is_empty() {
+        true => (0, 0, 0),
+        false => (
+            *per_segment.iter().min().unwrap_or(&0),
+            *per_segment.iter().max().unwrap_or(&0),
+            per_segment.iter().sum::<u64>() / per_segment.len() as u64,
+        ),
+    };
+    entry["max_slice_time_in_nanos"] = json!(max);
+    entry["min_slice_time_in_nanos"] = json!(min);
+    entry["avg_slice_time_in_nanos"] = json!(avg);
+}
+
+/// What running one query over a searcher cost, part by part.
+#[derive(Default)]
+struct QueryCost {
+    create_weight: Part,
+    build_scorer: Part,
+    next_doc: Part,
+    score: Part,
+    /// the whole of each segment's work
+    segments: Vec<u64>,
+}
+
+/// Run a query the way a collector runs it, timing each part: the weight,
+/// a scorer per segment, stepping through the documents it matches and, when
+/// the search scores, scoring them.
+fn time_query(searcher: &Searcher, q: &dyn boostcore::query::Query, scoring: bool) -> QueryCost {
+    use boostcore::DocSet;
+    let mut cost = QueryCost::default();
+    let t = Instant::now();
+    let enable = match scoring {
+        true => boostcore::query::EnableScoring::enabled_from_searcher(searcher),
+        false => boostcore::query::EnableScoring::disabled_from_searcher(searcher),
+    };
+    let Ok(weight) = q.weight(enable) else { return cost };
+    cost.create_weight.add(t.elapsed().as_nanos() as u64, 1);
+    for reader in searcher.segment_readers() {
+        let segment = Instant::now();
+        let t = Instant::now();
+        let Ok(mut scorer) = weight.scorer(reader, 1.0) else { continue };
+        cost.build_scorer.add(t.elapsed().as_nanos() as u64, 1);
+        let alive = reader.alive_bitset();
+        let (mut stepped, mut steps, mut scored, mut scores) = (0u64, 0u64, 0u64, 0u64);
+        let mut t = Instant::now();
+        loop {
+            let doc = scorer.doc();
+            if doc == boostcore::TERMINATED {
+                break;
+            }
+            if scoring && alive.map(|a| a.is_alive(doc)).unwrap_or(true) {
+                stepped += t.elapsed().as_nanos() as u64;
+                let s = Instant::now();
+                let _ = scorer.score();
+                scored += s.elapsed().as_nanos() as u64;
+                scores += 1;
+                t = Instant::now();
+            }
+            steps += 1;
+            scorer.advance();
+        }
+        stepped += t.elapsed().as_nanos() as u64;
+        cost.next_doc.add(stepped, steps);
+        cost.score.add(scored, scores);
+        cost.segments.push(segment.elapsed().as_nanos() as u64);
+    }
+    cost
+}
+
+/// The breakdown of a profiled query, with every key OpenSearch writes. The
+/// parts this engine's scorers do not have -- advancing to a target, the
+/// competitive-score hooks of block-max pruning, matching a two-phase
+/// iterator -- ran no times and took no time. A search run concurrently, as
+/// OpenSearch runs one with aggregations, adds each part's spread across the
+/// slices.
+fn query_breakdown(cost: &QueryCost, concurrent: bool) -> Value {
+    let mut out = std::collections::BTreeMap::new();
+    let none = Part::default();
+    for (name, part) in [
+        ("advance", &none),
+        ("build_scorer", &cost.build_scorer),
+        ("compute_max_score", &none),
+        ("match", &none),
+        ("next_doc", &cost.next_doc),
+        ("score", &cost.score),
+        ("set_min_competitive_score", &none),
+        ("shallow_advance", &none),
+    ] {
+        write_part(&mut out, name, part, concurrent, concurrent);
+    }
+    write_part(&mut out, "create_weight", &cost.create_weight, false, false);
+    Value::Object(out.into_iter().collect())
+}
+
+/// Whether a field holds numbers, as a query over it sees them.
+fn numeric_mapping(field: &str, ctx: &Ctx) -> bool {
+    matches!(
+        ctx.mapping.type_of(field),
+        Some("long" | "integer" | "short" | "byte" | "double" | "float" | "half_float")
+            | Some("scaled_float" | "unsigned_long" | "date" | "date_nanos")
+    )
+}
+
+/// Whether a query is a single term of a field that keeps no frequencies,
+/// which OpenSearch wraps in a constant score wherever it is scored.
+fn constant_term(json: &Value, ctx: &Ctx) -> bool {
+    let Some((kind, spec)) = json.as_object().and_then(|o| o.iter().next()) else {
+        return false;
+    };
+    if !matches!(kind.as_str(), "term" | "match") {
+        return false;
+    }
+    let Some(field) = spec.as_object().and_then(|o| o.keys().next()) else { return false };
+    matches!(ctx.mapping.type_of(field), Some("keyword" | "boolean" | "ip"))
+}
+
+/// What the profile prints for a match-all at the top of a search, which
+/// OpenSearch runs through its approximation.
+const APPROXIMATE_ALL: &str =
+    "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))";
+
+/// How a clause prints inside the query that holds it: scored where it is
+/// scored, and in parentheses when it holds clauses of its own.
+fn printed(json: &Value, ctx: &Ctx, scored: bool) -> String {
+    let (kind, desc, _) = describe_query(json, ctx);
+    match kind.as_str() {
+        _ if scored && constant_term(json, ctx) => format!("ConstantScore({desc})"),
+        "BooleanQuery" => format!("({desc})"),
+        _ => desc,
+    }
+}
+
+/// The Lucene query an OpenSearch query becomes, as the profile names it:
+/// its class, how it prints, and the clauses under it, each with whether it
+/// is scored there.
+fn describe_query(json: &Value, ctx: &Ctx) -> (String, String, Vec<(Value, bool)>) {
+    let Some((kind, spec)) = json.as_object().and_then(|o| o.iter().next()) else {
+        return ("MatchAllDocsQuery".into(), "*:*".into(), Vec::new());
+    };
+    let field_value = |spec: &Value| -> Option<(String, Value)> {
+        let (field, v) = spec.as_object()?.iter().next()?;
+        let v = match v {
+            Value::Object(o) => o.get("value").or_else(|| o.get("query")).cloned()?,
+            other => other.clone(),
+        };
+        Some((field.clone(), v))
+    };
+    let text = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let points = |field: &str, low: String, high: String| {
+        let range = format!("{field}:[{low} TO {high}]");
+        format!("IndexOrDocValuesQuery(indexQuery={range}, dvQuery={range})")
+    };
+    match kind.as_str() {
+        "match_all" => ("MatchAllDocsQuery".into(), "*:*".into(), Vec::new()),
+        "match_none" => ("MatchNoDocsQuery".into(), "MatchNoDocsQuery(\"\")".into(), Vec::new()),
+        "term" | "match" | "match_phrase" => {
+            let Some((field, v)) = field_value(spec) else {
+                return ("TermQuery".into(), String::new(), Vec::new());
+            };
+            if numeric_mapping(&field, ctx) {
+                let v = text(&v);
+                return ("IndexOrDocValuesQuery".into(), points(&field, v.clone(), v), Vec::new());
+            }
+            let words: Vec<String> = match (kind.as_str(), ctx.mapping.type_of(&field)) {
+                ("term", _) | (_, Some("keyword")) => vec![text(&v)],
+                _ => text(&v).split_whitespace().map(|w| w.to_lowercase()).collect(),
+            };
+            match words.len() {
+                0 | 1 => (
+                    "TermQuery".into(),
+                    format!("{field}:{}", words.first().cloned().unwrap_or_default()),
+                    Vec::new(),
+                ),
+                _ if kind == "match_phrase" => {
+                    ("PhraseQuery".into(), format!("{field}:\"{}\"", words.join(" ")), Vec::new())
+                }
+                _ => {
+                    let clauses: Vec<(Value, bool)> =
+                        words.iter().map(|w| (json!({"term": {field.clone(): w}}), true)).collect();
+                    let desc = words.iter().map(|w| format!("{field}:{w}")).collect::<Vec<_>>();
+                    ("BooleanQuery".into(), desc.join(" "), clauses)
+                }
+            }
+        }
+        "terms" => {
+            let Some((field, v)) = spec.as_object().and_then(|o| o.iter().next()) else {
+                return ("TermInSetQuery".into(), String::new(), Vec::new());
+            };
+            let values: Vec<String> =
+                v.as_array().map(|a| a.iter().map(text).collect()).unwrap_or_default();
+            ("TermInSetQuery".into(), format!("{field}:({})", values.join(" ")), Vec::new())
+        }
+        "ids" => {
+            let values: Vec<String> = spec
+                .get("values")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(text).collect())
+                .unwrap_or_default();
+            ("TermInSetQuery".into(), format!("_id:({})", values.join(" ")), Vec::new())
+        }
+        "range" => {
+            let Some((field, bounds)) = spec.as_object().and_then(|o| o.iter().next()) else {
+                return ("PointRangeQuery".into(), String::new(), Vec::new());
+            };
+            let bound = |keys: [&str; 2]| {
+                keys.iter().find_map(|k| bounds.get(*k).filter(|v| !v.is_null())).map(text)
+            };
+            let low = bound(["gte", "from"]).or_else(|| bound(["gt", "gt"]));
+            let high = bound(["lte", "to"]).or_else(|| bound(["lt", "lt"]));
+            if numeric_mapping(field, ctx) {
+                let (min, max) = match ctx.mapping.type_of(field) {
+                    Some("integer") => ("-2147483648", "2147483647"),
+                    Some("short") => ("-32768", "32767"),
+                    Some("byte") => ("-128", "127"),
+                    Some("double" | "float" | "half_float" | "scaled_float") => {
+                        ("-Infinity", "Infinity")
+                    }
+                    _ => ("-9223372036854775808", "9223372036854775807"),
+                };
+                let low = low.unwrap_or_else(|| min.to_string());
+                let high = high.unwrap_or_else(|| max.to_string());
+                return ("IndexOrDocValuesQuery".into(), points(field, low, high), Vec::new());
+            }
+            let open = if bounds.get("gt").is_some() { "{" } else { "[" };
+            let close = if bounds.get("lt").is_some() { "}" } else { "]" };
+            (
+                "TermRangeQuery".into(),
+                format!(
+                    "{field}:{open}{} TO {}{close}",
+                    low.unwrap_or_else(|| "*".into()),
+                    high.unwrap_or_else(|| "*".into())
+                ),
+                Vec::new(),
+            )
+        }
+        "exists" => {
+            let field = spec.get("field").map(text).unwrap_or_default();
+            ("FieldExistsQuery".into(), format!("FieldExistsQuery [field={field}]"), Vec::new())
+        }
+        "prefix" => {
+            let (field, v) = field_value(spec).unwrap_or_default();
+            ("PrefixQuery".into(), format!("{field}:{}*", text(&v)), Vec::new())
+        }
+        "wildcard" => {
+            let (field, v) = field_value(spec).unwrap_or_default();
+            ("WildcardQuery".into(), format!("{field}:{}", text(&v)), Vec::new())
+        }
+        "constant_score" => {
+            let inner = spec.get("filter").cloned().unwrap_or_else(|| json!({"match_all": {}}));
+            let desc = printed(&inner, ctx, false);
+            ("ConstantScoreQuery".into(), format!("ConstantScore({desc})"), vec![(inner, false)])
+        }
+        "bool" => {
+            let mut clauses: Vec<(Value, bool)> = Vec::new();
+            let mut shown: Vec<String> = Vec::new();
+            // the order OpenSearch adds a bool query's clauses in; a filter
+            // and a must_not are not scored, so they print bare
+            for (occur, mark, scored) in [
+                ("must", "+", true),
+                ("must_not", "-", false),
+                ("should", "", true),
+                ("filter", "#", false),
+            ] {
+                let listed = match spec.get(occur) {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(one @ Value::Object(_)) => vec![one.clone()],
+                    _ => Vec::new(),
+                };
+                for clause in listed {
+                    shown.push(format!("{mark}{}", printed(&clause, ctx, scored)));
+                    clauses.push((clause, scored));
+                }
+            }
+            if clauses.is_empty() {
+                return ("MatchAllDocsQuery".into(), "*:*".into(), Vec::new());
+            }
+            ("BooleanQuery".into(), shown.join(" "), clauses)
+        }
+        other => (
+            format!("{}Query", capitalise_words(other)),
+            serde_json::to_string(spec).unwrap_or_default(),
+            Vec::new(),
+        ),
+    }
+}
+
+/// One profiled query node, from what running it cost.
+fn timed_node(
+    kind: &str,
+    description: String,
+    cost: &QueryCost,
+    concurrent: bool,
+    children: Vec<Value>,
+) -> Value {
+    let total = cost.create_weight.total()
+        + cost.build_scorer.total()
+        + cost.next_doc.total()
+        + cost.score.total();
+    let mut node = json!({
+        "type": kind,
+        "description": description,
+        "time_in_nanos": total,
+    });
+    if concurrent {
+        slice_figures(&mut node, &cost.segments);
+    }
+    node["breakdown"] = query_breakdown(cost, concurrent);
+    if !children.is_empty() {
+        node["children"] = json!(children);
+    }
+    node
+}
+
+/// The cost of a query the request wrote, built and run on its own.
+fn cost_of(searcher: &Searcher, ctx: &Ctx, json: &Value, scoring: bool) -> QueryCost {
+    match crate::query::build(ctx, json) {
+        Ok(q) => time_query(searcher, q.as_ref(), scoring),
+        Err(_) => QueryCost::default(),
+    }
+}
+
+/// One node of the profiled query tree, and the nodes under it. `scored` says
+/// whether the query is scored where it stands, and `top` whether it is the
+/// whole of the search's query.
+fn query_node(
+    searcher: &Searcher,
+    ctx: &Ctx,
+    json: &Value,
+    scoring: bool,
+    concurrent: bool,
+    (scored, top): (bool, bool),
+) -> Value {
+    let is_all = json.get("match_all").is_some();
+    if top && is_all {
+        let cost = cost_of(searcher, ctx, json, scoring);
+        let inner =
+            timed_node("ApproximateScoreQuery", APPROXIMATE_ALL.into(), &cost, concurrent, vec![]);
+        let outer = format!("ConstantScore({APPROXIMATE_ALL})");
+        return timed_node("ConstantScoreQuery", outer, &cost, concurrent, vec![inner]);
+    }
+    if scored && constant_term(json, ctx) {
+        let inner = query_node(searcher, ctx, json, scoring, concurrent, (false, false));
+        let cost = cost_of(searcher, ctx, json, scoring);
+        let outer = format!("ConstantScore({})", printed(json, ctx, false));
+        return timed_node("ConstantScoreQuery", outer, &cost, concurrent, vec![inner]);
+    }
+    let (kind, description, clauses) = describe_query(json, ctx);
+    let cost = cost_of(searcher, ctx, json, scoring);
+    let children: Vec<Value> = clauses
+        .iter()
+        .map(|(c, scored)| query_node(searcher, ctx, c, scoring, concurrent, (*scored, false)))
+        .collect();
+    timed_node(&kind, description, &cost, concurrent, children)
+}
+
+/// A shard's `searches` section: the query tree, how long rewriting it took,
+/// and the collectors the search ran.
+///
+/// OpenSearch runs a search with aggregations concurrently, segment slices at
+/// a time, and profiles it as such: collector managers, and each figure's
+/// spread across the slices. A search without them runs one collector over
+/// the segments in turn, and its profile says only what each part cost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_profile(
+    searcher: &Searcher,
+    ctx: &Ctx,
+    query_json: &Option<Value>,
+    (scoring, sorted): (bool, bool),
+    search_nanos: u64,
+    agg_names: &[String],
+    agg_nanos: u64,
+    size: usize,
+) -> Value {
+    let json = query_json.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let concurrent = !agg_names.is_empty();
+    // rewriting is building the engine's query from the request's
+    let t = Instant::now();
+    let _ = crate::query::build(ctx, &json);
+    let rewrite = t.elapsed().as_nanos() as u64;
+    let tree = query_node(searcher, ctx, &json, scoring, concurrent, (scoring, true));
+    let collector = |name: &str, reason: &str, nanos: u64| match concurrent {
+        true => json!({
+            "name": name, "reason": reason, "time_in_nanos": nanos,
+            "reduce_time_in_nanos": 0,
+            "max_slice_time_in_nanos": nanos, "min_slice_time_in_nanos": nanos,
+            "avg_slice_time_in_nanos": nanos, "slice_count": 1,
+        }),
+        false => json!({"name": name, "reason": reason, "time_in_nanos": nanos}),
+    };
+    let collectors = match concurrent {
+        false => {
+            let name = match (size, sorted) {
+                (0, _) => "EarlyTerminatingCollector",
+                (_, true) => "SimpleFieldCollector",
+                _ => "TopScoreDocCollector",
+            };
+            let reason = if size == 0 { "search_count" } else { "search_top_hits" };
+            json!([collector(name, reason, search_nanos)])
+        }
+        true => {
+            let hits = match size {
+                0 => collector("TotalHitCountCollectorManager", "search_count", search_nanos),
+                _ => collector("SimpleTopDocsCollectorManager", "search_top_hits", search_nanos),
+            };
+            let named = match agg_names.len() {
+                1 => format!("[{}]", agg_names[0]),
+                _ => format!("[[{}]]", agg_names.join(", ")),
+            };
+            let aggs = collector(
+                &format!("NonGlobalAggCollectorManager: {named}"),
+                "aggregation",
+                agg_nanos,
+            );
+            let mut top =
+                collector("QueryCollectorManager", "search_multi", search_nanos + agg_nanos);
+            top["children"] = json!([hits, aggs]);
+            json!([top])
+        }
+    };
+    json!({"query": [tree], "rewrite_time": rewrite, "collector": collectors})
+}
+
+/// How many of the documents a query matches each shard of the index holds,
+/// placed by the same fold the index's writes use. A profile is shared out
+/// between the shards by these.
+pub(crate) fn matched_by_shard(
+    searcher: &Searcher,
+    g: &IdxState,
+    q: &dyn boostcore::query::Query,
+) -> Vec<u64> {
+    // enough documents to say how the matches fall, without reading the id
+    // of every one of a very large match
+    const SAMPLE: usize = 200_000;
+    let shards = g.shard_count().max(1) as usize;
+    let mut out = vec![0u64; shards];
+    let Ok(found) = searcher.search(q, &boostcore::collector::DocSetCollector) else {
+        return out;
+    };
+    let mut id = String::new();
+    for addr in found.into_iter().take(SAMPLE) {
+        let reader = searcher.segment_reader(addr.segment_ord);
+        let Ok(Some(column)) = reader.fast_fields().str("_id") else { continue };
+        let Some(ord) = column.term_ords(addr.doc_id).next() else { continue };
+        id.clear();
+        if column.ord_to_str(ord, &mut id).is_ok() {
+            let shard = g.shard_of_doc(&id) as usize;
+            if shard < shards {
+                out[shard] += 1;
+            }
+        }
+    }
+    out
+}
+
+/// What running aggregations cost, phase by phase.
+#[derive(Default)]
+struct AggCost {
+    initialize: Part,
+    build_leaf_collector: Part,
+    collect: Part,
+    post_collection: Part,
+    build_aggregation: Part,
+    segments: Vec<u64>,
+}
+
+impl AggCost {
+    fn total(&self) -> u64 {
+        self.initialize.total()
+            + self.build_leaf_collector.total()
+            + self.collect.total()
+            + self.post_collection.total()
+            + self.build_aggregation.total()
+    }
+
+    fn breakdown(&self) -> Value {
+        let mut out = std::collections::BTreeMap::new();
+        write_part(&mut out, "initialize", &self.initialize, true, false);
+        write_part(&mut out, "build_leaf_collector", &self.build_leaf_collector, true, true);
+        write_part(&mut out, "collect", &self.collect, true, true);
+        write_part(&mut out, "post_collection", &self.post_collection, true, false);
+        write_part(&mut out, "build_aggregation", &self.build_aggregation, true, false);
+        // the reduce runs once the shards' answers are merged, which is not
+        // a phase of any one shard
+        write_part(&mut out, "reduce", &Part { nanos: vec![0], counts: vec![0] }, true, false);
+        Value::Object(out.into_iter().collect())
+    }
+}
+
+/// Run aggregations over a query with the phase boundaries laid bare.
 ///
 /// `searcher.search` folds the whole run into one call, so the phases are
-/// driven here instead: a leaf collector per segment, the scan, the harvest,
-/// and the merge. The numbers reported are the real elapsed time of each --
-/// nothing is estimated -- though our engine has no separate initialise step
-/// beyond building the collector, which is what `initialize` measures.
-pub(crate) fn profiled_agg_search(
+/// driven here instead: building the collector, a leaf collector per segment,
+/// the scan, the harvest, and the merge.
+fn timed_aggs(
     searcher: &Searcher,
-    q: &dyn boostcore::query::Query,
+    weight: &dyn boostcore::query::Weight,
     aggs: Aggregations,
-    ctxp: AggContextParams,
     ctx: &Ctx,
-    request: Option<&Value>,
-) -> (boostcore::Result<IntermediateAggregationResults>, Value) {
+) -> (boostcore::Result<IntermediateAggregationResults>, AggCost) {
     use boostcore::collector::{Collector, SegmentCollector};
-    use std::time::Instant;
-
-    let mut ns = std::collections::BTreeMap::new();
-    let mut collected = 0u64;
+    let mut cost = AggCost::default();
     let t = Instant::now();
-    let collector = DistributedAggregationCollector::from_aggs(aggs.clone(), ctxp);
-    ns.insert("initialize", t.elapsed().as_nanos() as u64);
-
-    let started = Instant::now();
+    let ctxp = AggContextParams::new(Default::default(), ctx.index.tokenizers().clone());
+    let collector = DistributedAggregationCollector::from_aggs(aggs, ctxp);
+    cost.initialize.add((t.elapsed().as_nanos() as u64).max(1), 1);
     let mut run = || -> boostcore::Result<IntermediateAggregationResults> {
-        let weight = q.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher))?;
         let mut fruits = Vec::new();
-        let (mut leaf_ns, mut collect_ns, mut post_ns) = (0u64, 0u64, 0u64);
         for (ord, reader) in searcher.segment_readers().iter().enumerate() {
+            let segment = Instant::now();
             let t = Instant::now();
             let mut child = collector.for_segment(ord as u32, reader)?;
-            leaf_ns += t.elapsed().as_nanos() as u64;
-
+            cost.build_leaf_collector.add((t.elapsed().as_nanos() as u64).max(1), 1);
             let t = Instant::now();
+            let mut collected = 0u64;
             weight.for_each_no_score(reader, &mut |docs| {
                 collected += docs.len() as u64;
                 for d in docs {
                     child.collect(*d, 0.0);
                 }
             })?;
-            collect_ns += t.elapsed().as_nanos() as u64;
-
+            cost.collect.add((t.elapsed().as_nanos() as u64).max(1), collected);
             let t = Instant::now();
             fruits.push(child.harvest());
-            post_ns += t.elapsed().as_nanos() as u64;
+            cost.post_collection.add((t.elapsed().as_nanos() as u64).max(1), 1);
+            cost.segments.push(segment.elapsed().as_nanos() as u64);
         }
-        ns.insert("build_leaf_collector", leaf_ns.max(1));
-        ns.insert("collect", collect_ns.max(1));
-        ns.insert("post_collection", post_ns.max(1));
-
         let t = Instant::now();
         let merged = collector.merge_fruits(fruits)?;
-        ns.insert("build_aggregation", (t.elapsed().as_nanos() as u64).max(1));
+        cost.build_aggregation.add((t.elapsed().as_nanos() as u64).max(1), 1);
         Ok(merged)
     };
     let res = run();
-    for k in ["build_leaf_collector", "collect", "post_collection", "build_aggregation"] {
-        ns.entry(k).or_insert(1);
-    }
-    let total: u64 = ns.values().sum();
+    (res, cost)
+}
 
-    let breakdown: serde_json::Map<String, Value> = ns
+/// Run an aggregation request for its answer, and profile each aggregation
+/// in it on its own.
+///
+/// The answer comes from running them together, as the search would. Each
+/// aggregation is then run again by itself, and each of its
+/// sub-aggregations by itself, so that the time reported for one is that
+/// one's -- two aggregations reported with the same time were reported with
+/// the time of both. Answers the aggregations' results, their profile
+/// entries, and the time the request's own run took.
+pub(crate) fn profiled_agg_search(
+    searcher: &Searcher,
+    q: &dyn boostcore::query::Query,
+    aggs: Aggregations,
+    ctx: &Ctx,
+    request: Option<&Value>,
+) -> (boostcore::Result<IntermediateAggregationResults>, Vec<Value>, u64) {
+    let weight = match q.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher)) {
+        Ok(w) => w,
+        Err(e) => return (Err(e), Vec::new(), 0),
+    };
+    let (res, whole) = timed_aggs(searcher, weight.as_ref(), aggs.clone(), ctx);
+    // in the order the request named them, which is the order a reader
+    // looks for them in
+    let mut names: Vec<String> = request
+        .and_then(|r| r.as_object())
+        .map(|o| o.keys().filter(|k| aggs.contains_key(*k)).cloned().collect())
+        .unwrap_or_default();
+    for name in aggs.keys() {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    let entries = names
         .iter()
-        .map(|(k, v)| (k.to_string(), json!(v)))
-        .chain(std::iter::once(("collect_count".to_string(), json!(collected))))
-        .collect();
-    let entries: Vec<Value> = aggs
-        .iter()
-        .map(|(name, agg)| {
-            // the parsed model drops the knobs that only steer execution, so
-            // the request itself is consulted for those
+        .filter_map(|name| {
+            let agg = aggs.get(name)?;
             let def = request
                 .and_then(|r| r.get(name.as_str()))
                 .cloned()
                 .unwrap_or_else(|| serde_json::to_value(agg).unwrap_or(Value::Null));
-            // a sub-aggregation is profiled as a child of the one that
-            // built the buckets it ran over
-            let children: Vec<Value> = def
-                .get("aggs")
-                .or_else(|| def.get("aggregations"))
-                .and_then(|a| a.as_object())
-                .map(|o| {
-                    o.iter()
-                        .map(|(cname, cdef)| {
-                            json!({
-                                "type": agg_profile_type(cdef, Some(ctx)),
-                                "description": cname,
-                                "time_in_nanos": 0,
-                                "breakdown": breakdown,
-                                "debug": {},
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut entry = json!({
-                "type": agg_profile_type(&def, Some(ctx)),
-                "description": name,
-                "time_in_nanos": total,
-                "breakdown": breakdown,
-                "debug": agg_profile_debug(&def, ctx),
-            });
-            if !children.is_empty() {
-                entry["children"] = Value::Array(children);
-            }
-            entry
+            Some(agg_entry(searcher, weight.as_ref(), ctx, (name, true), agg, &def))
         })
         .collect();
-    let profile = json!({
-        "id": "[boostsearch][0]",
-        "searches": [],
-        "aggregations": entries,
-        "took": started.elapsed().as_nanos() as u64,
+    (res, entries, whole.total())
+}
+
+/// One aggregation's profile entry, its sub-aggregations as its children.
+fn agg_entry(
+    searcher: &Searcher,
+    weight: &dyn boostcore::query::Weight,
+    ctx: &Ctx,
+    (name, top): (&str, bool),
+    agg: &boostcore::aggregation::agg_req::Aggregation,
+    def: &Value,
+) -> Value {
+    let mut alone = Aggregations::default();
+    alone.insert(name.to_string(), agg.clone());
+    let (_, cost) = timed_aggs(searcher, weight, alone, ctx);
+    let mut entry = json!({
+        "type": agg_profile_type(def, Some(ctx)),
+        "description": name,
+        "time_in_nanos": cost.total(),
     });
-    (res, profile)
+    slice_figures(&mut entry, &cost.segments);
+    entry["breakdown"] = cost.breakdown();
+    if top {
+        entry["debug"] = agg_profile_debug(def, ctx);
+    }
+    let subs = def.get("aggs").or_else(|| def.get("aggregations"));
+    let children: Vec<Value> = agg
+        .sub_aggregation
+        .iter()
+        .map(|(cname, cagg)| {
+            let cdef = subs
+                .and_then(|s| s.get(cname.as_str()))
+                .cloned()
+                .unwrap_or_else(|| serde_json::to_value(cagg).unwrap_or(Value::Null));
+            agg_entry(searcher, weight, ctx, (cname, false), cagg, &cdef)
+        })
+        .collect();
+    if !children.is_empty() {
+        entry["children"] = json!(children);
+    }
+    entry
 }
 
 /// Whether the field an aggregation names holds numbers rather than strings.
@@ -226,8 +807,13 @@ pub(crate) fn agg_profile_debug(def: &Value, ctx: &Ctx) -> Value {
             "segments_with_single_valued_ords": 1,
             "segments_with_multi_valued_ords": 0,
             "has_filter": false,
+            "result_selection_strategy": "select_all",
         });
-        if !deferred.is_empty() {
+        // they are deferred only when the request collects breadth first; by
+        // default they are collected alongside the buckets
+        let breadth_first =
+            body.get("collect_mode").and_then(|m| m.as_str()) == Some("breadth_first");
+        if !deferred.is_empty() && breadth_first {
             out["deferred_aggregators"] = json!(deferred);
         }
         return out;
@@ -382,22 +968,26 @@ pub(crate) fn apply_typed_keys_suggest(out: &mut Value, request: &Value) {
 
 /// The profile entry for an aggregation this engine computed itself.
 ///
-/// One of those never reaches BoostCore's profiler, so what OpenSearch would
-/// have reported is written here: the aggregator it would have used, and what
-/// the answer turned out to hold.
+/// One of those never reaches BoostCore's collectors, so its time is the time
+/// the engine spent working it out, which `nanos` carries, and it is written
+/// as the aggregator OpenSearch would have used, with its sub-aggregations
+/// under it. Their time is part of their parent's: they are worked out
+/// bucket by bucket inside it, not as a pass of their own.
 pub(crate) fn own_agg_profiles(
     peeled: &[(String, Value)],
     results: &[(String, Value)],
+    nanos: &[(String, u64)],
+    matched: u64,
     query_json: &Option<Value>,
     shard_profiles: &mut Vec<Value>,
 ) {
-    let mut own: Vec<Value> = Vec::new();
-    for (name, def) in peeled {
-        let found = results
-            .iter()
-            .find(|(n, _)| n == name)
-            .and_then(|(_, v)| v.get("buckets"))
-            .and_then(|b| b.as_array());
+    fn entry(
+        name: &str,
+        def: &Value,
+        (nanos, matched): (u64, u64),
+        found: Option<&Vec<Value>>,
+        visited: u64,
+    ) -> Value {
         let buckets = found.map(|b| b.len()).unwrap_or(0);
         // an auto date histogram starts at the finest rounding, where
         // every document has a bucket to itself, and widens until few
@@ -413,30 +1003,49 @@ pub(crate) fn own_agg_profiles(
         } else {
             buckets
         };
-        // a query narrows the segment before the aggregation runs, so
-        // there is no leaf left for it to walk
-        let visited = if query_json.is_some() { 0 } else { 1 };
-        own.push(json!({
-            // the aggregations peeled out here are `filter` and `filters`,
-            // which are never named after the column they read
+        // it read every document the query matched
+        let collect = Part { nanos: vec![nanos], counts: vec![matched] };
+        let cost = AggCost { collect, segments: vec![nanos], ..Default::default() };
+        let mut out = json!({
             "type": agg_profile_type(def, None),
             "description": name,
-            "time_in_nanos": 0,
-            "breakdown": {
-                "reduce": 0, "build_aggregation": 0, "build_leaf_collector": 0,
-                "collect": 0, "initialize": 0, "post_collection": 0,
-            },
-            "debug": {
-                "total_buckets": buckets,
-                // the rewrite that turns a range into a segment lookup
-                // applies to the one segment there is
-                "optimized_segments": 1,
-                "unoptimized_segments": 0,
-                "leaf_visited": visited,
-                "inner_visited": 0,
-                "surviving_buckets": surviving,
-            },
-        }));
+            "time_in_nanos": nanos,
+        });
+        slice_figures(&mut out, &cost.segments);
+        out["breakdown"] = cost.breakdown();
+        out["debug"] = json!({
+            "total_buckets": buckets,
+            // the rewrite that turns a range into a segment lookup
+            // applies to the one segment there is
+            "optimized_segments": 1,
+            "unoptimized_segments": 0,
+            "leaf_visited": visited,
+            "inner_visited": 0,
+            "surviving_buckets": surviving,
+        });
+        let children: Vec<Value> = def
+            .get("aggs")
+            .or_else(|| def.get("aggregations"))
+            .and_then(|a| a.as_object())
+            .map(|subs| subs.iter().map(|(n, d)| entry(n, d, (0, 0), None, visited)).collect())
+            .unwrap_or_default();
+        if !children.is_empty() {
+            out["children"] = json!(children);
+        }
+        out
+    }
+    let mut own: Vec<Value> = Vec::new();
+    // a query narrows the segment before the aggregation runs, so there is no
+    // leaf left for it to walk
+    let visited = if query_json.is_some() { 0 } else { 1 };
+    for (name, def) in peeled {
+        let found = results
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, v)| v.get("buckets"))
+            .and_then(|b| b.as_array());
+        let took = nanos.iter().find(|(n, _)| n == name).map(|(_, t)| *t).unwrap_or(0);
+        own.push(entry(name, def, (took, matched), found, visited));
     }
     if !own.is_empty() {
         match shard_profiles.first_mut() {
@@ -448,7 +1057,6 @@ pub(crate) fn own_agg_profiles(
                 }
             }
             None => shard_profiles.push(json!({
-                "id": "[node-0][boostsearch][0]",
                 "searches": [],
                 "aggregations": own,
             })),
@@ -456,122 +1064,284 @@ pub(crate) fn own_agg_profiles(
     }
 }
 
-/// What the fetch cost, for `profile`.
+/// What reading one index's hits back cost, shard by shard, as the fetch
+/// loop measured it. Kept on the index's profile under `_fetch` until the
+/// profile is shared out between the shards.
+pub(crate) fn note_fetch_part(
+    shard_profiles: &mut [Value],
+    index: &str,
+    shard: u64,
+    part: &str,
+    nanos: u64,
+) {
+    let Some(profile) =
+        shard_profiles.iter_mut().find(|p| p.get("_index").and_then(|v| v.as_str()) == Some(index))
+    else {
+        return;
+    };
+    let slot = &mut profile["_fetch"][shard.to_string()][part];
+    let (had, count) = (
+        slot.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
+        slot.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
+    );
+    *slot = json!([had + nanos, count + 1]);
+}
+
+/// What the fetch cost, for `profile`, from what the fetch loop noted.
 ///
 /// Reading each hit back is a phase of its own in OpenSearch's profile, with
-/// sub-phases under it; there is one reader per shard here, so the numbers are
-/// the ones this engine can honestly report about itself.
+/// sub-phases under it: getting the segment's reader, making the visitor that
+/// reads stored fields, loading them, parsing the source out of them, and
+/// each sub-phase that dresses the hit. `dressing` is the time the page took
+/// to dress, which the sub-phases that ran share by hit; a top_hits
+/// aggregation's fetch is the time the aggregation took, from `agg_nanos`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_profiles(
     shard_profiles: &mut [Value],
     body: &Value,
     extras: &Extras,
     named: &std::collections::HashMap<String, Vec<(String, f32)>>,
-    size: usize,
+    dressing: u64,
     fetched: u64,
-    nanos: u64,
+    agg_nanos: &[(String, u64)],
 ) {
-    let breakdown = |n: u64| {
-        json!({
-            "load_stored_fields": nanos, "load_stored_fields_count": n,
-            "load_source": nanos, "load_source_count": n,
-            "get_next_reader": nanos, "get_next_reader_count": 1,
-            "build_sub_phase_processors": nanos, "build_sub_phase_processors_count": 1,
-            "create_stored_fields_visitor": nanos,
-            "create_stored_fields_visitor_count": 1,
-        })
+    // script fields fetch nothing of the source unless it was asked for
+    let source_wanted = match body.get("_source") {
+        Some(v) => v != &json!(false),
+        None => body.get("script_fields").is_none(),
     };
-    let child = |kind: &str, n: u64| {
+    let flag = |k: &str| body.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let phases: Vec<&str> = [
+        ("FetchSourcePhase", source_wanted),
+        ("ExplainPhase", flag("explain")),
+        ("FetchDocValuesPhase", body.get("docvalue_fields").is_some()),
+        ("FetchFieldsPhase", body.get("fields").is_some()),
+        ("FetchVersionPhase", flag("version")),
+        ("SeqNoPrimaryTermPhase", flag("seq_no_primary_term")),
+        ("MatchedQueriesPhase", !named.is_empty()),
+        ("HighlightPhase", body.get("highlight").is_some()),
+        ("ScriptFieldsPhase", body.get("script_fields").is_some()),
+        ("FetchScorePhase", flag("track_scores")),
+    ]
+    .into_iter()
+    .filter(|(_, on)| *on)
+    .map(|(name, _)| name)
+    .collect();
+    // a part that ran took some time, however little the clock saw of it
+    let ran = |nanos: u64, count: u64| if count > 0 { nanos.max(1) } else { nanos };
+    let phase = |kind: &str, process: u64, hits: u64, reader: u64| {
         json!({
-            "type": kind,
-            "description": kind,
-            "time_in_nanos": nanos,
+            "type": kind, "description": kind,
+            "time_in_nanos": ran(process, hits) + ran(reader, 1),
             "breakdown": {
-                "process": nanos, "process_count": n,
-                "set_next_reader": nanos, "set_next_reader_count": 1,
+                "process": ran(process, hits), "process_count": hits,
+                "set_next_reader": ran(reader, 1), "set_next_reader_count": 1,
             },
         })
     };
-    let mut entries: Vec<Value> = Vec::new();
-    if size > 0 && fetched > 0 {
-        let mut children = Vec::new();
-        // script fields fetch nothing of the source unless it was asked for
-        let source_wanted = match body.get("_source") {
-            Some(v) => v != &json!(false),
-            None => body.get("script_fields").is_none(),
-        };
-        if source_wanted {
-            children.push(child("FetchSourcePhase", fetched));
-        }
-        if body.get("explain").and_then(|v| v.as_bool()).unwrap_or(false) {
-            children.push(child("ExplainPhase", fetched));
-        }
-        if body.get("docvalue_fields").is_some() {
-            children.push(child("FetchDocValuesPhase", fetched));
-        }
-        if body.get("fields").is_some() {
-            children.push(child("FetchFieldsPhase", fetched));
-        }
-        if body.get("version").and_then(|v| v.as_bool()).unwrap_or(false) {
-            children.push(child("FetchVersionPhase", fetched));
-        }
-        if body.get("seq_no_primary_term").and_then(|v| v.as_bool()).unwrap_or(false) {
-            children.push(child("SeqNoPrimaryTermPhase", fetched));
-        }
-        if !named.is_empty() {
-            children.push(child("MatchedQueriesPhase", fetched));
-        }
-        if body.get("highlight").is_some() {
-            children.push(child("HighlightPhase", fetched));
-        }
-        if body.get("script_fields").is_some() {
-            children.push(child("ScriptFieldsPhase", fetched));
-        }
-        if body.get("track_scores").and_then(|v| v.as_bool()).unwrap_or(false) {
-            children.push(child("FetchScorePhase", fetched));
-        }
-        entries.push(json!({
-            "type": "fetch",
-            "description": "fetch",
-            "time_in_nanos": nanos,
-            "breakdown": breakdown(fetched),
-            "children": children,
-            "debug": {},
-        }));
-        // an inner-hits clause fetches documents of its own
-        if let Some((path, _)) = extras
-            .nested_inner_hits
-            .then(|| body.get("query").and_then(find_nested_inner_hits))
-            .flatten()
-        {
-            entries.push(json!({
-                "type": format!("fetch_inner_hits[{path}]"),
-                "description": format!("fetch_inner_hits[{path}]"),
-                "time_in_nanos": nanos,
-                "breakdown": breakdown(fetched),
-                "children": [child("FetchSourcePhase", fetched)],
-                "debug": {},
-            }));
-        }
-    }
-    // so does every top_hits aggregation
-    if let Some(o) =
-        body.get("aggs").or_else(|| body.get("aggregations")).and_then(|a| a.as_object())
-    {
-        for (name, def) in o {
-            if def.get("top_hits").is_none() {
-                continue;
+    let phase_count = phases.len().max(1) as u64;
+    for profile in shard_profiles.iter_mut() {
+        let noted = profile.get("_fetch").and_then(|f| f.as_object()).cloned().unwrap_or_default();
+        let mut by_shard = serde_json::Map::new();
+        for (shard, parts) in noted {
+            let read = |k: &str| -> (u64, u64) {
+                let v = parts.get(k);
+                (
+                    v.and_then(|v| v.get(0)).and_then(|v| v.as_u64()).unwrap_or(0),
+                    v.and_then(|v| v.get(1)).and_then(|v| v.as_u64()).unwrap_or(0),
+                )
+            };
+            let (stored_ns, hits) = read("load_stored_fields");
+            let (source_ns, sources) = read("load_source");
+            let (reader_ns, readers) = read("get_next_reader");
+            let (visitor_ns, visitors) = read("create_stored_fields_visitor");
+            let (setup_ns, setups) = read("build_sub_phase_processors");
+            let process = match fetched {
+                0 => 0,
+                n => dressing * hits / n / phase_count,
+            };
+            let children: Vec<Value> = phases
+                .iter()
+                .map(|kind| phase(kind, process, hits, reader_ns / phase_count))
+                .collect();
+            let breakdown = json!({
+                "build_sub_phase_processors": ran(setup_ns, setups),
+                "build_sub_phase_processors_count": setups,
+                "create_stored_fields_visitor": ran(visitor_ns, visitors),
+                "create_stored_fields_visitor_count": visitors,
+                "get_next_reader": ran(reader_ns, readers),
+                "get_next_reader_count": readers,
+                "load_source": ran(source_ns, sources),
+                "load_source_count": sources,
+                "load_stored_fields": ran(stored_ns, hits),
+                "load_stored_fields_count": hits,
+            });
+            let own: u64 = [
+                "build_sub_phase_processors",
+                "create_stored_fields_visitor",
+                "get_next_reader",
+                "load_source",
+                "load_stored_fields",
+            ]
+            .iter()
+            .filter_map(|k| breakdown[*k].as_u64())
+            .sum();
+            let children_ns: u64 =
+                children.iter().filter_map(|c| c["time_in_nanos"].as_u64()).sum();
+            let mut entries = vec![json!({
+                "type": "fetch",
+                "description": "fetch",
+                "time_in_nanos": own + children_ns,
+                "breakdown": breakdown,
+                "children": children,
+            })];
+            // an inner-hits clause fetches documents of its own, as part of
+            // dressing the hits it belongs to
+            if let Some((path, _)) = extras
+                .nested_inner_hits
+                .then(|| body.get("query").and_then(find_nested_inner_hits))
+                .flatten()
+            {
+                let source = phase("FetchSourcePhase", process, hits, reader_ns / phase_count);
+                entries.push(json!({
+                    "type": format!("fetch_inner_hits[{path}]"),
+                    "description": format!("fetch_inner_hits[{path}]"),
+                    "time_in_nanos": source["time_in_nanos"],
+                    "breakdown": {
+                        "build_sub_phase_processors": 0, "build_sub_phase_processors_count": 1,
+                        "create_stored_fields_visitor": 0,
+                        "create_stored_fields_visitor_count": 1,
+                        "get_next_reader": 0, "get_next_reader_count": 1,
+                        "load_source": 0, "load_source_count": 0,
+                        "load_stored_fields": 0, "load_stored_fields_count": 0,
+                    },
+                    "children": [source],
+                }));
             }
-            entries.push(json!({
-                "type": format!("fetch_top_hits_aggregation[{name}]"),
-                "description": format!("fetch_top_hits_aggregation[{name}]"),
-                "time_in_nanos": nanos,
-                "breakdown": breakdown(1),
-                "children": [child("FetchSourcePhase", 1)],
-                "debug": {},
+            by_shard.insert(shard, json!(entries));
+        }
+        // so does every top_hits aggregation, whose documents are read while
+        // the aggregation is worked out
+        if let Some(o) =
+            body.get("aggs").or_else(|| body.get("aggregations")).and_then(|a| a.as_object())
+        {
+            for (name, def) in o {
+                if def.get("top_hits").is_none() {
+                    continue;
+                }
+                let took = agg_nanos.iter().find(|(n, _)| n == name).map(|(_, t)| *t).unwrap_or(0);
+                let size = def.pointer("/top_hits/size").and_then(|v| v.as_u64()).unwrap_or(3);
+                let slot = by_shard.entry("0".to_string()).or_insert_with(|| json!([]));
+                if let Some(list) = slot.as_array_mut() {
+                    list.push(json!({
+                        "type": format!("fetch_top_hits_aggregation[{name}]"),
+                        "description": format!("fetch_top_hits_aggregation[{name}]"),
+                        "time_in_nanos": ran(took, 1),
+                        "breakdown": {
+                            "build_sub_phase_processors": 0,
+                            "build_sub_phase_processors_count": 1,
+                            "create_stored_fields_visitor": 0,
+                            "create_stored_fields_visitor_count": 1,
+                            "get_next_reader": 0, "get_next_reader_count": 1,
+                            "load_source": ran(took, size), "load_source_count": size,
+                            "load_stored_fields": 0, "load_stored_fields_count": size,
+                        },
+                        "children": [phase("FetchSourcePhase", took, size, 0)],
+                    }));
+                }
+            }
+        }
+        profile["_fetch"] = Value::Object(by_shard);
+    }
+}
+
+/// Share a timing out to one shard, by the part of the index's matches the
+/// shard holds.
+fn scaled(v: &Value, share: f64) -> Value {
+    match v.as_u64() {
+        Some(n) => json!((n as f64 * share).round() as u64),
+        None => v.clone(),
+    }
+}
+
+/// Scale every time and count of a profile entry, leaving what describes it
+/// -- its type, its description, the debug figures -- as it is.
+fn scale_entry(entry: &mut Value, share: f64) {
+    let Some(o) = entry.as_object_mut() else { return };
+    for (k, v) in o.iter_mut() {
+        match k.as_str() {
+            "breakdown" => {
+                if let Some(b) = v.as_object_mut() {
+                    for (_, n) in b.iter_mut() {
+                        *n = scaled(n, share);
+                    }
+                }
+            }
+            "children" | "query" | "collector" => {
+                if let Some(list) = v.as_array_mut() {
+                    for child in list {
+                        scale_entry(child, share);
+                    }
+                }
+            }
+            "rewrite_time" | "time_in_nanos" | "reduce_time_in_nanos" => *v = scaled(v, share),
+            k if k.ends_with("_slice_time_in_nanos") => *v = scaled(v, share),
+            _ => {}
+        }
+    }
+}
+
+/// The index-level profiles made into one entry per shard, as OpenSearch
+/// reports them.
+///
+/// Each index was searched once, over all its shards. A shard's entry carries
+/// the index's query, collector and aggregation measurements in proportion to
+/// the documents that shard contributed to the match -- a shard that matched
+/// nothing did no work -- and the fetch of the hits that came from it.
+pub(crate) fn split_by_shard(profiles: Vec<Value>) -> Vec<Value> {
+    let node = crate::tasks::node_id();
+    let mut out = Vec::new();
+    for mut profile in profiles {
+        let index = profile.get("_index").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let shares: Vec<u64> = profile
+            .get("_shares")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|n| n.as_u64().unwrap_or(0)).collect())
+            .unwrap_or_else(|| vec![1]);
+        let fetch = profile.get("_fetch").cloned().unwrap_or_else(|| json!({}));
+        if let Some(o) = profile.as_object_mut() {
+            o.shift_remove("_index");
+            o.shift_remove("_shares");
+            o.shift_remove("_fetch");
+        }
+        let matched: u64 = shares.iter().sum();
+        for (shard, held) in shares.iter().enumerate() {
+            let share = match matched {
+                0 => 1.0 / shares.len() as f64,
+                m => *held as f64 / m as f64,
+            };
+            let mut searches = profile.get("searches").cloned().unwrap_or_else(|| json!([]));
+            if let Some(list) = searches.as_array_mut() {
+                for s in list {
+                    scale_entry(s, share);
+                }
+            }
+            let mut aggregations =
+                profile.get("aggregations").cloned().unwrap_or_else(|| json!([]));
+            if let Some(list) = aggregations.as_array_mut() {
+                for a in list {
+                    scale_entry(a, share);
+                }
+            }
+            out.push(json!({
+                "id": format!("[{node}][{index}][{shard}]"),
+                "inbound_network_time_in_millis": 0,
+                "outbound_network_time_in_millis": 0,
+                "searches": searches,
+                "aggregations": aggregations,
+                "fetch": fetch.get(shard.to_string()).cloned().unwrap_or_else(|| json!([])),
             }));
         }
     }
-    for shard in shard_profiles.iter_mut() {
-        shard["fetch"] = Value::Array(entries.clone());
-    }
+    out
 }

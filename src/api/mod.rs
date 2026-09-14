@@ -9,13 +9,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use boostcore::TantivyDocument;
-use boostcore::collector::TopDocs;
-use boostcore::query::TermQuery;
-use boostcore::schema::{IndexRecordOption, Term, Value as _};
+use boostcore::schema::Value as _;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
 mod alias;
+mod async_search;
+pub use async_search::*;
 pub mod json_position;
 // The handlers are re-exported flat, so the routing table reads as one list
 // and the module a handler lives in is a detail of where to find it.

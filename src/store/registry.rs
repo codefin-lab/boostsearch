@@ -169,8 +169,6 @@ impl Store {
             security: crate::security::Security::from_settings(&crate::tls::node_settings()),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            task_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scripts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -203,8 +201,6 @@ impl Store {
             security: crate::security::Security::from_settings(&crate::tls::node_settings()),
             templates: Arc::new(RwLock::new(HashMap::new())),
             scrolls: Arc::new(RwLock::new(HashMap::new())),
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            task_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scripts: Arc::new(RwLock::new(HashMap::new())),
         };
         for entry in std::fs::read_dir(&dir)? {

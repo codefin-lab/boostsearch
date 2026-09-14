@@ -24,10 +24,11 @@ curl -s 'localhost:9280/parcels/_settings?filter_path=**.refresh_interval'
 
 ## A waited-for job answers 409, and some documents changed anyway
 
-That is `conflicts: abort`, the default, doing its job: it stopped at the first
-version conflict. Nothing is rolled back -- the answer's `updated` says how many
-documents were written before it stopped, and `failures` names the document it
-stopped on. Either rerun with `conflicts: proceed`, if the script is safe to
+That is `conflicts: abort`, the default, doing its job: it stopped after the
+batch that met a version conflict. The rest of that batch was still written,
+and nothing is rolled back -- the answer's `updated` says how many documents
+were written, and `failures` names every document in the batch that
+conflicted. Either rerun with `conflicts: proceed`, if the script is safe to
 apply twice, or narrow the query so it excludes what is already done.
 
 ## `version_conflicts` is not 0 and nobody else is writing
@@ -61,10 +62,13 @@ curl -s -X POST 'localhost:9280/.tasks/_delete_by_query?refresh=true' \
   -H 'content-type: application/json' -d '{"query":{"match_all":{}}}'
 ```
 
-## `_rethrottle`, `_cancel`, `slices`, asynchronous search or `profile` look wrong
+## `_tasks/<id>/_cancel` or `_rethrottle` answers 200 with `node_failures`
 
-They are not part of `run.sh` because this node does not yet answer them the
-way OpenSearch does; `docs/design.md` lists what it answers instead.
+The task is not running: it finished, or the id is wrong. The failure's
+`caused_by` says which -- `task [...] is not found` (or `is missing`, for a
+rethrottle) for a task this node no longer runs, `No such node` for an id whose
+node part is not a node of the cluster. A finished job's result is read with
+`GET _tasks/<id>`.
 
 ## The node will not start: address in use
 
