@@ -158,75 +158,93 @@ pub(crate) fn index_stats(
         completion_stat["fields"] = Value::Object(f);
     }
 
-    // `groups` is only reported for the groups the request named
-    let groups: serde_json::Map<String, Value> = st
-        .search_groups
-        .read()
-        .iter()
-        .filter(|(k, _)| match want_groups {
-            None => false,
-            // the request may name groups outright, or by pattern
-            Some(w) => w.iter().any(|g| g == "_all" || g == *k || crate::store::glob_match(g, k)),
+    let c = &st.counters;
+    let load = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
+    // one set of search counters, for the index or for one group of it
+    let search_section = |t: &crate::store::counters::SearchTally| {
+        json!({
+            "query_total": t.query.total(), "query_time_in_millis": t.query.millis(),
+            "query_current": t.query.current(), "query_failed": load(&t.query_failed),
+            "fetch_total": t.fetch.total(), "fetch_time_in_millis": t.fetch.millis(),
+            "fetch_current": t.fetch.current(),
+            "scroll_total": t.scroll.total(), "scroll_time_in_millis": t.scroll.millis(),
+            "scroll_current": t.scroll.current(),
+            "suggest_total": t.suggest.total(), "suggest_time_in_millis": t.suggest.millis(),
+            "suggest_current": t.suggest.current(),
+            "point_in_time_total": 0, "point_in_time_time_in_millis": 0,
+            "point_in_time_current": 0,
+            // a search that reads its segments side by side counts what
+            // that cost separately
+            "concurrent_query_total": 0, "concurrent_query_time_in_millis": 0,
+            "concurrent_query_current": 0, "concurrent_avg_slice_count": 0.0,
+            "search_idle_reactivate_count_total": 0,
+            "startree_query_total": 0, "startree_query_time_in_millis": 0,
+            "startree_query_current": 0, "startree_query_failed": 0,
         })
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                json!({
-                    "query_total": v, "query_time_in_millis": 1, "query_current": 0,
-                    "fetch_total": v, "fetch_time_in_millis": 1, "fetch_current": 0,
-                    "scroll_total": 0, "scroll_time_in_millis": 0, "scroll_current": 0,
-                    "suggest_total": 0, "suggest_time_in_millis": 0, "suggest_current": 0
-                }),
-            )
-        })
-        .collect();
-    let groups_field = match want_groups {
-        None => Value::Null,
-        Some(_) => Value::Object(groups),
     };
+    // `groups` is only reported for the groups the request named
+    let groups_field = want_groups.map(|w| {
+        Value::Object(
+            c.groups
+                .read()
+                .iter()
+                // the request may name groups outright, or by pattern
+                .filter(|(k, _)| {
+                    w.iter().any(|g| g == "_all" || g == *k || crate::store::glob_match(g, k))
+                })
+                .map(|(k, t)| (k.clone(), search_section(t)))
+                .collect(),
+        )
+    });
+    // a document deleted or replaced stays in its segment, counted as
+    // deleted, until a merge rewrites the segment -- as `_cat/segments`
+    // reports it segment by segment
+    let deleted: u64 = searcher.segment_readers().iter().map(|r| r.num_deleted_docs() as u64).sum();
     // `human` asks for the readable form beside the machine one
     let human = p.get("human").map(|v| v != "false").unwrap_or(false);
+    let mut search = search_section(&c.search);
+    search["open_contexts"] = json!(0);
     let mut out = json!({
-        "docs": {"count": docs, "deleted": 0},
+        "docs": {"count": docs, "deleted": if st.closed { 0 } else { deleted }},
         "store": {"size_in_bytes": on_disk, "reserved_in_bytes": 0},
-        "indexing": {"index_total": docs, "index_time_in_millis": 0, "index_current": 0,
-                     "index_failed": 0, "delete_total": 0, "delete_time_in_millis": 0,
-                     "delete_current": 0,
+        "indexing": {"index_total": c.index.total(), "index_time_in_millis": c.index.millis(),
+                     "index_current": c.index.current(),
+                     "index_failed": load(&c.index_failed),
+                     "delete_total": c.delete.total(),
+                     "delete_time_in_millis": c.delete.millis(),
+                     "delete_current": c.delete.current(),
                      "noop_update_total":
                          st.noop_updates.load(std::sync::atomic::Ordering::Relaxed),
                      "is_throttled": false,
                      "throttle_time_in_millis": 0,
+                     "max_last_index_request_timestamp": load(&c.last_index_ms),
                      // what each write answered with, counted by status
                      "doc_status": {}},
-        "get": {"total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
-                "getTime": "0s",
-                "time_in_millis": 0,
-                "exists_total": st.gets.load(std::sync::atomic::Ordering::Relaxed),
-                "exists_time_in_millis": 0, "missing_total": 0,
-                "missing_time_in_millis": 0, "current": 0},
-        "search": {"open_contexts": 0, "query_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "query_time_in_millis": 1,
-                   "query_current": 0, "fetch_total": st.search_count.load(std::sync::atomic::Ordering::Relaxed), "fetch_time_in_millis": 1,
-                   "fetch_current": 0, "scroll_total": 0, "scroll_time_in_millis": 0,
-                   "scroll_current": 0, "suggest_total": 0, "suggest_time_in_millis": 0,
-                   "suggest_current": 0,
-                   "point_in_time_total": 0, "point_in_time_time_in_millis": 0,
-                   "point_in_time_current": 0,
-                   // a search that reads its segments side by side counts what
-                   // that cost separately
-                   "concurrent_query_total": 0, "concurrent_query_time_in_millis": 0,
-                   "concurrent_query_current": 0, "concurrent_avg_slice_count": 0.0,
-                   "search_idle_reactivate_count_total": 0,
-                   },
+        "get": {"total": c.get.total(),
+                "getTime": crate::api::shared::time_value_text(c.get.millis() * 1_000_000),
+                "time_in_millis": c.get.millis(),
+                "exists_total": c.get_exists.total(),
+                "exists_time_in_millis": c.get_exists.millis(),
+                "missing_total": c.get_missing.total(),
+                "missing_time_in_millis": c.get_missing.millis(), "current": c.get.current()},
+        "search": search,
         "merges": {"current": 0, "current_docs": 0, "current_size_in_bytes": 0,
-                   "total": 0, "total_time_in_millis": 0, "total_docs": 0,
-                   "total_size_in_bytes": 0,
+                   "total": c.merge.total(), "total_time_in_millis": c.merge.millis(),
+                   "total_docs": load(&c.merge_docs),
+                   "total_size_in_bytes": load(&c.merge_bytes),
                    "total_stopped_time_in_millis": 0, "total_throttled_time_in_millis": 0,
                    "total_auto_throttle_in_bytes": 20_971_520_i64,
-                   "unreferenced_file_cleanups_performed": 0},
-        "refresh": {"total": 0, "total_time_in_millis": 0, "external_total": 0,
-                    "external_total_time_in_millis": 0, "listeners": 0},
-        "flush": {"total": st.flushes.load(std::sync::atomic::Ordering::Relaxed),
-                  "periodic": 0, "total_time_in_millis": 0},
+                   "unreferenced_file_cleanups_performed": 0,
+                   "warmer": {"ongoing_count": 0, "total_bytes_received": 0,
+                              "total_bytes_sent": 0, "total_failure_count": 0,
+                              "total_invocations_count": 0, "total_receive_time_millis": 0,
+                              "total_send_time_millis": 0, "total_time_millis": 0}},
+        "refresh": {"total": c.refresh.total(), "total_time_in_millis": c.refresh.millis(),
+                    "external_total": c.refresh_external.total(),
+                    "external_total_time_in_millis": c.refresh_external.millis(),
+                    "listeners": 0},
+        "flush": {"total": c.flush.total(), "periodic": 0,
+                  "total_time_in_millis": c.flush.millis()},
         "warmer": {"current": 0, "total": 0, "total_time_in_millis": 0},
         "query_cache": {"memory_size_in_bytes": 0, "total_count": 0, "hit_count": 0,
                         "miss_count": 0, "cache_size": 0, "cache_count": 0, "evictions": 0},
@@ -287,16 +305,17 @@ pub(crate) fn index_stats(
         "total_upload_size": {"started_bytes": 0, "failed_bytes": 0, "succeeded_bytes": 0},
     }});
 
-    if let Value::Object(groups) = groups_field {
-        out["search"]["groups"] = Value::Object(groups);
+    if let Some(groups) = groups_field {
+        out["search"]["groups"] = groups;
     }
     if human {
         // the readable form of what a get cost, under both of the names
         // OpenSearch writes it as
-        out["get"]["time"] = json!("0s");
-        out["get"]["getTime"] = json!("0s");
-        out["get"]["exists_time"] = json!("0s");
-        out["get"]["missing_time"] = json!("0s");
+        let text = |ms: u64| json!(crate::api::shared::time_value_text(ms * 1_000_000));
+        out["get"]["time"] = text(c.get.millis());
+        out["get"]["getTime"] = text(c.get.millis());
+        out["get"]["exists_time"] = text(c.get_exists.millis());
+        out["get"]["missing_time"] = text(c.get_missing.millis());
     }
     out
 }
@@ -314,9 +333,13 @@ pub(crate) fn sum_stats(a: &Value, b: &Value) -> Value {
             }
             Value::Object(out)
         }
-        (Value::Number(x), Value::Number(y)) => {
-            json!(x.as_f64().unwrap_or(0.0) + y.as_f64().unwrap_or(0.0))
-        }
+        // a count stays a whole number when added up: summed as floats,
+        // `query_total` came back as `3.0`, which a client reading a long
+        // refuses
+        (Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+            (Some(a), Some(b)) => json!(a.saturating_add(b)),
+            _ => json!(x.as_f64().unwrap_or(0.0) + y.as_f64().unwrap_or(0.0)),
+        },
         _ => b.clone(),
     }
 }
@@ -471,13 +494,28 @@ pub(crate) fn stats_value(
                 "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0))});
             let seq = json!({"max_seq_no": max_seq, "local_checkpoint": local, "global_checkpoint": global});
             let mut shards = serde_json::Map::new();
+            // each shard counts the documents routed to it; what was deleted
+            // is not placed, so the first shard carries it
+            let per_shard = st.read().docs_per_shard();
+            let docs_of = |shard: u64| {
+                let mut docs = s.get("docs").cloned().unwrap_or(json!({}));
+                if docs.is_object() {
+                    docs["count"] = json!(per_shard.get(shard as usize).copied().unwrap_or(0));
+                    if shard > 0 {
+                        docs["deleted"] = json!(0);
+                    }
+                }
+                docs
+            };
             let mut copies: Vec<_> = live.routing.shards_of(n).collect();
             if copies.is_empty() {
-                shards.insert("0".into(), json!([{
-                    "routing": {"state": "STARTED", "primary": true, "node": me.as_str(), "relocating_node": null},
-                    "docs": s.get("docs").cloned().unwrap_or(json!({})),
-                    "commit": commit, "seq_no": seq,
-                }]));
+                for shard in 0..per_shard.len().max(1) as u64 {
+                    shards.insert(shard.to_string(), json!([{
+                        "routing": {"state": "STARTED", "primary": true, "node": me.as_str(), "relocating_node": null},
+                        "docs": docs_of(shard),
+                        "commit": commit.clone(), "seq_no": seq.clone(),
+                    }]));
+                }
             } else {
                 copies.sort_by_key(|c| (c.shard, !c.primary));
                 for c in copies {
@@ -487,7 +525,7 @@ pub(crate) fn stats_value(
                             "routing": {"state": c.state.as_str(), "primary": c.primary,
                                 "node": c.node.as_ref().map(|x| x.as_str().to_string()),
                                 "relocating_node": c.relocating_node.as_ref().map(|x| x.as_str().to_string())},
-                            "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                            "docs": docs_of(c.shard as u64),
                             "commit": commit.clone(), "seq_no": seq.clone(),
                         }));
                     }

@@ -22,7 +22,7 @@ checks (`_count`, and the polling in `follow`) are listed where they happen.
 | a repricing job with conflicts: proceed, sent off and followed | `POST` | `/$IDX/_update_by_query?wait_for_completion=false&refresh=true` | `requests/04-reprice-by-weight-band.json` |
 |  | `GET` | `/_tasks/<task id>` | -- (repeated until `completed`) |
 |  | `POST` | `/$IDX/_count` | inline |
-| the same collision without conflicts: proceed -- the job stops at the first | `POST` | `/$IDX/_update/TH000075` ... `/$IDX/_update/TH005925` (40 calls) | `requests/06-the-dispatch-app-marks-a-parcel-returned.json` |
+| the same collision without conflicts: proceed -- the job stops after the batch that met one | `POST` | `/$IDX/_update/TH000075` ... `/$IDX/_update/TH005925` (40 calls) | `requests/06-the-dispatch-app-marks-a-parcel-returned.json` |
 |  | `POST` | `/$IDX/_update_by_query` | `requests/07-the-same-job-without-conflicts-proceed.json` (answers 409) |
 | nothing is left running once the jobs have answered | `GET` | `/_tasks?actions=*byquery&detailed` | -- |
 | the .tasks index: where a finished task's result outlives the request | `POST` | `/.tasks/_refresh` | -- |

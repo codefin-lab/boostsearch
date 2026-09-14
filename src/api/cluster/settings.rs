@@ -235,6 +235,77 @@ pub(crate) fn check_cluster_setting(key: &str, value: &Value) -> Option<Response
     None
 }
 
+/// Cluster settings and the value each has when nobody set it, as the
+/// reference lists them under `include_defaults`.
+const COMMON_DEFAULTS: &[(&str, &str)] = &[
+    ("action.auto_create_index", "true"),
+    ("action.destructive_requires_name", "false"),
+    ("action.search.shard_count.limit", "9223372036854775807"),
+    ("bootstrap.memory_lock", "false"),
+    ("cluster.blocks.read_only", "false"),
+    ("cluster.blocks.read_only_allow_delete", "false"),
+    ("cluster.indices.close.enable", "true"),
+    ("cluster.info.update.interval", "30s"),
+    ("cluster.max_shards_per_node", "1000"),
+    ("cluster.max_voting_config_exclusions", "10"),
+    ("cluster.no_cluster_manager_block", "metadata_write"),
+    ("cluster.persistent_tasks.allocation.enable", "all"),
+    ("cluster.remote.connect", "true"),
+    ("cluster.remote.initial_connect_timeout", "30s"),
+    ("cluster.routing.allocation.allow_rebalance", "indices_all_active"),
+    ("cluster.routing.allocation.balance.index", "0.55"),
+    ("cluster.routing.allocation.balance.shard", "0.45"),
+    ("cluster.routing.allocation.balance.threshold", "1.0"),
+    ("cluster.routing.allocation.cluster_concurrent_rebalance", "2"),
+    ("cluster.routing.allocation.disk.reroute_interval", "60s"),
+    ("cluster.routing.allocation.disk.threshold_enabled", "true"),
+    ("cluster.routing.allocation.disk.watermark.flood_stage", "95%"),
+    ("cluster.routing.allocation.disk.watermark.high", "90%"),
+    ("cluster.routing.allocation.disk.watermark.low", "85%"),
+    ("cluster.routing.allocation.enable", "all"),
+    ("cluster.routing.allocation.node_concurrent_incoming_recoveries", "2"),
+    ("cluster.routing.allocation.node_concurrent_outgoing_recoveries", "2"),
+    ("cluster.routing.allocation.node_concurrent_recoveries", "2"),
+    ("cluster.routing.allocation.node_initial_primaries_recoveries", "4"),
+    ("cluster.routing.allocation.same_shard.host", "false"),
+    ("cluster.routing.allocation.total_shards_per_node", "-1"),
+    ("cluster.routing.rebalance.enable", "all"),
+    ("cluster.routing.use_adaptive_replica_selection", "true"),
+    ("gateway.expected_data_nodes", "-1"),
+    ("http.compression", "true"),
+    ("http.cors.enabled", "false"),
+    ("http.max_content_length", "100mb"),
+    ("http.max_header_size", "16384b"),
+    ("http.max_initial_line_length", "4096b"),
+    ("indices.breaker.fielddata.limit", "40%"),
+    ("indices.breaker.request.limit", "60%"),
+    ("indices.breaker.total.limit", "95%"),
+    ("indices.breaker.total.use_real_memory", "true"),
+    ("indices.fielddata.cache.size", "35.0%"),
+    ("indices.id_field_data.enabled", "true"),
+    ("indices.memory.index_buffer_size", "10%"),
+    ("indices.queries.cache.size", "10%"),
+    ("indices.query.bool.max_clause_count", "1024"),
+    ("indices.recovery.max_bytes_per_sec", "41943040b"),
+    ("indices.recovery.max_concurrent_file_chunks", "2"),
+    ("indices.requests.cache.size", "1%"),
+    ("plugins.index_state_management.job_interval", "5"),
+    ("script.max_compilations_rate", "use-context"),
+    ("script.max_size_in_bytes", "65535"),
+    ("search.allow_expensive_queries", "true"),
+    ("search.concurrent_segment_search.mode", "auto"),
+    ("search.default_allow_partial_results", "true"),
+    ("search.default_keep_alive", "5m"),
+    ("search.default_search_timeout", "-1"),
+    ("search.low_level_cancellation", "true"),
+    ("search.max_aggregation_rewrite_filters", "3000"),
+    ("search.max_buckets", "65535"),
+    ("search.max_keep_alive", "24h"),
+    ("search.max_open_scroll_context", "500"),
+    ("transport.compress", "false"),
+    ("transport.connect_timeout", "30s"),
+];
+
 pub async fn cluster_settings_get(State(store): State<Store>, Query(p): Query<Params>) -> Response {
     let raw = store.cluster_settings();
     let flat = p.get("flat_settings").map(|v| v == "true").unwrap_or(false);
@@ -261,6 +332,41 @@ pub async fn cluster_settings_get(State(store): State<Store>, Query(p): Query<Pa
         // one out of the defaults and registers it again under another name
         for (key, value) in super::configured_defaults() {
             defaults[key] = value;
+        }
+        // What a setting nobody set comes to. Only the node attributes were
+        // listed, so a caller asking what the disk watermarks or the bucket
+        // limit are was told nothing; these are the values the reference
+        // lists for the settings an operator asks about, and the ones a
+        // node works out for itself. A setting set on the cluster is not a
+        // default, and is left out.
+        let set: std::collections::HashSet<String> = ["persistent", "transient"]
+            .iter()
+            .filter_map(|scope| raw.get(*scope))
+            .flat_map(|v| {
+                let mut flat = serde_json::Map::new();
+                crate::api::flatten_settings(v, "", &mut flat);
+                flat.into_iter().map(|(k, _)| k)
+            })
+            .collect();
+        let me = crate::cluster::identity();
+        let cpus = crate::api::num_cpus();
+        let mut common: Vec<(String, Value)> =
+            COMMON_DEFAULTS.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+        common.extend([
+            ("cluster.name".to_string(), json!(me.cluster_name)),
+            ("node.name".to_string(), json!(me.name)),
+            ("node.roles".to_string(), json!(me.roles)),
+            ("thread_pool.search.size".to_string(), json!((cpus * 3 / 2 + 1).to_string())),
+            ("thread_pool.write.size".to_string(), json!(cpus.to_string())),
+            ("thread_pool.get.size".to_string(), json!(cpus.to_string())),
+            ("script.allowed_types".to_string(), json!([])),
+            ("script.allowed_contexts".to_string(), json!([])),
+            ("cluster.routing.allocation.awareness.attributes".to_string(), json!([])),
+        ]);
+        for (key, value) in common {
+            if !set.contains(&key) && defaults.get(&key).is_none() {
+                defaults[key] = value;
+            }
         }
         if !flat {
             defaults = nest_settings(&defaults);

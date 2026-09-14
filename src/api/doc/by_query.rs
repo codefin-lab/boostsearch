@@ -137,25 +137,77 @@ impl Tally {
     }
 }
 
+/// Why a walk's batches are too large for what it reads, if they are.
+///
+/// The walk writes a batch at a time, the way the reference scrolls, so a
+/// batch -- not the number of documents walked -- is what the index's
+/// `max_result_window` bounds. It is judged before the walk starts, so a
+/// request sent off as a task is refused as the waited-for one is.
+fn batch_refusal(store: &Store, expr: &str, batch: usize) -> Option<Response> {
+    let window = store
+        .resolve_open(expr)
+        .iter()
+        .filter_map(|n| store.get(n))
+        .filter_map(|st| st.read().numeric_setting("max_result_window"))
+        .min()
+        .unwrap_or(10_000);
+    if batch as u64 > window {
+        let reason = format!(
+            "Batch size is too large, size must be less than or equal to: [{window}] but was \
+             [{batch}]. Scroll batch sizes cost as much memory as result windows so they are \
+             controlled by the [index.max_result_window] index level setting."
+        );
+        // the reference fails the first shard's scroll with it, and says so
+        // the way a failed search phase does
+        let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+        let mut caused_by = cause.clone();
+        caused_by["caused_by"] = cause.clone();
+        let index = store.resolve_open(expr).into_iter().next().unwrap_or_default();
+        let body = json!({
+            "error": {
+                "root_cause": [cause.clone()],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "phase": "query",
+                "grouped": true,
+                "failed_shards": [{"shard": 0, "index": index,
+                    "node": crate::cluster::identity().id.as_str(), "reason": cause}],
+                "caused_by": caused_by,
+            },
+            "status": 400,
+        });
+        return Some((StatusCode::BAD_REQUEST, axum::Json(body)).into_response());
+    }
+    None
+}
+
 /// Every document a query finds, as `(index, id, source)`.
 ///
 /// The walk reads them all before it writes any: writing while the reader is
 /// still open would have it read what the walk itself had just written. With
 /// no limit named, the limit is everything the query matches -- a walk that
 /// stopped at the first ten thousand left the rest of an index unchanged and
-/// said it was done.
+/// said it was done. The request's `routing` and `preference` keep the walk
+/// to the shards they name, as they keep a search.
 fn found(
     store: &Store,
     expr: &str,
     body: &Value,
     limit: Option<usize>,
+    p: &Params,
 ) -> std::result::Result<Vec<Seen>, Response> {
+    let mut asked = Params::new();
+    for key in ["routing", "preference"] {
+        if let Some(v) = p.get(key) {
+            asked.insert(key.into(), v.clone());
+        }
+    }
     let query = body.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
     let limit = match limit {
         Some(n) => n,
         None => {
             let counted = json!({"query": query, "size": 0, "track_total_hits": true});
-            crate::search::run(store, expr, &counted, &Params::new())?.total as usize
+            crate::search::run(store, expr, &counted, &asked)?.total as usize
         }
     };
     if limit == 0 {
@@ -168,7 +220,8 @@ fn found(
     if let Some(sort) = body.get("sort") {
         request["sort"] = sort.clone();
     }
-    let answer = crate::search::run(store, expr, &request, &Params::new())?;
+    let answer =
+        crate::search::as_the_server(|| crate::search::run(store, expr, &request, &asked))?;
     // a walk rewrites what it reads, so a document whose source was never
     // stored is one it cannot carry over
     for hit in &answer.hits {
@@ -714,10 +767,7 @@ fn change_refusal_for(store: &Store, expr: &str) -> Option<Response> {
         let Some(st) = store.get(&name) else { continue };
         let refusal = st.read().change_refusal();
         if let Some((kind, why)) = refusal {
-            let status = match kind {
-                "index_closed_exception" => StatusCode::BAD_REQUEST,
-                _ => StatusCode::FORBIDDEN,
-            };
+            let status = crate::store::IdxState::refusal_status(kind, &why);
             return Some(err(status, kind, why));
         }
     }
@@ -1051,6 +1101,16 @@ impl Walk {
         }
     }
 
+    /// The parameters the walk's read keeps: a by-query walk is kept to the
+    /// shards its request's `routing` and `preference` name; a reindex names
+    /// its source in the body, and reads all of it.
+    fn routed(&self) -> Params {
+        match self.kind {
+            Kind::Reindex => Params::new(),
+            _ => self.p.clone(),
+        }
+    }
+
     /// How many documents the walk may write, if the request said.
     fn wanted(&self) -> Option<usize> {
         max_docs(&self.p, &self.body)
@@ -1116,7 +1176,7 @@ fn read_walk(walk: &Walk) -> std::result::Result<Vec<Seen>, Response> {
         // bounds what a caller may ask the node to hold, and a walk the node
         // runs for itself holds it a batch at a time on the way out
         _ => crate::search::as_the_server(|| {
-            found(&walk.store, &walk.read, &walk.search, walk.wanted())
+            found(&walk.store, &walk.read, &walk.search, walk.wanted(), &walk.routed())
         }),
     }
 }
@@ -1972,6 +2032,9 @@ pub async fn delete_by_query(
             "Validation Failed: 1: query is missing;",
         );
     }
+    if let Some(refusal) = batch_refusal(&store, &index, batch_size(&p, &body)) {
+        return refusal;
+    }
     if let Some(failure) = too_few_copies(&store, &index, &p) {
         return unavailable(failure);
     }
@@ -2014,6 +2077,9 @@ pub async fn update_by_query(
             Err(e) if e.kind == "compile error" => return crate::api::compile_failure(e),
             Err(e) => return crate::api::script_failure(e),
         }
+    }
+    if let Some(refusal) = batch_refusal(&store, &index, batch_size(&p, &body)) {
+        return refusal;
     }
     if let Some(failure) = too_few_copies(&store, &index, &p) {
         return unavailable(failure);
@@ -2104,6 +2170,11 @@ pub async fn reindex(
     // already there
     if let Some(refused) = change_refusal_for(&store, &to) {
         return refused;
+    }
+    if remote.is_none()
+        && let Some(refusal) = batch_refusal(&store, &from, batch_size(&p, &source))
+    {
+        return refusal;
     }
     // a destination that is not there yet is created, unless the cluster was
     // told which names may be created on the fly

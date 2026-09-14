@@ -64,32 +64,28 @@ exactly that.
 
 ## `span_near` returns a parse error
 
-Two shapes are refused by this node:
+The clauses of a `span_near` must all name one field -- `Cannot add clause
+... to SpanNearQuery for field ...` -- and each clause must itself be a span
+query: a `match` inside `clauses` is refused. A boost belongs on the outer
+query, not on a clause. `span_gap` is only allowed with `in_order: true`.
 
-- `in_order: false` -- `unsupported query type [span_near] with in_order: false`.
-  Use an `intervals` `all_of` with `ordered: false` instead.
-- `span_multi` anywhere but the last clause -- `[span_multi] is only supported
-  as the last clause` -- and a `wildcard` inside `span_multi` in any clause.
-  Put the prefix last, as step 10 does, or use an `intervals` `prefix` or
-  `wildcard` rule.
+## Scores of span and interval queries
 
-## Scores of span and interval queries look flat
-
-Here every interval hit scores 0.5 and a single-term span 1.0, so the order of
-their hits is not a ranking; `run.sh` prints their ids sorted for that reason.
-OpenSearch scores an interval hit by how short the matching stretch is, and a
-span by BM25 over its sloppy frequency. If the order matters, wrap the
-positional query in a `bool` `filter` and put a `match` beside it in `must`,
-so the ranking comes from the words.
+A span scores by BM25 over its sloppy frequency: each match adds
+`1 / (1 + width)`, so *terminate ... notice* five words apart counts a sixth
+of an adjacent pair. An interval hit scores `freq / (freq + 1)`, where each
+interval adds one over how much longer it is than the rule needs. Both rank
+tight matches first; `run.sh` still prints their ids sorted, which keeps its
+output the same whichever order ties fall in.
 
 ## `more_like_this` returns almost everything
 
 With `minimum_should_match: 1` any shared term is enough, and on twelve
 clauses *the*, *party* and *agreement* are shared by nearly all of them.
 Read the order, not the count. On a large corpus set `max_doc_freq` or
-`stop_words` to drop the common words; note that this node does not yet apply
-`max_doc_freq`, `stop_words` or `minimum_should_match` to `more_like_this`, and
-finds nothing when `fields` names a sub-field such as `body.english`.
+`stop_words` to drop the common words, or leave `minimum_should_match` at its
+default of 30% of the chosen terms, which on these clauses finds nothing like
+*c1* at all.
 
 ## `_termvectors` returns `found: false` or no `term_vectors`
 

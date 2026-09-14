@@ -175,6 +175,35 @@ impl IdxState {
         out
     }
 
+    /// Read back the routing every committed document was written with.
+    ///
+    /// The routing is kept in the document, so this is what a restart knows
+    /// of it; a segment without the column holds no routed document at all
+    /// and costs nothing to pass over. Run when an index opens, before its
+    /// translog is replayed over it and before anything is written to it.
+    pub fn load_routing(&mut self) {
+        let column = format!("{RAW}.{}", crate::store::ROUTING_KEY);
+        let searcher = self.realtime.searcher();
+        for seg in searcher.segment_readers() {
+            let Ok(Some(routing)) = seg.fast_fields().str(&column) else { continue };
+            let Ok(Some(ids)) = seg.fast_fields().str("_id") else { continue };
+            let alive = seg.alive_bitset();
+            for doc in 0..seg.max_doc() {
+                if alive.map(|a| a.is_deleted(doc)).unwrap_or(false) {
+                    continue;
+                }
+                let Some(r_ord) = routing.term_ords(doc).next() else { continue };
+                let Some(id_ord) = ids.term_ords(doc).next() else { continue };
+                let (mut r, mut id) = (String::new(), String::new());
+                if routing.ord_to_str(r_ord, &mut r).is_ok()
+                    && ids.ord_to_str(id_ord, &mut id).is_ok()
+                {
+                    self.routing.insert(id, r);
+                }
+            }
+        }
+    }
+
     /// Merge a scan result in without overwriting anything written since.
     pub fn absorb_ids(&mut self, scanned: Vec<u64>) {
         for fp in scanned {

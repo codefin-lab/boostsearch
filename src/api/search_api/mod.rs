@@ -83,20 +83,8 @@ async fn search_answer(
     if !split.remote.is_empty() {
         return across_clusters(&store, split, &expr, body, &p).await;
     }
-    // `stats: [name]` tags the query so _stats can report per-group counts
-    if let Some(groups) = body.get("stats").and_then(|v| v.as_array()) {
-        let names: Vec<String> =
-            groups.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect();
-        for n in store.resolve(&expr) {
-            if let Some(st) = store.get(&n) {
-                let g = st.read();
-                let mut m = g.search_groups.write();
-                for name in &names {
-                    *m.entry(name.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
+    // `stats: [name]` tags the query so _stats can report per-group counts;
+    // the shards count them as they search
     note_fielddata(&store, &expr, &body);
     if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;
@@ -200,6 +188,22 @@ async fn search_answer(
 /// run one after another on the thread answering the request.
 const MOST_SUB_SEARCHES: usize = 1_000;
 
+/// The keys of a multi search header that are parameters of its search.
+const HEADER_PARAMS: &[&str] = &[
+    "routing",
+    "preference",
+    "search_type",
+    "request_cache",
+    "allow_partial_search_results",
+    "ignore_unavailable",
+    "expand_wildcards",
+    "allow_no_indices",
+    "ignore_throttled",
+    "cancel_after_time_interval",
+    "phase_took",
+    "ccs_minimize_roundtrips",
+];
+
 pub async fn msearch(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -269,18 +273,36 @@ pub async fn msearch(
             })
             .unwrap_or_else(|| default_index.clone());
         fold_params_into_body(&mut req, &p);
+        // what a header says about how to search -- the routing, the
+        // preference, the search type -- is a parameter of that one search,
+        // not part of its body, where it was refused as an unknown key
+        let mut sub = p.clone();
         if let Some(hdr) = header.as_object() {
             for (k, v) in hdr {
-                if k != "index" && req.get(k).is_none() {
+                if HEADER_PARAMS.contains(&k.as_str()) {
+                    let text = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Array(a) => a
+                            .iter()
+                            .map(|x| x.as_str().map(String::from).unwrap_or_else(|| x.to_string()))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        other => other.to_string(),
+                    };
+                    sub.insert(k.clone(), text);
+                } else if k != "index" && req.get(k).is_none() {
                     req[k.clone()] = v.clone();
                 }
             }
         }
+        let p = sub;
         // a bad parameter in any sub-request fails the whole msearch
-        if let Some(why) = crate::security::item_refusal(
+        if let Some(why) = crate::security::item_refusal_audited(
             &store,
             &["indices:data/read/search"],
+            &expr,
             &crate::security::layer::indices_for_expr(&store, &expr),
+            || Some(req.to_string()),
         ) {
             responses.push(json!({"error": crate::security::item_error(&why), "status": 403}));
             continue;
@@ -394,12 +416,13 @@ pub async fn search_shards(
     let slice = body.get("slice");
     let slice_id = slice.and_then(|s| s.get("id")).and_then(|v| v.as_u64()).unwrap_or(0);
     let slice_max = slice.and_then(|s| s.get("max")).and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    // `preference: _shards:...` narrows to the shards it names before
-    // anything else looks at the list
-    let preferred: Option<Vec<u64>> = p.get("preference").and_then(|v| {
-        v.strip_prefix("_shards:")
-            .map(|list| list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect())
-    });
+    // `routing` and `preference: _shards:...` narrow to the shards they name
+    // before anything else looks at the list, the way a search is narrowed
+    let narrowed = store.search_narrowing(
+        expr.as_deref().unwrap_or(""),
+        p.get("routing").map(|s| s.as_str()),
+        p.get("preference").map(|s| s.as_str()),
+    );
     // each shard as the manager placed its copies; an index the manager has
     // not placed yet is this node's alone
     let live = crate::cluster::current_state();
@@ -417,7 +440,7 @@ pub async fn search_shards(
             })
             .unwrap_or(1);
         for shard in 0..count {
-            if preferred.as_ref().map(|w| !w.contains(&shard)).unwrap_or(false) {
+            if narrowed.get(n).map(|w| !w.contains(&shard)).unwrap_or(false) {
                 continue;
             }
             listed.push((n.clone(), shard));

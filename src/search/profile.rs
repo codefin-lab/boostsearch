@@ -1067,7 +1067,7 @@ pub(crate) fn own_agg_profiles(
 /// What reading one index's hits back cost, shard by shard, as the fetch
 /// loop measured it. Kept on the index's profile under `_fetch` until the
 /// profile is shared out between the shards.
-pub(crate) fn note_fetch(
+pub(crate) fn note_fetch_part(
     shard_profiles: &mut [Value],
     index: &str,
     shard: u64,

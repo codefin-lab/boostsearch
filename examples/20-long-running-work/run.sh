@@ -137,7 +137,7 @@ expect "no dispatch write was lost: all $delivered still say who delivered them"
   "$(count '{"query":{"term":{"delivered_by":"dispatch-app"}}}') == $delivered"
 note "the $conflicts skipped parcels still carry the old fee; running the job again picks them up"
 
-step "the same collision without conflicts: proceed -- the job stops at the first"
+step "the same collision without conflicts: proceed -- the job stops after the batch that met one"
 for i in $(seq 75 150 6000); do
   quietf POST "/$IDX/_update/$(printf 'TH%06d' "$i")" requests/06-the-dispatch-app-marks-a-parcel-returned.json
 done
@@ -151,8 +151,13 @@ body, status = open(sys.argv[1]).read().rstrip("\n").rsplit("\n", 1)
 open(sys.argv[2], "w").write(body)
 print(body); print(f"   HTTP {status}")
 PY
-expect "it stopped at the first conflict and said which parcel" \
-  "$(pick "$WORK/abort.json" 'd["version_conflicts"]') == 1 and $(pick "$WORK/abort.json" 'd["failures"][0]["cause"]["type"] == "version_conflict_engine_exception"')"
+# a job reads and writes a batch at a time; aborting on a conflict stops it
+# once the batch the conflict was in has been written, and every conflict in
+# that batch is listed
+expect "it stopped after the batch that met a conflict: one batch, the rest of it written" \
+  "$(pick "$WORK/abort.json" 'd["batches"]') == 1 and $(pick "$WORK/abort.json" 'd["updated"] + d["version_conflicts"]') == $(pick "$WORK/abort.json" 'min(1000, d["total"])')"
+expect "and listed every conflict in that batch, naming each parcel" \
+  "$(pick "$WORK/abort.json" 'd["version_conflicts"] >= 1 and len(d["failures"]) == d["version_conflicts"] and all(f["cause"]["type"] == "version_conflict_engine_exception" and f["status"] == 409 for f in d["failures"])')"
 note "what it had already written stays written: an aborted job is not rolled back"
 
 step "nothing is left running once the jobs have answered"

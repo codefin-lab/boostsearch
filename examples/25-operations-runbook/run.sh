@@ -41,12 +41,11 @@ expect() {
 # settle -- wait, up to five seconds, for the cluster-wide health to agree with
 # the per-index health.
 #
-# For about half a second after an index is created, this node's
-# _cluster/health can answer "green" while the same answer counts an
-# unassigned shard, and while level=indices already says the new index is
-# yellow. OpenSearch acknowledges a create only once the cluster state carrying
-# it is applied, so its health never shows that gap. A runbook that reads the
-# colour straight after a create would record the wrong one, so this asks again.
+# Earlier builds of this node could, for about half a second after an index
+# was created, answer "green" from _cluster/health while counting an
+# unassigned shard, and while level=indices already said the new index was
+# yellow. The summary is now judged from the same state as the per-index view,
+# so this returns at once; it stays for a runbook pointed at an older node.
 settle() {
   local i=0
   while [ "$i" -lt 25 ]; do
@@ -200,7 +199,7 @@ note "{} -- no blocks left on orders"
 step "is anything queueing or being rejected? -- _cat/thread_pool"
 req GET "/_cat/thread_pool/search,write,get?v&h=name,active,queue,rejected&s=name"
 req GET "/_cat/thread_pool?h=name,type&s=name:desc&format=json"
-note "on this node active, queue and rejected are not measured and always read 0 -- see docs/troubleshooting.md"
+note "active and completed count the requests each pool has run; queue is the runtime's backlog -- see docs/troubleshooting.md"
 
 step "caches, flush, refresh -- the three buttons, and what each one does"
 req POST "/orders/_cache/clear?query=true&request=true&fielddata=true"
@@ -215,7 +214,7 @@ reqf PUT /orders/_settings requests/13-slow-log-thresholds.json
 req GET "/orders/_settings/index.search.slowlog*"
 reqf GET /orders/_search requests/14-a-search-the-slow-log-would-catch.json
 note "with query.debug at 0ms, OpenSearch writes that search to logs/<cluster>_index_search_slowlog.json"
-note "this node stores and reports the thresholds, but writes no slow log entries -- see docs/troubleshooting.md"
+note "this node writes the same entry to its log output, and to BOOSTSEARCH_LOGS when set -- see docs/troubleshooting.md"
 reqf PUT /orders/_settings requests/15-slow-log-thresholds-removed.json
 expect "slow log settings left on orders" \
   "$(get '/orders/_settings' 'len(d["orders"]["settings"]["index"].get("search", {}))')" 0

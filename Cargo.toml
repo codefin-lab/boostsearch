@@ -92,6 +92,8 @@ lindera = { version = "6.0.0", features = [
     "embed-cc-cedict",
 ], optional = true }
 jsonwebtoken = "9"
+# the cipher on-behalf-of tokens carry their roles under, as the plugin does
+aes = "0.8"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 quick-xml = "0.42.0"

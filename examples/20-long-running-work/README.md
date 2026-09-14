@@ -28,9 +28,8 @@ where they are kept after the request that started them has gone.
 | 11 | `_delete_by_query?wait_for_completion=false`, followed the same way |
 
 `_rethrottle`, `_tasks/<id>/_cancel`, `slices`, asynchronous search and the
-search `profile` are part of the same story and are not in `run.sh`: this node
-answers each of them, but not with what OpenSearch would say.
-`docs/design.md` says what each one is for and what this node does instead.
+search `profile` are part of the same story and are not in `run.sh`, because
+what they print depends on timing. `docs/design.md` says what each one is for.
 
 ## Running it
 
@@ -71,9 +70,11 @@ port with `PORT=9287 make serve` and `BS=http://127.0.0.1:9287`.
   those forty come back as `version_conflicts: 40`, `updated: 5960`, and all
   forty deliveries survive. Without that check the repricing would have written
   back the old `status` and the deliveries would have been silently undone.
-- **Step 8** is the same collision without `conflicts: proceed`. The job stops
-  at the first conflict (here `TH000075`), answers 409, and the 107 parcels it
-  had already written stay written. An aborted job is not a transaction.
+- **Step 8** is the same collision without `conflicts: proceed`. The job works
+  a batch of 1000 at a time: the first batch meets some of the forty writes, so
+  it writes the rest of that batch, lists every conflict it met there in
+  `failures` (the first is `TH000075`), answers 409 and stops. What it wrote
+  stays written. An aborted job is not a transaction.
 - **Step 10**: the repricing's result is a document in `.tasks`, with the same
   40 conflicts, and it is still there after the request, the connection and the
   client are gone. That is what makes a job sent off safe to lose track of.

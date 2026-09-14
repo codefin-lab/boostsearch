@@ -99,6 +99,35 @@ pub fn doc_err(
     r
 }
 
+/// Why a request by id without a routing value is refused where the mapping
+/// requires one, as the reference words it -- which names no index uuid.
+pub fn routing_missing_cause(index: &str, id: &str) -> Value {
+    json!({
+        "type": "routing_missing_exception",
+        "reason": format!("routing is required for [{index}]/[{id}]"),
+        "index": index,
+        "index_uuid": "_na_",
+    })
+}
+
+/// The same refusal as a whole answer.
+pub fn routing_missing(index: &str, id: &str) -> Response {
+    cause_refusal(StatusCode::BAD_REQUEST, routing_missing_cause(index, id))
+}
+
+/// A refusal whose cause is written out in full, answered with that cause
+/// at the top and as the root cause.
+pub fn cause_refusal(status: StatusCode, cause: Value) -> Response {
+    let kind = cause.get("type").and_then(|v| v.as_str()).unwrap_or("exception").to_string();
+    let reason = cause.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut error = cause.clone();
+    error["root_cause"] = json!([cause]);
+    let mut r =
+        (status, axum::Json(json!({"error": error, "status": status.as_u16()}))).into_response();
+    r.extensions_mut().insert(ErrorKind { kind, reason });
+    r
+}
+
 /// The cause a refusal quotes, kept beside its body, so a bulk item built
 /// from the refusal quotes it too.
 #[derive(Clone, Debug)]
@@ -367,6 +396,19 @@ pub(crate) fn fold_params_into_body(body: &mut Value, p: &Params) {
             };
         }
     }
+    // `explain` on the URL asks what the body's `explain` asks: each hit's
+    // explanation, and the shard that answered for it
+    if let (Some(v), None) = (p.get("explain"), body.get("explain")) {
+        body["explain"] = json!(v != "false");
+    }
+    // `?stats=a,b` names the groups a search is counted under, as `stats`
+    // in the body does
+    if let Some(s) = p.get("stats")
+        && body.get("stats").is_none()
+    {
+        body["stats"] =
+            s.split(',').map(|g| json!(g.trim())).filter(|g| g != "").collect::<Value>();
+    }
     if let Some(s) = p.get("sort")
         && body.get("sort").is_none()
     {
@@ -443,6 +485,51 @@ pub(crate) fn readable_bytes(bytes: u64) -> String {
         }
     }
     "0b".to_string()
+}
+
+/// A duration the way OpenSearch writes a time value as text: in the largest
+/// unit it reaches, with at most one decimal, and `0s` for nothing --
+/// `856micros`, `13.7ms`, `500ms`, `1.5m`.
+pub(crate) fn time_value_text(nanos: u64) -> String {
+    if nanos == 0 {
+        return "0s".into();
+    }
+    const UNITS: &[(u64, &str)] = &[
+        (86_400_000_000_000, "d"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "micros"),
+        (1, "nanos"),
+    ];
+    let (scale, suffix) = UNITS.iter().find(|(s, _)| nanos >= *s).copied().unwrap_or((1, "nanos"));
+    let value = nanos as f64 / scale as f64;
+    let rounded = (value * 10.0).round() / 10.0;
+    if rounded.fract() == 0.0 {
+        format!("{}{suffix}", rounded as u64)
+    } else {
+        format!("{rounded:.1}{suffix}")
+    }
+}
+
+/// A time value as a request writes one -- a number and a unit -- in
+/// nanoseconds. A number with no unit is not one.
+pub(crate) fn parse_time_value_nanos(text: &str) -> Option<u64> {
+    let t = text.trim();
+    let split = t.find(|c: char| c.is_ascii_alphabetic())?;
+    let n: f64 = t[..split].trim().parse().ok()?;
+    let scale: f64 = match &t[split..] {
+        "nanos" => 1.0,
+        "micros" => 1e3,
+        "ms" => 1e6,
+        "s" => 1e9,
+        "m" => 60e9,
+        "h" => 3600e9,
+        "d" => 86400e9,
+        _ => return None,
+    };
+    (n >= 0.0).then_some((n * scale) as u64)
 }
 
 /// A size the way a `cat` column writes one: readable text, or a plain number

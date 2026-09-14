@@ -142,16 +142,11 @@ Some of the questions in this runbook get an answer from this node that is not
 the one OpenSearch gives. They are kept out of the checks, or the step says so
 where it runs:
 
-- `_nodes/hot_threads` answers with the nodes-info JSON, not the plain-text
-  thread dump.
-- `_nodes/stats` `jvm`, `os`, `fs` and `process` are fixed numbers (1 GiB of
-  memory, 2 GiB of disk, zero heap), as are the disk columns of
-  `_cat/allocation` and the heap, RAM and CPU columns of `_cat/nodes`. Step 21
-  reads `_boostsearch/memory` for the process's real memory instead.
-- `_cat/thread_pool` always reads 0 for `active`, `queue` and `rejected`.
-- The search slow log thresholds are stored and read back, but no slow log
-  entries are written.
-- `_stats?groups=` returns `"groups":{}` after searches made with `stats=`.
+- `_nodes/hot_threads` is the plain-text report with measured CPU times, but
+  where OpenSearch prints stack frames this node prints each thread's run
+  state.
+- `_nodes/stats` `jvm` reports what the allocator holds as the heap: there is
+  no JVM. Step 21 reads `_boostsearch/memory` for the allocator's own view.
 
 `docs/troubleshooting.md` has the detail of each, and what to use in the
 meantime.

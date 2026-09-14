@@ -57,6 +57,34 @@ pub fn expand_dotted_properties(node: &mut Value) {
 }
 
 /// Recursive object merge; `patch` wins on conflict.
+/// Take one index setting out of an index's settings in every shape it may
+/// be held in: under `index` or not, nested, dotted, or any mix of the two --
+/// `{"index": {"blocks": {"write": "true"}}}`, `{"index": {"blocks.write":
+/// "true"}}` and `{"index.blocks.write": "true"}` are one setting.
+pub fn clear_index_setting(settings: &mut Value, key: &str) {
+    fn remove(node: &mut Value, segs: &[&str]) {
+        let Some(map) = node.as_object_mut() else { return };
+        for i in 1..=segs.len() {
+            let head = segs[..i].join(".");
+            if i == segs.len() {
+                map.remove(&head);
+            } else if let Some(child) = map.get_mut(&head) {
+                remove(child, &segs[i..]);
+                // an object emptied here held nothing but this setting
+                if child.as_object().map(|o| o.is_empty()).unwrap_or(false) && head != "index" {
+                    map.remove(&head);
+                }
+            }
+        }
+    }
+    let key = key.strip_prefix("index.").unwrap_or(key);
+    let segs: Vec<&str> = key.split('.').collect();
+    let mut under_index = vec!["index"];
+    under_index.extend(segs.iter().copied());
+    remove(settings, &under_index);
+    remove(settings, &segs);
+}
+
 pub fn deep_merge(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
@@ -543,6 +571,25 @@ pub fn make_doc(
         }
     }
     d
+}
+
+/// The key a document's routing is kept under in the untouched view.
+///
+/// The routing is how a document was addressed rather than part of its
+/// source, so it was held in memory alone: a restart after a commit forgot
+/// it, and the document answered to any routing or none. Written into the
+/// document itself it is committed with it, a `term` on `_routing` finds it,
+/// and a search narrowed to some shards can read where each document lives.
+/// The reference forbids a source field of this name, so nothing collides.
+pub const ROUTING_KEY: &str = "_routing";
+
+/// Put the routing a document was written with into its indexed form.
+pub fn add_routing(doc: &mut TantivyDocument, fields: &Fields, routing: Option<&str>) {
+    if let Some(r) = routing {
+        let mut one = BTreeMap::new();
+        one.insert(ROUTING_KEY.to_string(), OwnedValue::Str(r.to_string()));
+        doc.add_object_to(&[fields.raw], one);
+    }
 }
 
 /// Split one object into what the analysed view holds and what the untouched

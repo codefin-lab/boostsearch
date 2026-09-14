@@ -27,6 +27,10 @@ pub struct Presented<'a> {
     pub remote: String,
     /// the subject DN of the client certificate, if one was presented
     pub peer_dn: Option<String>,
+    /// the path and method asked for, which decide whether some credentials
+    /// count at all
+    pub path: &'a str,
+    pub method: &'a str,
 }
 
 impl Presented<'_> {
@@ -54,6 +58,9 @@ pub struct Credentials {
     pub password: Option<String>,
     /// roles the token or the proxy carried
     pub backend_roles: Vec<String>,
+    /// security roles the credentials carry outright, as an on-behalf-of
+    /// token does
+    pub security_roles: Vec<String>,
     pub attributes: BTreeMap<String, String>,
 }
 
@@ -85,6 +92,8 @@ pub enum Authenticator {
     /// SAML: the token the exchange minted is read as a JWT; the challenge
     /// sends the browser to the IdP
     Saml(Arc<super::saml::SamlSettings>, JwtSettings),
+    /// an on-behalf-of token, minted by this cluster
+    OnBehalfOf(Arc<super::obo::OboSettings>),
     /// a kind this build does not carry (kerberos)
     Unsupported(String),
 }
@@ -472,6 +481,21 @@ impl AuthChain {
                 backend: Backend::Internal,
             });
         }
+        // with both of its keys configured, the plugin puts the on-behalf-of
+        // domain before every other and never challenges from it: a token
+        // that does not hold up is left to the domains after it
+        if let Some(obo) = super::obo::OboSettings::from_dynamic(dynamic) {
+            domains.insert(
+                0,
+                Domain {
+                    name: "on_behalf_of".into(),
+                    order: -1,
+                    challenge: false,
+                    authenticator: Authenticator::OnBehalfOf(Arc::new(obo)),
+                    backend: Backend::Noop,
+                },
+            );
+        }
         let mut authorizers = Vec::new();
         if let Some(authz) = dynamic.pointer("/dynamic/authz").and_then(|a| a.as_object()) {
             for (name, d) in authz {
@@ -659,7 +683,13 @@ impl JwtSettings {
                     .insert(format!("attr.jwt.{k}"), v.to_string().trim_matches('"').to_string());
             }
         }
-        Some(Credentials { name, password: None, backend_roles: roles, attributes })
+        Some(Credentials {
+            name,
+            password: None,
+            backend_roles: roles,
+            attributes,
+            ..Default::default()
+        })
     }
 }
 
@@ -886,7 +916,13 @@ impl OpenIdSettings {
                     .insert(format!("attr.jwt.{k}"), v.to_string().trim_matches('"').to_string());
             }
         }
-        Some(Credentials { name, password: None, backend_roles: roles, attributes })
+        Some(Credentials {
+            name,
+            password: None,
+            backend_roles: roles,
+            attributes,
+            ..Default::default()
+        })
     }
 }
 
@@ -971,6 +1007,7 @@ impl Authenticator {
                 })
             }
             Authenticator::Saml(_, jwt) => jwt.credentials(p),
+            Authenticator::OnBehalfOf(o) => o.credentials(p),
             Authenticator::Unsupported(_) => None,
         }
     }
@@ -1085,7 +1122,7 @@ impl LdapSettings {
                 attributes.insert(format!("attr.ldap.{k}"), first.clone());
             }
         }
-        Some(Credentials { name: shown, password: None, backend_roles: Vec::new(), attributes })
+        Some(Credentials { name: shown, attributes, ..Default::default() })
     }
 
     async fn connect_unbound(&self) -> Option<ldap3::Ldap> {
@@ -1309,6 +1346,7 @@ impl AuthChain {
                             password: None,
                             backend_roles: user.backend_roles.clone(),
                             attributes: user.attributes.clone(),
+                            ..Default::default()
                         }),
                         None => None,
                     }
@@ -1323,7 +1361,7 @@ impl AuthChain {
             let security_roles = if matches!(domain.backend, Backend::Internal) {
                 cfg.users.get(&user.name).map(|u| u.security_roles.clone()).unwrap_or_default()
             } else {
-                Vec::new()
+                user.security_roles.clone()
             };
             // the plugin keeps the user and adds each token's roles to it
             let key = (domain.name.clone(), user.name.clone());

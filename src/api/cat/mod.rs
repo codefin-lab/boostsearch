@@ -50,6 +50,13 @@ pub(crate) async fn cat_by_name(
             // one row per node the cluster state holds, the manager starred
             let live = crate::cluster::current_state();
             let full = p.get("full_id").map(|v| v != "false").unwrap_or(false);
+            // this node's figures are measured; another node's are its own to
+            // report, and are left blank here rather than written as zeros
+            let here = crate::api::sysinfo::resources(store.data_dir());
+            let me = crate::cluster::identity().id.clone();
+            let unit = p.get("bytes").map(|s| s.to_string());
+            let size = |b: u64| crate::api::shared::sized(unit.as_deref(), b);
+            let pct = crate::api::sysinfo::percent;
             let mut rows_all: Vec<Vec<(&str, String)>> = Vec::new();
             for (id, n) in &live.nodes {
                 let letters: String = {
@@ -75,6 +82,14 @@ pub(crate) async fn cat_by_name(
                     .map(|(h, _)| h.to_string())
                     .unwrap_or_default();
                 let is_manager = live.cluster_manager.as_ref() == Some(id);
+                let local = *id == me;
+                let measured = |v: String| if local { v } else { String::new() };
+                let load = |i: usize| {
+                    measured(here.load.map(|l| format!("{:.2}", l[i])).unwrap_or_default())
+                };
+                let (disk_total, disk_avail) =
+                    here.disk.as_ref().map(|d| (d.total, d.available)).unwrap_or((0, 0));
+                let disk_used = disk_total.saturating_sub(disk_avail);
                 rows_all.push(vec![
                     (
                         "id",
@@ -92,17 +107,22 @@ pub(crate) async fn cat_by_name(
                     ("type", "tar".into()),
                     ("build", "boostsearch".into()),
                     ("jdk", "21".into()),
-                    ("uptime", "0s".into()),
+                    (
+                        "uptime",
+                        measured(crate::api::shared::time_value_text(
+                            crate::api::sysinfo::uptime_millis() * 1_000_000,
+                        )),
+                    ),
                     ("master", if is_manager { "*".into() } else { "-".into() }),
-                    ("file_desc.current", "0".into()),
-                    ("file_desc.percent", "0".into()),
-                    ("file_desc.max", "0".into()),
-                    ("heap.current", "0b".into()),
-                    ("heap.percent", "0".into()),
-                    ("heap.max", "0b".into()),
-                    ("ram.current", "0b".into()),
-                    ("ram.percent", "0".into()),
-                    ("ram.max", "0b".into()),
+                    ("file_desc.current", measured(here.fds.to_string())),
+                    ("file_desc.percent", measured(pct(here.fds, here.max_fds).to_string())),
+                    ("file_desc.max", measured(here.max_fds.to_string())),
+                    ("heap.current", measured(size(here.heap_used))),
+                    ("heap.percent", measured(pct(here.heap_used, here.heap_max).to_string())),
+                    ("heap.max", measured(size(here.heap_max))),
+                    ("ram.current", measured(size(here.ram_used))),
+                    ("ram.percent", measured(pct(here.ram_used, here.ram_total).to_string())),
+                    ("ram.max", measured(size(here.ram_total))),
                     // the address the node answers HTTP on, which it says
                     // when it joins; every node was reported at port 9200
                     (
@@ -113,18 +133,25 @@ pub(crate) async fn cat_by_name(
                             n.http_address.clone()
                         },
                     ),
-                    ("cpu", "0".into()),
-                    ("load_1m", "0.00".into()),
-                    ("load_5m", "0.00".into()),
-                    ("load_15m", "0.00".into()),
+                    ("cpu", measured(here.cpu_percent.to_string())),
+                    ("load_1m", load(0)),
+                    ("load_5m", load(1)),
+                    ("load_15m", load(2)),
                     ("node.role", letters),
                     ("node.roles", n.roles.join(",")),
                     ("cluster_manager", if is_manager { "*".into() } else { "-".into() }),
                     ("name", n.name.clone()),
-                    ("diskAvail", "1gb".into()),
-                    ("diskTotal", "2gb".into()),
-                    ("diskUsed", "1gb".into()),
-                    ("diskUsedPercent", "50.00".into()),
+                    ("diskAvail", measured(size(disk_avail))),
+                    ("diskTotal", measured(size(disk_total))),
+                    ("diskUsed", measured(size(disk_used))),
+                    (
+                        "diskUsedPercent",
+                        measured(if disk_total == 0 {
+                            String::new()
+                        } else {
+                            format!("{:.2}", disk_used as f64 * 100.0 / disk_total as f64)
+                        }),
+                    ),
                 ]);
             }
             let rows = cat_only_default(
@@ -300,8 +327,20 @@ pub(crate) async fn cat_by_name(
             let forwarded = crate::cluster::forward::answering_forward();
             let mut rows: Vec<Vec<(&str, String)>> = Vec::new();
             for n in names {
-                let local_docs =
-                    store.get(&n).map(|st| st.read().reader.searcher().num_docs()).unwrap_or(0);
+                // each shard holds the documents routed to it, and its share
+                // of the index's bytes is its share of the documents
+                let per_shard =
+                    store.get(&n).map(|st| st.read().docs_per_shard()).unwrap_or_default();
+                let local_docs: u64 = per_shard.iter().sum();
+                let docs_on = |shard: u32| per_shard.get(shard as usize).copied().unwrap_or(0);
+                let bytes_on = |shard: u32| match local_docs {
+                    0 if shard == 0 => store.index_size(&n),
+                    0 => 0,
+                    total => {
+                        (store.index_size(&n) as u128 * docs_on(shard) as u128 / total as u128)
+                            as u64
+                    }
+                };
                 let mut copies: Vec<&crate::cluster::state::ShardRouting> =
                     live.routing.shards_of(&n).collect();
                 copies.sort_by_key(|c| (c.shard, !c.primary));
@@ -316,8 +355,11 @@ pub(crate) async fn cat_by_name(
                     let replicas = g.numeric_setting("number_of_replicas").unwrap_or(1);
                     for shard in 0..shards {
                         let mut row = blank(&n, shard, "p", "STARTED", "");
-                        row[4].1 = if shard == 0 { local_docs.to_string() } else { "0".into() };
-                        row[5].1 = "0b".into();
+                        row[4].1 = docs_on(shard).to_string();
+                        row[5].1 = crate::api::shared::sized(
+                            p.get("bytes").map(|s| s.as_str()),
+                            bytes_on(shard),
+                        );
                         row[6].1 = "127.0.0.1".into();
                         row[7].1 = me.id.as_str().into();
                         row[8].1 = me.name.clone();
@@ -357,10 +399,10 @@ pub(crate) async fn cat_by_name(
                         // holding one can answer for it; a copy elsewhere is
                         // that node's row to write
                         if here {
-                            row[4].1 = local_docs.to_string();
+                            row[4].1 = docs_on(c.shard).to_string();
                             row[5].1 = crate::api::shared::sized(
                                 p.get("bytes").map(|s| s.as_str()),
-                                store.index_size(&n),
+                                bytes_on(c.shard),
                             );
                         } else if clustered {
                             continue;

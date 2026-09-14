@@ -771,8 +771,27 @@ pub fn run(
     // for `derived` fields, or an aggregation running a search of its own,
     // must not have the filter laid over it a second time under a name the
     // alias does not cover.
+    //
+    // A search narrowed by `routing` or `preference=_shards:` is narrowed the
+    // same way, for the same reason: the shards it may ask are a property of
+    // the request, and each index's share of it is kept to the documents
+    // those shards hold.
     if crate::security::layer::ALIAS_FILTERS.try_with(|_| ()).is_err() {
-        let filters = store.alias_filters(expr);
+        let mut filters = store.alias_filters(expr);
+        let narrowed = store.search_narrowing(
+            expr,
+            p.get("routing").map(|s| s.as_str()),
+            p.get("preference").map(|s| s.as_str()),
+        );
+        for (name, shards) in narrowed {
+            let Some(st) = store.get(&name) else { continue };
+            let on_shards = st.read().on_shards_filter(&shards);
+            let combined = match filters.remove(&name) {
+                Some(alias) => json!({"bool": {"filter": [alias, on_shards]}}),
+                None => on_shards,
+            };
+            filters.insert(name, combined);
+        }
         if !filters.is_empty() {
             return crate::security::layer::ALIAS_FILTERS
                 .sync_scope(filters, || run(store, expr, body, p));
@@ -827,7 +846,6 @@ pub fn run(
         "profile",
         "suggest",
         "fields",
-        "runtime_mappings",
         "slice",
         "pit",
         "stats",
@@ -974,15 +992,14 @@ pub fn run(
         }
     }
     // an index held closed to readers refuses a search, the way one held
-    // closed to writers refuses a write
+    // closed to writers refuses a write. `read_only` is not such a block: it
+    // stops changes, and a read-only index is searched as any other -- the
+    // reference answers it, and refusing it here refused the one thing a
+    // read-only index is kept for.
     for name in &targets {
         let blocked = store
             .get(name)
-            .map(|st| {
-                let g = st.read();
-                g.setting("blocks.read").as_deref() == Some("true")
-                    || g.setting("blocks.read_only").as_deref() == Some("true")
-            })
+            .map(|st| st.read().setting("blocks.read").as_deref() == Some("true"))
             .unwrap_or(false);
         if blocked {
             return Err(err(
@@ -1089,19 +1106,6 @@ pub fn run(
                 "must_not": [{"ids": {"values": excluded_ids.clone()}}],
             }
         }));
-    }
-    // A document's routing is not part of it -- it is how the document was
-    // addressed -- so asking which documents have one is asking after a list
-    // of ids rather than after a column.
-    if let Some(q) = query_json.as_mut()
-        && extras.routing_exists
-    {
-        let ids: Vec<String> = targets
-            .iter()
-            .filter_map(|n| store.get(n))
-            .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
-            .collect();
-        replace_routing_exists(q, &ids);
     }
     // what a join asked to list is read before the join is rewritten away
     let mut join_inner_hits: Vec<(String, String, Value, Value)> = Vec::new();
@@ -1362,7 +1366,7 @@ pub fn run(
     let fanned_out = targets.len() > 1;
     // what the caller may see of each target, worked out here on the
     // request's own task, before any thread that cannot ask
-    // a geo or intervals clause is answered by narrowing the whole result, so
+    // a geo clause is answered by narrowing the whole result, so
     // it may only stand where that means the same thing
     if let Some(q) = body.get("query")
         && let Some(why) = crate::search::extras::placement_complaint(q)
@@ -1478,6 +1482,8 @@ pub fn run(
         }
         searchers.push((o.name, o.searcher, o.st));
     }
+    // the query phase ends here; what follows reads the page back
+    let fetch_started = std::time::Instant::now();
 
     // A wide fan-out leaves one intermediate result per index to combine.
     // Folding them one after another is linear and single-threaded, which at
@@ -1509,9 +1515,9 @@ pub fn run(
         apply_indices_boost(store, &mut cands, &searchers, boosts, p)?;
     }
 
-    // a geo shape, an intervals rule or a distance_feature is settled from the
-    // candidates' own values, and what survives is the new total
-    if extras.geo || extras.intervals || extras.distance_feature || extras.nested_query {
+    // a geo shape or a distance_feature is settled from the candidates' own
+    // values, and what survives is the new total
+    if extras.geo || extras.distance_feature || extras.nested_query {
         let before = cands.len();
         settle_by_value(&mut cands, &searchers, body, &extras);
         if cands.len() != before {
@@ -1733,8 +1739,8 @@ pub fn run(
                 let parsed = t.elapsed().as_nanos() as u64;
                 if let Some((id, _)) = &found {
                     let shard = g.shard_of_doc(id);
-                    note_fetch(&mut shard_profiles, name, shard, "load_stored_fields", stored);
-                    note_fetch(&mut shard_profiles, name, shard, "load_source", parsed);
+                    note_fetch_part(&mut shard_profiles, name, shard, "load_stored_fields", stored);
+                    note_fetch_part(&mut shard_profiles, name, shard, "load_source", parsed);
                     // the reader, the visitor and the sub-phases are made
                     // once for each shard the page reads from
                     if readers_seen.insert((c.shard, shard)) {
@@ -1746,7 +1752,7 @@ pub fn run(
                             ("create_stored_fields_visitor", visitor),
                             ("build_sub_phase_processors", fetch_setup),
                         ] {
-                            note_fetch(&mut shard_profiles, name, shard, part, nanos);
+                            note_fetch_part(&mut shard_profiles, name, shard, part, nanos);
                         }
                     }
                 }
@@ -1786,6 +1792,15 @@ pub fn run(
     // than silently truncated -- unless the request says how much to analyse,
     // or the field stores offsets and the highlighter can use them.
     if let Some(spec) = body.get("highlight") {
+        // A highlighter that cannot read a field refuses the whole request,
+        // as upstream does while it sets the highlighter up: `fvh` on a field
+        // without term vectors used to be answered as if it were `unified`.
+        if let Some(h) = all_hits.first() {
+            let g = searchers[h.shard_idx].2.read();
+            if let Some(reason) = crate::search::highlight::highlight_refusal(spec, &g.mapping) {
+                return Err(search_shard_failure("illegal_argument_exception", &reason, &h.index));
+            }
+        }
         for h in &all_hits {
             let g = searchers[h.shard_idx].2.read();
             let Some(cap) =
@@ -1948,6 +1963,7 @@ pub fn run(
             if let Some(o) = hit.as_object_mut() {
                 o.remove("_index");
                 o.remove("_id");
+                o.remove("_routing");
             }
         }
     }
@@ -1961,6 +1977,7 @@ pub fn run(
         }
         let agg_bytes = agg_acc.as_ref().and_then(|a| postcard::to_allocvec(a).ok());
         let agg_req_json = agg_req.as_ref().and_then(|r| serde_json::to_value(r).ok());
+        note_fetch(store, &targets, body, fetch_started, total);
         return Ok(Outcome {
             took_ms: started.elapsed().as_millis() as u64,
             skipped: 0,
@@ -2062,6 +2079,7 @@ pub(crate) fn finish_search(
     p: &Params,
     f: Finish,
 ) -> std::result::Result<Outcome, Response> {
+    let fetch_started = std::time::Instant::now();
     let Finish {
         started,
         page,
@@ -2290,6 +2308,7 @@ pub(crate) fn finish_search(
     if body.get("query").is_some_and(names_a_percolate) {
         attach_percolate_slots(store, &targets, body, &mut page);
     }
+    note_fetch(store, &targets, body, fetch_started, total);
     Ok(Outcome {
         took_ms: started.elapsed().as_millis() as u64,
         skipped,
@@ -2311,6 +2330,42 @@ pub(crate) fn finish_search(
         filtered: dls_applied,
         native: None,
     })
+}
+
+/// The fetch phase of a search -- reading back and filling in the page --
+/// counted for each index searched and for the groups the search named, and
+/// written to the fetch slow log where it took long enough. A page drawn from
+/// several indices is one fetch here, and each of them is counted as having
+/// done it, as each shard of the reference runs a fetch of its own.
+fn note_fetch(
+    store: &Store,
+    targets: &[String],
+    body: &Value,
+    started: std::time::Instant,
+    total: u64,
+) {
+    let took = started.elapsed().as_nanos() as u64;
+    let groups = crate::search::shard::stats_groups(body);
+    for name in targets {
+        let Some(st) = store.get(name) else { continue };
+        let g = st.read();
+        g.counters.search.fetch.add(took);
+        for group in &groups {
+            g.counters.group(group).fetch.add(took);
+        }
+        if !g.knobs.slowlog.fetch.is_off() {
+            crate::store::slowlog::search(
+                &g.knobs.slowlog.fetch,
+                "fetch",
+                name,
+                took,
+                total,
+                &groups,
+                g.shard_count(),
+                body,
+            );
+        }
+    }
 }
 
 /// Run a search whose body defines derived fields of its own.
@@ -2347,7 +2402,9 @@ fn run_with_derived(
     }
     // every document of the index, written into the scratch one as it was
     let all = json!({"query": {"match_all": {}}, "size": 10_000});
-    let found = run(store, expr, &all, &Params::new())?;
+    // a copy the server makes for itself is not a page a caller asked for,
+    // so the result window does not bound it
+    let found = crate::search::as_the_server(|| run(store, expr, &all, &Params::new()))?;
     {
         let mut g = st.write();
         for hit in &found.hits {

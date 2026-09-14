@@ -121,8 +121,60 @@ pub fn write_doc_versioned(
     write_doc_within(st, id, source, op_type, raw, forced, None, true)
 }
 
+/// A write, counted into the index's indexing statistics and written to the
+/// indexing slow log when it took long enough. What the server writes for
+/// itself -- a replay, a restore -- is not a write anyone asked for, and is
+/// not counted, as a recovery in the reference is not.
 #[allow(clippy::too_many_arguments)]
 fn write_doc_within(
+    st: &mut IdxState,
+    id: &str,
+    source: Value,
+    op_type: &str,
+    raw: Option<String>,
+    forced: Option<u64>,
+    forced_seq: Option<u64>,
+    from_caller: bool,
+) -> std::result::Result<(Value, StatusCode), Response> {
+    if !from_caller {
+        return write_doc_uncounted(st, id, source, op_type, raw, forced, forced_seq, false);
+    }
+    let started = std::time::Instant::now();
+    // the source is copied for the slow log only when the log is on
+    let logged = (!st.knobs.slowlog.index.is_off())
+        .then(|| raw.clone().unwrap_or_else(|| source.to_string()));
+    st.counters.index.current_add(1);
+    let done = write_doc_uncounted(st, id, source, op_type, raw, forced, forced_seq, true);
+    let took = started.elapsed().as_nanos() as u64;
+    st.counters.index.current_add(-1);
+    match &done {
+        Ok(_) => {
+            st.counters.index.add(took);
+            st.counters.last_index_ms.store(
+                crate::store::now_millis().max(0) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if let Some(source) = logged {
+                crate::store::slowlog::indexing(
+                    &st.knobs.slowlog,
+                    &st.name,
+                    &st.uuid,
+                    took,
+                    id,
+                    st.routing.get(id).map(|r| r.as_str()),
+                    &source,
+                );
+            }
+        }
+        Err(_) => {
+            st.counters.index_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    done
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_doc_uncounted(
     st: &mut IdxState,
     id: &str,
     source: Value,
@@ -135,10 +187,7 @@ fn write_doc_within(
     // an index held still takes no writes until it is let go -- from a
     // caller. What the server is putting back is not a caller's write.
     if let Some((kind, why)) = st.change_refusal().filter(|_| from_caller) {
-        let status = match kind {
-            "index_closed_exception" => StatusCode::BAD_REQUEST,
-            _ => StatusCode::FORBIDDEN,
-        };
+        let status = IdxState::refusal_status(kind, &why);
         return Err(err(status, kind, why));
     }
     // an id is carried in the index's terms, which caps how long it may be
@@ -222,12 +271,19 @@ fn write_doc_within(
     };
     st.has_doc_count |= source.get("_doc_count").is_some();
     if let Err(field) = st.mapping.apply_dynamic_templates(&source) {
+        // the refusal names the mode the mapping is in: `strict` and
+        // `strict_allow_templates` both refuse here, and a caller reading
+        // the one they did not set is sent looking for templates they never had
+        let mode = match st.mapping.raw.get("dynamic").and_then(|v| v.as_str()) {
+            Some("strict_allow_templates") => "strict_allow_templates",
+            _ => "strict",
+        };
         return Err(err(
             StatusCode::BAD_REQUEST,
             "strict_dynamic_mapping_exception",
             format!(
-                "mapping set to strict_allow_templates, dynamic introduction of [{field}] \
-                 within [_doc] is not allowed"
+                "mapping set to {mode}, dynamic introduction of [{field}] within [_doc] is not \
+                 allowed"
             ),
         ));
     }
@@ -320,7 +376,8 @@ fn write_doc_within(
         source_for_audit.as_ref(),
         false,
     );
-    let doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
+    let mut doc = make_doc(&st.fields, &st.mapping, id, indexed, &raw, seq);
+    crate::store::add_routing(&mut doc, &st.fields, st.routing.get(id).map(|s| s.as_str()));
     // the copy that is being replaced goes when the new one is ready to take
     // its place, and not before: every complaint above this line returns
     // without writing, and a delete queued before them destroyed the
@@ -368,10 +425,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
     // index refuses it, which is what an operator holding an index still
     // before a snapshot or a shrink is relying on
     if let Some((kind, why)) = st.change_refusal() {
-        let status = match kind {
-            "index_closed_exception" => StatusCode::BAD_REQUEST,
-            _ => StatusCode::FORBIDDEN,
-        };
+        let status = IdxState::refusal_status(kind, &why);
         return (
             json!({
                 "_index": st.name, "_id": id,
@@ -380,6 +434,7 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
             status,
         );
     }
+    let started = std::time::Instant::now();
     let existed = exists_doc(st, id);
     let (version, seq) = st.bump(id, false, existed);
     let shard = st.shard_of_doc(id);
@@ -405,6 +460,9 @@ pub fn delete_doc(st: &mut IdxState, id: &str) -> (Value, StatusCode) {
             doc_term: None,
         });
     }
+    // a delete of what is not there is still a delete the index carried out,
+    // and the reference counts it
+    st.counters.delete.add(started.elapsed().as_nanos() as u64);
     let body = json!({
         "_index": st.name,
         "_id": id,
@@ -534,10 +592,12 @@ pub(crate) fn maybe_refresh(
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "translog_exception", why));
     }
     if flag(p, "refresh") {
+        let started = std::time::Instant::now();
         let _ = match shard {
             Some(one) => st.refresh_shard(one),
             None => st.refresh(),
         };
+        st.counters.refresh_external.add(started.elapsed().as_nanos() as u64);
     }
     Ok(())
 }
@@ -719,6 +779,16 @@ pub(crate) async fn do_index(
     if let Some(refusal) = crate::api::indices::auto_create_refusal(&store, &index) {
         return refusal;
     }
+    // an alias with an index routing routes every write through it; the
+    // name is read before it is resolved to the index behind it
+    let asked_routing = match routing_from_pipeline.clone() {
+        Some(r) => r,
+        None => p.get("routing").filter(|r| !r.is_empty()).cloned(),
+    };
+    let routed = match write_routing(&store, &index, asked_routing) {
+        Ok(r) => r,
+        Err(refusal) => return refusal,
+    };
     // a write to an alias goes to the index the alias marks as the write
     // index, and to no other: without this it went wherever the map listed
     // first, which after a rollover is as likely to be the index that was
@@ -751,26 +821,18 @@ pub(crate) async fn do_index(
     }
     let mut g = st.write();
     let id = id.unwrap_or_else(|| g.next_auto_id());
+    if let Some(refusal) = routing_refusal(&g, &id, routed.as_deref()) {
+        return refusal;
+    }
     // A document written with a routing is only reachable by quoting the same
     // routing back, so it has to be remembered -- before the write, because
     // the routing is also what says which shard the write lands on.
-    let routed = match routing_from_pipeline {
-        Some(r) => r,
-        None => p.get("routing").filter(|r| !r.is_empty()).cloned(),
+    let before = match &routed {
+        Some(r) => g.routing.insert(id.clone(), r.clone()),
+        None => g.routing.remove(&id),
     };
-    match &routed {
-        Some(r) => {
-            g.routing.insert(id.clone(), r.clone());
-        }
-        None => {
-            g.routing.remove(&id);
-        }
-    }
     match write_doc_checked(&mut g, &id, source, &op_type, None, &p) {
         Ok((mut body, status)) => {
-            if let Some(r) = &routed {
-                body["_routing"] = json!(r);
-            }
             let shard = g.shard_of_doc(&id);
             if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {
                 return r;
@@ -778,7 +840,14 @@ pub(crate) async fn do_index(
             note_forced_refresh(&mut body, &p);
             (status, axum::Json(body)).into_response()
         }
-        Err(resp) => resp,
+        Err(resp) => {
+            // a refused write leaves the document where it was
+            match before {
+                Some(r) => g.routing.insert(id.clone(), r),
+                None => g.routing.remove(&id),
+            };
+            resp
+        }
     }
 }
 
@@ -787,6 +856,10 @@ pub async fn get_doc(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(why) = store.single_index_refusal(&index) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why);
+    }
+    let p = read_routing(&store, &index, &p);
     refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else {
         return if ignored(&p, StatusCode::NOT_FOUND) {
@@ -797,6 +870,9 @@ pub async fn get_doc(
         };
     };
     let g = st.read();
+    if let Some(refusal) = read_routing_refusal(&g, &id, &p) {
+        return refusal;
+    }
     // A version named on a read is a condition: the document must be at it.
     // Only for a document this caller may see, though -- the refusal carries
     // the document's current version in its message, so asking for a version
@@ -879,9 +955,16 @@ pub async fn head_doc(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if store.single_index_refusal(&index).is_some() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let p = read_routing(&store, &index, &p);
     refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else { return StatusCode::NOT_FOUND.into_response() };
     let g = st.read();
+    if read_routing_refusal(&g, &id, &p).is_some() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     // the same view a `_get` would take, so `realtime=false` says whether a
     // search can see the document rather than whether it was written -- and
     // the wrong routing reaches nothing, here as there
@@ -901,8 +984,21 @@ pub async fn delete_doc_route(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    let p = match write_routing(&store, &index, p.get("routing").cloned()) {
+        Ok(Some(r)) => {
+            let mut p = p;
+            p.insert("routing".into(), r);
+            p
+        }
+        Ok(None) => p,
+        Err(refusal) => return refusal,
+    };
+    let index = store.write_target(&index).unwrap_or(index);
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let mut g = st.write();
+    if let Some(refusal) = read_routing_refusal(&g, &id, &p) {
+        return refusal;
+    }
     if let Some(r) = seq_check(&g, &id, &p) {
         return r;
     }
@@ -1025,10 +1121,26 @@ pub async fn explain(
             format!("request does not support [{first}]"),
         );
     }
+    // an explain is of a query, and one that names none is refused before the
+    // document is looked for
+    if body.get("query").is_none() && p.get("q").map(|q| q.is_empty()).unwrap_or(true) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: query is missing;",
+        );
+    }
+    if let Some(why) = store.single_index_refusal(&index) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why);
+    }
+    let p = read_routing(&store, &index, &p);
     let Some(st) = store.get(&index) else { return no_such_index(&index) };
     let (name, src) = {
         let g = st.read();
-        (g.name.clone(), read_source(&g, &id))
+        if let Some(refusal) = read_routing_refusal(&g, &id, &p) {
+            return refusal;
+        }
+        (g.name.clone(), read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p)))
     };
     let Some(src) = src else {
         return (

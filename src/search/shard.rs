@@ -57,9 +57,111 @@ pub(crate) struct ShardOut {
     pub(crate) profile: Option<Value>,
 }
 
-/// Search one index, as one shard of the whole request.
+/// How many shards a filter keeps a search to, where it keeps it to some.
+pub(crate) fn narrowed_shard_count(filter: &Value) -> Option<u64> {
+    match filter {
+        Value::Object(o) => match o.get("_bs_on_shards") {
+            Some(on) => on.get("shards").and_then(|v| v.as_array()).map(|a| a.len() as u64),
+            None => o.values().find_map(narrowed_shard_count),
+        },
+        Value::Array(a) => a.iter().find_map(narrowed_shard_count),
+        _ => None,
+    }
+}
+
+/// The groups a search names in `stats`, which `_stats?groups=` reports on.
+pub(crate) fn stats_groups(body: &Value) -> Vec<String> {
+    match body.get("stats") {
+        Some(Value::Array(a)) => a.iter().filter_map(|g| g.as_str().map(String::from)).collect(),
+        Some(Value::String(s)) => s.split(',').map(|g| g.trim().to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Search one index, as one shard of the whole request: its query phase,
+/// counted into the index's search statistics and the groups the search
+/// named, and written to the search slow log when it took long enough.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_one_shard(
+    store: &Store,
+    shard_idx: usize,
+    name: &str,
+    body: &Value,
+    query_json: &Option<Value>,
+    sort_keys: &[SortKey],
+    search_after: &Option<Vec<SortValue>>,
+    pit_ceiling: &std::collections::HashMap<String, u64>,
+    agg_json: &Option<Value>,
+    filters_aggs: &[(String, Value)],
+    page_want: usize,
+    fanned_out: bool,
+    views: &crate::security::view::Views,
+) -> std::result::Result<Option<ShardOut>, Response> {
+    let Some(st) = store.get(name) else { return Ok(None) };
+    let started = std::time::Instant::now();
+    let groups = stats_groups(body);
+    let out = {
+        let g = st.read();
+        g.counters.search.query.current_add(1);
+        for group in &groups {
+            g.counters.group(group).query.current_add(1);
+        }
+        drop(g);
+        query_shard(
+            store,
+            shard_idx,
+            name,
+            body,
+            query_json,
+            sort_keys,
+            search_after,
+            pit_ceiling,
+            agg_json,
+            filters_aggs,
+            page_want,
+            fanned_out,
+            views,
+        )
+    };
+    let took = started.elapsed().as_nanos() as u64;
+    let g = st.read();
+    let c = &g.counters;
+    c.search.query.current_add(-1);
+    for group in &groups {
+        c.group(group).query.current_add(-1);
+    }
+    match &out {
+        Ok(Some(o)) => {
+            c.search.query.add(took);
+            for group in &groups {
+                c.group(group).query.add(took);
+            }
+            if !g.knobs.slowlog.query.is_off() {
+                crate::store::slowlog::search(
+                    &g.knobs.slowlog.query,
+                    "query",
+                    name,
+                    took,
+                    o.count as u64,
+                    &groups,
+                    g.shard_count(),
+                    body,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => {
+            c.search.query_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for group in &groups {
+                c.group(group).query_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_shard(
     store: &Store,
     shard_idx: usize,
     name: &str,
@@ -108,14 +210,16 @@ pub(crate) fn search_one_shard(
         _ => sort_keys,
     };
     let g = st.read();
-    g.search_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut shards = 0u64;
     let mut cands: Vec<Cand> = Vec::new();
     let mut agg_acc: Option<IntermediateAggregationResults> = None;
     let mut agg_req: Option<Aggregations> = None;
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
-    shards += g.shard_count();
+    // a search narrowed to some of the shards reports only those
+    shards += crate::security::layer::alias_filter_for(name)
+        .and_then(|f| narrowed_shard_count(&f))
+        .unwrap_or_else(|| g.shard_count());
     let ctx = Ctx {
         fields: &g.fields,
         mapping: &g.mapping,
@@ -151,7 +255,9 @@ pub(crate) fn search_one_shard(
                 let why = e.to_string();
                 // a query that reads well but cannot be run over the field it
                 // names fails on the shard rather than in the parser
-                if why.starts_with("Cannot create intervals") {
+                if why.starts_with("Cannot create intervals")
+                    || why.starts_with("failed to create query:")
+                {
                     return Err(err_caused_by(
                         "search_phase_execution_exception",
                         "all shards failed",

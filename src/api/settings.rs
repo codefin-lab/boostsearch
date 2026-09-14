@@ -32,6 +32,29 @@ pub(crate) fn flatten_settings(v: &Value, prefix: &str, out: &mut serde_json::Ma
     }
 }
 
+/// Take a setting out of every spelling it may have been written in: under
+/// `index` or at the top, flat or nested, with its `index.` prefix or without.
+fn forget_setting(settings: &mut Value, key: &str) {
+    fn remove_path(node: &mut Value, parts: &[&str]) {
+        let Some(o) = node.as_object_mut() else { return };
+        // the rest of the path written flat under this object
+        o.remove(&parts.join("."));
+        if parts.len() > 1
+            && let Some(child) = o.get_mut(parts[0])
+        {
+            remove_path(child, &parts[1..]);
+        }
+    }
+    let parts: Vec<&str> = key.split('.').collect();
+    let prefixed: Vec<&str> = std::iter::once("index").chain(parts.iter().copied()).collect();
+    remove_path(settings, &parts);
+    remove_path(settings, &prefixed);
+    if let Some(index) = settings.get_mut("index") {
+        remove_path(index, &parts);
+        remove_path(index, &prefixed);
+    }
+}
+
 /// `human` asks for a readable form beside each machine one.
 pub(crate) fn add_human_settings(view: &mut Value, st: &IdxState) {
     let created = st.created_millis();
@@ -144,6 +167,128 @@ pub(crate) fn settings_response(
     respond(&p, Value::Object(out))
 }
 
+/// Settings an index takes only when it is made, or while it is closed.
+///
+/// A match is the setting itself or anything under it: `index.analysis`
+/// covers every analyzer. What the reference refuses on an open index, and
+/// on a closed one where it is final, was checked against it one setting at
+/// a time.
+const NOT_DYNAMIC: &[&str] = &[
+    "index.number_of_shards",
+    "index.number_of_routing_shards",
+    "index.routing_partition_size",
+    "index.codec",
+    "index.soft_deletes.enabled",
+    "index.sort",
+    "index.analysis",
+    "index.similarity",
+    "index.store.type",
+    "index.store.preload",
+    "index.shard.check_on_startup",
+    "index.replication.type",
+    "index.creation_date",
+    "index.queries.cache.enabled",
+    "index.load_fixed_bitset_filters_eagerly",
+    "index.knn",
+    "index.format",
+    "index.append_only.enabled",
+];
+
+/// The ones of those that stay as they were made, closed or not.
+const FINAL: &[&str] = &[
+    "index.number_of_shards",
+    "index.soft_deletes.enabled",
+    "index.sort",
+    "index.replication.type",
+    "index.knn",
+    "index.append_only.enabled",
+];
+
+/// Settings the node keeps for itself, which no request may write.
+const PRIVATE: &[&str] =
+    &["index.uuid", "index.version.created", "index.version.upgraded", "index.remote_store"];
+
+/// Whether `key` is `setting` or a setting under it.
+fn is_under(key: &str, setting: &str) -> bool {
+    key == setting || key.strip_prefix(setting).map(|rest| rest.starts_with('.')).unwrap_or(false)
+}
+
+/// Why a settings update may not be applied to these indices, if it may not.
+///
+/// Every refusal is decided before any index is changed, as the reference
+/// decides them: a request that one index refuses changes none of them.
+fn settings_refusal(store: &Store, targets: &[String], keys: &[String]) -> Option<Response> {
+    if let Some(k) = keys.iter().find(|k| PRIVATE.iter().any(|s| is_under(k, s))) {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "settings_exception",
+            format!("can not update private setting [{k}]; this setting is managed by OpenSearch"),
+        ));
+    }
+    // A block that stops an index's metadata changing stops its settings
+    // changing too -- except the one change that lifts such a block, or
+    // nobody could lift it. The reference allows exactly that: a request
+    // naming one setting, and that setting one of these blocks.
+    const LIFTS: &[&str] =
+        &["index.blocks.read_only", "index.blocks.read_only_allow_delete", "index.blocks.metadata"];
+    let lifting = keys.len() == 1 && LIFTS.contains(&keys[0].as_str());
+    if !lifting {
+        let mut reason = String::new();
+        let mut status = 0u16;
+        for n in targets {
+            let Some(st) = store.get(n) else { continue };
+            let blocks = st.read().metadata_blocks();
+            if blocks.is_empty() {
+                continue;
+            }
+            let names: Vec<&str> = blocks.iter().map(|(b, _)| *b).collect();
+            reason.push_str(&format!("index [{n}] blocked by: [{}];", names.join(", ")));
+            status = status.max(blocks.iter().map(|(_, s)| *s).max().unwrap_or(403));
+        }
+        if !reason.is_empty() {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN);
+            return Some(err(code, "cluster_block_exception", reason));
+        }
+    }
+    let fixed: Vec<&String> =
+        keys.iter().filter(|k| NOT_DYNAMIC.iter().any(|s| is_under(k, s))).collect();
+    if fixed.is_empty() {
+        return None;
+    }
+    let mut open = Vec::new();
+    for n in targets {
+        let Some(st) = store.get(n) else { continue };
+        let g = st.read();
+        if !g.closed {
+            open.push(format!("[{}/{}]", g.name, g.uuid));
+        }
+    }
+    if !open.is_empty() {
+        let names: Vec<&str> = fixed.iter().map(|k| String::as_str(k)).collect();
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "illegal_argument_exception",
+            format!(
+                "Can't update non dynamic settings [[{}]] for open indices [{}]",
+                names.join(", "),
+                open.join(", ")
+            ),
+        ));
+    }
+    // every target is closed: what may change on a closed index may change,
+    // and a final setting may not change at all
+    if let (Some(k), Some(n)) =
+        (fixed.iter().find(|k| FINAL.iter().any(|s| is_under(k, s))), targets.first())
+    {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "settings_exception",
+            format!("final {n} setting [{k}], not updateable"),
+        ));
+    }
+    None
+}
+
 pub async fn put_settings(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -162,6 +307,16 @@ pub async fn put_settings(
     // a settings body may arrive wrapped in `settings`, wrapped in `index`, or flat
     let patch = body.get("settings").unwrap_or(&body);
     let patch = patch.get("index").unwrap_or(patch).clone();
+    // every setting the request names, as `index.<dotted name>`
+    let mut named = serde_json::Map::new();
+    flatten_settings(&patch, "", &mut named);
+    let keys: Vec<String> = named
+        .keys()
+        .map(|k| if k.starts_with("index.") { k.clone() } else { format!("index.{k}") })
+        .collect();
+    if let Some(refused) = settings_refusal(&store, &targets, &keys) {
+        return refused;
+    }
     // `preserve_existing` says to fill in only what is not already set
     let preserve = p.get("preserve_existing").map(|v| v != "false").unwrap_or(false);
     for n in targets {
@@ -177,8 +332,28 @@ pub async fn put_settings(
             // lookup adds for itself
             o.retain(|k, _| g.setting(k.strip_prefix("index.").unwrap_or(k)).is_none());
         }
+        // A setting may be held in any of the shapes it was written in --
+        // nested, dotted, with or without `index.` -- and a lookup takes the
+        // first it finds. Writing a new value beside an old one in another
+        // shape left the old one winning: `_block/write` wrote `blocks.write`,
+        // `{"index.blocks.write": false}` was filed under another name, read
+        // back as false, and writes were still refused. Each setting named
+        // is taken out in every shape before the new value goes in, and a
+        // null takes it out for good -- which is what brings the default back
+        // rather than whatever the index was created with.
+        let mut leaves = serde_json::Map::new();
+        flatten_settings(&patch, "", &mut leaves);
+        for key in leaves.keys() {
+            crate::store::clear_index_setting(&mut settings, key);
+        }
         let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &patch);
+        for (key, value) in &leaves {
+            if value.is_null() {
+                crate::store::clear_index_setting(&mut settings, key);
+                forget_setting(&mut settings, key.strip_prefix("index.").unwrap_or(key));
+            }
+        }
         g.settings = settings;
         g.refresh_knobs();
         g.apply_analysis();

@@ -17,6 +17,13 @@ pub(crate) fn source_enabled(st: &IdxState) -> bool {
 /// `realtime=false` asks for exactly that -- the reader's view rather than the
 /// writer's -- which is how a caller checks whether a write is visible yet.
 pub fn read_source_refreshed(st: &IdxState, id: &str) -> Option<Value> {
+    let started = std::time::Instant::now();
+    let found = read_refreshed(st, id);
+    count_get(st, started, found.is_some());
+    found
+}
+
+fn read_refreshed(st: &IdxState, id: &str) -> Option<Value> {
     let searcher = st.reader.searcher();
     let addr = crate::store::alive_address(&searcher, st.fields.id, id)?;
     let doc: TantivyDocument = searcher.doc(addr).ok()?;
@@ -32,8 +39,26 @@ pub fn read_source_as_asked(st: &IdxState, id: &str, p: &Params) -> Option<Value
     read_source(st, id)
 }
 
+/// A document fetched by id, counted as `_stats` counts it under `get`: a
+/// terms lookup and an update read one too, and a read that finds nothing is
+/// counted as missing.
+fn count_get(st: &IdxState, started: std::time::Instant, found: bool) {
+    let nanos = started.elapsed().as_nanos() as u64;
+    st.counters.get.add(nanos);
+    match found {
+        true => st.counters.get_exists.add(nanos),
+        false => st.counters.get_missing.add(nanos),
+    }
+}
+
 pub fn read_source(st: &IdxState, id: &str) -> Option<Value> {
-    st.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let found = read_realtime(st, id);
+    count_get(st, started, found.is_some());
+    found
+}
+
+fn read_realtime(st: &IdxState, id: &str) -> Option<Value> {
     if let Some(p) = st.pending.get(id) {
         return p.as_ref().and_then(|raw| serde_json::from_str(raw).ok());
     }
@@ -52,7 +77,7 @@ pub(crate) fn refresh_before_read(store: &Store, index: &str, p: &Params) {
     }
     for n in store.resolve(index) {
         if let Some(st) = store.get(&n) {
-            let _ = st.write().refresh();
+            let _ = st.write().refresh_external();
         }
     }
 }
@@ -62,6 +87,10 @@ pub async fn get_source(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(why) = store.single_index_refusal(&index) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why);
+    }
+    let p = crate::api::read_routing(&store, &index, &p);
     refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else {
         return if ignored(&p, StatusCode::NOT_FOUND) {
@@ -71,6 +100,9 @@ pub async fn get_source(
         };
     };
     let g = st.read();
+    if let Some(refusal) = crate::api::read_routing_refusal(&g, &id, &p) {
+        return refusal;
+    }
     if !source_enabled(&g) {
         return err(
             StatusCode::NOT_FOUND,

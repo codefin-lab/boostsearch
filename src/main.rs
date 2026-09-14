@@ -426,6 +426,14 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_security/api/ssl/certs", get(security::api::certs))
         .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
+            "/_plugins/_security/api/internalusers/{name}/authtoken",
+            post(security::api::service_authtoken).fallback(security::api::post_only),
+        )
+        .route(
+            "/_plugins/_security/api/generateonbehalfoftoken",
+            post(security::api::generate_obo_token).fallback(security::api::post_only),
+        )
+        .route(
             "/_plugins/_security/api/audit",
             get(security::api::audit_get)
                 .patch(security::api::audit_patch)
@@ -462,6 +470,9 @@ fn app(store: Store) -> Router {
         .fallback_service(routes)
         .layer(axum::middleware::from_fn_with_state(store.clone(), cluster::forward::layer))
         .layer(axum::middleware::from_fn_with_state(store, security::layer::authenticate))
+        // outermost, so a request refused before it reaches a handler is
+        // still one its pool counts
+        .layer(axum::middleware::from_fn(api::pools::track))
 }
 
 /// How large a request body may be, in bytes.
@@ -478,6 +489,8 @@ fn max_content_bytes() -> usize {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
+    // the node's uptime counts from here
+    api::sysinfo::uptime_millis();
     let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
     // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
@@ -627,17 +640,48 @@ async fn main() -> anyhow::Result<()> {
     let tls_settings = tls::TlsSettings::read(&node_settings);
     if tls_settings.enabled {
         eprintln!("boostsearch listening on https://{addr}");
-        tls::serve_tls(listener, app(store.clone()), &tls_settings, shutdown_signal(store)).await?;
+        tls::serve_tls(listener, app(store.clone()), &tls_settings, shutdown_signal(store.clone()))
+            .await?;
     } else {
         eprintln!("boostsearch listening on {addr}");
         axum::serve(
             http_compat::LenientListener(listener),
             app(store.clone()).into_make_service_with_connect_info::<http_compat::Peer>(),
         )
-        .with_graceful_shutdown(shutdown_signal(store))
+        .with_graceful_shutdown(shutdown_signal(store.clone()))
         .await?;
     }
-    Ok(())
+    // Every connection has closed. Returning from here would drop the runtime,
+    // and dropping a runtime waits for every blocking task still running -- a
+    // merge, a snapshot -- so the state is put down once more and the process
+    // ends on its own terms.
+    save_state(&store);
+    std::process::exit(0);
+}
+
+/// How long a stopping node gives the requests already running to finish.
+///
+/// A graceful shutdown waits for every connection to close, and a client
+/// holding a keep-alive connection open never closes it: the node stopped only
+/// when something killed it, which is why the examples ended with `kill -9`.
+/// What an acknowledged write needs is on disk before it is answered, so a
+/// request cut off here is one that was never acknowledged.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Put down what a restart would otherwise rebuild or lose: every translog
+/// forced to disk, and where each document's version had got to, so that a
+/// node started again answers `_version` with the number the documents really
+/// carry rather than beginning at one. An index whose lock is held for long --
+/// a merge -- is left to its translog, which is what a crash would leave too.
+fn save_state(store: &Store) {
+    for name in store.names() {
+        if let Some(st) = store.get(&name)
+            && let Some(mut g) = st.try_write_for(std::time::Duration::from_millis(500))
+        {
+            g.flush_translog(true);
+            g.save_doc_meta();
+        }
+    }
 }
 
 /// SIGTERM or SIGINT: the node tells the cluster manager it is leaving, so
@@ -670,12 +714,15 @@ async fn shutdown_signal(store: Store) {
         // the primaries here are what a write needs, so the node waits for the
         // manager to put them somewhere else before it stops answering: a
         // rolling restart then costs a moment of a copy's absence rather than
-        // every write to those indices while the node is down
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        // every write to those indices while the node is down. With no other
+        // data node there is nowhere for them to go, and the wait was fifteen
+        // seconds of nothing on every stop of a node running alone.
+        let elsewhere = rt.state().data_nodes().iter().any(|n| n.id != me);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let mine = rt.state().routing.on_node(&me).filter(|c| c.primary).count();
-            if mine == 0 || std::time::Instant::now() >= deadline {
-                if mine > 0 {
+            if mine == 0 || !elsewhere || std::time::Instant::now() >= deadline {
+                if mine > 0 && elsewhere {
                     eprintln!("boostsearch: stopping with {mine} primaries still here");
                 }
                 break;
@@ -684,14 +731,13 @@ async fn shutdown_signal(store: Store) {
         }
     }
     cluster::replication::flush_trace();
-    for name in store.names() {
-        if let Some(st) = store.get(&name) {
-            let mut g = st.write();
-            g.flush_translog(true);
-            // where each document's version had got to, so that a node
-            // started again answers `_version` with the number the documents
-            // really carry rather than beginning at one
-            g.save_doc_meta();
-        }
-    }
+    save_state(&store);
+    // from here the listener takes no new connections; the ones open get the
+    // grace period, and then the process ends whether they closed or not
+    std::thread::spawn(move || {
+        std::thread::sleep(SHUTDOWN_GRACE);
+        save_state(&store);
+        eprintln!("boostsearch: stopped with connections still open");
+        std::process::exit(0);
+    });
 }

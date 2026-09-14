@@ -228,8 +228,9 @@ impl IdxState {
     pub fn refresh_knobs(&mut self) {
         self.knobs = WriteKnobs {
             blocks_write: self.setting("blocks.write").as_deref() == Some("true"),
-            blocks_read_only: self.setting("blocks.read_only").as_deref() == Some("true")
-                || self.setting("blocks.read_only_allow_delete").as_deref() == Some("true"),
+            blocks_read_only: self.setting("blocks.read_only").as_deref() == Some("true"),
+            blocks_read_only_allow_delete: self.setting("blocks.read_only_allow_delete").as_deref()
+                == Some("true"),
             ignore_malformed: self.setting("mapping.ignore_malformed").as_deref() == Some("true"),
             append_only: self.setting("append_only.enabled").as_deref() == Some("true"),
             nested_limit: self.numeric_setting("mapping.nested_objects.limit").unwrap_or(10_000),
@@ -239,6 +240,7 @@ impl IdxState {
                 .and_then(|v| crate::cluster::allocation::time_ms(&v))
                 .unwrap_or(5_000),
             shards: self.numeric_setting("number_of_shards").unwrap_or(1).max(1),
+            slowlog: crate::store::slowlog::SlowLogKnobs::read(|k| self.setting(k)),
         };
     }
 
