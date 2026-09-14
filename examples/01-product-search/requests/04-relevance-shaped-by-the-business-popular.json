@@ -1,0 +1,48 @@
+{
+  "size": 6,
+  "_source": [
+    "name",
+    "sold_last_month",
+    "rating",
+    "in_stock"
+  ],
+  "query": {
+    "function_score": {
+      "query": {
+        "multi_match": {
+          "query": "audio video",
+          "fields": [
+            "categories",
+            "blurb"
+          ]
+        }
+      },
+      "functions": [
+        {
+          "field_value_factor": {
+            "field": "sold_last_month",
+            "modifier": "log1p",
+            "factor": 0.4
+          }
+        },
+        {
+          "field_value_factor": {
+            "field": "rating",
+            "modifier": "none",
+            "factor": 0.5
+          }
+        },
+        {
+          "filter": {
+            "term": {
+              "in_stock": false
+            }
+          },
+          "weight": 0.2
+        }
+      ],
+      "score_mode": "sum",
+      "boost_mode": "multiply"
+    }
+  }
+}

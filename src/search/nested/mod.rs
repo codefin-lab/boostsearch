@@ -451,7 +451,13 @@ pub(crate) fn object_matches(filter: &Value, object: &Value, path: &str) -> bool
                 return false;
             };
             let want = want.get("value").unwrap_or(want);
-            field_value(name).map(|v| &v == want).unwrap_or(false)
+            // a field of an object may hold one value or a list of them, and
+            // a term asks whether it holds this one
+            match field_value(name) {
+                Some(Value::Array(a)) => a.iter().any(|v| v == want),
+                Some(v) => &v == want,
+                None => false,
+            }
         }
         // a match asks after the words in a value rather than the whole of it
         "match" | "match_phrase" => {
@@ -478,9 +484,15 @@ pub(crate) fn object_matches(filter: &Value, object: &Value, path: &str) -> bool
             let Some((name, spec)) = body.as_object().and_then(|o| o.iter().next()) else {
                 return false;
             };
-            let Some(here) = field_value(name).as_ref().and_then(number_of) else {
-                return false;
+            let held = field_value(name);
+            let here: Vec<f64> = match held.as_ref() {
+                Some(Value::Array(a)) => a.iter().filter_map(number_of).collect(),
+                Some(one) => number_of(one).into_iter().collect(),
+                None => Vec::new(),
             };
+            if here.is_empty() {
+                return false;
+            }
             let bound = |key: &str| -> Option<f64> {
                 spec.get(key).and_then(|v| match v {
                     Value::String(s) => crate::store::canonical_date(&json!(s))
@@ -490,10 +502,12 @@ pub(crate) fn object_matches(filter: &Value, object: &Value, path: &str) -> bool
                     other => other.as_f64(),
                 })
             };
-            bound("gte").map(|b| here >= b).unwrap_or(true)
-                && bound("gt").map(|b| here > b).unwrap_or(true)
-                && bound("lte").map(|b| here <= b).unwrap_or(true)
-                && bound("lt").map(|b| here < b).unwrap_or(true)
+            here.iter().any(|&here| {
+                bound("gte").map(|b| here >= b).unwrap_or(true)
+                    && bound("gt").map(|b| here > b).unwrap_or(true)
+                    && bound("lte").map(|b| here <= b).unwrap_or(true)
+                    && bound("lt").map(|b| here < b).unwrap_or(true)
+            })
         }
         _ => true,
     }

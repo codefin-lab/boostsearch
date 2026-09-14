@@ -86,8 +86,22 @@ pub fn shape(planned: &Planned, answer: &Value) -> Table {
     }
 
     let total = rows.len();
+    // a column that was only there to be sorted by goes no further: `top 3
+    // customer` orders by a count the answer does not report
+    let shown = planned.columns.len().saturating_sub(planned.hidden);
+    let mut rows = rows;
+    if planned.hidden > 0 {
+        for row in rows.iter_mut() {
+            row.truncate(shown);
+        }
+    }
+    let rows = rows;
     let columns: Vec<(String, String)> = planned
         .columns
+        .iter()
+        .take(shown)
+        .cloned()
+        .collect::<Vec<_>>()
         .iter()
         .enumerate()
         .map(|(at, name)| {
@@ -104,6 +118,7 @@ pub fn shape(planned: &Planned, answer: &Value) -> Table {
     let aliases = planned
         .also_called
         .iter()
+        .take(shown)
         .enumerate()
         .map(|(at, behind)| behind.as_ref().map(|_| planned.columns[at].clone()))
         .collect();

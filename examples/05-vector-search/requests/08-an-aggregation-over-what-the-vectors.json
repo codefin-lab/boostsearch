@@ -1,0 +1,37 @@
+{
+  "size": 0,
+  "query": {
+    "knn": {
+      "embedding": {
+        "vector": [
+          0.5,
+          0.5,
+          0.5,
+          0.5,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "k": 7
+      }
+    }
+  },
+  "aggs": {
+    "fields": {
+      "terms": {
+        "field": "field"
+      },
+      "aggs": {
+        "median_year": {
+          "percentiles": {
+            "field": "year",
+            "percents": [
+              50
+            ]
+          }
+        }
+      }
+    }
+  }
+}

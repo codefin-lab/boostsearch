@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "seq": {
+        "type": "long"
+      },
+      "kind": {
+        "type": "keyword"
+      },
+      "at": {
+        "type": "date"
+      },
+      "payload": {
+        "type": "text"
+      }
+    }
+  }
+}

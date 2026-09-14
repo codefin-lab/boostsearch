@@ -1,0 +1,12 @@
+{"index":{"_id":"d1"}}
+{"title":"Snapshot and restore","body":"How to take a snapshot of an index and restore it into another cluster. Covers filesystem and S3 repositories, partial restores and renaming on restore.","section":"operations","kind":"guide","views":9100,"updated":"2026-08-01","deprecated":false}
+{"index":{"_id":"d2"}}
+{"title":"The snapshot API","body":"Reference for every snapshot endpoint.","section":"reference","kind":"reference","views":4200,"updated":"2026-08-20","deprecated":false}
+{"index":{"_id":"d3"}}
+{"title":"Backing up with the old snapshot tool","body":"The previous snapshot tool, removed in version 3. Use the snapshot API instead. This page is kept only so that links to it do not break, and it describes a snapshot workflow that no longer exists.","section":"operations","kind":"guide","views":11000,"updated":"2023-02-11","deprecated":true}
+{"index":{"_id":"d4"}}
+{"title":"Restoring a single index","body":"A short recipe for restoring one index from a snapshot.","section":"operations","kind":"recipe","views":2600,"updated":"2026-09-01","deprecated":false}
+{"index":{"_id":"d5"}}
+{"title":"Cluster health","body":"What green, yellow and red mean, and what to do about each.","section":"operations","kind":"guide","views":15000,"updated":"2026-07-14","deprecated":false}
+{"index":{"_id":"d6"}}
+{"title":"Repository settings","body":"Settings for snapshot repositories: compression, chunk size, and the allowed paths.","section":"reference","kind":"reference","views":900,"updated":"2026-06-30","deprecated":false}

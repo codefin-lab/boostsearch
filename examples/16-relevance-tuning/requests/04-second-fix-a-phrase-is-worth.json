@@ -1,0 +1,40 @@
+{
+  "size": 6,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "multi_match": {
+            "query": "snapshot restore",
+            "fields": [
+              "title^4",
+              "body"
+            ]
+          }
+        }
+      ],
+      "should": [
+        {
+          "match_phrase": {
+            "body": {
+              "query": "snapshot restore",
+              "slop": 2,
+              "boost": 3
+            }
+          }
+        },
+        {
+          "match_phrase": {
+            "title": {
+              "query": "snapshot restore",
+              "boost": 6
+            }
+          }
+        }
+      ]
+    }
+  }
+}

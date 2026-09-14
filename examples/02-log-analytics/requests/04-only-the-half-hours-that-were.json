@@ -1,0 +1,55 @@
+{
+  "size": 0,
+  "aggs": {
+    "over_time": {
+      "date_histogram": {
+        "field": "@timestamp",
+        "fixed_interval": "30m"
+      },
+      "aggs": {
+        "errors": {
+          "filter": {
+            "range": {
+              "status": {
+                "gte": 500
+              }
+            }
+          }
+        },
+        "err": {
+          "bucket_script": {
+            "buckets_path": {
+              "b": "errors>_count"
+            },
+            "script": "params.b"
+          }
+        },
+        "change": {
+          "derivative": {
+            "buckets_path": "err"
+          }
+        },
+        "smoothed": {
+          "moving_fn": {
+            "buckets_path": "err",
+            "window": 3,
+            "script": "MovingFunctions.unweightedAvg(values)"
+          }
+        },
+        "running_total": {
+          "cumulative_sum": {
+            "buckets_path": "err"
+          }
+        },
+        "only_the_bad": {
+          "bucket_selector": {
+            "buckets_path": {
+              "b": "errors>_count"
+            },
+            "script": "params.b > 20"
+          }
+        }
+      }
+    }
+  }
+}

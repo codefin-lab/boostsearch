@@ -1,0 +1,31 @@
+{
+  "size": 7,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "script_score": {
+      "query": {
+        "term": {
+          "field": "physics"
+        }
+      },
+      "script": {
+        "lang": "painless",
+        "source": "cosineSimilarity(params.q, doc[\"embedding\"]) + 1.0",
+        "params": {
+          "q": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      }
+    }
+  }
+}

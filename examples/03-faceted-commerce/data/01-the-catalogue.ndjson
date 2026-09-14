@@ -1,0 +1,12 @@
+{"index":{"_id":"s1"}}
+{"title":"Trail Runner GTX","brand":"Fellside","colour":"black","gender":"unisex","rating":4.5,"tags":["waterproof","trail"],"variants":[{"sku":"s1-40","size":"40","price":129.00,"stock":4},{"sku":"s1-42","size":"42","price":129.00,"stock":0},{"sku":"s1-44","size":"44","price":139.00,"stock":11}]}
+{"index":{"_id":"s2"}}
+{"title":"Trail Runner Lite","brand":"Fellside","colour":"blue","gender":"unisex","rating":4.1,"tags":["trail"],"variants":[{"sku":"s2-40","size":"40","price":89.00,"stock":0},{"sku":"s2-42","size":"42","price":89.00,"stock":2}]}
+{"index":{"_id":"s3"}}
+{"title":"City Walker","brand":"Quay","colour":"brown","gender":"women","rating":4.8,"tags":["leather"],"variants":[{"sku":"s3-38","size":"38","price":175.00,"stock":6},{"sku":"s3-40","size":"40","price":175.00,"stock":3}]}
+{"index":{"_id":"s4"}}
+{"title":"City Walker Wide","brand":"Quay","colour":"black","gender":"women","rating":4.3,"tags":["leather","wide"],"variants":[{"sku":"s4-40","size":"40","price":185.00,"stock":0},{"sku":"s4-42","size":"42","price":185.00,"stock":1}]}
+{"index":{"_id":"s5"}}
+{"title":"Harbour Deck Shoe","brand":"Quay","colour":"blue","gender":"men","rating":3.9,"tags":["leather"],"variants":[{"sku":"s5-42","size":"42","price":95.00,"stock":9},{"sku":"s5-44","size":"44","price":95.00,"stock":5}]}
+{"index":{"_id":"s6"}}
+{"title":"Fell Boot","brand":"Fellside","colour":"brown","gender":"men","rating":4.6,"tags":["waterproof","leather"],"variants":[{"sku":"s6-42","size":"42","price":215.00,"stock":2},{"sku":"s6-44","size":"44","price":229.00,"stock":0}]}

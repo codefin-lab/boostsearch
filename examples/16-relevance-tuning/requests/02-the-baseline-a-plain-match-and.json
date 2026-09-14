@@ -1,0 +1,13 @@
+{
+  "size": 6,
+  "_source": [
+    "title",
+    "deprecated",
+    "views"
+  ],
+  "query": {
+    "match": {
+      "body": "snapshot restore"
+    }
+  }
+}

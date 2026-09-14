@@ -1,0 +1,105 @@
+{
+  "settings": {
+    "number_of_shards": 2,
+    "number_of_replicas": 0,
+    "analysis": {
+      "char_filter": {
+        "strip_marks": {
+          "type": "mapping",
+          "mappings": [
+            "&=> and ",
+            "+=> plus "
+          ]
+        }
+      },
+      "filter": {
+        "shop_synonyms": {
+          "type": "synonym_graph",
+          "synonyms": [
+            "laptop, notebook, portable computer",
+            "tv, television",
+            "headphones, headset, earphones"
+          ]
+        },
+        "english_stems": {
+          "type": "stemmer",
+          "language": "english"
+        },
+        "edge_2_15": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 15
+        }
+      },
+      "analyzer": {
+        "shop_text": {
+          "type": "custom",
+          "char_filter": [
+            "strip_marks"
+          ],
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "shop_synonyms",
+            "english_stems"
+          ]
+        },
+        "shop_prefix": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "edge_2_15"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text",
+        "analyzer": "shop_text",
+        "fields": {
+          "prefix": {
+            "type": "text",
+            "analyzer": "shop_prefix",
+            "search_analyzer": "standard"
+          },
+          "raw": {
+            "type": "keyword"
+          }
+        }
+      },
+      "blurb": {
+        "type": "text",
+        "analyzer": "shop_text"
+      },
+      "brand": {
+        "type": "keyword"
+      },
+      "categories": {
+        "type": "keyword"
+      },
+      "price": {
+        "type": "scaled_float",
+        "scaling_factor": 100
+      },
+      "rating": {
+        "type": "half_float"
+      },
+      "sold_last_month": {
+        "type": "integer"
+      },
+      "in_stock": {
+        "type": "boolean"
+      },
+      "released": {
+        "type": "date"
+      },
+      "suggest": {
+        "type": "completion"
+      }
+    }
+  }
+}

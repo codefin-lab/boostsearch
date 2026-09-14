@@ -1,0 +1,27 @@
+{
+  "description": "what can be worked out about the caller",
+  "processors": [
+    {
+      "geoip": {
+        "field": "client.ip",
+        "target_field": "client.geo",
+        "ignore_missing": true,
+        "on_failure": [
+          {
+            "set": {
+              "field": "client.geo.located",
+              "value": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "user_agent": {
+        "field": "user_agent.original",
+        "target_field": "user_agent",
+        "ignore_missing": true
+      }
+    }
+  ]
+}

@@ -58,3 +58,7 @@ __pycache__/
 # working notes from the study phase, written with an AI and not
 # reviewed as documents: kept locally, not published
 /docs/notes/
+
+# An example copied somewhere else carries its own .env; the one in the tree
+# is the example of one
+/examples/*/.env

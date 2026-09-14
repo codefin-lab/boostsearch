@@ -76,7 +76,28 @@ pub async fn warmup(
     Query(p): Query<Params>,
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_else(|| "*".into());
-    for name in store.resolve(&expr) {
+    let named = store.resolve(&expr);
+    // Warming an index that holds no vectors is not a cheap no-op but a
+    // request that cannot mean anything, and the reference says so rather
+    // than answering as though it had warmed something. This answered every
+    // caller with a success, so a warm-up pointed at the wrong index read as
+    // though it had worked.
+    if named.iter().any(|name| {
+        store
+            .get(name)
+            .map(|st| {
+                let g = st.read();
+                !matches!(g.setting("index.knn").as_deref(), Some("true"))
+            })
+            .unwrap_or(false)
+    }) {
+        return crate::api::err(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "k_n_n_invalid_indices_exception",
+            "Warm up request rejected. One or more indices have 'index.knn' set to false.",
+        );
+    }
+    for name in named {
         let Some(st) = store.get(&name) else { continue };
         let needs = {
             let g = st.read();

@@ -364,9 +364,35 @@ pub(crate) fn run_scripted_terms_agg(
                     ),
                 ));
             }
-            for (n, d) in subs {
-                b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+            // `run_peeled_agg` answers the aggregations that are run here
+            // and falls through to `filters` for anything else, so a plain
+            // metric under a scripted terms -- `sum`, `avg`, `value_count` --
+            // reached it as a `filters` aggregation with no filters and the
+            // whole request was refused. The split the field-terms path
+            // already makes is made here too: what can be peeled is peeled,
+            // and the rest is asked of the engine over the bucket's documents.
+            let (peeled, plain) = split_peelable(&sub_aggs, store, targets);
+            let any_plain = plain
+                .as_ref()
+                .and_then(|p| p.as_object())
+                .map(|o| o.into_iter().next().is_some())
+                .unwrap_or(false);
+            if any_plain && let Some(plain) = plain.as_ref() {
+                let narrowed_q = narrowed.clone().unwrap_or_else(|| json!({"match_all": {}}));
+                let (_, answered) =
+                    count_with_sub_aggs(store, targets, &narrowed_q, &Some(plain.clone()), false)?;
+                if let Some(Value::Object(o)) = answered {
+                    for (n, v) in o {
+                        b[n] = v;
+                    }
+                }
             }
+            if let Some(peeled) = peeled.as_ref().and_then(|p| p.as_object()) {
+                for (n, d) in peeled {
+                    b[n.clone()] = run_peeled_agg(store, targets, &narrowed, n, d, weighted)?;
+                }
+            }
+            let _ = subs;
         }
         buckets.push(b);
     }

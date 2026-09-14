@@ -1,0 +1,16 @@
+{
+  "cluster_permissions": [
+    "cluster_composite_ops"
+  ],
+  "index_permissions": [
+    {
+      "index_patterns": [
+        "tickets*"
+      ],
+      "allowed_actions": [
+        "crud",
+        "read"
+      ]
+    }
+  ]
+}

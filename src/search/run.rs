@@ -695,12 +695,71 @@ pub fn walk_every_hit_of(
     }
 }
 
+/// A script written as `{"id": "..."}` replaced by the script that id names.
+///
+/// `Compiled::of` resolves a stored script when it is given somewhere to look
+/// it up, and most of the places that compile one pass the store. The places
+/// that run a script over a document read it out of the request body and had
+/// nowhere to look, so a stored script in `script_fields`, in a `_script`
+/// sort, in a `script` query or in `_explain` was answered with `unable to
+/// find script [...] in cluster state` -- the id was resolved for a
+/// `_update` and not for a search. Resolving it once, here, puts the source
+/// where every one of those reads it.
+fn inline_stored_scripts(store: &Store, node: &mut Value) -> bool {
+    let mut any = false;
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get_mut("script")
+                && let Some(inner) = spec.as_object_mut()
+                && inner.get("source").is_none()
+                && inner.get("inline").is_none()
+                && let Some(id) = inner.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+                && let Some(found) = store.stored_script(&id)
+            {
+                if let Some(text) = found.get("source") {
+                    inner.insert("source".into(), text.clone());
+                }
+                if let Some(lang) = found.get("lang")
+                    && inner.get("lang").is_none()
+                {
+                    inner.insert("lang".into(), lang.clone());
+                }
+                inner.remove("id");
+                any = true;
+            }
+            for v in o.values_mut() {
+                any |= inline_stored_scripts(store, v);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                any |= inline_stored_scripts(store, v);
+            }
+        }
+        _ => {}
+    }
+    any
+}
+
 pub fn run(
     store: &Store,
     expr: &str,
     body: &Value,
     p: &Params,
 ) -> std::result::Result<Outcome, Response> {
+    // a stored script named by id is the script it names, from here on
+    let inlined;
+    let body = if mentions_a_script(body) {
+        let mut copy = body.clone();
+        if inline_stored_scripts(store, &mut copy) {
+            inlined = copy;
+            &inlined
+        } else {
+            body
+        }
+    } else {
+        body
+    };
     // An alias may be a narrower view of an index, and the filter that makes
     // it narrower belongs to the request rather than to the query: it is put
     // where every path that builds a query for one index can read it, which
@@ -1017,7 +1076,10 @@ pub fn run(
         scan_extras(q, &mut extras);
     }
     let extras = extras;
-    let mut query_json = body.get("query").cloned();
+    // a `nested` clause that will be settled against the candidates' own
+    // objects is asked here in its widest form, so the settling has something
+    // to accept; see `relaxed_for_nested`
+    let mut query_json = body.get("query").map(crate::search::extras::relaxed_for_nested);
     if !excluded_ids.is_empty() {
         let base = query_json.take().unwrap_or_else(|| json!({"match_all": {}}));
         query_json = Some(json!({
@@ -1448,7 +1510,7 @@ pub fn run(
 
     // a geo shape, an intervals rule or a distance_feature is settled from the
     // candidates' own values, and what survives is the new total
-    if extras.geo || extras.intervals || extras.distance_feature {
+    if extras.geo || extras.intervals || extras.distance_feature || extras.nested_query {
         let before = cands.len();
         settle_by_value(&mut cands, &searchers, body, &extras);
         if cands.len() != before {

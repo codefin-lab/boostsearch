@@ -1,0 +1,23 @@
+{
+  "size": 2,
+  "_source": [
+    "title",
+    "rating"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "sort": [
+    {
+      "rating": "desc"
+    },
+    {
+      "_id": "asc"
+    }
+  ],
+  "search_after": [
+    4.5,
+    "s1"
+  ],
+  "track_total_hits": false
+}

@@ -1,0 +1,25 @@
+{
+  "size": 5,
+  "_source": [
+    "plate",
+    "km",
+    "serviced_km"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "script": {
+            "script": {
+              "lang": "painless",
+              "source": "doc[\"km\"].value - doc[\"serviced_km\"].value > params.overdue",
+              "params": {
+                "overdue": 20000
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

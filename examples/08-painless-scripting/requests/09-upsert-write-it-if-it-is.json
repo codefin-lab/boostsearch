@@ -1,0 +1,19 @@
+{
+  "script": {
+    "source": "ctx._source.km += params.driven",
+    "params": {
+      "driven": 100
+    }
+  },
+  "upsert": {
+    "plate": "9\u0e2e\u0e2e9999",
+    "model": "New",
+    "km": 0,
+    "price": 1000000,
+    "bought": "2026-09-01",
+    "faults": [],
+    "driver": "nok",
+    "tank_l": 80,
+    "litres_per_100km": 9.0
+  }
+}

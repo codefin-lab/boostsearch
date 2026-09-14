@@ -1,0 +1,94 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "char_filter": {
+        "no_html": {
+          "type": "html_strip"
+        }
+      },
+      "filter": {
+        "thai_stops": {
+          "type": "stop",
+          "stopwords": [
+            "\u0e41\u0e25\u0e30",
+            "\u0e2b\u0e23\u0e37\u0e2d",
+            "\u0e17\u0e35\u0e48"
+          ]
+        },
+        "cjk_2gram": {
+          "type": "cjk_bigram"
+        }
+      },
+      "analyzer": {
+        "th": {
+          "type": "custom",
+          "char_filter": [
+            "no_html"
+          ],
+          "tokenizer": "thai",
+          "filter": [
+            "lowercase",
+            "decimal_digit",
+            "thai_stops"
+          ]
+        },
+        "ja": {
+          "type": "custom",
+          "tokenizer": "kuromoji_tokenizer",
+          "filter": [
+            "kuromoji_baseform",
+            "ja_stop",
+            "kuromoji_stemmer",
+            "lowercase"
+          ]
+        },
+        "ko": {
+          "type": "custom",
+          "tokenizer": "nori_tokenizer",
+          "filter": [
+            "nori_readingform",
+            "lowercase"
+          ]
+        },
+        "zh": {
+          "type": "custom",
+          "tokenizer": "icu_tokenizer",
+          "filter": [
+            "cjk_2gram",
+            "lowercase"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text",
+        "fields": {
+          "th": {
+            "type": "text",
+            "analyzer": "th"
+          },
+          "ja": {
+            "type": "text",
+            "analyzer": "ja"
+          },
+          "ko": {
+            "type": "text",
+            "analyzer": "ko"
+          },
+          "zh": {
+            "type": "text",
+            "analyzer": "zh"
+          }
+        }
+      },
+      "lang": {
+        "type": "keyword"
+      }
+    }
+  }
+}

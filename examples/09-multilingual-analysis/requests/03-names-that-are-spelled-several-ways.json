@@ -1,0 +1,59 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "filter": {
+        "dbl_metaphone": {
+          "type": "phonetic",
+          "encoder": "double_metaphone",
+          "replace": false
+        },
+        "cologne": {
+          "type": "phonetic",
+          "encoder": "koelnerphonetik",
+          "replace": false
+        }
+      },
+      "analyzer": {
+        "sounds_like": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "dbl_metaphone"
+          ]
+        },
+        "sounds_like_de": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "cologne"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text",
+        "fields": {
+          "sounds": {
+            "type": "text",
+            "analyzer": "sounds_like"
+          },
+          "de": {
+            "type": "text",
+            "analyzer": "sounds_like_de"
+          }
+        }
+      },
+      "phone": {
+        "type": "text",
+        "analyzer": "standard"
+      }
+    }
+  }
+}

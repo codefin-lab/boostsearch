@@ -1,0 +1,34 @@
+{
+  "size": 5,
+  "_source": [
+    "plate",
+    "km",
+    "serviced_km"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "script_fields": {
+    "km_since_service": {
+      "script": {
+        "lang": "painless",
+        "source": "doc[\"km\"].value - doc[\"serviced_km\"].value"
+      }
+    },
+    "range_km": {
+      "script": {
+        "lang": "painless",
+        "source": "(int) Math.round(doc[\"tank_l\"].value * 100 / doc[\"litres_per_100km\"].value)"
+      }
+    },
+    "age_years": {
+      "script": {
+        "lang": "painless",
+        "source": "ChronoUnit.DAYS.between(doc[\"bought\"].value, ZonedDateTime.parse(params.now)) / 365.0",
+        "params": {
+          "now": "2026-09-13T00:00:00Z"
+        }
+      }
+    }
+  }
+}

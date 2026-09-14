@@ -1,0 +1,36 @@
+{
+  "script": {
+    "lang": "mustache",
+    "source": {
+      "size": "{{size}}{{^size}}3{{/size}}",
+      "_source": [
+        "name",
+        "price"
+      ],
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "multi_match": {
+                "query": "{{q}}",
+                "fields": [
+                  "name^3",
+                  "blurb"
+                ]
+              }
+            }
+          ],
+          "filter": [
+            {
+              "range": {
+                "price": {
+                  "lte": "{{max_price}}{{^max_price}}100000{{/max_price}}"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

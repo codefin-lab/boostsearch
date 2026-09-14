@@ -1,0 +1,23 @@
+{
+  "size": 3,
+  "_source": [
+    "name"
+  ],
+  "query": {
+    "term": {
+      "city": "Bangkok"
+    }
+  },
+  "script_fields": {
+    "metres": {
+      "script": {
+        "lang": "painless",
+        "source": "doc[\"location\"].size() == 0 ? -1 : doc[\"location\"].arcDistance(params.lat, params.lon)",
+        "params": {
+          "lat": 13.73,
+          "lon": 100.54
+        }
+      }
+    }
+  }
+}

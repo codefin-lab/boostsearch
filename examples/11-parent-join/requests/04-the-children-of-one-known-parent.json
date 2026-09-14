@@ -1,0 +1,18 @@
+{
+  "size": 5,
+  "_source": [
+    "body",
+    "votes"
+  ],
+  "query": {
+    "parent_id": {
+      "type": "answer",
+      "id": "q1"
+    }
+  },
+  "sort": [
+    {
+      "votes": "desc"
+    }
+  ]
+}

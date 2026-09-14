@@ -1,0 +1,47 @@
+{
+  "size": 0,
+  "aggs": {
+    "rings": {
+      "geo_distance": {
+        "field": "location",
+        "origin": {
+          "lat": 13.73,
+          "lon": 100.54
+        },
+        "unit": "km",
+        "ranges": [
+          {
+            "to": 2,
+            "key": "walk"
+          },
+          {
+            "from": 2,
+            "to": 10,
+            "key": "ride"
+          },
+          {
+            "from": 10,
+            "key": "far"
+          }
+        ]
+      },
+      "aggs": {
+        "best": {
+          "max": {
+            "field": "rating"
+          }
+        }
+      }
+    },
+    "centre_of_gravity": {
+      "geo_centroid": {
+        "field": "location"
+      }
+    },
+    "the_whole_extent": {
+      "geo_bounds": {
+        "field": "location"
+      }
+    }
+  }
+}

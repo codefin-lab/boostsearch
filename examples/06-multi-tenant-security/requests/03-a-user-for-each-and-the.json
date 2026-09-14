@@ -1,0 +1,6 @@
+{
+  "password": "another-long-passphrase-2",
+  "backend_roles": [
+    "contoso"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "size": 5,
+  "_source": [
+    "title",
+    "citations",
+    "year"
+  ],
+  "query": {
+    "function_score": {
+      "query": {
+        "knn": {
+          "embedding": {
+            "vector": [
+              0.5,
+              0.5,
+              0.5,
+              0.5,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "k": 7
+          }
+        }
+      },
+      "functions": [
+        {
+          "field_value_factor": {
+            "field": "citations",
+            "modifier": "log1p",
+            "factor": 0.2
+          }
+        },
+        {
+          "gauss": {
+            "year": {
+              "origin": 2026,
+              "scale": 3,
+              "decay": 0.6
+            }
+          }
+        }
+      ],
+      "boost_mode": "multiply"
+    }
+  }
+}

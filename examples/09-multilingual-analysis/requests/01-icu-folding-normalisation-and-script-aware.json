@@ -1,0 +1,8 @@
+{
+  "tokenizer": "icu_tokenizer",
+  "filter": [
+    "icu_normalizer",
+    "icu_folding"
+  ],
+  "text": "\uff23af\u00e9  \u00c9COLE  \uff34okyo  \u00bd kg"
+}

@@ -1,0 +1,27 @@
+{
+  "size": 6,
+  "_source": [
+    "title",
+    "deprecated"
+  ],
+  "query": {
+    "boosting": {
+      "positive": {
+        "multi_match": {
+          "query": "snapshot restore",
+          "fields": [
+            "title^4",
+            "body"
+          ],
+          "type": "best_fields"
+        }
+      },
+      "negative": {
+        "term": {
+          "deprecated": true
+        }
+      },
+      "negative_boost": 0.15
+    }
+  }
+}

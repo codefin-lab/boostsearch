@@ -110,8 +110,21 @@ pub async fn pending_tasks(Query(p): Query<Params>) -> Response {
     respond(&p, json!({"tasks": []}))
 }
 
-/// A single-node cluster is always green once it is up; the suite mostly uses
-/// this endpoint as a barrier before it starts asserting.
+/// The cluster's health, and the barrier nearly every script uses before it
+/// starts asserting.
+///
+/// The wait used to be skipped unless the node already knew of another one,
+/// on the reasoning that nothing can change while a lone node holds the
+/// request. Two things can. A node that is alone *now* may be joined a second
+/// later -- which is what a three-node cluster looks like from the first one
+/// to start, so `wait_for_nodes=3` returned `timed_out` at once and every
+/// script that used it as a barrier went on to assert against one node. And
+/// an index's replicas are placed after it is created, so `wait_for_status`
+/// asked in that moment answered yellow and did not wait for green.
+///
+/// The reference blocks until the condition holds or the timeout runs out,
+/// and so does this. A condition that can never hold -- more active shards
+/// than the cluster has -- still ends at the timeout, as it does there.
 pub async fn cluster_health(
     State(store): State<Store>,
     index: Option<Path<String>>,
@@ -124,8 +137,7 @@ pub async fn cluster_health(
     let waits = ["wait_for_status", "wait_for_nodes", "wait_for_active_shards", "wait_for_events"]
         .iter()
         .any(|k| p.contains_key(*k));
-    let clustered = crate::cluster::runtime().map(|rt| rt.state().nodes.len() > 1).unwrap_or(false);
-    if waits && clustered {
+    if waits {
         let ms = p
             .get("timeout")
             .and_then(|t| crate::cluster::allocation::time_ms(t))
@@ -257,8 +269,7 @@ fn health_now(store: &Store, expr: Option<String>, p: &Params) -> (Response, boo
         })
         .unwrap_or(false);
 
-    // a wait this engine cannot satisfy is answered as a timeout rather than
-    // by waiting: nothing here is going to change while the request is held
+    // whether what the request is waiting for has come about
     let satisfied = match p.get("wait_for_status").map(|v| v.as_str()) {
         Some("green") => status == "green",
         Some("yellow") => status != "red",

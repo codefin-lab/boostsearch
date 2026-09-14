@@ -1,0 +1,37 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "order_id": {
+        "type": "keyword"
+      },
+      "customer": {
+        "type": "keyword"
+      },
+      "country": {
+        "type": "keyword"
+      },
+      "channel": {
+        "type": "keyword"
+      },
+      "placed": {
+        "type": "date"
+      },
+      "items": {
+        "type": "integer"
+      },
+      "total": {
+        "type": "double"
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "note": {
+        "type": "text"
+      }
+    }
+  }
+}

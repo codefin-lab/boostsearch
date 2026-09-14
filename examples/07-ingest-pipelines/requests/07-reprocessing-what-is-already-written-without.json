@@ -1,0 +1,11 @@
+{
+  "script": {
+    "lang": "painless",
+    "source": "ctx._source.reprocessed = true"
+  },
+  "query": {
+    "term": {
+      "outcome": "server_error"
+    }
+  }
+}

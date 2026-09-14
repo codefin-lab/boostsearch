@@ -1,0 +1,34 @@
+{
+  "size": 10,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "nested": {
+            "path": "variants",
+            "query": {
+              "term": {
+                "variants.size": "42"
+              }
+            }
+          }
+        },
+        {
+          "nested": {
+            "path": "variants",
+            "query": {
+              "range": {
+                "variants.stock": {
+                  "gt": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

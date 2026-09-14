@@ -1,0 +1,27 @@
+{
+  "size": 10,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "sort": [
+    {
+      "variants.price": {
+        "order": "asc",
+        "mode": "min",
+        "nested": {
+          "path": "variants",
+          "filter": {
+            "range": {
+              "variants.stock": {
+                "gt": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

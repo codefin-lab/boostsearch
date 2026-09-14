@@ -1,0 +1,12 @@
+{
+  "size": 0,
+  "suggest": {
+    "spell": {
+      "text": "hedphones",
+      "term": {
+        "field": "blurb",
+        "suggest_mode": "always"
+      }
+    }
+  }
+}

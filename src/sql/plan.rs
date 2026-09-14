@@ -35,6 +35,8 @@ pub struct Planned {
     /// answers to both, and a `HAVING` may use either
     pub also_called: Vec<Option<String>>,
     pub distinct: bool,
+    /// columns to drop from the answer once the rows are ordered
+    pub hidden: usize,
 }
 
 /// Where one column's value comes from.
@@ -173,6 +175,7 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
             .map(|c| c.alias.as_ref().filter(|_| c.expr.field().is_none()).map(|_| c.expr.name()))
             .collect(),
         distinct: select.distinct,
+        hidden: select.hide_trailing,
     })
 }
 
@@ -186,17 +189,36 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
     let mut reads = Vec::new();
     let mut metrics = serde_json::Map::new();
 
-    // every grouping key, innermost last: a terms aggregation inside a terms
-    // aggregation is how SQL's several keys are asked for
-    let keys: Vec<String> = select
-        .group_by
-        .iter()
-        .map(|e| {
-            e.field()
-                .map(|f| f.to_string())
-                .ok_or_else(|| format!("cannot group by [{}]", e.name()))
-        })
-        .collect::<Result<_, _>>()?;
+    // A grouping key is a field, or an expression a script can compute --
+    // `GROUP BY MONTH(placed)` is ordinary SQL and was refused outright. A
+    // key written as an alias (`GROUP BY m`) is the column that alias names.
+    let by_alias = |e: &Expr| -> Expr {
+        if let Expr::Field(name) = e
+            && let Some(c) = select
+                .columns
+                .iter()
+                .find(|c| c.alias.as_deref() == Some(name.as_str()) && c.expr.field().is_none())
+        {
+            return c.expr.clone();
+        }
+        e.clone()
+    };
+    let group_by: Vec<Expr> = select.group_by.iter().map(by_alias).collect();
+    // what each key is called, so a column can be matched to it, and how it
+    // is asked for
+    let mut keys: Vec<String> = Vec::new();
+    let mut key_aggs: Vec<Value> = Vec::new();
+    for e in &group_by {
+        keys.push(e.name());
+        match e.field() {
+            Some(f) => key_aggs.push(json!({"field": f})),
+            None => {
+                let script = crate::sql::script::script_of(e)
+                    .ok_or_else(|| format!("cannot group by [{}]", e.name()))?;
+                key_aggs.push(json!({"script": script}));
+            }
+        }
+    }
 
     for (position, column) in select.columns.iter().enumerate() {
         columns.push(column.name());
@@ -205,6 +227,16 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
                 let at = keys.iter().position(|k| k == field).ok_or_else(|| {
                     format!("[{field}] is not grouped by and is not an aggregate")
                 })?;
+                reads.push(Read::Key(at));
+            }
+            // an expression that is itself a grouping key -- `MONTH(placed)`
+            // asked for beside `GROUP BY MONTH(placed)`
+            other
+                if !other.is_aggregate()
+                    && keys.iter().any(|k| *k == other.name())
+                    && other.field().is_none() =>
+            {
+                let at = keys.iter().position(|k| *k == other.name()).unwrap_or(0);
                 reads.push(Read::Key(at));
             }
             Expr::Call { name, args } if is_aggregate_name(name) => {
@@ -248,12 +280,15 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
 
     // the aggregations, built from the inside out
     let mut inner = Value::Object(metrics.clone());
-    for (depth, key) in keys.iter().enumerate().rev() {
+    for (depth, key) in key_aggs.iter().enumerate().rev() {
         // Groups come back in key order, as the reference's composite
         // aggregation returns them; the default order of a `terms` is by
         // count, and a query with no ORDER BY answered its groups fullest
         // first where the reference answers them by key.
-        let mut terms = json!({"terms": {"field": key, "size": 1000, "order": {"_key": "asc"}}});
+        let mut spec = key.clone();
+        spec["size"] = json!(1000);
+        spec["order"] = json!({"_key": "asc"});
+        let mut terms = json!({"terms": spec});
         // the innermost group is the one that carries the metrics
         if !inner.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             terms["aggs"] = inner.clone();
@@ -283,7 +318,14 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
             })?;
         order_rows.push((at, *ascending));
     }
-    let mut wanted_fields: Vec<String> = keys.clone();
+    // the fields the grouping reads, rather than what the keys are called:
+    // a key written `MONTH(placed)` is named for the expression and reads the
+    // field `placed`, and naming the expression made the column check look
+    // for a field called `month(placed)`
+    let mut wanted_fields: Vec<String> = Vec::new();
+    for e in &group_by {
+        collect_fields(e, &mut wanted_fields);
+    }
     for c in &select.columns {
         collect_fields(&c.expr, &mut wanted_fields);
     }
@@ -318,6 +360,7 @@ fn plan_grouped(select: &Select) -> Result<Planned, String> {
             .map(|c| c.alias.as_ref().map(|_| c.expr.name()))
             .collect(),
         distinct: select.distinct,
+        hidden: select.hide_trailing,
     })
 }
 
@@ -355,9 +398,20 @@ fn metric_for(
             ))
         }
         "sum" | "avg" | "min" | "max" => {
-            let field = field.ok_or_else(|| format!("{lowered} needs a field"))?;
+            // `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` counts a condition, which
+            // is how SQL asks a question an aggregation asks with a filter.
+            // Only a bare field used to be taken, so it was refused.
+            let spec = match field {
+                Some(f) => json!({"field": f}),
+                None => {
+                    let e = args.first().ok_or_else(|| format!("{lowered} needs a field"))?;
+                    let script = crate::sql::script::script_of(e)
+                        .ok_or_else(|| format!("{lowered} needs a field"))?;
+                    json!({"script": script})
+                }
+            };
             Ok((
-                Some((metric_name.clone(), json!({lowered.clone(): {"field": field}}))),
+                Some((metric_name.clone(), json!({lowered.clone(): spec}))),
                 Read::Metric(metric_name),
             ))
         }

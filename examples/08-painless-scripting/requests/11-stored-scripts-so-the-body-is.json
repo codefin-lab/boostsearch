@@ -1,0 +1,6 @@
+{
+  "script": {
+    "lang": "painless",
+    "source": "double years = ChronoUnit.DAYS.between(doc[\"bought\"].value, ZonedDateTime.parse(params.now)) / 365.0; return doc[\"price\"].value * Math.pow(1 - params.rate, years);"
+  }
+}

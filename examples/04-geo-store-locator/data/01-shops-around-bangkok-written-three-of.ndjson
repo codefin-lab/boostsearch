@@ -1,0 +1,12 @@
+{"index":{"_id":"g1"}}
+{"name":"Silom Corner","city":"Bangkok","kind":"cafe","location":{"lat":13.7279,"lon":100.5241},"opens":7,"closes":22,"rating":4.5,"delivers":{"type":"polygon","coordinates":[[[100.50,13.70],[100.56,13.70],[100.56,13.76],[100.50,13.76],[100.50,13.70]]]}}
+{"index":{"_id":"g2"}}
+{"name":"Asok Roasters","city":"Bangkok","kind":"cafe","location":"13.7370,100.5601","opens":6,"closes":20,"rating":4.7,"delivers":{"type":"polygon","coordinates":[[[100.53,13.71],[100.60,13.71],[100.60,13.78],[100.53,13.78],[100.53,13.71]]]}}
+{"index":{"_id":"g3"}}
+{"name":"Thonglor Bakery","city":"Bangkok","kind":"bakery","location":[100.5860,13.7280],"opens":8,"closes":19,"rating":4.2,"delivers":{"type":"polygon","coordinates":[[[100.56,13.70],[100.62,13.70],[100.62,13.76],[100.56,13.76],[100.56,13.70]]]}}
+{"index":{"_id":"g4"}}
+{"name":"Chatuchak Kiosk","city":"Bangkok","kind":"cafe","location":{"lat":13.7999,"lon":100.5501},"opens":9,"closes":18,"rating":3.8,"delivers":{"type":"polygon","coordinates":[[[100.52,13.77],[100.59,13.77],[100.59,13.84],[100.52,13.84],[100.52,13.77]]]}}
+{"index":{"_id":"g5"}}
+{"name":"Chiang Mai Old Town","city":"Chiang Mai","kind":"cafe","location":{"lat":18.7877,"lon":98.9931},"opens":7,"closes":21,"rating":4.9,"delivers":{"type":"polygon","coordinates":[[[98.96,18.76],[99.02,18.76],[99.02,18.82],[98.96,18.82],[98.96,18.76]]]}}
+{"index":{"_id":"g6"}}
+{"name":"Phuket Beach Bar","city":"Phuket","kind":"bar","location":{"lat":7.8804,"lon":98.3923},"opens":16,"closes":2,"rating":4.0,"delivers":{"type":"polygon","coordinates":[[[98.36,7.86],[98.42,7.86],[98.42,7.92],[98.36,7.92],[98.36,7.86]]]}}

@@ -1,0 +1,64 @@
+{
+  "size": 0,
+  "aggs": {
+    "variants": {
+      "nested": {
+        "path": "variants"
+      },
+      "aggs": {
+        "buyable": {
+          "filter": {
+            "range": {
+              "variants.stock": {
+                "gt": 0
+              }
+            }
+          },
+          "aggs": {
+            "bands": {
+              "range": {
+                "field": "variants.price",
+                "ranges": [
+                  {
+                    "to": 100
+                  },
+                  {
+                    "from": 100,
+                    "to": 200
+                  },
+                  {
+                    "from": 200
+                  }
+                ]
+              }
+            },
+            "cheapest": {
+              "min": {
+                "field": "variants.price"
+              }
+            },
+            "sizes": {
+              "terms": {
+                "field": "variants.size",
+                "size": 20,
+                "order": {
+                  "_key": "asc"
+                }
+              }
+            },
+            "back_to_product": {
+              "reverse_nested": {},
+              "aggs": {
+                "brands": {
+                  "terms": {
+                    "field": "brand"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "size": 0,
+  "query": {
+    "match_all": {}
+  },
+  "aggs": {
+    "all_brands": {
+      "global": {},
+      "aggs": {
+        "brands": {
+          "terms": {
+            "field": "brand"
+          }
+        }
+      }
+    },
+    "womens_brands": {
+      "filter": {
+        "term": {
+          "gender": "women"
+        }
+      },
+      "aggs": {
+        "brands": {
+          "terms": {
+            "field": "brand"
+          }
+        }
+      }
+    },
+    "each_gender": {
+      "filters": {
+        "filters": {
+          "men": {
+            "term": {
+              "gender": "men"
+            }
+          },
+          "women": {
+            "term": {
+              "gender": "women"
+            }
+          },
+          "unisex": {
+            "term": {
+              "gender": "unisex"
+            }
+          }
+        }
+      }
+    }
+  }
+}

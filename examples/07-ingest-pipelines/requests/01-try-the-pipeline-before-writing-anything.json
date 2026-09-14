@@ -1,0 +1,41 @@
+{
+  "pipeline": {
+    "description": "one combined-log line, taken apart",
+    "processors": [
+      {
+        "grok": {
+          "field": "message",
+          "patterns": [
+            "%{IPORHOST:client.ip} - %{DATA:user.name} \\[%{HTTPDATE:_ts}\\] \"%{WORD:http.method} %{DATA:url.path} HTTP/%{NUMBER:http.version}\" %{NUMBER:http.status:int} %{NUMBER:http.bytes:int} \"%{DATA:http.referrer}\" \"%{DATA:user_agent.original}\""
+          ]
+        }
+      },
+      {
+        "date": {
+          "field": "_ts",
+          "target_field": "@timestamp",
+          "formats": [
+            "dd/MMM/yyyy:HH:mm:ss Z"
+          ]
+        }
+      },
+      {
+        "remove": {
+          "field": "_ts"
+        }
+      }
+    ]
+  },
+  "docs": [
+    {
+      "_source": {
+        "message": "203.0.113.9 - dee [12/Sep/2026:09:14:02 +0700] \"GET /api/items?page=2 HTTP/1.1\" 200 4821 \"https://shop.example/\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\""
+      }
+    },
+    {
+      "_source": {
+        "message": "this line is not a log line at all"
+      }
+    }
+  ]
+}

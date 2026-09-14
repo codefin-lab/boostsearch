@@ -1,0 +1,25 @@
+{
+  "size": 0,
+  "aggs": {
+    "browsers": {
+      "terms": {
+        "field": "user_agent.name"
+      }
+    },
+    "systems": {
+      "terms": {
+        "field": "user_agent.os.name"
+      }
+    },
+    "sections": {
+      "terms": {
+        "field": "url.section"
+      }
+    },
+    "outcomes": {
+      "terms": {
+        "field": "outcome"
+      }
+    }
+  }
+}

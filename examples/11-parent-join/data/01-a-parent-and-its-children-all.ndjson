@@ -1,0 +1,8 @@
+{"index":{"_id":"q1"}}
+{"thread":"question","title":"How do I make a cluster forget a node","body":"A node left and the cluster still lists it.","author":"dee","tags":["cluster","allocation"],"votes":12,"asked":"2026-08-01"}
+{"index":{"_id":"a1"}}
+{"thread":{"name":"answer","parent":"q1"},"body":"Use the voting config exclusion API, then remove it.","author":"somchai","votes":30,"accepted":true}
+{"index":{"_id":"a2"}}
+{"thread":{"name":"answer","parent":"q1"},"body":"Restarting the cluster manager also clears it, badly.","author":"pim","votes":2,"accepted":false}
+{"index":{"_id":"c1"}}
+{"thread":{"name":"comment","parent":"q1"},"body":"See also the allocation explain API.","author":"nok","votes":1}

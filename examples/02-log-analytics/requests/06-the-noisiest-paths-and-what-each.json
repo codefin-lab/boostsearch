@@ -1,0 +1,66 @@
+{
+  "size": 0,
+  "aggs": {
+    "paths": {
+      "terms": {
+        "field": "path",
+        "size": 10,
+        "order": {
+          "bytes_out": "desc"
+        }
+      },
+      "aggs": {
+        "bytes_out": {
+          "sum": {
+            "field": "bytes"
+          }
+        },
+        "levels": {
+          "terms": {
+            "field": "level"
+          }
+        },
+        "first_seen": {
+          "min": {
+            "field": "@timestamp"
+          }
+        },
+        "example": {
+          "top_hits": {
+            "size": 1,
+            "_source": [
+              "message",
+              "status"
+            ]
+          }
+        }
+      }
+    },
+    "sizes": {
+      "histogram": {
+        "field": "bytes",
+        "interval": 20000
+      }
+    },
+    "buckets_named_by_hand": {
+      "range": {
+        "field": "took_ms",
+        "ranges": [
+          {
+            "to": 50,
+            "key": "fast"
+          },
+          {
+            "from": 50,
+            "to": 200,
+            "key": "usual"
+          },
+          {
+            "from": 200,
+            "key": "slow"
+          }
+        ]
+      }
+    }
+  }
+}

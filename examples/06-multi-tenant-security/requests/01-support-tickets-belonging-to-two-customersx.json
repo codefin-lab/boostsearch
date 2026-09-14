@@ -1,0 +1,31 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "tenant": {
+        "type": "keyword"
+      },
+      "subject": {
+        "type": "text"
+      },
+      "body": {
+        "type": "text"
+      },
+      "contact_email": {
+        "type": "keyword"
+      },
+      "internal_note": {
+        "type": "text"
+      },
+      "severity": {
+        "type": "keyword"
+      },
+      "opened": {
+        "type": "date"
+      }
+    }
+  }
+}

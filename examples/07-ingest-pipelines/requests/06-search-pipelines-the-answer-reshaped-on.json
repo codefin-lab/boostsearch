@@ -1,0 +1,12 @@
+{
+  "description": "rename a field on the way out and drop the noisy one",
+  "response_processors": [
+    {
+      "rename_field": {
+        "field": "http.kb",
+        "target_field": "kilobytes",
+        "ignore_missing": true
+      }
+    }
+  ]
+}

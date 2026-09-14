@@ -6953,3 +6953,303 @@ against what went in of the thirtieth, the TLS and authentication
 deployment and the image's own healthcheck of the thirty-sixth, and now the
 security surface compared with the reference. What remains is Tier 3: a
 cluster, two hundred chaos runs, and a soak in staging.
+
+## The thirty-eighth review
+
+Two things were found out here, and both of them are about the difference
+between a thing being checked and a thing being believed. The first is a P1
+the thirty-first review wrote down as closed; it was not closed, and the
+evidence that closed it was not enough. The second is a set of sixteen
+worked examples, written to be read rather than to be run, which turned out
+to find eleven differences from the reference that nothing in this
+repository had been looking for.
+
+### A claim withdrawn
+
+The thirty-first review closed the single-document P1 -- a copy holding a
+document no caller was ever told about -- on forty-five clean chaos runs.
+One hundred and fifty runs of the same check found it twice, at runs 130 and
+135, the same document both times. Forty-five runs is not evidence of a
+thing that happens once in eighty; it is the absence of evidence, written
+down as its presence. The rule that follows is the one the gate already
+states and this ledger did not honour: two hundred consecutive clean runs,
+counted from zero after any change to the binary.
+
+A second and worse mistake sits behind the first. The runs were tallied by
+looking for `copies agree | settled` in the RESULT line -- which is in every
+RESULT line, whatever else it says. Six of the one hundred and eighty-eight
+runs of the last gate had a copy behind and were counted clean. The tally in
+this round's notes said 101 clean, 161 clean, 175 clean; the true figures
+were 181 clean of 188, with six behind and one that disagreed. The gate now
+matches the whole sentence, and the runs it cannot explain keep their nodes'
+data and logs instead of being deleted with them.
+
+### P1 -- a write refused after the documents were written down, and not closed
+
+The reproduction is exact. A node takes a write believing itself the
+primary, writes the documents, and only then finds out that it is not: it
+answers the caller `no longer the primary`, and the documents stay where
+they were put. Nothing takes them away again. A resync trims a copy the new
+primary can see and this one was not in the set; a fill replaces a copy from
+the primary and this one was what others were filled *from*. The instrument
+that found it is four lines: at each of the three refusals, if
+`BOOSTSEARCH_CLUSTER_DEBUG` is set, the ids that were written are printed.
+Two hundred and twenty-five runs with full tracing on found nothing --
+tracing every write is slow enough to close the window -- and the cheap
+note found it at the second run.
+
+It was then fixed four times, and the gate disproved the first three. Each
+is written down because the mistake is the same one, made in three shapes.
+
+**One.** Fail this node's own copy, so the manager takes it out of the
+in-sync set and fills it again from the primary that really is one. Forty
+runs passed; the gate found it at run fifteen of the next two hundred. The
+write had been copied to the other nodes *before* the refusal, so failing
+the writer's own copy took away the wrong one and the stray survived on a
+copy nobody had failed.
+
+**Two.** Carry, on the acknowledgement, every copy the write reached, and
+fail all of them. The gate found it at run one hundred and fourteen. The
+allocation ids were read out of this node's own routing table -- and this
+node has just found out that its view of the cluster is out of date. It
+named an id the manager did not recognise, `shard_failed` matched nothing,
+and the report did nothing at all, silently.
+
+**Three.** Let the report name the *node* and have the manager resolve it
+against its own table, which is the only table that is right. That much
+stands. But the same report also left out "the primary", read from the same
+stale state -- which still called this node the primary. The one copy
+certain to be holding the stray documents was the one filtered out, and a
+new log line showed the report going out empty: `failing the copies a
+refused write reached (a copy refused its term):` and nothing after the
+colon. The rule was already in the manager, where it belongs; stating it
+twice, once from a state known to be wrong, is what broke it.
+
+**Four, and still open.** The sender names every copy it reached, its own
+included, and judges none of them. The manager refuses to fail the copy it
+now calls the primary. That exception was justified in an earlier draft of
+this entry with "a stray write that reached the primary is on every copy and
+they agree", and the gate disproved that too, at run nineteen of the next
+hunt: n3 wrote twenty documents at sequence numbers 0 to 19, refused the
+caller, and named both copies it had reached -- correctly, with n1's real
+allocation id. n1 was promoted, the manager would not fail it, and the
+twenty documents sat on n1 and on no other copy. Two copies, one search, two
+answers, about once in fifty runs.
+
+What closes it is not a fifth guard at the refusal. It is what the reference
+does: a primary that takes over trims the operations it holds from a term
+that was not its own and that nobody acknowledged. That needs the primary
+term kept per operation on a copy, and a trim at promotion -- a mechanism
+this engine does not have. The code says so where the exception is made, and
+this ledger says so here, rather than the round ending with a P1 called
+closed for the third time.
+
+### A second claim withdrawn: nested queries do not need block indexing
+
+The sixth review wrote a `nested` query difference down as found and not
+fixed, saying that closing it "means indexing each nested object as a
+document of its own and joining the blocks at search time, which the storage
+layer here does not do". That is not what it needs.
+
+The difference is real: the `path` was dropped and the inner query asked of
+the whole document, so a product whose size 42 is sold out and whose size 44
+is in stock answered a query for a size 42 in stock. Against OpenSearch
+3.1.0, five of eight shapes differed, and in both directions -- `filter:
+term + term` returned four documents where the reference returns one, and
+`must` with a `must_not` returned one where the reference returns four.
+
+But the per-object answer was already being computed and thrown away.
+`object_matches` reads one object against a clause, and it is what
+`inner_hits` uses, what a sort filter uses, and what every nested
+aggregation uses. A document whose `inner_hits` came back empty was being
+returned as a match by the very engine that had just failed to name a
+matching object. So the clause is settled the way a geo shape already is:
+the query finds the candidates, and a candidate keeps its place only if one
+of its objects answers the whole inner query.
+
+Two conditions keep it honest. The clause must narrow the whole answer, as a
+geo clause must -- under a `should` with a sibling, dropping a candidate
+would be wrong, and that one shape is left as it was. And the inner query
+must be written in clauses `object_matches` answers exactly: it answers
+anything else with `true`, which is safe for a filter that only narrows and
+would be a wrong answer here. The query that finds the candidates also has
+its `must_not` clauses stripped inside such a `nested`, because a post-filter
+can only take candidates away and a `must_not` built as written asks that no
+object answer it -- there would be nothing left to accept.
+
+Fourteen of fifteen shapes now answer as the reference does. The fifteenth
+is the `should` with a sibling, which is named above and left alone.
+
+The corpus found what the first version of this broke, which is what the
+corpus is for: a `flat_object` inside a nested path is queried without a dot
+path -- `{"term": {"issue.labels": "2023-01-01"}}` matches a value anywhere
+inside the tree -- and reading `labels` out of the object and comparing the
+tree with the string says no. The settling now runs only where the mapping
+says every field the clause names is a plain leaf.
+
+### Sixteen examples, and the eleven differences they found
+
+`examples/` holds sixteen use cases, each a project of its own: its own
+README, its own `docs/design.md`, `docs/api.md` and
+`docs/troubleshooting.md`, its own node configuration on a port of its own,
+its own copy of the shell helpers, a `Makefile`, and its request bodies as
+files rather than as inline JSON. They were written to be read -- every step
+prints the request it made and the answer it got, with a note in between
+saying why the step is there.
+
+They were also written to fail loudly. A request can succeed and leave no
+data: a bulk answers 200 with every item failed, a reindex answers 200 with
+its failures inside. The examples say what they expect -- this index holds
+six documents, this search finds four -- and stop when it is not so. The
+thirty-second review learned this about the disk check; it is the same
+lesson, and it caught a migration example that reported success having
+reindexed none of two thousand documents.
+
+Running them against OpenSearch 3.1.0 and against this, question by
+question, found eleven differences. Each was confirmed against the reference
+before anything was changed.
+
+- **A `nested` query matched clauses across different objects** -- the P1
+  above.
+- **A geo or `intervals` clause was refused inside a `function_score`.**
+  The clause is answered by narrowing the whole result, so it is refused
+  where it does not narrow the whole result; a `function_score` moves scores
+  and never the set, and so does the `positive` side of a `boosting`. Both
+  now count as narrowing. The shape refused was the commonest one there is:
+  filter by distance, then rank by a decay over it.
+- **`ChronoUnit.DAYS.between(a, b)` was a runtime error**, for every unit
+  and every pair of arguments. A `ChronoUnit` is held as its own name here,
+  so `between` was looked for among the string methods and not found. The
+  fixed-length units are now the millisecond difference divided, truncated
+  towards zero as `java.time` truncates; the calendar units are counted on
+  the calendar, so 31 January to 1 March is one month and not two.
+- **SQL could not group by a function.** `GROUP BY MONTH(placed)` is
+  ordinary SQL and was refused with `cannot group by`; so was `GROUP BY` the
+  alias of such a column. An aggregation may read a script instead of a
+  field, and nothing here wrote one. `src/sql/script.rs` renders an
+  expression as Painless -- the parts of a date, arithmetic, `CASE`, and the
+  conditions inside it -- and returns nothing for anything it cannot write
+  exactly, so a query that used to be refused is not quietly answered wrongly.
+- **SQL could not aggregate an expression.** `SUM(CASE WHEN status =
+  'refunded' THEN 1 ELSE 0 END)` is how SQL counts a condition, and it was
+  `sum needs a field`. The same renderer answers it.
+- **`trim`, `lowercase`, `uppercase` and `gsub` refused a list.** A `split`
+  followed by a `trim` is how a comma-separated field is taken apart, and it
+  failed on every document with `cannot be cast to [java.lang.String]`. The
+  reference applies the processor to each element. This is what left the
+  migration example with none of its two thousand documents.
+- **A `terms` aggregation by script refused a metric under it.**
+  `run_peeled_agg` answers the aggregations that are run here and falls
+  through to `filters` for anything else, so a `sum` under a scripted
+  `terms` arrived as a `filters` aggregation with no filters and the request
+  was refused with `[filters] cannot be empty`. The split the field-terms
+  path already makes is made here too.
+- **A stored script named by id was not found in a search.** `{"script":
+  {"id": "..."}}` is resolved where the store is at hand -- an `_update`, an
+  ingest pipeline -- and the places that run a script over a document read
+  it out of the request body and had nowhere to look. `script_fields`, a
+  `_script` sort, a `script` query and `_explain` all answered `unable to
+  find script [...] in cluster state`. The id is resolved once, where the
+  body is read.
+- **PPL had no `if`, `rename`, `top` or `rare`, and could not group by what
+  an `eval` made.** `if(total > 2000, 'large', 'medium')` is a CASE and is
+  now read as one. `top 3 customer` is a `terms` aggregation ordered by a
+  count the answer does not report, which is what the planner's new
+  `hide_trailing` is for.
+- **`_knn/warmup` accepted an index with no vectors.** The reference
+  refuses it; this answered every caller with a success, so a warm-up
+  pointed at the wrong index read as though it had worked.
+- **`_cluster/health` did not wait.** This is the one that matters most
+  outside this repository. The wait was skipped unless the node already knew
+  of another one, on the reasoning that nothing can change while a lone node
+  holds the request. Two things can: a node that is alone now may be joined
+  a second later, which is what a three-node cluster looks like from the
+  first node to start; and an index's replicas are placed after it is
+  created. So `wait_for_nodes=3` returned `timed_out` at once and every
+  script that used it as a barrier went on to assert against one node --
+  including this repository's own cluster example, which passed while
+  reporting one node of three. Measured against the reference: it blocks for
+  the full timeout, and now so does this.
+
+### What the examples themselves got wrong
+
+Five of the sixteen made a claim the engine was right to refuse, and each is
+worth writing down because each is a thing somebody else will believe.
+`calendar_interval: "10y"` is not a calendar interval in either engine. A
+Lucene expression reads its fields through `doc['name'].value`; a bare field
+name is a link error, in both. `_knn/warmup` is a GET. And the cluster
+example claimed a cluster goes yellow when a node of three is killed -- but
+three shards with one replica need six copies and two nodes have room for
+six, so it can return to green without the node. The check it makes now is
+that health is **not red**: yellow against green is a fact about how much
+room is left; red against the rest is a fact about whether the data can be
+read at all.
+
+A sixth was a shell mistake with a moral: `req ... | head` under
+`set -o pipefail` fails the script for a request that succeeded, because
+`head` closes the pipe and the write upstream is killed. The helpers read
+everything and then trim.
+
+### The other thing the gate keeps finding, and has not explained
+
+Three runs of the gate, and one of the hunts after it, ended with a copy
+**behind**: n2 placed as a replica at the sixty-second second, started at the
+sixty-third, the cluster green -- and at the check, thirty seconds later,
+missing a narrow window of acknowledged writes it had never been given. In
+run 35 it was eighty documents from 26.2s to 26.3s on the load clock; in run
+107, two hundred and seventy from 1.9s to 2.1s; each time from the middle of
+the load rather than its end, and each time the copies agreed a little
+later. Nothing was lost -- every acknowledged document was on some copy
+throughout -- but a copy is called started, and the cluster calls itself
+green, while it is missing documents a caller was told were written. A
+search that reaches that copy in that window answers short.
+
+This is not new to this round: the previous gate had six of a hundred and
+eighty-eight, at the same rate. It is not explained either, and the reason it
+is not is worth recording: **the engine logs a fill and does not log a
+resync**, so what delivered the missing documents afterwards cannot be read
+off the evidence. The next round starts by giving the resync a line of its
+own, not by guessing.
+
+One place is worth reading first. `scan_replicated` pages a copy's documents
+by sequence number, and it already carries a comment about a page that was
+cut wrong and filled a copy with two thousand of thirty-eight thousand
+documents. A document in the pending table whose sequence number is below
+the page's start is skipped there -- and skipped again in the reader's loop,
+because its id is in `pending_ids`. Whether that state can arise is exactly
+what the instrumentation is for.
+
+### The gates
+
+On the binary as it will ship: core corpus 1,427 of 1,427 over all 409 files
+(77 skipped), phase1 398/398, unit 198/198, clippy clean, sql_check 8/8,
+ism_check 6/6, refusal 30 refusals through five write paths, DLS 29 paths,
+auth_matrix 1,587 answers over 334 routes with its baseline unmoved,
+snapshot, health, TLS and authentication, knn and fuzz checks all passing,
+disk fault 11/11, `docker_health_check` 9/9, `security_replay` 40 of 40, and
+a thirty-minute soak: 2,355,758 documents acknowledged, memory settling
+rather than climbing, and the control index's search as quick at the end as
+at the start.
+
+Against OpenSearch 3.1.0: the query corpus 60 of 61, 45/45, the aggregations
+36 of 43, none of them moved. The canonical corpus reads 163 of 183 where it
+read 160 before this round -- three of the fixes here close differences it
+measures, and the twentieth difference is a `DELETE` of an index the replay's
+own ordering had already removed.
+
+The chaos gate does not pass. Two hundred runs were started three times; the
+first was stopped at 188 when the counting was found to be wrong, the second
+at 114 on a disagreement, the third at 19 on the same one. Of 188 runs of
+the binary before this round's cluster work, 181 were clean, six had a copy
+behind and one disagreed; of 114 after the second fix, 111 clean, two behind,
+one disagreed. Tier 3 is where it was.
+
+### What remains
+
+The two hundred consecutive clean chaos runs, which need the promotion-time
+trim above before they can be expected. The copy that is started before it
+holds everything, which needs the resync to say what it did. The cluster
+soak, which has not been run. And a 503 seen once in 1,504 corpus sections
+-- a bulk refused on a single node with `no longer the primary`, which is
+this same family on a cluster of one, and which a full run with the cluster
+notes on could not reproduce.

@@ -1,0 +1,39 @@
+{
+  "size": 5,
+  "_source": [
+    "title",
+    "author"
+  ],
+  "query": {
+    "has_child": {
+      "type": "answer",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "body": "snapshot voting"
+              }
+            }
+          ],
+          "filter": [
+            {
+              "term": {
+                "accepted": true
+              }
+            }
+          ]
+        }
+      },
+      "score_mode": "max",
+      "inner_hits": {
+        "name": "the_answer",
+        "size": 2,
+        "_source": [
+          "body",
+          "votes"
+        ]
+      }
+    }
+  }
+}

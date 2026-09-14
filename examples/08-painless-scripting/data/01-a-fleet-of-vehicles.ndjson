@@ -1,0 +1,10 @@
+{"index":{"_id":"c1"}}
+{"plate":"1กก1111","model":"Hilux","bought":"2022-03-01","price":900000,"km":142000,"serviced_km":132000,"faults":["brake","aircon"],"driver":"somchai","tank_l":80,"litres_per_100km":9.4}
+{"index":{"_id":"c2"}}
+{"plate":"2ขข2222","model":"Hilux","bought":"2025-01-15","price":1050000,"km":31000,"serviced_km":30000,"faults":[],"driver":"pim","tank_l":80,"litres_per_100km":8.9}
+{"index":{"_id":"c3"}}
+{"plate":"3คค3333","model":"D-Max","bought":"2019-07-20","price":780000,"km":311000,"serviced_km":280000,"faults":["gearbox"],"driver":"somchai","tank_l":76,"litres_per_100km":10.2}
+{"index":{"_id":"c4"}}
+{"plate":"4งง4444","model":"Ranger","bought":"2024-11-02","price":1180000,"km":58000,"serviced_km":55000,"faults":["aircon"],"driver":"nok","tank_l":80,"litres_per_100km":9.8}
+{"index":{"_id":"c5"}}
+{"plate":"5จจ5555","model":"D-Max","bought":"2021-05-09","price":810000,"km":198000,"serviced_km":150000,"faults":["brake","tyre","gearbox"],"driver":"pim","tank_l":76,"litres_per_100km":11.1}

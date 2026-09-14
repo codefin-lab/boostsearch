@@ -1,0 +1,13 @@
+{
+  "size": 0,
+  "aggs": {
+    "litres_by_driver": {
+      "scripted_metric": {
+        "init_script": "state.per = [:]",
+        "map_script": "double left = Math.max(0, 200000 - doc[\"km\"].value); double l = left / 100.0 * doc[\"litres_per_100km\"].value; String d = doc[\"driver\"].value; state.per.put(d, (state.per.containsKey(d) ? state.per[d] : 0.0) + l);",
+        "combine_script": "return state.per",
+        "reduce_script": "Map all = [:]; for (s in states) { if (s == null) continue; for (e in s.entrySet()) { all.put(e.getKey(), (all.containsKey(e.getKey()) ? all[e.getKey()] : 0.0) + e.getValue()); } } return all;"
+      }
+    }
+  }
+}

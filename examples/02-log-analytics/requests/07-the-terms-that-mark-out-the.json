@@ -1,0 +1,18 @@
+{
+  "size": 0,
+  "query": {
+    "range": {
+      "status": {
+        "gte": 500
+      }
+    }
+  },
+  "aggs": {
+    "what_is_different": {
+      "significant_terms": {
+        "field": "service",
+        "size": 4
+      }
+    }
+  }
+}

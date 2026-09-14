@@ -1,0 +1,37 @@
+{
+  "size": 5,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "nested": {
+      "path": "answers",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "answers.body": "voting snapshot"
+              }
+            }
+          ],
+          "filter": [
+            {
+              "term": {
+                "answers.accepted": true
+              }
+            }
+          ]
+        }
+      },
+      "score_mode": "max",
+      "inner_hits": {
+        "name": "the_answer",
+        "_source": [
+          "answers.body",
+          "answers.votes"
+        ]
+      }
+    }
+  }
+}

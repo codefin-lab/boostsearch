@@ -1,0 +1,19 @@
+{
+  "size": 5,
+  "_source": [
+    "plate",
+    "faults",
+    "km"
+  ],
+  "query": {
+    "script_score": {
+      "query": {
+        "match_all": {}
+      },
+      "script": {
+        "lang": "painless",
+        "source": "double risk = doc[\"faults\"].size() * 2.0 + doc[\"km\"].value / 100000.0; return risk;"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "query": {
+    "term": {
+      "model": "D-Max"
+    }
+  },
+  "script": {
+    "lang": "painless",
+    "source": "if (!ctx._source.faults.contains(\"recall\")) { ctx._source.faults.add(\"recall\"); } ctx._source.recalled = true;"
+  }
+}

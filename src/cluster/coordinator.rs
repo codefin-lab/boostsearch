@@ -2316,8 +2316,42 @@ impl Coordinator {
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
                 let index = v.get("index").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let shard = v.get("shard").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                let allocation_id =
+                let mut allocation_id =
                     v.get("allocation_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                // A failure may name the *node* whose copy is no good rather
+                // than the allocation id, and then this manager resolves it
+                // from its own table. The node reporting is, in the case this
+                // is for, a node that has just found out its view of the
+                // cluster is out of date -- it wrote as a primary it is not.
+                // Asking it for an allocation id is asking the one node that
+                // cannot know: the id it names is the one it remembers, the
+                // manager does not recognise it, and the copy holding a
+                // document nobody acknowledged is quietly left in place.
+                if e.action == SHARD_FAILED
+                    && let Some(named) = v.get("node").and_then(|x| x.as_str())
+                {
+                    let primary_alloc = self
+                        .committed
+                        .routing
+                        .primary(&index, shard)
+                        .and_then(|p| p.allocation_id.clone());
+                    let here: Vec<String> = self
+                        .committed
+                        .routing
+                        .shards_of(&index)
+                        .filter(|c| {
+                            c.shard == shard && c.node.as_ref().map(|n| n.as_str()) == Some(named)
+                        })
+                        .filter_map(|c| c.allocation_id.clone())
+                        // the copy this manager now calls the primary is what
+                        // the others will be filled from, and is never failed
+                        // on the word of a node that did not know it was one
+                        .filter(|a| Some(a) != primary_alloc.as_ref())
+                        .collect();
+                    if let Some(first) = here.first() {
+                        allocation_id = first.clone();
+                    }
+                }
                 // A copy speaks for itself when it is filled, and it has to
                 // be the copy: the node reporting one started has to be the
                 // node this manager placed that allocation id on. It was

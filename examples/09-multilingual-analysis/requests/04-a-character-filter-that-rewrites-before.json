@@ -1,0 +1,11 @@
+{
+  "char_filter": [
+    {
+      "type": "pattern_replace",
+      "pattern": "(\\d{4})[- ]?(\\d{4})[- ]?(\\d{4})",
+      "replacement": "CARD"
+    }
+  ],
+  "tokenizer": "standard",
+  "text": "the card 4111 1111 1111 was used"
+}

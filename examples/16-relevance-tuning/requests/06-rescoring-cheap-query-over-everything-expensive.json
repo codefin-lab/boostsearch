@@ -1,0 +1,26 @@
+{
+  "size": 5,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "match": {
+      "body": "snapshot restore"
+    }
+  },
+  "rescore": {
+    "window_size": 20,
+    "query": {
+      "rescore_query": {
+        "match_phrase": {
+          "body": {
+            "query": "snapshot restore",
+            "slop": 3
+          }
+        }
+      },
+      "query_weight": 0.6,
+      "rescore_query_weight": 2.0
+    }
+  }
+}

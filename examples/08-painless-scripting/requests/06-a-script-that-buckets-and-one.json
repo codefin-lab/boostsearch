@@ -1,0 +1,34 @@
+{
+  "size": 0,
+  "aggs": {
+    "by_age_band": {
+      "terms": {
+        "script": {
+          "lang": "painless",
+          "source": "long y = doc[\"bought\"].value.getYear(); return y >= 2024 ? \"new\" : (y >= 2021 ? \"middling\" : \"old\");"
+        }
+      },
+      "aggs": {
+        "total_value": {
+          "sum": {
+            "field": "price"
+          }
+        },
+        "mean_km": {
+          "avg": {
+            "field": "km"
+          }
+        },
+        "cost_per_km": {
+          "bucket_script": {
+            "buckets_path": {
+              "v": "total_value",
+              "k": "mean_km"
+            },
+            "script": "params.k == 0 ? 0 : params.v / params.k"
+          }
+        }
+      }
+    }
+  }
+}

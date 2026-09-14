@@ -1,0 +1,9 @@
+{
+  "indices": "ledger,other",
+  "ignore_unavailable": true,
+  "include_global_state": false,
+  "metadata": {
+    "taken_by": "examples/12",
+    "reason": "before the change"
+  }
+}

@@ -1,0 +1,14 @@
+{"index":{"_id":"v1"}}
+{"title":"Gene expression in cold water fish","abstract":"A study of transcription under cold stress.","field":"biology","year":2024,"citations":40,"embedding":[0.9,0.8,0.05,0.0,0.0,0.1,0.0,0.0]}
+{"index":{"_id":"v2"}}
+{"title":"Protein folding at low temperature","abstract":"How folding changes when it is cold.","field":"biology","year":2021,"citations":210,"embedding":[0.85,0.9,0.0,0.1,0.05,0.0,0.0,0.0]}
+{"index":{"_id":"v3"}}
+{"title":"An index for approximate nearest neighbours","abstract":"A graph structure for high dimensional search.","field":"computing","year":2025,"citations":95,"embedding":[0.0,0.05,0.95,0.9,0.0,0.0,0.1,0.0]}
+{"index":{"_id":"v4"}}
+{"title":"Cache-aware graph traversal","abstract":"Laying a graph out for the memory hierarchy.","field":"computing","year":2019,"citations":330,"embedding":[0.1,0.0,0.9,0.85,0.05,0.0,0.0,0.1]}
+{"index":{"_id":"v5"}}
+{"title":"Superconduction above 200 kelvin","abstract":"Measurements under pressure.","field":"physics","year":2023,"citations":510,"embedding":[0.0,0.0,0.05,0.0,0.95,0.9,0.0,0.05]}
+{"index":{"_id":"v6"}}
+{"title":"Cold atoms in an optical lattice","abstract":"Trapping atoms with light.","field":"physics","year":2022,"citations":120,"embedding":[0.05,0.1,0.0,0.0,0.9,0.88,0.0,0.0]}
+{"index":{"_id":"v7"}}
+{"title":"Machine learning for protein structure","abstract":"A network that predicts folding.","field":"biology","year":2025,"citations":800,"embedding":[0.6,0.55,0.6,0.5,0.0,0.0,0.0,0.0]}

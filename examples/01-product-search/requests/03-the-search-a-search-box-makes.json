@@ -1,0 +1,26 @@
+{
+  "size": 3,
+  "_source": [
+    "name",
+    "brand",
+    "price"
+  ],
+  "query": {
+    "multi_match": {
+      "query": "meridan headphone",
+      "fields": [
+        "name^3",
+        "name.prefix",
+        "blurb"
+      ],
+      "type": "best_fields",
+      "fuzziness": "AUTO"
+    }
+  },
+  "highlight": {
+    "fields": {
+      "name": {},
+      "blurb": {}
+    }
+  }
+}

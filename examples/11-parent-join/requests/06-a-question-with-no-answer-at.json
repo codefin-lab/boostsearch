@@ -1,0 +1,27 @@
+{
+  "size": 5,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "term": {
+            "thread": "question"
+          }
+        }
+      ],
+      "must_not": [
+        {
+          "has_child": {
+            "type": "answer",
+            "query": {
+              "match_all": {}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

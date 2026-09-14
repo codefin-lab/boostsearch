@@ -1,0 +1,4 @@
+{"index":{"_id":"n1"}}
+{"title":"How do I make a cluster forget a node","tags":["cluster","allocation"],"answers":[{"body":"Use the voting config exclusion API, then remove it.","author":"somchai","votes":30,"accepted":true},{"body":"Restarting the cluster manager also clears it, badly.","author":"pim","votes":2,"accepted":false}]}
+{"index":{"_id":"n2"}}
+{"title":"Why is my shard unassigned","tags":["allocation"],"answers":[{"body":"The node holding the only copy is gone; you need the snapshot.","author":"dee","votes":14,"accepted":true}]}

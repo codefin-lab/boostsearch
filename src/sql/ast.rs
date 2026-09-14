@@ -12,6 +12,10 @@ pub struct Select {
     pub limit: Option<usize>,
     pub offset: usize,
     pub distinct: bool,
+    /// how many of the last columns are there only to be sorted by. PPL's
+    /// `top` and `rare` order by a count the answer does not show, and the
+    /// planner has no other way to ask for a column and then not report it.
+    pub hide_trailing: usize,
 }
 
 /// One thing asked for, and what to call it.

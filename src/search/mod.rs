@@ -513,6 +513,9 @@ pub(crate) struct Extras {
     distance_feature: bool,
     routing_exists: bool,
     nested_inner_hits: bool,
+    /// a `nested` clause is in the query somewhere; whether any of them can
+    /// actually be settled is decided by `settleable_nested`
+    nested_query: bool,
     named: bool,
 }
 

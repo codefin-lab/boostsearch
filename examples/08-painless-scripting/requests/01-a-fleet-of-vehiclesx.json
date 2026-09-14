@@ -1,0 +1,40 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "plate": {
+        "type": "keyword"
+      },
+      "model": {
+        "type": "keyword"
+      },
+      "bought": {
+        "type": "date"
+      },
+      "price": {
+        "type": "double"
+      },
+      "km": {
+        "type": "long"
+      },
+      "serviced_km": {
+        "type": "long"
+      },
+      "faults": {
+        "type": "keyword"
+      },
+      "driver": {
+        "type": "keyword"
+      },
+      "tank_l": {
+        "type": "float"
+      },
+      "litres_per_100km": {
+        "type": "float"
+      }
+    }
+  }
+}

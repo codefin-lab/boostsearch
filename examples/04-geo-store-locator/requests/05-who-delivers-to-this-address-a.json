@@ -1,0 +1,20 @@
+{
+  "size": 10,
+  "_source": [
+    "name"
+  ],
+  "query": {
+    "geo_shape": {
+      "delivers": {
+        "shape": {
+          "type": "point",
+          "coordinates": [
+            100.545,
+            13.735
+          ]
+        },
+        "relation": "intersects"
+      }
+    }
+  }
+}

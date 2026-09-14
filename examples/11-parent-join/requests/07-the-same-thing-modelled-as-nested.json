@@ -1,0 +1,33 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text"
+      },
+      "tags": {
+        "type": "keyword"
+      },
+      "answers": {
+        "type": "nested",
+        "properties": {
+          "body": {
+            "type": "text"
+          },
+          "author": {
+            "type": "keyword"
+          },
+          "votes": {
+            "type": "integer"
+          },
+          "accepted": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

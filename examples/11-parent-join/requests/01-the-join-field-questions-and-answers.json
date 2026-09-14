@@ -1,0 +1,40 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "thread": {
+        "type": "join",
+        "relations": {
+          "question": [
+            "answer",
+            "comment"
+          ]
+        }
+      },
+      "title": {
+        "type": "text"
+      },
+      "body": {
+        "type": "text"
+      },
+      "author": {
+        "type": "keyword"
+      },
+      "tags": {
+        "type": "keyword"
+      },
+      "votes": {
+        "type": "integer"
+      },
+      "accepted": {
+        "type": "boolean"
+      },
+      "asked": {
+        "type": "date"
+      }
+    }
+  }
+}

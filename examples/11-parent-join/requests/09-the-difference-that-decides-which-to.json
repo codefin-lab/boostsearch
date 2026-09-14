@@ -1,0 +1,10 @@
+{
+  "script": {
+    "lang": "painless",
+    "source": "for (a in ctx._source.answers) { if (a.author == params.who) { a.votes = params.v } }",
+    "params": {
+      "who": "pim",
+      "v": 3
+    }
+  }
+}

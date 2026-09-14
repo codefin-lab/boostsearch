@@ -317,6 +317,136 @@ pub struct Ack {
     pub failures: Vec<Value>,
     /// a copy's failure or staleness could not be recorded with the manager
     pub manager_unreachable: bool,
+    /// every node whose copy took this write. A write refused afterwards --
+    /// because this node turns out not to be the primary -- has left the
+    /// documents on all of them, not only here.
+    pub wrote_to: Vec<NodeId>,
+}
+
+/// The shards a batch of writes went to, each named once: a bulk carries a
+/// hundred documents into one shard, and the copy is failed for the shard.
+fn shards_of_written(written: &[(String, u32, u64)]) -> Vec<(String, u32)> {
+    let mut seen: Vec<(String, u32)> = Vec::new();
+    for (index, shard, _) in written {
+        let one = (index.clone(), *shard);
+        if !seen.contains(&one) {
+            seen.push(one);
+        }
+    }
+    seen
+}
+
+/// Every copy this write reached, reported to the manager as no good.
+///
+/// A node that takes a write believing itself the primary writes the
+/// documents down before it finds out otherwise, and the caller is told the
+/// write did not happen. The documents stay. Nothing took them away again:
+/// a resync trims a copy the new primary can see, and this copy was not in
+/// the set; a fill replaces a copy from the primary, and this copy was the
+/// one others were filled *from*. A copy filled from it inherited a document
+/// nobody had acknowledged, and the two copies answered one search
+/// differently for as long as the index lived -- once in about eighty chaos
+/// runs. The reference fails a primary that finds a newer term, and so does
+/// this: the manager takes those copies out of the in-sync set and they are
+/// filled again from the primary that really is one.
+///
+/// Failing only this node's own copy was not enough, and the gate found it
+/// out: the write had already been copied to the other nodes before the
+/// refusal, and the document survived on one of *them*. So every copy the
+/// write reached is named here, and the manager decides what to do with each.
+///
+/// This does not close the hole, and the ledger says so rather than the code
+/// implying otherwise. The manager will not fail the copy it now calls the
+/// primary -- it is what every other copy is filled from, and failing it on
+/// the word of a node that did not know it was not one is how a cluster
+/// loses acknowledged writes. So when the stray write reached the node that
+/// is promoted next, its documents stay there and the other copies never get
+/// them: two copies, one search, two answers. The gate reproduces it in
+/// about one run in fifty.
+///
+/// What closes it is what the reference does, and it is not another guard at
+/// this call site: a primary that takes over trims the operations it holds
+/// from a term that was not its own and that nobody acknowledged. That needs
+/// the term kept per operation on a copy and a trim at promotion, which is a
+/// mechanism this does not have yet.
+async fn fail_copies_written(index: &str, shard: u32, why: &str, also: &[NodeId]) {
+    let Some(rt) = super::runtime() else { return };
+    let me = rt.local();
+    let state = rt.state();
+    // Every copy the write reached is named, this node's own included, and
+    // none of them is judged here. Leaving out "the primary" was tried and
+    // was worse than useless: the state this node reads is the state that
+    // just turned out to be out of date, and it still calls *this* node the
+    // primary -- so the one copy certain to be holding the stray documents
+    // was the one filtered out, and the report went out empty. The manager
+    // knows which copy it now calls the primary and refuses to fail that one;
+    // that is the right place for the rule, and the only place that knows.
+    let touched: Vec<NodeId> = std::iter::once(me.clone()).chain(also.iter().cloned()).collect();
+    // one report per node touched, naming the node: the allocation id this
+    // node remembers is the one thing it cannot be trusted about, and the
+    // manager resolves the node against its own table. The id is sent too,
+    // for a manager that has nothing placed on that node any more.
+    let mine: Vec<(NodeId, String)> = touched
+        .iter()
+        .map(|n| {
+            let aid = state
+                .routing
+                .shards_of(index)
+                .find(|c| c.shard == shard && c.node.as_ref() == Some(n))
+                .and_then(|c| c.allocation_id.clone())
+                .unwrap_or_default();
+            (n.clone(), aid)
+        })
+        .collect();
+    if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+        eprintln!(
+            "boostsearch: {} failing the copies a refused write reached ({why}): {}",
+            super::clock().wall(),
+            mine.iter()
+                .map(|(n, a)| format!("{}={}", n.as_str(), if a.is_empty() { "?" } else { a }))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    let body_for = |node: &NodeId, aid: &str| {
+        json!({"index": index, "shard": shard, "allocation_id": aid, "node": node.as_str(),
+               "message": format!("wrote as a primary it is not: {why}")})
+    };
+    let Some(mgr) = state.cluster_manager.clone() else {
+        for (node, aid) in mine {
+            retry_later(super::coordinator::SHARD_FAILED, &body_for(&node, &aid));
+        }
+        return;
+    };
+    for (node, aid) in mine {
+        let body = body_for(&node, &aid);
+        let answer = rt
+            .call(
+                &mgr,
+                super::coordinator::SHARD_FAILED,
+                serde_json::to_vec(&body).unwrap_or_default(),
+                std::time::Duration::from_secs(10),
+            )
+            .await;
+        if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
+            retry_later(super::coordinator::SHARD_FAILED, &body);
+        }
+    }
+}
+
+/// A refusal that comes after this node has already written the documents
+/// down. The caller is told the write did not happen; the documents are
+/// here all the same, and if this node is not the primary any more nobody
+/// will take them away again. One line per refusal, not per write.
+fn note_refused_after_writing(why: &str, ids: &[String]) {
+    if ids.is_empty() || std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_err() {
+        return;
+    }
+    eprintln!(
+        "boostsearch: {} refused after writing ({why}): {}",
+        super::clock().wall(),
+        ids.iter().take(25).cloned().collect::<Vec<_>>().join(",")
+    );
 }
 
 /// The primary's side: copy the writes out, wait for the answers, and
@@ -530,6 +660,7 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
     // to several shards, the fewest
     for (index, ack) in acks.iter_mut() {
         let acked = acked_nodes.get(index).cloned().unwrap_or_default();
+        ack.wrote_to = acked.clone();
         let shards: std::collections::BTreeSet<u32> =
             ops.iter().filter(|o| o.index == *index).map(|o| o.shard).collect();
         let mut fewest: Option<usize> = None;
@@ -733,6 +864,11 @@ pub async fn finish(
     } else {
         Vec::new()
     };
+    // what this node has already written down when a refusal below decides the
+    // write did not happen: the document stays here whatever the caller is
+    // told, so the ids are worth a line of the cluster's own notes
+    let written_ids: Vec<String> =
+        ops.iter().map(|o| format!("{}/{}@{}", o.index, o.id, o.seq)).collect();
     let acks = replicate(ops, refresh).await;
     // a copy that refused this node's term: this node is no primary any
     // more, and the write did not happen as far as the cluster is concerned
@@ -748,6 +884,11 @@ pub async fn finish(
         for t in &traced {
             trace!("TRACE answer {t} refused stale-term");
         }
+        note_refused_after_writing("stale-term", &written_ids);
+        for (index, shard) in shards_of_written(&written) {
+            let reached = acks.get(&index).map(|a| a.wrote_to.clone()).unwrap_or_default();
+            fail_copies_written(&index, shard, "a copy refused its term", &reached).await;
+        }
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "unavailable_shards_exception",
@@ -758,6 +899,7 @@ pub async fn finish(
         for t in &traced {
             trace!("TRACE answer {t} refused manager-unreachable");
         }
+        note_refused_after_writing("manager-unreachable", &written_ids);
         return crate::api::err(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "unavailable_shards_exception",
@@ -767,6 +909,11 @@ pub async fn finish(
     if !may_still_answer(&written) {
         for t in &traced {
             trace!("TRACE answer {t} refused no-longer-primary");
+        }
+        note_refused_after_writing("no-longer-primary", &written_ids);
+        for (index, shard) in shards_of_written(&written) {
+            let reached = acks.get(&index).map(|a| a.wrote_to.clone()).unwrap_or_default();
+            fail_copies_written(&index, shard, "no longer the primary", &reached).await;
         }
         return no_longer_primary();
     }
@@ -1384,6 +1531,14 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
     let store = store.clone();
     let name = index.to_string();
     tokio::task::spawn_blocking(move || {
+        // what the fill let in behind the pages it copied: written down
+        // because a copy that ends a chaos run holding one document more than
+        // its primary was filled in that run, and this is the only door a
+        // document comes through after the copying and before the copy is a
+        // copy. Cheap enough to leave on with the cluster's own notes: one
+        // line for a recovery, not one for a write.
+        let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+        let mut waited: Vec<String> = Vec::new();
         loop {
             let batch = {
                 let mut m = arrived().lock();
@@ -1392,10 +1547,24 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
                     // nothing waiting: close the recovery while the lock is held
                     _ => {
                         m.remove(&name);
+                        if notes && !waited.is_empty() {
+                            eprintln!(
+                                "boostsearch: {} [{name}]: {} writes waited for the fill and went \
+                                 in after it: {}",
+                                super::clock().wall(),
+                                waited.len(),
+                                waited.iter().take(25).cloned().collect::<Vec<_>>().join(",")
+                            );
+                        }
                         return Ok(());
                     }
                 }
             };
+            if notes {
+                waited.extend(batch.iter().map(|op| {
+                    format!("{}@{}{}", op.id, op.seq, if op.source.is_none() { "-del" } else { "" })
+                }));
+            }
             let Some(st) = store.get(&name) else {
                 arrived().lock().remove(&name);
                 return Err(format!("no copy of [{name}] here to finish"));
@@ -1906,6 +2075,7 @@ mod tests {
                 failed: 0,
                 failures: vec![],
                 manager_unreachable: false,
+                wrote_to: vec![],
             },
         );
         acks.insert(
@@ -1916,6 +2086,7 @@ mod tests {
                 failed: 1,
                 failures: vec![json!({"_node": "x"})],
                 manager_unreachable: false,
+                wrote_to: vec![],
             },
         );
         let mut one = json!({"_index": "a", "_id": "1", "_shards": {"total": 2, "successful": 1, "failed": 0}});

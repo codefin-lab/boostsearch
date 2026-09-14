@@ -1,0 +1,12 @@
+{
+  "size": 0,
+  "suggest": {
+    "box": {
+      "prefix": "meri",
+      "completion": {
+        "field": "suggest",
+        "size": 5
+      }
+    }
+  }
+}

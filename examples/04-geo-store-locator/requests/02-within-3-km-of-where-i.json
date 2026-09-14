@@ -1,0 +1,35 @@
+{
+  "size": 10,
+  "_source": [
+    "name",
+    "kind"
+  ],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "geo_distance": {
+            "distance": "3km",
+            "location": {
+              "lat": 13.73,
+              "lon": 100.54
+            }
+          }
+        }
+      ]
+    }
+  },
+  "sort": [
+    {
+      "_geo_distance": {
+        "location": {
+          "lat": 13.73,
+          "lon": 100.54
+        },
+        "order": "asc",
+        "unit": "m",
+        "distance_type": "arc"
+      }
+    }
+  ]
+}

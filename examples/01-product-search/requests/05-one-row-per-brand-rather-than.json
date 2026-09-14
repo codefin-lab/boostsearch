@@ -1,0 +1,27 @@
+{
+  "size": 5,
+  "_source": [
+    "name",
+    "brand"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "collapse": {
+    "field": "brand",
+    "inner_hits": {
+      "name": "cheapest",
+      "size": 2,
+      "sort": [
+        {
+          "price": "asc"
+        }
+      ]
+    }
+  },
+  "sort": [
+    {
+      "rating": "desc"
+    }
+  ]
+}

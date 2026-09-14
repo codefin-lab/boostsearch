@@ -1,0 +1,37 @@
+{
+  "size": 10,
+  "_source": [
+    "title"
+  ],
+  "query": {
+    "nested": {
+      "path": "variants",
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "variants.size": "42"
+              }
+            },
+            {
+              "range": {
+                "variants.stock": {
+                  "gt": 0
+                }
+              }
+            }
+          ]
+        }
+      },
+      "inner_hits": {
+        "name": "the_variant",
+        "_source": [
+          "variants.sku",
+          "variants.price",
+          "variants.stock"
+        ]
+      }
+    }
+  }
+}

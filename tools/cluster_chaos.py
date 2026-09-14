@@ -565,12 +565,19 @@ def main():
                 body = {"size": 1000, "sort": [{"_id": "asc"}], "_source": False}
                 if after:
                     body["search_after"] = after
-                st, r = call(
-                    f"http://{n.http}/{a.index}/_search?preference=_local",
-                    "POST",
-                    body,
-                    timeout=20,
-                )
+                # a node that no longer holds the index answers 404, and the
+                # listing is what explains a disagreement: it must not be the
+                # thing that stops the run reporting one
+                try:
+                    st, r = call(
+                        f"http://{n.http}/{a.index}/_search?preference=_local",
+                        "POST",
+                        body,
+                        timeout=20,
+                    )
+                except Exception as e:
+                    print(f"    (listing {n.name} stopped: {type(e).__name__} {e})")
+                    break
                 hits = (r.get("hits") or {}).get("hits") or []
                 if st != 200 or not hits:
                     break

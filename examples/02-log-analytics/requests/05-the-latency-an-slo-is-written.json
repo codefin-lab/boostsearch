@@ -1,0 +1,60 @@
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "service": "checkout"
+    }
+  },
+  "aggs": {
+    "latency": {
+      "percentiles": {
+        "field": "took_ms",
+        "percents": [
+          50,
+          90,
+          95,
+          99
+        ]
+      }
+    },
+    "under_slo": {
+      "percentile_ranks": {
+        "field": "took_ms",
+        "values": [
+          100,
+          250
+        ]
+      }
+    },
+    "spread": {
+      "extended_stats": {
+        "field": "took_ms"
+      }
+    },
+    "how_many_hosts": {
+      "cardinality": {
+        "field": "host"
+      }
+    },
+    "worst": {
+      "max_bucket": {
+        "buckets_path": "by_host>p99"
+      }
+    },
+    "by_host": {
+      "terms": {
+        "field": "host"
+      },
+      "aggs": {
+        "p99": {
+          "percentiles": {
+            "field": "took_ms",
+            "percents": [
+              99
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -21,10 +21,14 @@ pub fn parse(source: &str) -> Result<Select, String> {
         limit: None,
         offset: 0,
         distinct: false,
+        hide_trailing: 0,
     };
     // what `eval` has named, so that a later `fields` naming one of them
     // means the value rather than a field of the document that does not exist
     let mut evaluated: Vec<(String, Expr)> = Vec::new();
+    // what `rename` has called things, so a later stage naming the new name
+    // reaches the old field
+    let mut renamed: Vec<(String, String)> = Vec::new();
     // the stages, split on the pipe that separates them
     let stages: Vec<&str> = split_stages(source);
     for (at, stage) in stages.iter().enumerate() {
@@ -48,24 +52,148 @@ pub fn parse(source: &str) -> Result<Select, String> {
                 select.columns = parse_columns(rest)?
                     .into_iter()
                     .map(|column| match &column.expr {
-                        // a name `eval` gave to something is that something
-                        Expr::Field(name) => match evaluated.iter().find(|(n, _)| n == name) {
-                            Some((_, expr)) => {
+                        // a name `eval` gave to something is that something,
+                        // and so is a name `rename` gave to a field
+                        Expr::Field(name) => {
+                            if let Some((_, expr)) = evaluated.iter().find(|(n, _)| n == name) {
                                 Column { expr: expr.clone(), alias: Some(name.clone()) }
+                            } else if let Some((from, _)) =
+                                renamed.iter().find(|(_, to)| to == name)
+                            {
+                                Column {
+                                    expr: Expr::Field(from.clone()),
+                                    alias: Some(name.clone()),
+                                }
+                            } else {
+                                column
                             }
-                            None => column,
-                        },
+                        }
                         _ => column,
                     })
                     .collect();
             }
             "stats" => {
                 let (columns, group_by) = parse_stats(rest)?;
-                select.columns = columns;
-                select.group_by = group_by;
+                // `eval band = ... | stats count() by band` groups by what the
+                // eval worked out, and the name it gave is not a field of the
+                // index: grouping by it was refused with `can't resolve
+                // Symbol`. The name stands for the expression here, as it
+                // already did after `fields`.
+                let named = |e: &Expr| -> Expr {
+                    match e {
+                        Expr::Field(name) => match evaluated.iter().find(|(n, _)| n == name) {
+                            Some((_, expr)) => expr.clone(),
+                            None => e.clone(),
+                        },
+                        _ => e.clone(),
+                    }
+                };
+                select.columns = columns
+                    .into_iter()
+                    .map(|c| match (&c.expr, &c.alias) {
+                        (Expr::Field(name), None) if evaluated.iter().any(|(n, _)| n == name) => {
+                            Column { expr: named(&c.expr), alias: Some(name.clone()) }
+                        }
+                        _ => c,
+                    })
+                    .collect();
+                select.group_by = group_by.iter().map(named).collect();
+                // a grouping key written as an expression still answers to the
+                // name the eval gave it
+                for (name, expr) in &evaluated {
+                    if select.group_by.iter().any(|g| g.name() == expr.name())
+                        && !select.columns.iter().any(|c| c.name() == *name)
+                    {
+                        select
+                            .columns
+                            .push(Column { expr: expr.clone(), alias: Some(name.clone()) });
+                    }
+                }
+            }
+            // `rename a as b` calls a column something else from here on
+            "rename" => {
+                for piece in split_commas(rest) {
+                    let lowered = piece.to_lowercase();
+                    let at = lowered
+                        .find(" as ")
+                        .ok_or_else(|| format!("[rename] wants `field as name`: {piece}"))?;
+                    let from = piece[..at].trim().to_string();
+                    let to = piece[at + 4..].trim().to_string();
+                    // a name an earlier `eval` gave stands for its expression
+                    let expr = evaluated
+                        .iter()
+                        .find(|(n, _)| *n == from)
+                        .map(|(_, e)| e.clone())
+                        .unwrap_or(Expr::Field(from.clone()));
+                    renamed.push((from.clone(), to.clone()));
+                    // a `fields` before this one named the old name
+                    let mut hit = false;
+                    for c in select.columns.iter_mut() {
+                        if c.name() == from {
+                            c.alias = Some(to.clone());
+                            hit = true;
+                        }
+                    }
+                    if !hit && !select.columns.iter().any(|c| matches!(c.expr, Expr::Star)) {
+                        select.columns.push(Column { expr, alias: Some(to) });
+                    }
+                }
+            }
+            // `top 3 customer` is the three commonest values, `rare 2 x` the
+            // two least common: a terms aggregation, ordered by its count,
+            // reporting the value and not the count
+            "top" | "rare" => {
+                let least = command.eq_ignore_ascii_case("rare");
+                let mut words = rest.split_whitespace();
+                let first = words.next().unwrap_or_default();
+                let (how_many, field) = match first.parse::<usize>() {
+                    Ok(n) => (n, words.next().unwrap_or_default().to_string()),
+                    Err(_) => (10, first.to_string()),
+                };
+                if field.is_empty() {
+                    return Err(format!("[{command}] wants a field"));
+                }
+                let field = field.trim_end_matches(',').to_string();
+                select.columns = vec![
+                    Column { expr: Expr::Field(field.clone()), alias: None },
+                    Column {
+                        expr: Expr::Call { name: "count".into(), args: vec![Expr::Star] },
+                        alias: Some("__count".into()),
+                    },
+                ];
+                select.group_by = vec![Expr::Field(field)];
+                select.order_by = vec![(Expr::Field("__count".into()), least)];
+                select.limit = Some(how_many);
+                select.hide_trailing = 1;
             }
             "sort" => {
-                select.order_by = parse_sort(rest)?;
+                select.order_by = parse_sort(rest)?
+                    .into_iter()
+                    .map(|(e, ascending)| match &e {
+                        // the answer may call a column something the index
+                        // does not: `rename total as amount | sort - amount`
+                        // sorts on `total`, and asking the index for `amount`
+                        // was refused with `no mapping found`
+                        Expr::Field(name) => {
+                            let behind = select
+                                .columns
+                                .iter()
+                                .find(|c| c.name() == *name)
+                                .and_then(|c| c.expr.field().map(|f| f.to_string()))
+                                .or_else(|| {
+                                    renamed
+                                        .iter()
+                                        .find(|(_, to)| to == name)
+                                        .map(|(from, _)| from.clone())
+                                });
+                            match behind {
+                                Some(f) if f != *name => (Expr::Field(f), ascending),
+                                _ => (e, ascending),
+                            }
+                        }
+                        _ => (e, ascending),
+                    })
+                    .collect();
             }
             "head" => {
                 select.limit = Some(rest.trim().parse::<usize>().unwrap_or(10));

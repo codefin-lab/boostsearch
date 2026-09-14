@@ -1,0 +1,24 @@
+{
+  "size": 0,
+  "aggs": {
+    "cells": {
+      "geohash_grid": {
+        "field": "location",
+        "precision": 5
+      },
+      "aggs": {
+        "here": {
+          "geo_centroid": {
+            "field": "location"
+          }
+        }
+      }
+    },
+    "tiles": {
+      "geotile_grid": {
+        "field": "location",
+        "precision": 8
+      }
+    }
+  }
+}

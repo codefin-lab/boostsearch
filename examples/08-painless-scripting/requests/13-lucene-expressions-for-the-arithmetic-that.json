@@ -1,0 +1,17 @@
+{
+  "size": 3,
+  "_source": [
+    "plate"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "script_fields": {
+    "cost_per_100km": {
+      "script": {
+        "lang": "expression",
+        "source": "doc['litres_per_100km'].value * 35"
+      }
+    }
+  }
+}

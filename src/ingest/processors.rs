@@ -480,6 +480,37 @@ fn string_at(
     }
 }
 
+/// The strings a processor is to work on: one, or every element of a list.
+///
+/// `lowercase`, `uppercase`, `trim` and `gsub` are written against a string,
+/// and a field holding several values was refused outright -- so a `split`
+/// followed by a `trim`, which is how a comma-separated field is taken apart,
+/// failed on every document. The reference applies the processor to each
+/// element and puts the list back. `None` means the field was missing and
+/// `ignore_missing` allowed it.
+fn strings_at(
+    doc: &IngestDoc,
+    field: &str,
+    ignore_missing: bool,
+) -> Result<Option<(Vec<String>, bool)>, IngestError> {
+    if let Some(Value::Array(a)) = doc.get(field) {
+        let mut out = Vec::with_capacity(a.len());
+        for one in &a {
+            match one {
+                Value::String(s) => out.push(s.clone()),
+                other => {
+                    return Err(IngestError::illegal(format!(
+                        "field [{field}] of type [{}] cannot be cast to [java.lang.String]",
+                        type_name(other)
+                    )));
+                }
+            }
+        }
+        return Ok(Some((out, true)));
+    }
+    Ok(string_at(doc, field, ignore_missing)?.map(|one| (vec![one], false)))
+}
+
 /// Run one processor over the document.
 pub(crate) fn run(
     store: &Store,
@@ -724,7 +755,9 @@ fn run_body(
         "lowercase" | "uppercase" | "trim" | "urldecode" | "html_strip" | "bytes" => {
             let field = field_of(&doc, c, "field")?;
             let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| field.clone());
-            let Some(text) = string_at(&doc, &field, ignore_missing)? else { return Ok(Some(doc)) };
+            let Some((texts, was_list)) = strings_at(&doc, &field, ignore_missing)? else {
+                return Ok(Some(doc));
+            };
             let apply = |s: &str| -> Result<Value, IngestError> {
                 Ok(match spec.kind.as_str() {
                     "lowercase" => json!(s.to_lowercase()),
@@ -739,7 +772,15 @@ fn run_body(
                     _ => json!(bytes_of(s)?),
                 })
             };
-            let value = apply(&text)?;
+            let mut done: Vec<Value> = Vec::with_capacity(texts.len());
+            for text in &texts {
+                done.push(apply(text)?);
+            }
+            let value = if was_list {
+                Value::Array(done)
+            } else {
+                done.into_iter().next().unwrap_or(Value::Null)
+            };
             doc.set(&target, value).map_err(IngestError::illegal)?;
         }
         "split" => {
@@ -834,12 +875,22 @@ fn run_body(
             let target = field_opt(&doc, c, "target_field")?.unwrap_or_else(|| field.clone());
             let pattern = c.str_req("pattern")?;
             let replacement = c.str_req("replacement")?;
-            let Some(text) = string_at(&doc, &field, ignore_missing)? else { return Ok(Some(doc)) };
+            let Some((texts, was_list)) = strings_at(&doc, &field, ignore_missing)? else {
+                return Ok(Some(doc));
+            };
             let re =
                 regex::Regex::new(&pattern).map_err(|e| IngestError::illegal(e.to_string()))?;
             // Java writes a group as `$1`, which is what the regex crate reads
-            let out = re.replace_all(&text, replacement.as_str()).to_string();
-            doc.set(&target, json!(out)).map_err(IngestError::illegal)?;
+            let done: Vec<Value> = texts
+                .iter()
+                .map(|t| json!(re.replace_all(t, replacement.as_str()).to_string()))
+                .collect();
+            let value = if was_list {
+                Value::Array(done)
+            } else {
+                done.into_iter().next().unwrap_or(Value::Null)
+            };
+            doc.set(&target, value).map_err(IngestError::illegal)?;
         }
         "json" => {
             let field = field_of(&doc, c, "field")?;

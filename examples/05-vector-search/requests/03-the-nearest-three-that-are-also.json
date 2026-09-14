@@ -1,0 +1,42 @@
+{
+  "size": 5,
+  "_source": [
+    "title",
+    "field"
+  ],
+  "query": {
+    "knn": {
+      "embedding": {
+        "vector": [
+          0.0,
+          0.0,
+          1.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "k": 3,
+        "filter": {
+          "bool": {
+            "filter": [
+              {
+                "term": {
+                  "field": "biology"
+                }
+              },
+              {
+                "range": {
+                  "year": {
+                    "gte": 2020
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

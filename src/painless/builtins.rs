@@ -355,6 +355,15 @@ pub fn call_method(
     call: Callback<'_>,
 ) -> Result<Value, String> {
     match t {
+        // a ChronoUnit is held as its own name, so `between` on one reaches
+        // here rather than any date method
+        Value::Str(s)
+            if name == "between"
+                && args.len() == 2
+                && chrono_unit_between(s, arg(args, 0), arg(args, 1)).is_some() =>
+        {
+            Ok(Value::Long(chrono_unit_between(s, arg(args, 0), arg(args, 1)).unwrap_or(0)))
+        }
         Value::Str(s) => string_method(s, name, args),
         Value::Builder(b) => builder_method(b, name, args),
         Value::List(l) => list_method(l, name, args, call),
@@ -1368,8 +1377,101 @@ fn doc_values_method(
                 .cloned()
                 .ok_or_else(|| format!("Index {i} out of bounds for length {}", d.values.len()))
         }
+        // A geo_point's doc value answers how far it is from somewhere, and
+        // this had none of these: `doc['location'].arcDistance(lat, lon)` --
+        // the way the distance to a point is read in a script, and what the
+        // reference's own documentation uses -- was a runtime error, and the
+        // only way to the number was to compute the spherical law of cosines
+        // by hand in Painless.
+        "arcDistance"
+        | "arcDistanceWithDefault"
+        | "planeDistance"
+        | "planeDistanceWithDefault"
+        | "geohashDistance"
+        | "geohashDistanceWithDefault" => {
+            let here = d.values.first().and_then(point_of);
+            let Some((lat1, lon1)) = here else {
+                // the `WithDefault` forms answer with what was passed for an
+                // empty field; the plain ones have nothing to answer with
+                return Ok(match name.ends_with("WithDefault") {
+                    true => arg(args, 2).clone(),
+                    false => Value::Double(0.0),
+                });
+            };
+            let (lat2, lon2) = match name.starts_with("geohash") {
+                true => {
+                    let Some(p) = geohash_point(&arg(args, 0).as_text()) else {
+                        return Ok(Value::Double(0.0));
+                    };
+                    p
+                }
+                false => {
+                    (arg(args, 0).as_f64().unwrap_or(0.0), arg(args, 1).as_f64().unwrap_or(0.0))
+                }
+            };
+            Ok(Value::Double(match name.starts_with("plane") {
+                // the flat approximation, as Lucene computes it
+                true => {
+                    let x = (lon2 - lon1).to_radians() * ((lat1 + lat2) / 2.0).to_radians().cos();
+                    let y = (lat2 - lat1).to_radians();
+                    (x * x + y * y).sqrt() * 6_371_008.8
+                }
+                false => {
+                    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+                    let dl = (lon2 - lon1).to_radians();
+                    let a = ((p2 - p1) / 2.0).sin().powi(2)
+                        + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+                    2.0 * a.sqrt().asin() * 6_371_008.8
+                }
+            }))
+        }
         _ => list_method(&Rc::new(RefCell::new(d.values.clone())), name, args, call),
     }
+}
+
+/// A point held in a doc value, however the source wrote it.
+fn point_of(v: &Value) -> Option<(f64, f64)> {
+    match v {
+        Value::Map(m) => {
+            let get = |k: &str| {
+                m.borrow().iter().find(|(key, _)| key.as_text() == k).and_then(|(_, v)| v.as_f64())
+            };
+            Some((get("lat")?, get("lon")?))
+        }
+        Value::List(l) => {
+            let held = l.borrow();
+            // a pair is longitude first, as GeoJSON writes it
+            Some((held.get(1)?.as_f64()?, held.first()?.as_f64()?))
+        }
+        Value::Str(s) => {
+            let (lat, lon) = s.split_once(',')?;
+            Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// The middle of the cell a geohash names.
+fn geohash_point(hash: &str) -> Option<(f64, f64)> {
+    const BASE32: &str = "0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat0, mut lat1) = (-90.0f64, 90.0f64);
+    let (mut lon0, mut lon1) = (-180.0f64, 180.0f64);
+    let mut even = true;
+    for c in hash.chars() {
+        let n = BASE32.find(c.to_ascii_lowercase())?;
+        for bit in (0..5).rev() {
+            let set = (n >> bit) & 1 == 1;
+            if even {
+                let mid = (lon0 + lon1) / 2.0;
+                if set { lon0 = mid } else { lon1 = mid }
+            } else {
+                let mid = (lat0 + lat1) / 2.0;
+                if set { lat0 = mid } else { lat1 = mid }
+            }
+            even = !even;
+        }
+    }
+    Some(((lat0 + lat1) / 2.0, (lon0 + lon1) / 2.0))
 }
 
 fn map_method(m: &MapRef, name: &str, args: &[Value], call: Callback<'_>) -> Result<Value, String> {
@@ -1691,6 +1793,61 @@ fn map_method(m: &MapRef, name: &str, args: &[Value], call: Callback<'_>) -> Res
 }
 
 // ------------------------------------------------------------------ dates
+
+/// `ChronoUnit.DAYS.between(a, b)` -- whole units from one moment to another.
+///
+/// A `ChronoUnit` is a string here, since the enum carries nothing else, and
+/// `between` was therefore looked for among the string methods and not found:
+/// every unit, and every pair of arguments, was a runtime error. The two ways
+/// round it -- `Duration.between` and arithmetic on `toEpochMilli` -- both
+/// work, which is how the gap stayed hidden.
+///
+/// The fixed-length units are the millisecond difference divided, truncated
+/// towards zero as `java.time` truncates. The calendar units are counted on
+/// the calendar: a month is not 30 days, and 31 January to 1 March is one
+/// month and not two.
+fn chrono_unit_between(unit: &str, a: &Value, b: &Value) -> Option<i64> {
+    let (Value::Date { millis: ma, offset_secs: oa }, Value::Date { millis: mb, offset_secs: ob }) =
+        (a, b)
+    else {
+        return None;
+    };
+    let diff = mb - ma;
+    let fixed = match unit {
+        "NANOS" => return Some(diff.saturating_mul(1_000_000)),
+        "MICROS" => return Some(diff.saturating_mul(1_000)),
+        "MILLIS" => return Some(diff),
+        "SECONDS" => 1_000,
+        "MINUTES" => 60_000,
+        "HOURS" => 3_600_000,
+        "HALF_DAYS" => 43_200_000,
+        "DAYS" => 86_400_000,
+        "WEEKS" => 604_800_000,
+        _ => 0,
+    };
+    if fixed > 0 {
+        return Some(diff / fixed);
+    }
+    let (y1, mo1, d1, h1, mi1, s1, ms1, _) = date_parts(*ma, *oa);
+    let (y2, mo2, d2, h2, mi2, s2, ms2, _) = date_parts(*mb, *ob);
+    let mut months = (y2 - y1) * 12 + (mo2 - mo1);
+    // a month is whole only when the day and the time of day have come round
+    let from = (d1, h1, mi1, s1, ms1);
+    let to = (d2, h2, mi2, s2, ms2);
+    if months > 0 && to < from {
+        months -= 1;
+    } else if months < 0 && to > from {
+        months += 1;
+    }
+    Some(match unit {
+        "MONTHS" => months,
+        "YEARS" => months / 12,
+        "DECADES" => months / 120,
+        "CENTURIES" => months / 1_200,
+        "MILLENNIA" => months / 12_000,
+        _ => return None,
+    })
+}
 
 fn date_parts(millis: i64, offset: i32) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
     let secs = millis.div_euclid(1000) + offset as i64;

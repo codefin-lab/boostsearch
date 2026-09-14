@@ -1,0 +1,24 @@
+{
+  "size": 5,
+  "_source": [
+    "body",
+    "author"
+  ],
+  "query": {
+    "has_parent": {
+      "parent_type": "question",
+      "query": {
+        "term": {
+          "tags": "allocation"
+        }
+      },
+      "score": true,
+      "inner_hits": {
+        "name": "the_question",
+        "_source": [
+          "title"
+        ]
+      }
+    }
+  }
+}

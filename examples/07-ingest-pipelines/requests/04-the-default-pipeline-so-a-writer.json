@@ -1,0 +1,67 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.default_pipeline": "access-log"
+  },
+  "mappings": {
+    "properties": {
+      "@timestamp": {
+        "type": "date"
+      },
+      "client": {
+        "properties": {
+          "ip": {
+            "type": "ip"
+          }
+        }
+      },
+      "http": {
+        "properties": {
+          "status": {
+            "type": "short"
+          },
+          "bytes": {
+            "type": "long"
+          },
+          "kb": {
+            "type": "float"
+          },
+          "method": {
+            "type": "keyword"
+          },
+          "version": {
+            "type": "float"
+          }
+        }
+      },
+      "url": {
+        "properties": {
+          "path": {
+            "type": "keyword"
+          },
+          "section": {
+            "type": "keyword"
+          }
+        }
+      },
+      "outcome": {
+        "type": "keyword"
+      },
+      "user_agent": {
+        "properties": {
+          "name": {
+            "type": "keyword"
+          },
+          "os": {
+            "properties": {
+              "name": {
+                "type": "keyword"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

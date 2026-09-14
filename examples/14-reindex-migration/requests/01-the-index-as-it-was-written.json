@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "number_of_shards": 4,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text"
+      },
+      "country": {
+        "type": "text"
+      },
+      "born": {
+        "type": "text"
+      },
+      "score": {
+        "type": "text"
+      },
+      "tags": {
+        "type": "text"
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{"index":{"_id":"t1"}}
+{"tenant":"northwind","subject":"Invoices will not print","body":"The print button does nothing.","contact_email":"ops@northwind.example","internal_note":"known bug, fix in 4.2","severity":"high","opened":"2026-09-01"}
+{"index":{"_id":"t2"}}
+{"tenant":"northwind","subject":"Slow export","body":"The CSV export takes ten minutes.","contact_email":"ops@northwind.example","internal_note":"their data is enormous, not our problem","severity":"low","opened":"2026-09-04"}
+{"index":{"_id":"t3"}}
+{"tenant":"contoso","subject":"Cannot log in","body":"Password reset mail never arrives.","contact_email":"it@contoso.example","internal_note":"their mail server bounces us","severity":"high","opened":"2026-09-02"}
+{"index":{"_id":"t4"}}
+{"tenant":"contoso","subject":"Feature request: dark mode","body":"Please.","contact_email":"it@contoso.example","internal_note":"scheduled Q1","severity":"low","opened":"2026-09-08"}

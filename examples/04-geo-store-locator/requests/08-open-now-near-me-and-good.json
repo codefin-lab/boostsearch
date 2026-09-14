@@ -1,0 +1,70 @@
+{
+  "size": 5,
+  "_source": [
+    "name",
+    "rating",
+    "opens",
+    "closes"
+  ],
+  "query": {
+    "function_score": {
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "geo_distance": {
+                "distance": "12km",
+                "location": {
+                  "lat": 13.73,
+                  "lon": 100.54
+                }
+              }
+            },
+            {
+              "range": {
+                "opens": {
+                  "lte": 10
+                }
+              }
+            },
+            {
+              "range": {
+                "closes": {
+                  "gte": 10
+                }
+              }
+            }
+          ],
+          "should": [
+            {
+              "term": {
+                "kind": "cafe"
+              }
+            }
+          ]
+        }
+      },
+      "functions": [
+        {
+          "gauss": {
+            "location": {
+              "origin": "13.7300,100.5400",
+              "scale": "2km",
+              "offset": "200m",
+              "decay": 0.5
+            }
+          }
+        },
+        {
+          "field_value_factor": {
+            "field": "rating",
+            "factor": 0.3,
+            "modifier": "ln1p"
+          }
+        }
+      ],
+      "score_mode": "multiply",
+      "boost_mode": "multiply"
+    }
+  }
+}

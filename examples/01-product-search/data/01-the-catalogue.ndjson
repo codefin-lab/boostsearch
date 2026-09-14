@@ -1,0 +1,12 @@
+{"index":{"_id":"p1"}}
+{"name":"Aurora 14 Notebook","blurb":"A thin portable computer for writing and mail.","brand":"Aurora","categories":["computers","laptops"],"price":899.00,"rating":4.4,"sold_last_month":310,"in_stock":true,"released":"2026-02-11","suggest":{"input":["Aurora 14","Aurora Notebook"],"weight":9}}
+{"index":{"_id":"p2"}}
+{"name":"Aurora 16 Notebook Pro","blurb":"The larger laptop, for editing film.","brand":"Aurora","categories":["computers","laptops"],"price":1799.00,"rating":4.7,"sold_last_month":140,"in_stock":true,"released":"2026-05-02","suggest":{"input":["Aurora 16","Aurora Pro"],"weight":7}}
+{"index":{"_id":"p3"}}
+{"name":"Meridian Over-Ear Headphones","blurb":"A headset with noise cancelling.","brand":"Meridian","categories":["audio","headphones"],"price":249.50,"rating":4.6,"sold_last_month":900,"in_stock":true,"released":"2025-11-20","suggest":{"input":["Meridian Headphones"],"weight":8}}
+{"index":{"_id":"p4"}}
+{"name":"Meridian Earphones Mini","blurb":"Small earphones, eight hours.","brand":"Meridian","categories":["audio","headphones"],"price":89.00,"rating":4.1,"sold_last_month":1500,"in_stock":false,"released":"2026-01-09","suggest":{"input":["Meridian Mini"],"weight":6}}
+{"index":{"_id":"p5"}}
+{"name":"Kestrel 55 Television","blurb":"A 55 inch tv with a bright panel.","brand":"Kestrel","categories":["video","tv"],"price":649.00,"rating":4.2,"sold_last_month":220,"in_stock":true,"released":"2026-03-30","suggest":{"input":["Kestrel 55","Kestrel TV"],"weight":5}}
+{"index":{"_id":"p6"}}
+{"name":"Kestrel Soundbar & Sub","blurb":"Television sound, two pieces.","brand":"Kestrel","categories":["audio","video"],"price":399.00,"rating":3.9,"sold_last_month":95,"in_stock":true,"released":"2025-08-14","suggest":{"input":["Kestrel Soundbar"],"weight":4}}

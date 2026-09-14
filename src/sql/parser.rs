@@ -138,7 +138,18 @@ impl Parser {
         if self.took("OFFSET") {
             offset = self.number()? as usize;
         }
-        Ok(Select { columns, from, filter, group_by, having, order_by, limit, offset, distinct })
+        Ok(Select {
+            columns,
+            from,
+            filter,
+            group_by,
+            having,
+            order_by,
+            limit,
+            offset,
+            distinct,
+            hide_trailing: 0,
+        })
     }
 
     /// Whether what follows begins a clause rather than naming an alias.
@@ -362,6 +373,24 @@ impl Parser {
                     return Ok(Expr::Null);
                 }
                 if self.took("(") {
+                    // `if(total > 2000, 'large', 'medium')` -- PPL's way of
+                    // writing what SQL writes as CASE. Its first argument is a
+                    // condition rather than a value, and the argument parser
+                    // reads values: `expected [)] but found [>]`. It is read
+                    // as the CASE it is, so everything that already plans a
+                    // CASE plans this too.
+                    if lowered == "if" {
+                        let when = self.condition()?;
+                        self.expect(",")?;
+                        let then = self.expr()?;
+                        self.expect(",")?;
+                        let otherwise = self.expr()?;
+                        self.expect(")")?;
+                        return Ok(Expr::Case {
+                            whens: vec![(when, then)],
+                            otherwise: Some(Box::new(otherwise)),
+                        });
+                    }
                     let mut args = Vec::new();
                     // `count(distinct x)` counts what is different about x
                     let distinct = self.took("DISTINCT");

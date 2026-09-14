@@ -1,0 +1,19 @@
+{
+  "settings": {
+    "number_of_shards": 2,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "entry": {
+        "type": "keyword"
+      },
+      "amount": {
+        "type": "double"
+      },
+      "when": {
+        "type": "date"
+      }
+    }
+  }
+}

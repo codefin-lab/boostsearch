@@ -1,0 +1,49 @@
+{
+  "size": 10,
+  "_source": [
+    "title",
+    "brand",
+    "colour"
+  ],
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "match": {
+            "title": "walker runner boot shoe"
+          }
+        }
+      ],
+      "filter": [
+        {
+          "term": {
+            "gender": "women"
+          }
+        }
+      ]
+    }
+  },
+  "post_filter": {
+    "term": {
+      "colour": "black"
+    }
+  },
+  "aggs": {
+    "colours": {
+      "terms": {
+        "field": "colour"
+      }
+    },
+    "brands": {
+      "terms": {
+        "field": "brand"
+      }
+    },
+    "tags": {
+      "terms": {
+        "field": "tags",
+        "size": 10
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "size": 0,
+  "aggs": {
+    "answers": {
+      "nested": {
+        "path": "answers"
+      },
+      "aggs": {
+        "who": {
+          "terms": {
+            "field": "answers.author"
+          }
+        },
+        "best": {
+          "max": {
+            "field": "answers.votes"
+          }
+        }
+      }
+    }
+  }
+}

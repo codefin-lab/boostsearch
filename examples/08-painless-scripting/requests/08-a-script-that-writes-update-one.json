@@ -1,0 +1,9 @@
+{
+  "script": {
+    "lang": "painless",
+    "source": "ctx._source.km += params.driven; ctx._source.trips = (ctx._source.trips ?: 0) + 1;",
+    "params": {
+      "driven": 850
+    }
+  }
+}

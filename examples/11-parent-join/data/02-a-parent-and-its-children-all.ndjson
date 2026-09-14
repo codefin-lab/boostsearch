@@ -1,0 +1,4 @@
+{"index":{"_id":"q2"}}
+{"thread":"question","title":"Why is my shard unassigned","body":"It says no valid shard copy.","author":"pim","tags":["allocation"],"votes":5,"asked":"2026-08-20"}
+{"index":{"_id":"a3"}}
+{"thread":{"name":"answer","parent":"q2"},"body":"The node holding the only copy is gone; you need the snapshot.","author":"dee","votes":14,"accepted":true}

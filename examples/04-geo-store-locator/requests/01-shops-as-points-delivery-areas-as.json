@@ -1,0 +1,39 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text",
+        "fields": {
+          "raw": {
+            "type": "keyword"
+          }
+        }
+      },
+      "city": {
+        "type": "keyword"
+      },
+      "kind": {
+        "type": "keyword"
+      },
+      "location": {
+        "type": "geo_point"
+      },
+      "delivers": {
+        "type": "geo_shape"
+      },
+      "opens": {
+        "type": "integer"
+      },
+      "closes": {
+        "type": "integer"
+      },
+      "rating": {
+        "type": "half_float"
+      }
+    }
+  }
+}

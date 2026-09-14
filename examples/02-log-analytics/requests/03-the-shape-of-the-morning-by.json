@@ -1,0 +1,37 @@
+{
+  "size": 0,
+  "aggs": {
+    "over_time": {
+      "date_histogram": {
+        "field": "@timestamp",
+        "fixed_interval": "30m",
+        "min_doc_count": 0
+      },
+      "aggs": {
+        "by_service": {
+          "terms": {
+            "field": "service"
+          }
+        },
+        "errors": {
+          "filter": {
+            "range": {
+              "status": {
+                "gte": 500
+              }
+            }
+          }
+        },
+        "error_rate": {
+          "bucket_script": {
+            "buckets_path": {
+              "bad": "errors>_count",
+              "all": "_count"
+            },
+            "script": "params.all == 0 ? 0 : params.bad / params.all"
+          }
+        }
+      }
+    }
+  }
+}

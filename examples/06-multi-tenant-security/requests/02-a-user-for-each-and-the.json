@@ -1,0 +1,9 @@
+{
+  "password": "correct-horse-battery-1",
+  "backend_roles": [
+    "northwind"
+  ],
+  "attributes": {
+    "company": "Northwind"
+  }
+}

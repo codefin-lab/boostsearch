@@ -1,0 +1,50 @@
+{
+  "size": 6,
+  "_source": [
+    "title",
+    "updated",
+    "views"
+  ],
+  "query": {
+    "function_score": {
+      "query": {
+        "multi_match": {
+          "query": "snapshot restore",
+          "fields": [
+            "title^4",
+            "body"
+          ]
+        }
+      },
+      "functions": [
+        {
+          "gauss": {
+            "updated": {
+              "origin": "2026-09-13",
+              "scale": "180d",
+              "offset": "30d",
+              "decay": 0.5
+            }
+          }
+        },
+        {
+          "field_value_factor": {
+            "field": "views",
+            "modifier": "log1p",
+            "factor": 0.15
+          }
+        },
+        {
+          "filter": {
+            "term": {
+              "deprecated": true
+            }
+          },
+          "weight": 0.1
+        }
+      ],
+      "score_mode": "multiply",
+      "boost_mode": "multiply"
+    }
+  }
+}

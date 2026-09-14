@@ -1,0 +1,35 @@
+{
+  "size": 3,
+  "_source": [
+    "plate"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "script_fields": {
+    "worth": {
+      "script": {
+        "id": "depreciated-value",
+        "params": {
+          "now": "2026-09-13T00:00:00Z",
+          "rate": 0.15
+        }
+      }
+    }
+  },
+  "sort": [
+    {
+      "_script": {
+        "type": "number",
+        "order": "desc",
+        "script": {
+          "id": "depreciated-value",
+          "params": {
+            "now": "2026-09-13T00:00:00Z",
+            "rate": 0.15
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "thread": "question"
+    }
+  },
+  "aggs": {
+    "answers": {
+      "children": {
+        "type": "answer"
+      },
+      "aggs": {
+        "best": {
+          "max": {
+            "field": "votes"
+          }
+        },
+        "who": {
+          "terms": {
+            "field": "author"
+          }
+        },
+        "back_up": {
+          "parent": {
+            "type": "answer"
+          },
+          "aggs": {
+            "tags": {
+              "terms": {
+                "field": "tags"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

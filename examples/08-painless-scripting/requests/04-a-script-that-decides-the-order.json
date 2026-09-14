@@ -1,0 +1,27 @@
+{
+  "size": 5,
+  "_source": [
+    "plate",
+    "price",
+    "bought"
+  ],
+  "query": {
+    "match_all": {}
+  },
+  "sort": [
+    {
+      "_script": {
+        "type": "number",
+        "order": "desc",
+        "script": {
+          "lang": "painless",
+          "source": "double years = ChronoUnit.DAYS.between(doc[\"bought\"].value, ZonedDateTime.parse(params.now)) / 365.0; return doc[\"price\"].value * Math.pow(1 - params.rate, years);",
+          "params": {
+            "now": "2026-09-13T00:00:00Z",
+            "rate": 0.15
+          }
+        }
+      }
+    }
+  ]
+}

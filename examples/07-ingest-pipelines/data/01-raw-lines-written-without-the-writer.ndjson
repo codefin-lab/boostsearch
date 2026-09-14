@@ -1,0 +1,8 @@
+{"index":{"_id":"l1"}}
+{"message":"203.0.113.9 - dee [12/Sep/2026:09:14:02 +0700] \"GET /api/items?page=2 HTTP/1.1\" 200 4821 \"https://shop.example/\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\""}
+{"index":{"_id":"l2"}}
+{"message":"198.51.100.4 - - [12/Sep/2026:09:14:40 +0700] \"POST /api/cart HTTP/2.0\" 503 91 \"-\" \"curl/8.6.0\""}
+{"index":{"_id":"l3"}}
+{"message":"203.0.113.9 - dee [12/Sep/2026:09:15:10 +0700] \"GET /assets/logo.svg HTTP/1.1\" 404 0 \"https://shop.example/\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1\""}
+{"index":{"_id":"l4"}}
+{"message":"not a log line, at all, sorry"}

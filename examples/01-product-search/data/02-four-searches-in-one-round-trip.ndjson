@@ -1,0 +1,8 @@
+{}
+{"size":0,"aggs":{"brands":{"terms":{"field":"brand"}}}}
+{}
+{"size":1,"sort":[{"price":"asc"}],"_source":["name","price"]}
+{}
+{"size":1,"sort":[{"price":"desc"}],"_source":["name","price"]}
+{}
+{"size":0,"query":{"term":{"in_stock":true}},"aggs":{"avg_price":{"avg":{"field":"price"}}}}

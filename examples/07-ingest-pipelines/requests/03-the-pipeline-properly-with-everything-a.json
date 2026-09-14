@@ -1,0 +1,87 @@
+{
+  "description": "a combined log line to a document",
+  "processors": [
+    {
+      "grok": {
+        "field": "message",
+        "patterns": [
+          "%{IPORHOST:client.ip} - %{DATA:user.name} \\[%{HTTPDATE:_ts}\\] \"%{WORD:http.method} %{DATA:url.path} HTTP/%{NUMBER:http.version}\" %{NUMBER:http.status:int} %{NUMBER:http.bytes:int} \"%{DATA:http.referrer}\" \"%{DATA:user_agent.original}\""
+        ]
+      }
+    },
+    {
+      "date": {
+        "field": "_ts",
+        "target_field": "@timestamp",
+        "formats": [
+          "dd/MMM/yyyy:HH:mm:ss Z"
+        ]
+      }
+    },
+    {
+      "dissect": {
+        "field": "url.path",
+        "pattern": "/%{url.section}/%{url.rest}",
+        "ignore_missing": true
+      }
+    },
+    {
+      "pipeline": {
+        "name": "enrich-client"
+      }
+    },
+    {
+      "script": {
+        "lang": "painless",
+        "source": "ctx.outcome = ctx.http.status >= 500 ? \"server_error\" : (ctx.http.status >= 400 ? \"client_error\" : \"ok\"); ctx.http.kb = Math.round(ctx.http.bytes / 102.4) / 10.0;"
+      }
+    },
+    {
+      "lowercase": {
+        "field": "http.method"
+      }
+    },
+    {
+      "set": {
+        "field": "event.dataset",
+        "value": "access"
+      }
+    },
+    {
+      "remove": {
+        "field": [
+          "_ts",
+          "message"
+        ],
+        "ignore_missing": true
+      }
+    },
+    {
+      "convert": {
+        "field": "http.version",
+        "type": "float",
+        "ignore_missing": true
+      }
+    }
+  ],
+  "on_failure": [
+    {
+      "set": {
+        "field": "_index",
+        "value": "failed-lines"
+      }
+    },
+    {
+      "set": {
+        "field": "error.reason",
+        "value": "{{ _ingest.on_failure_message }}"
+      }
+    },
+    {
+      "set": {
+        "field": "error.processor",
+        "value": "{{ _ingest.on_failure_processor_type }}"
+      }
+    }
+  ]
+}

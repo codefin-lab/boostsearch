@@ -12,3 +12,4 @@ pub mod parser;
 pub mod plan;
 pub mod ppl;
 pub mod rows;
+pub mod script;

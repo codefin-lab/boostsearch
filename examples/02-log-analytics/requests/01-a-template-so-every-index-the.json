@@ -1,0 +1,43 @@
+{
+  "index_patterns": [
+    "logs-*"
+  ],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "1s"
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "service": {
+          "type": "keyword"
+        },
+        "host": {
+          "type": "keyword"
+        },
+        "level": {
+          "type": "keyword"
+        },
+        "status": {
+          "type": "short"
+        },
+        "took_ms": {
+          "type": "float"
+        },
+        "bytes": {
+          "type": "long"
+        },
+        "path": {
+          "type": "keyword"
+        },
+        "message": {
+          "type": "text"
+        }
+      }
+    }
+  }
+}
