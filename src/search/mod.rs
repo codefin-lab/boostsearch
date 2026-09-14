@@ -509,7 +509,6 @@ pub(crate) struct Cand {
 #[derive(Default)]
 pub(crate) struct Extras {
     geo: bool,
-    intervals: bool,
     distance_feature: bool,
     nested_inner_hits: bool,
     /// a `nested` clause is in the query somewhere; whether any of them can
@@ -577,9 +576,9 @@ pub struct Outcome {
 
 /// The parts of a query that only a document's own values can settle.
 ///
-/// A geo shape, an `intervals` rule and `distance_feature` all ask something
-/// the index cannot answer on its own: whether a point is inside a shape, where
-/// in a field the words fell, how far a value is from an origin. The query put
+/// A geo shape and `distance_feature` ask something the index cannot answer
+/// on its own: whether a point is inside a shape, how far a value is from an
+/// origin. The query put
 /// to BoostCore matches more widely than that, and the candidates it found are
 /// read back here and judged properly.
 type Searchers = [(String, Searcher, std::sync::Arc<crate::store::IdxLock>)];

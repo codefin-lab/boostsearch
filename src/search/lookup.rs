@@ -229,10 +229,23 @@ pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
 
 /// Rewrite a `more_like_this` clause into the query it stands for.
 ///
-/// The clause names documents rather than terms: the terms come from
-/// analysing what those documents hold. `unlike` names documents whose terms
-/// are to be taken back out of that set, which is what makes a query for
-/// "like this one but not like that one" narrower rather than empty.
+/// OpenSearch picks the terms the way its `XMoreLikeThis` does, and this
+/// follows it step by step. The words of what is liked are counted: a text
+/// is cut by the search analyzer of the first field named, a document gives
+/// the terms its fields were indexed as. Each word that is frequent enough
+/// there, held by enough documents and not by too many, is scored `tf * idf`
+/// with the classic idf, and the best `max_query_terms` of them become term
+/// queries -- chosen separately for each field of the liked documents, and
+/// once over all the fields for the liked texts, where each word goes to the
+/// field that holds it most. `minimum_should_match` (30% unless asked) is
+/// then counted over those term queries, and the liked documents themselves
+/// are left out unless `include` says otherwise. `unlike` names words to
+/// leave out of the counting altogether.
+///
+/// It used to split the text on spaces, keep every word, ask for any one of
+/// them and read none of `max_doc_freq`, `stop_words`, the word lengths or
+/// `minimum_should_match`, which found nearly every document; and a field
+/// such as `body.english` is not a key of the source, so it found none.
 pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mut Value) {
     let Some(o) = node.as_object_mut() else { return };
     for (_, v) in o.iter_mut() {
@@ -243,149 +256,398 @@ pub(crate) fn expand_more_like_this(store: &Store, targets: &[String], node: &mu
         }
     }
     let Some(spec) = o.get("more_like_this").cloned() else { return };
+    // the statistics are the shard's, and this node answers an index as one
+    let Some(st) = targets.first().and_then(|n| store.get(n)) else { return };
+    let g = st.read();
+    let ctx = Ctx {
+        fields: &g.fields,
+        mapping: &g.mapping,
+        analysis: &g.analysis,
+        index: &g.index,
+        max_terms_count: g.max_terms_count(),
+        max_regex_length: g.max_regex_length(),
+        allow_expensive: crate::search::expensive_allowed(store),
+        observed_kinds: &g.observed_kinds,
+        kinds_complete: g.kinds_complete,
+        stats: &g.stats,
+        vectors: &g.vectors,
+    };
+    let searcher = g.reader.searcher();
 
-    let listed = |key: &str| -> Vec<Value> {
-        match spec.get(key) {
+    let int = |key: &str, default: i64| spec.get(key).and_then(|v| v.as_i64()).unwrap_or(default);
+    let max_query_terms = int("max_query_terms", 25).max(1) as usize;
+    let min_term_freq = int("min_term_freq", 2);
+    let min_doc_freq = int("min_doc_freq", 5);
+    let max_doc_freq = int("max_doc_freq", i32::MAX as i64);
+    let min_word_length = int("min_word_length", 0);
+    let max_word_length = int("max_word_length", 0);
+    let boost_terms = spec.get("boost_terms").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let include = spec.get("include").and_then(|v| v.as_bool()).unwrap_or(false);
+    let msm = match spec.get("minimum_should_match") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) if !other.is_null() => other.to_string(),
+        _ => "30%".to_string(),
+    };
+    let stop_words: Option<std::collections::HashSet<String>> = spec
+        .get("stop_words")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|w| w.as_str().map(|s| s.to_string())).collect());
+    let analyzer = spec.get("analyzer").and_then(|v| v.as_str());
+
+    // `like` and `unlike` each hold texts and documents, one or a list
+    let listed = |key: &str| -> (Vec<String>, Vec<Value>) {
+        let items: Vec<Value> = match spec.get(key) {
             Some(Value::Array(a)) => a.clone(),
             Some(one) => vec![one.clone()],
             None => Vec::new(),
-        }
-    };
-    let fields: Option<Vec<String>> = spec
-        .get("fields")
-        .and_then(|f| f.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect());
-
-    // the documents an item names, or the one it carries
-    let source_of_item = |item: &Value| -> Option<(Option<String>, Value)> {
-        if let Some(doc) = item.get("doc") {
-            return Some((None, doc.clone()));
-        }
-        let id = match item {
-            Value::String(s) => s.clone(),
-            other => other.get("_id").map(|v| match v {
-                Value::String(s) => s.clone(),
-                n => n.to_string(),
-            })?,
         };
-        let index = item.get("_index").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let names: Vec<String> = match index {
-            Some(n) => vec![n],
-            None => targets.to_vec(),
-        };
-        for n in names {
-            let st = store.get(&n)?;
-            let g = st.read();
-            if let Some(src) = crate::api::read_source(&g, &id) {
-                return Some((Some(id), src));
-            }
-        }
-        None
+        let texts = items.iter().filter_map(|i| i.as_str().map(|s| s.to_string())).collect();
+        (texts, items.into_iter().filter(|i| i.is_object()).collect())
     };
+    let (like_texts, like_items) = listed("like");
+    let (unlike_texts, unlike_items) = listed("unlike");
 
-    // words a document contributes, by field
-    let collect = |items: &[Value],
-                   out: &mut std::collections::BTreeMap<String, Vec<String>>,
-                   ids: &mut Vec<String>| {
-        for item in items {
-            // a string that names no document is the text itself, which is
-            // how `like` is most often written
-            if let Value::String(text) = item
-                && source_of_item(item).is_none()
-            {
-                for name in fields.clone().unwrap_or_default() {
-                    for word in text.split_whitespace() {
-                        out.entry(name.clone()).or_default().push(word.to_lowercase());
-                    }
-                }
-                continue;
-            }
-            let Some((id, src)) = source_of_item(item) else { continue };
-            if let Some(id) = id {
-                ids.push(id);
-            }
-            let Some(obj) = src.as_object() else { continue };
-            for (name, value) in obj {
-                if fields.as_ref().map(|f| !f.iter().any(|w| w == name)).unwrap_or(false) {
-                    continue;
-                }
-                let Some(text) = value.as_str() else { continue };
-                for word in text.split_whitespace() {
-                    out.entry(name.clone()).or_default().push(word.to_lowercase());
-                }
-            }
-        }
+    // the fields: those named that can be read as words, or every such field
+    let readable = |name: &str| matches!(g.mapping.type_of(name), Some("text" | "keyword"));
+    let every_field = || -> Vec<String> {
+        let mut all: Vec<String> = g
+            .mapping
+            .types
+            .keys()
+            .filter(|name| !name.starts_with('_') && readable(name))
+            .cloned()
+            .collect();
+        all.sort();
+        all
     };
-
-    let mut like: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    let mut unlike: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    let mut like_ids = Vec::new();
-    let mut unlike_ids = Vec::new();
-    collect(&listed("like"), &mut like, &mut like_ids);
-    collect(&listed("unlike"), &mut unlike, &mut unlike_ids);
-
-    let min_tf = spec.get("min_term_freq").and_then(|v| v.as_u64()).unwrap_or(2);
-    let min_df = spec.get("min_doc_freq").and_then(|v| v.as_u64()).unwrap_or(5);
-
-    let mut should = Vec::new();
-    for (field, words) in &like {
-        let taken_back: Vec<&String> =
-            unlike.get(field).map(|w| w.iter().collect()).unwrap_or_default();
-        let mut counts: std::collections::BTreeMap<&String, u64> = Default::default();
-        for w in words {
-            *counts.entry(w).or_insert(0) += 1;
-        }
-        for (word, tf) in counts {
-            if tf < min_tf || taken_back.contains(&word) {
-                continue;
-            }
-            // how many documents hold the word, which is what min_doc_freq caps
-            let df = targets
-                .iter()
-                .filter_map(|n| store.get(n))
-                .map(|st| {
-                    let g = st.read();
-                    let ctx = Ctx {
-                        fields: &g.fields,
-                        mapping: &g.mapping,
-                        analysis: &g.analysis,
-                        index: &g.index,
-                        max_terms_count: g.max_terms_count(),
-                        max_regex_length: g.max_regex_length(),
-                        allow_expensive: crate::search::expensive_allowed(store),
-                        observed_kinds: &g.observed_kinds,
-                        kinds_complete: g.kinds_complete,
-                        stats: &g.stats,
-                        vectors: &g.vectors,
-                    };
-                    crate::query::build(&ctx, &json!({"match": {field.clone(): word}}))
-                        .ok()
-                        .and_then(|q| g.reader.searcher().search(&q, &Count).ok())
-                        .unwrap_or(0) as u64
-                })
-                .sum::<u64>();
-            if df < min_df {
-                continue;
-            }
-            should.push(json!({"match": {field.clone(): word}}));
-        }
-    }
-
-    let mut bool_q = serde_json::Map::new();
-    if should.is_empty() {
-        // nothing survived the thresholds, so nothing is like it
-        *node = json!({"bool": {"must_not": [{"match_all": {}}]}});
+    let named: Option<Vec<String>> = spec.get("fields").and_then(|f| f.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .filter(|name| g.mapping.type_of(name).is_none() || readable(name))
+            .collect()
+    });
+    let fields: Vec<String> = match &named {
+        Some(named) => named.clone(),
+        None => vec!["*".to_string()],
+    };
+    if fields.is_empty() {
+        *node = json!({"match_none": {}});
         return;
     }
-    bool_q.insert("should".into(), Value::Array(should));
-    bool_q.insert("minimum_should_match".into(), json!(1));
-    // the documents the query was built from are left out unless asked for
-    let include = spec.get("include").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !include && !like_ids.is_empty() {
-        bool_q.insert("must_not".into(), json!([{"terms": {"_id": like_ids}}]));
+
+    let noise = |word: &str| {
+        let len = word.encode_utf16().count() as i64;
+        (min_word_length > 0 && len < min_word_length)
+            || (max_word_length > 0 && len > max_word_length)
+            || stop_words.as_ref().is_some_and(|s| s.contains(word))
+    };
+    // the words a text is cut into, by the analyzer of the field it is read for
+    let cut = |field: &str, text: &str| -> Vec<String> {
+        let (_, _, view) = ctx.resolve(field, true);
+        crate::query::analyze_with(&ctx, view, field, text, analyzer)
+    };
+    // the terms of a document, field by field, as its term vectors give them
+    let terms_of = |item: &Value| -> Option<DocTerms> {
+        let (source, wanted): (Value, Option<Vec<String>>) = match item.get("doc") {
+            Some(doc) => (doc.clone(), None),
+            None => {
+                let id = match item.get("_id")? {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let index = item.get("_index").and_then(|v| v.as_str());
+                let source = match index {
+                    Some(name) if name != g.name => {
+                        let other = store.get(name)?;
+                        let other = other.read();
+                        crate::api::read_source(&other, &id)?
+                    }
+                    _ => crate::api::read_source(&g, &id)?,
+                };
+                (source, Some(fields.clone()))
+            }
+        };
+        let wanted: Vec<String> = match item.get("fields").and_then(|f| f.as_array()) {
+            Some(own) => own.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect(),
+            None => match wanted {
+                Some(w) if !w.iter().any(|f| f == "*") => w,
+                _ => every_field(),
+            },
+        };
+        let shape = crate::api::Shape {
+            term_statistics: false,
+            field_statistics: false,
+            positions: false,
+            offsets: false,
+        };
+        let vectors = crate::api::term_vectors_of(&g, &source, shape, Some(&wanted));
+        let mut out = Vec::new();
+        for (field, body) in vectors.as_object()? {
+            let terms = body
+                .get("terms")
+                .and_then(|t| t.as_object())
+                .map(|t| {
+                    t.iter()
+                        .map(|(term, v)| {
+                            (
+                                term.clone(),
+                                v.get("term_freq").and_then(|f| f.as_u64()).unwrap_or(0) as u32,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push((field.clone(), terms));
+        }
+        Some(out)
+    };
+
+    // words to leave out, by field
+    let mut skip: std::collections::HashSet<(String, String)> = Default::default();
+    for text in &unlike_texts {
+        for word in cut(&fields[0], text) {
+            skip.insert((fields[0].clone(), word));
+        }
+    }
+    let liked: Vec<DocTerms> = like_items.iter().filter_map(terms_of).collect();
+    if !like_items.is_empty() {
+        for item in &unlike_items {
+            for (field, terms) in terms_of(item).unwrap_or_default() {
+                for (term, _) in terms {
+                    skip.insert((field.clone(), term));
+                }
+            }
+        }
+    }
+
+    let doc_freq = |field: &str, word: &str| -> u64 {
+        let (f, path, _) = ctx.resolve(field, false);
+        crate::query::term_for(f, &path, &json!(word))
+            .first()
+            .map(|t| searcher.doc_freq(t).unwrap_or(0))
+            .unwrap_or(0)
+    };
+    let num_docs = searcher.num_docs();
+    // the best-scoring words of a count, as term queries, lowest score first
+    let choose = |counts: &JavaCounts, fields: &[String]| -> Vec<Value> {
+        let words = counts.in_java_order();
+        let limit = max_query_terms.min(words.len());
+        let mut chosen: Vec<(String, String, f32)> = Vec::new();
+        let mut heap = crate::query::positions::LuceneHeap::new();
+        for (word, tf) in words {
+            if min_term_freq > 0 && (tf as i64) < min_term_freq {
+                continue;
+            }
+            let mut top_field = fields[0].clone();
+            let mut df = 0u64;
+            for field in fields {
+                let freq = doc_freq(field, &word);
+                if freq > df {
+                    top_field = field.clone();
+                    df = freq;
+                }
+            }
+            if (min_doc_freq > 0 && (df as i64) < min_doc_freq)
+                || df as i64 > max_doc_freq
+                || df == 0
+            {
+                continue;
+            }
+            let idf = (((num_docs + 1) as f64 / (df + 1) as f64).ln() + 1.0) as f32;
+            let score = tf as f32 * idf;
+            if heap.len() < limit {
+                chosen.push((word, top_field, score));
+                let at = chosen.len() - 1;
+                let scores: Vec<f32> = chosen.iter().map(|c| c.2).collect();
+                heap.add(at, &|a, b| scores[a] < scores[b]);
+            } else if let Some(top) = heap.top()
+                && chosen[top].2 < score
+            {
+                chosen[top] = (word, top_field, score);
+                let scores: Vec<f32> = chosen.iter().map(|c| c.2).collect();
+                heap.update_top(&|a, b| scores[a] < scores[b]);
+            }
+        }
+        let scores: Vec<f32> = chosen.iter().map(|c| c.2).collect();
+        let mut clauses = Vec::new();
+        let mut lowest = -1f32;
+        while let Some(at) = heap.pop(&|a, b| scores[a] < scores[b]) {
+            let (word, field, score) = &chosen[at];
+            let mut term = json!({"value": word});
+            if boost_terms != 0.0 {
+                if lowest == -1.0 {
+                    lowest = *score;
+                }
+                term["boost"] = json!(boost_terms * score / lowest);
+            }
+            // The reference's clause is a bare Lucene term query, scored by
+            // BM25 on every field. A `term` on a keyword scores one, as the
+            // reference's own `term` query does; a `span_term` is the same
+            // bare term, scored.
+            let kind = match ctx.resolve(field, true).2 {
+                crate::query::View::Raw => "span_term",
+                _ => "term",
+            };
+            clauses.push(json!({kind: {field.clone(): term}}));
+        }
+        clauses
+    };
+    let with_msm = |clauses: Vec<Value>| -> Value {
+        // a Lucene boolean query of no clauses matches nothing, where an
+        // empty `bool` here would match everything
+        if clauses.is_empty() {
+            return json!({"match_none": {}});
+        }
+        let required = min_should_match(clauses.len(), &msm);
+        let mut bool_q = json!({"should": clauses});
+        if required > 0 {
+            bool_q["minimum_should_match"] = json!(required);
+        }
+        json!({"bool": bool_q})
+    };
+
+    let mut parts = Vec::new();
+    if !like_items.is_empty() {
+        // each field of the liked documents chooses its own words
+        let mut names: Vec<String> = Vec::new();
+        for doc in &liked {
+            for (field, _) in doc {
+                if !names.contains(field) {
+                    names.push(field.clone());
+                }
+            }
+        }
+        let mut clauses = Vec::new();
+        for name in &names {
+            let mut counts = JavaCounts::default();
+            for doc in &liked {
+                for (field, terms) in doc {
+                    if field != name {
+                        continue;
+                    }
+                    for (term, freq) in terms {
+                        if noise(term) || skip.contains(&(name.clone(), term.clone())) {
+                            continue;
+                        }
+                        counts.add(term, *freq);
+                    }
+                }
+            }
+            clauses.extend(choose(&counts, std::slice::from_ref(name)));
+        }
+        parts.push(with_msm(clauses));
+    }
+    if !like_texts.is_empty() {
+        if named.is_none() {
+            // there is no field to cut a text by
+            *node = json!({"match_none": {}});
+            return;
+        }
+        let mut counts = JavaCounts::default();
+        for text in &like_texts {
+            for (at, word) in cut(&fields[0], text).into_iter().enumerate() {
+                if at >= 5000 {
+                    break;
+                }
+                if noise(&word) || skip.contains(&(fields[0].clone(), word.clone())) {
+                    continue;
+                }
+                counts.add(&word, 1);
+            }
+        }
+        parts.push(with_msm(choose(&counts, &fields)));
+    }
+    let mut query = json!({"bool": {"should": parts}});
+    if !like_items.is_empty() && !include {
+        let ids: Vec<Value> = like_items
+            .iter()
+            .filter(|item| item.get("doc").is_none())
+            .filter_map(|item| {
+                item.get("_id").map(|id| match id {
+                    Value::String(s) => json!(s),
+                    other => json!(other.to_string()),
+                })
+            })
+            .collect();
+        if !ids.is_empty() {
+            query = json!({"bool": {"should": [query], "must_not": [{"ids": {"values": ids}}]}});
+        }
     }
     o.remove("more_like_this");
-    *node = json!({"bool": Value::Object(bool_q)});
+    *node = query;
+}
+
+/// How many of `n` optional clauses `spec` asks for, counted as OpenSearch's
+/// `Queries.calculateMinShouldMatch` counts: a percentage is taken of the
+/// count in float and cut down, and nothing caps it at `n`.
+fn min_should_match(n: usize, spec: &str) -> usize {
+    let spec = spec.trim();
+    let n = n as i32;
+    if spec.contains('<') {
+        let mut result = n;
+        let spaced = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tight = spaced.replace(" < ", "<").replace(" <", "<").replace("< ", "<");
+        for part in tight.split(' ') {
+            let Some((bound, rule)) = part.split_once('<') else { continue };
+            let Ok(bound) = bound.parse::<i32>() else { continue };
+            if n <= bound {
+                return result.max(0) as usize;
+            }
+            result = min_should_match(n as usize, rule) as i32;
+        }
+        return result.max(0) as usize;
+    }
+    let result = if let Some(percent) = spec.strip_suffix('%') {
+        let percent: i32 = percent.trim().parse().unwrap_or(0);
+        let calc = (n.wrapping_mul(percent)) as f32 * 0.01f32;
+        if calc < 0.0 { n + calc as i32 } else { calc as i32 }
+    } else {
+        let calc: i32 = spec.parse().unwrap_or(0);
+        if calc < 0 { n + calc } else { calc }
+    };
+    result.max(0) as usize
+}
+
+/// Word counts kept the way a Java `HashMap<String, _>` keeps them.
+///
+/// Which words make the cut when two score the same depends on which one the
+/// reference meets first, and it meets them in its hash map's order: by
+/// bucket of the string's hash, then in the order they went in. Walking them
+/// in any other order keeps a different word of a tie.
+/// The terms of one liked document, field by field, each with how often it
+/// stands there.
+type DocTerms = Vec<(String, Vec<(String, u32)>)>;
+
+#[derive(Default)]
+struct JavaCounts {
+    words: Vec<(String, u32)>,
+}
+
+impl JavaCounts {
+    fn add(&mut self, word: &str, freq: u32) {
+        match self.words.iter_mut().find(|(w, _)| w == word) {
+            Some((_, count)) => *count += freq,
+            None => self.words.push((word.to_string(), freq)),
+        }
+    }
+
+    fn in_java_order(&self) -> Vec<(String, u32)> {
+        let mut capacity = 16usize;
+        while self.words.len() > capacity * 3 / 4 {
+            capacity *= 2;
+        }
+        let bucket = |word: &str| {
+            let mut h: i32 = 0;
+            for unit in word.encode_utf16() {
+                h = h.wrapping_mul(31).wrapping_add(unit as i32);
+            }
+            let spread = (h ^ ((h as u32) >> 16) as i32) as u32;
+            spread as usize & (capacity - 1)
+        };
+        let mut ordered = self.words.clone();
+        ordered.sort_by_key(|(word, _)| bucket(word));
+        ordered
+    }
 }
 
 pub(crate) fn resolve_terms_lookups(
@@ -1288,5 +1550,39 @@ fn unmapped_in_query(g: &IdxState, query: &Value) -> Option<String> {
         }
         Value::Array(items) => items.iter().find_map(|v| unmapped_in_query(g, v)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod more_like_this_tests {
+    use super::*;
+
+    #[test]
+    fn minimum_should_match_counts_as_the_reference_counts() {
+        assert_eq!(min_should_match(3, "30%"), 0);
+        assert_eq!(min_should_match(10, "30%"), 3);
+        assert_eq!(min_should_match(25, "30%"), 7);
+        assert_eq!(min_should_match(5, "-1"), 4);
+        assert_eq!(min_should_match(4, "2<50%"), 2);
+    }
+
+    #[test]
+    fn words_come_back_in_java_hash_map_order() {
+        let mut counts = JavaCounts::default();
+        for word in ["party", "the", "agreement", "of"] {
+            counts.add(word, 1);
+        }
+        counts.add("the", 2);
+        let order: Vec<(String, u32)> = counts.in_java_order();
+        // bucket = (h ^ h >>> 16) & 15 over Java's String.hashCode
+        let bucket = |w: &str| {
+            let mut h: i32 = 0;
+            for u in w.encode_utf16() {
+                h = h.wrapping_mul(31).wrapping_add(u as i32);
+            }
+            ((h ^ ((h as u32) >> 16) as i32) as u32 & 15) as usize
+        };
+        assert!(order.windows(2).all(|w| bucket(&w[0].0) <= bucket(&w[1].0)));
+        assert_eq!(order.iter().find(|(w, _)| w == "the").map(|(_, n)| *n), Some(3));
     }
 }

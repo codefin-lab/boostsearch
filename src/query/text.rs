@@ -2,102 +2,6 @@
 
 use super::*;
 
-/// One rule of an `intervals` query, as the query it most nearly is.
-pub(crate) fn build_interval_rule(ctx: &Ctx, field: &str, rule: &Value) -> Result<Box<dyn Query>> {
-    let Some((kind, spec)) = rule.as_object().and_then(|o| o.iter().next()) else {
-        return Err(anyhow!("[intervals] requires a rule"));
-    };
-    // a rule may name a different field to read
-    let field = spec
-        .get("use_field")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| field.to_string());
-    let insensitive = is_true(spec.get("case_insensitive"));
-    let clause = match kind.as_str() {
-        "match" => {
-            let text = spec.get("query").cloned().unwrap_or(Value::Null);
-            let ordered = is_true(spec.get("ordered"));
-            let gaps = spec.get("max_gaps").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let words = text.as_str().unwrap_or_default().split_whitespace().count();
-            let inner = if ordered && gaps == 0 {
-                serde_json::json!({"match_phrase": {field.clone(): {"query": text}}})
-            } else if ordered && words > 1 {
-                // the words have to turn up in the order they were written,
-                // with as much between them as the rule allows
-                let clauses: Vec<Value> = text
-                    .as_str()
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .map(|w| serde_json::json!({"span_term": {field.clone(): w}}))
-                    .collect();
-                let slop = if gaps < 0 { 1_000 } else { gaps as u64 };
-                serde_json::json!({
-                    "span_near": {"clauses": clauses, "slop": slop, "in_order": true}
-                })
-            } else {
-                serde_json::json!({"match": {field.clone(): {"query": text, "operator": "and"}}})
-            };
-            build(ctx, &inner)?
-        }
-        "prefix" => {
-            let text = spec.get("prefix").cloned().unwrap_or(Value::Null);
-            build(ctx, &serde_json::json!({"prefix": {field.clone(): text}}))?
-        }
-        "wildcard" => {
-            let text = spec.get("pattern").cloned().unwrap_or(Value::Null);
-            build(ctx, &serde_json::json!({"wildcard": {field.clone(): text}}))?
-        }
-        "fuzzy" => {
-            let text = spec.get("term").cloned().unwrap_or(Value::Null);
-            build(ctx, &serde_json::json!({"fuzzy": {field.clone(): {"value": text}}}))?
-        }
-        "regexp" => {
-            let text = spec.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            let mut inner = serde_json::json!({"regexp": {field.clone(): {"value": text}}});
-            if insensitive {
-                inner["regexp"][field.clone()]["case_insensitive"] = serde_json::json!(true);
-            }
-            build(ctx, &inner)?
-        }
-        "all_of" | "any_of" => {
-            let occur = if kind == "all_of" { Occur::Must } else { Occur::Should };
-            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-            for sub in spec.get("intervals").and_then(|v| v.as_array()).into_iter().flatten() {
-                clauses.push((occur, build_interval_rule(ctx, &field, sub)?));
-            }
-            if clauses.is_empty() {
-                return Ok(Box::new(EmptyQuery));
-            }
-            Box::new(BooleanQuery::new(clauses))
-        }
-        other => return Err(anyhow!("Unknown interval rule [{other}]")),
-    };
-    // `filter` narrows what the rule matched; the parts of it this engine can
-    // answer are the ones that name a query
-    let filtered = spec.get("filter").and_then(|f| f.as_object()).map(|f| {
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for (name, inner) in f {
-            let occur = match name.as_str() {
-                "not_contained_by" | "not_containing" | "not_overlapping" => Occur::MustNot,
-                "filter" => Occur::Must,
-                _ => Occur::Must,
-            };
-            if let Ok(q) = build_interval_rule(ctx, &field, inner) {
-                clauses.push((occur, q));
-            }
-        }
-        clauses
-    });
-    match filtered {
-        Some(mut clauses) if !clauses.is_empty() => {
-            clauses.insert(0, (Occur::Must, clause));
-            Ok(Box::new(BooleanQuery::new(clauses)))
-        }
-        _ => Ok(clause),
-    }
-}
-
 pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
     // a date, a number, a boolean or an address is one value, not text to
@@ -236,12 +140,27 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
                 return Ok(Box::new(crate::query::SpanPaths::new(every, clauses)));
             }
         }
+        // Each word keeps the place the analyzer gave it. A stop word the
+        // analyzer dropped leaves a gap -- `notify the supplier` cut by the
+        // english analyzer is `notifi` and `supplier` two places apart -- and
+        // the document was written with the same gap, so a phrase that closed
+        // it up found nothing where the reference finds the clause.
+        let offsets: Vec<usize> = match arcs.len() == terms.len() {
+            true => arcs.iter().map(|a| a.from.saturating_sub(arcs[0].from)).collect(),
+            false => (0..terms.len()).collect(),
+        };
         // `slop` lets the words stand that many moves apart. It was read by
         // `span_near` and nowhere here, so `match_phrase: {query: "quick
         // fox", slop: 2}` found nothing in "quick brown fox".
-        let mut phrase = PhraseQuery::new(terms);
-        phrase.set_slop(opts.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32);
-        return Ok(Box::new(phrase));
+        // With room between the words, each match counts by how far the
+        // words moved to make it, which BoostCore's phrase does not weigh.
+        let slop = opts.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if slop > 0 {
+            return Ok(Box::new(crate::query::SloppyPhrase::new(terms, offsets, slop)));
+        }
+        return Ok(Box::new(PhraseQuery::new_with_offset(
+            offsets.into_iter().zip(terms).collect(),
+        )));
     }
 
     // a field holding text holds the number as text: `1234` written into a
@@ -486,82 +405,6 @@ pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query
 
 /// `match_bool_prefix`: every analysed term is a term query except the last,
 /// which matches as a prefix.
-/// `span_near` over ordered `span_term` clauses, optionally ending in a
-/// `span_multi` prefix.
-///
-/// That shape is a phrase, which is what it is built as. The span family's
-/// other members -- `span_or`, `span_not`, unordered clauses -- are not
-/// expressible this way and are still refused rather than approximated.
-pub(crate) fn build_span_near(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let clauses = body
-        .get("clauses")
-        .and_then(|c| c.as_array())
-        .ok_or_else(|| anyhow!("[span_near] requires [clauses]"))?;
-    if body.get("in_order").and_then(|v| v.as_bool()) == Some(false) {
-        return Err(anyhow!("unsupported query type [span_near] with in_order: false"));
-    }
-    let slop = body.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-    let mut field: Option<String> = None;
-    let mut words: Vec<String> = Vec::new();
-    let mut prefix_last = false;
-    for (i, clause) in clauses.iter().enumerate() {
-        let (name, text, is_prefix) = if let Some(t) = clause.get("span_term") {
-            let (f, v, _) = field_and_value(t)?;
-            (f, v.as_str().unwrap_or_default().to_string(), false)
-        } else if let Some(m) = clause.pointer("/span_multi/match/prefix") {
-            let (f, v, _) = field_and_value(m)?;
-            (f, v.as_str().unwrap_or_default().to_string(), true)
-        } else {
-            return Err(anyhow!("unsupported query type [span_near] clause"));
-        };
-        if is_prefix && i + 1 != clauses.len() {
-            return Err(anyhow!("[span_multi] is only supported as the last clause"));
-        }
-        prefix_last |= is_prefix;
-        match &field {
-            Some(f) if *f != name => {
-                return Err(anyhow!("[span_near] clauses must all name one field"));
-            }
-            _ => field = Some(name),
-        }
-        words.push(text);
-    }
-    let Some(field) = field else { return Ok(Box::new(EmptyQuery)) };
-    let (f, path, view) = ctx.resolve(&field, true);
-
-    let mut terms: Vec<Term> = Vec::new();
-    for (i, w) in words.iter().enumerate() {
-        let last = i + 1 == words.len();
-        // the prefix clause is matched as written; the rest go through the
-        // analyser so they meet the terms the field actually holds
-        let pieces = if last && prefix_last {
-            vec![if view == View::Dyn { w.to_lowercase() } else { w.clone() }]
-        } else {
-            analyze(ctx, view, &field, w)
-        };
-        for p in pieces {
-            let mut t = Term::from_field_json_path(f, &path, true);
-            t.append_type_and_str(&p);
-            terms.push(t);
-        }
-    }
-    if terms.is_empty() {
-        return Ok(Box::new(EmptyQuery));
-    }
-    if prefix_last {
-        let mut q = boostcore::query::PhrasePrefixQuery::new(terms);
-        q.set_max_expansions(50);
-        return Ok(Box::new(q));
-    }
-    if terms.len() == 1 {
-        return Ok(Box::new(TermQuery::new(terms.remove(0), IndexRecordOption::WithFreqs)));
-    }
-    let mut q = PhraseQuery::new(terms);
-    q.set_slop(slop);
-    Ok(Box::new(q))
-}
-
 pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     let (field, val, opts) = field_and_value(body)?;
     for banned in ["slop", "cutoff_frequency"] {
@@ -622,59 +465,84 @@ pub(crate) fn build_match_bool_prefix(ctx: &Ctx, body: &Value) -> Result<Box<dyn
     Ok(Box::new(BooleanQuery::with_minimum_required_clauses(clauses, required)))
 }
 
-/// `span_term` -- one word, in the field it is written in.
-///
-/// Span queries are about where words stand in a document. The ones here
-/// answer with the documents whose spans could match; a span query that only
-/// narrows -- `span_first`, `span_not`, `span_containing` -- is read as the
-/// clause it narrows, with the narrowing applied where BoostCore can see the
-/// positions.
-pub(crate) fn build_span_term(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let (field, value, _) = field_and_value(body)?;
-    let text = match &value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    let (f, path, _) = ctx.resolve(&field, true);
-    let mut term = Term::from_field_json_path(f, &path, true);
-    term.append_type_and_str(&text);
-    Ok(Box::new(TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions)))
+/// A span clause of any kind, as the query that walks its matches.
+pub(crate) fn build_span(ctx: &Ctx, clause: &Value) -> Result<Box<dyn Query>> {
+    let (tree, field) = span_tree(ctx, clause)?;
+    let query = crate::query::SpanQuery::new(tree);
+    // a keyword keeps no lengths, and a word there is scored as if every
+    // value were one word long
+    let exact = field.as_deref().map(|f| ctx.resolve(f, true).2 == View::Raw).unwrap_or(false);
+    Ok(Box::new(if exact { query.without_norms() } else { query }))
 }
 
-/// One span clause, whichever kind it is.
-pub(crate) fn build_span(ctx: &Ctx, clause: &Value) -> Result<Box<dyn Query>> {
-    let Some((kind, body)) = clause.as_object().and_then(|o| o.iter().next()) else {
-        return Err(anyhow!("[span] clause is empty"));
-    };
-    match kind.as_str() {
-        "span_term" => build_span_term(ctx, body),
-        "span_near" => build_span_near(ctx, body),
-        "span_or" => build_span_or(ctx, body),
-        "span_not" => build_span_not(ctx, body),
-        "span_first" => build_span_first(ctx, body),
-        "span_containing" | "span_within" => build_span_pair(ctx, body),
-        "span_multi" => {
-            let inner = body.get("match").ok_or_else(|| anyhow!("[span_multi] needs [match]"))?;
-            super::build(ctx, inner)
-        }
-        "span_gap" => Ok(Box::new(EmptyQuery)),
-        other => Err(anyhow!("unknown span query [{other}]")),
+/// A nested span clause may not carry a boost of its own: only the query as
+/// a whole is scored, so a boost inside it would mean nothing.
+fn no_nested_boost(parent: &str, part: &str, clause: &Value) -> Result<()> {
+    let boost = clause
+        .as_object()
+        .and_then(|o| o.values().next())
+        .and_then(|body| {
+            body.get("boost").or_else(|| {
+                body.as_object()
+                    .filter(|o| o.len() == 1)
+                    .and_then(|o| o.values().next())
+                    .and_then(|v| v.get("boost"))
+            })
+        })
+        .and_then(|b| b.as_f64());
+    match boost {
+        Some(b) if b != 1.0 => Err(anyhow!(
+            "{parent} [{part}] as a nested span clause can't have non-default boost value [{b:?}]"
+        )),
+        _ => Ok(()),
     }
 }
 
-/// `span_or` -- any of its clauses.
-pub(crate) fn build_span_or(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let clauses = body
-        .get("clauses")
-        .and_then(|c| c.as_array())
-        .ok_or_else(|| anyhow!("[span_or] requires [clauses]"))?;
-    // where every clause is one word, the whole thing is a single span over
-    // those words, which is what Lucene scores it as
-    let words: Option<Vec<Term>> = clauses
-        .iter()
-        .map(|clause| {
-            let spec = clause.get("span_term")?;
-            let (field, value, _) = field_and_value(spec).ok()?;
+/// One nested clause, which has to be a span clause.
+fn span_part(
+    ctx: &Ctx,
+    parent: &str,
+    part: &str,
+    clause: &Value,
+) -> Result<(SpanTree, Option<String>)> {
+    let kind = clause.as_object().and_then(|o| o.keys().next()).map(|k| k.as_str()).unwrap_or("");
+    if !kind.starts_with("span_") && kind != "field_masking_span" {
+        return Err(anyhow!("{parent} [{part}] must be of type span query"));
+    }
+    no_nested_boost(parent, part, clause)?;
+    span_tree(ctx, clause)
+}
+
+/// Every clause of a compound span names the same field.
+fn same_field(field: &mut Option<String>, clause: Option<String>, complaint: &str) -> Result<()> {
+    match (field.as_ref(), clause) {
+        (Some(a), Some(b)) if *a != b => Err(anyhow!("{complaint}")),
+        (None, Some(b)) => {
+            *field = Some(b);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A span clause, as the tree its matches are walked by, with the field it
+/// is over.
+pub(crate) fn span_tree(ctx: &Ctx, clause: &Value) -> Result<(SpanTree, Option<String>)> {
+    let Some((kind, body)) = clause.as_object().and_then(|o| o.iter().next()) else {
+        return Err(anyhow!("[span] clause is empty"));
+    };
+    let int = |key: &str| body.get(key).and_then(|v| v.as_i64());
+    match kind.as_str() {
+        "span_term" => {
+            let (field, value, opts) = field_and_value(body)?;
+            let value = match opts.get("term") {
+                Some(term) if opts.get("value").is_none() => term.clone(),
+                _ => value,
+            };
+            let value = match (&value, value.get("term")) {
+                (Value::Object(_), Some(term)) => term.clone(),
+                _ => value,
+            };
             let text = match &value {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -682,60 +550,277 @@ pub(crate) fn build_span_or(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             let (f, path, _) = ctx.resolve(&field, true);
             let mut term = Term::from_field_json_path(f, &path, true);
             term.append_type_and_str(&text);
-            Some(term)
+            Ok((SpanTree::Term(term), Some(field)))
+        }
+        "span_or" => {
+            let clauses = body
+                .get("clauses")
+                .and_then(|c| c.as_array())
+                .ok_or_else(|| anyhow!("span_or must include [clauses]"))?;
+            let mut field = None;
+            let mut trees = Vec::new();
+            for clause in clauses {
+                let (tree, named) = span_part(ctx, "span_or", "clauses", clause)?;
+                same_field(
+                    &mut field,
+                    named,
+                    "failed to create query: Clauses must have same field.",
+                )?;
+                trees.push(tree);
+            }
+            Ok((SpanTree::Or(trees), field))
+        }
+        "span_near" => {
+            let clauses = body
+                .get("clauses")
+                .and_then(|c| c.as_array())
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| anyhow!("span_near must include [clauses]"))?;
+            let ordered = body.get("in_order").and_then(|v| v.as_bool()).unwrap_or(true);
+            let slop = int("slop").unwrap_or(0) as i32;
+            let mut field = None;
+            let mut trees = Vec::new();
+            for clause in clauses {
+                if let Some(gap) = clause.get("span_gap") {
+                    if !ordered {
+                        return Err(anyhow!(
+                            "failed to create query: Gaps can only be added to ordered near queries"
+                        ));
+                    }
+                    let (_, width, _) = field_and_value(gap)?;
+                    trees.push(SpanTree::Gap(width.as_i64().unwrap_or(0) as i32));
+                    continue;
+                }
+                let (tree, named) = span_part(ctx, "span_near", "clauses", clause)?;
+                if let (Some(f), Some(n)) = (&field, &named)
+                    && f != n
+                {
+                    return Err(anyhow!(
+                        "failed to create query: Cannot add clause {n} to SpanNearQuery for field {f}"
+                    ));
+                }
+                same_field(
+                    &mut field,
+                    named,
+                    "failed to create query: Clauses must have same field.",
+                )?;
+                trees.push(tree);
+            }
+            Ok((SpanTree::Near { clauses: trees, slop, ordered }, field))
+        }
+        "span_not" => {
+            let include = body
+                .get("include")
+                .ok_or_else(|| anyhow!("span_not must have [include] span query clause"))?;
+            let exclude = body
+                .get("exclude")
+                .ok_or_else(|| anyhow!("span_not must have [exclude] span query clause"))?;
+            let dist = int("dist");
+            if dist.is_some() && (int("pre").is_some() || int("post").is_some()) {
+                return Err(anyhow!("span_not can either use [dist] or [pre] & [post] (or none)"));
+            }
+            let (include, field) = span_part(ctx, "span_not", "include", include)?;
+            let (exclude, other) = span_part(ctx, "span_not", "exclude", exclude)?;
+            if let (Some(a), Some(b)) = (&field, &other)
+                && a != b
+            {
+                return Err(anyhow!("failed to create query: Clauses must have same field."));
+            }
+            let pre = dist.or(int("pre")).unwrap_or(0).max(0) as i32;
+            let post = dist.or(int("post")).unwrap_or(0).max(0) as i32;
+            Ok((
+                SpanTree::Not { include: Box::new(include), exclude: Box::new(exclude), pre, post },
+                field,
+            ))
+        }
+        "span_first" => {
+            let inner = body
+                .get("match")
+                .ok_or_else(|| anyhow!("span_first must have [match] span query clause"))?;
+            let end = int("end").ok_or_else(|| anyhow!("span_first must have [end] set for it"))?;
+            if end < 0 {
+                return Err(anyhow!("parameter [end] needs to be positive."));
+            }
+            let (inner, field) = span_part(ctx, "span_first", "match", inner)?;
+            Ok((SpanTree::First { inner: Box::new(inner), end: end as i32 }, field))
+        }
+        "span_containing" | "span_within" => {
+            let big = body.get("big").ok_or_else(|| anyhow!("{kind} must include [big]"))?;
+            let little =
+                body.get("little").ok_or_else(|| anyhow!("{kind} must include [little]"))?;
+            let (big, field) = span_part(ctx, kind, "big", big)?;
+            let (little, other) = span_part(ctx, kind, "little", little)?;
+            if let (Some(a), Some(b)) = (&field, &other)
+                && a != b
+            {
+                return Err(anyhow!("failed to create query: big and little not same field"));
+            }
+            let (big, little) = (Box::new(big), Box::new(little));
+            Ok(match kind.as_str() {
+                "span_containing" => (SpanTree::Containing { big, little }, field),
+                _ => (SpanTree::Within { big, little }, field),
+            })
+        }
+        "field_masking_span" | "span_field_masking" => {
+            let inner = body
+                .get("query")
+                .ok_or_else(|| anyhow!("field_masking_span must have [query] span query clause"))?;
+            let masked = body
+                .get("field")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("field_masking_span must have [field] set for it"))?;
+            let (inner, _) = span_part(ctx, "field_masking_span", "query", inner)?;
+            let (f, path, _) = ctx.resolve(masked, true);
+            let probe = crate::query::positions::probe_of(f, &path);
+            Ok((
+                SpanTree::Masked { inner: Box::new(inner), field: probe },
+                Some(masked.to_string()),
+            ))
+        }
+        "span_multi" => {
+            let inner = body
+                .get("match")
+                .ok_or_else(|| anyhow!("span_multi must have [match] multi term query clause"))?;
+            let (field, terms) = multi_term_words(ctx, inner)?;
+            Ok((SpanTree::Or(terms.into_iter().map(SpanTree::Term).collect()), Some(field)))
+        }
+        "span_gap" => Err(anyhow!("[span_gap] can only be used as a clause of [span_near]")),
+        other => Err(anyhow!("unknown span query [{other}]")),
+    }
+}
+
+/// The indexed words a multi-term query stands for: what a `span_multi`
+/// rewrites into before its matches are walked.
+pub(crate) fn multi_term_words(ctx: &Ctx, inner: &Value) -> Result<(String, Vec<Term>)> {
+    // Lucene refuses a rewrite to more clauses than this rather than walking
+    // an unbounded number of words
+    const MOST: usize = 1024;
+    let Some((kind, body)) = inner.as_object().and_then(|o| o.iter().next()) else {
+        return Err(anyhow!("[span_multi] [match] must be of type multi term query"));
+    };
+    if !matches!(kind.as_str(), "prefix" | "wildcard" | "regexp" | "fuzzy" | "range") {
+        return Err(anyhow!("[span_multi] [match] must be of type multi term query"));
+    }
+    let (field, value, opts) = field_and_value(body)?;
+    let (f, path, _) = ctx.resolve(&field, true);
+    let text = match &value {
+        Value::String(s) => s.clone(),
+        Value::Object(_) => String::new(),
+        other => other.to_string(),
+    };
+    let insensitive = is_true(opts.get("case_insensitive"));
+    let words = match kind.as_str() {
+        "prefix" => dictionary_words(ctx, f, &path, &text, &|_| true, MOST)?,
+        "wildcard" => {
+            let head = if insensitive { "(?i)" } else { "" };
+            let re = regex::Regex::new(&format!("{head}^{}$", wildcard_to_regex(&text)))
+                .map_err(|e| anyhow!("bad wildcard `{text}`: {e}"))?;
+            dictionary_words(ctx, f, &path, "", &|w| re.is_match(w), MOST)?
+        }
+        "regexp" => {
+            let head = if insensitive { "(?i)" } else { "" };
+            let re = regex::Regex::new(&format!("{head}^(?:{text})$"))
+                .map_err(|e| anyhow!("bad regex `{text}`: {e}"))?;
+            dictionary_words(ctx, f, &path, "", &|w| re.is_match(w), MOST)?
+        }
+        "range" => {
+            let spec = body.get(&field).cloned().unwrap_or(Value::Null);
+            let bound = |key: &str| spec.get(key).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let (gte, gt, lte, lt) = (bound("gte"), bound("gt"), bound("lte"), bound("lt"));
+            dictionary_words(
+                ctx,
+                f,
+                &path,
+                "",
+                &|w| {
+                    gte.as_deref().is_none_or(|b| w >= b)
+                        && gt.as_deref().is_none_or(|b| w > b)
+                        && lte.as_deref().is_none_or(|b| w <= b)
+                        && lt.as_deref().is_none_or(|b| w < b)
+                },
+                MOST,
+            )?
+        }
+        _ => {
+            let mut term = Term::from_field_json_path(f, &path, true);
+            term.append_type_and_str(&text);
+            let auto = Value::String("AUTO".into());
+            let edits = fuzzy_edits(Some(opts.get("fuzziness").unwrap_or(&auto)), &text)
+                .unwrap_or(0)
+                .min(2);
+            let transpositions =
+                opts.get("transpositions").and_then(|v| v.as_bool()).unwrap_or(true);
+            let searcher = ctx.index.reader()?.searcher();
+            crate::query::ScoredFuzzy::new(term, &text, edits, transpositions)
+                .prefix_length(
+                    opts.get("prefix_length").and_then(|v| v.as_u64()).unwrap_or(0) as usize
+                )
+                .max_expansions(
+                    opts.get("max_expansions").and_then(|v| v.as_u64()).unwrap_or(50) as usize
+                )
+                .words(&searcher)?
+        }
+    };
+    Ok((field, words))
+}
+
+/// The words of a field's dictionary under a path that begin with `prefix`
+/// and that `accept` keeps, each once however many segments hold it.
+pub(crate) fn dictionary_words(
+    ctx: &Ctx,
+    field: Field,
+    path: &str,
+    prefix: &str,
+    accept: &dyn Fn(&str) -> bool,
+    most: usize,
+) -> Result<Vec<Term>> {
+    let mut head = Term::from_field_json_path(field, path, true);
+    head.append_type_and_str("");
+    let head_len = head.serialized_value_bytes().len();
+    let mut low = head.serialized_value_bytes().to_vec();
+    low.extend_from_slice(prefix.as_bytes());
+    let mut high = low.clone();
+    let high = loop {
+        match high.pop() {
+            Some(b) if b < u8::MAX => {
+                high.push(b + 1);
+                break Some(high);
+            }
+            Some(_) => continue,
+            None => break None,
+        }
+    };
+    let searcher = ctx.index.reader()?.searcher();
+    let mut found: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    for reader in searcher.segment_readers() {
+        let inverted = reader.inverted_index(field)?;
+        let mut range = inverted.terms().range().ge(&low);
+        if let Some(high) = &high {
+            range = range.lt(high);
+        }
+        let mut stream = range.into_stream()?;
+        while stream.advance() {
+            let key = stream.key();
+            let Ok(word) = std::str::from_utf8(&key[head_len..]) else { continue };
+            if accept(word) {
+                found.insert(key.to_vec());
+                if found.len() > most {
+                    return Err(anyhow!("maxClauseCount is set to {most}"));
+                }
+            }
+        }
+    }
+    // built on the path's own term, so each word is still a word under that
+    // path -- one rebuilt from its bytes alone would be read as a plain
+    // byte term and scored against the whole field's length
+    Ok(found
+        .into_iter()
+        .map(|bytes| {
+            let mut term = head.clone();
+            term.append_bytes(&bytes[head_len..]);
+            term
         })
-        .collect();
-    if let Some(words) =
-        words.filter(|w| !w.is_empty() && w.iter().all(|t| t.field() == w[0].field()))
-    {
-        return Ok(Box::new(crate::query::SpanUnion::new(words)));
-    }
-    let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    for clause in clauses {
-        parts.push((Occur::Should, build_span(ctx, clause)?));
-    }
-    Ok(Box::new(BooleanQuery::new(parts)))
-}
-
-/// `span_not` -- the first clause where the second does not stand.
-pub(crate) fn build_span_not(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let include = body.get("include").ok_or_else(|| anyhow!("[span_not] requires [include]"))?;
-    body.get("exclude").ok_or_else(|| anyhow!("[span_not] requires [exclude]"))?;
-    // What `exclude` takes out is a span that overlaps the included one, not
-    // every document that holds it: a document where the two stand apart is
-    // still an answer. Without spans of its own to compare, this answers with
-    // the included clause, which is the document set OpenSearch answers with
-    // wherever the two do not overlap.
-    build_span(ctx, include)
-}
-
-/// `span_first` -- a clause that stands near the beginning of the field.
-pub(crate) fn build_span_first(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let inner = body.get("match").ok_or_else(|| anyhow!("[span_first] requires [match]"))?;
-    let end = body.get("end").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as usize;
-    // where the clause is one word, how early it stands can be answered from
-    // its positions; anything else is read as the clause itself
-    if let Some(spec) = inner.get("span_term") {
-        let (field, value, _) = field_and_value(spec)?;
-        let text = match &value {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        let (f, path, _) = ctx.resolve(&field, true);
-        let mut term = Term::from_field_json_path(f, &path, true);
-        term.append_type_and_str(&text);
-        return Ok(Box::new(crate::query::FirstPositions::new(term, end)));
-    }
-    build_span(ctx, inner)
-}
-
-/// `span_containing` and `span_within` -- one span inside another.
-pub(crate) fn build_span_pair(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
-    let little = body.get("little").ok_or_else(|| anyhow!("[span] requires [little]"))?;
-    let big = body.get("big").ok_or_else(|| anyhow!("[span] requires [big]"))?;
-    let parts: Vec<(Occur, Box<dyn Query>)> =
-        vec![(Occur::Must, build_span(ctx, little)?), (Occur::Must, build_span(ctx, big)?)];
-    Ok(Box::new(BooleanQuery::new(parts)))
+        .collect())
 }
 
 /// Every term in a field that begins with these letters.

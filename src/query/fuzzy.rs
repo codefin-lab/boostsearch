@@ -47,6 +47,12 @@ impl ScoredFuzzy {
         self
     }
 
+    /// The indexed words within reach, nearest first, without their weights:
+    /// what a `span_multi` over a fuzzy term rewrites into.
+    pub(crate) fn words(&self, searcher: &Searcher) -> boostcore::Result<Vec<Term>> {
+        Ok(self.expand(searcher)?.into_iter().map(|(term, _)| term).collect())
+    }
+
     /// The indexed words within reach, with the weight each is given.
     fn expand(&self, searcher: &Searcher) -> boostcore::Result<Vec<(Term, f32)>> {
         let value = self.term.serialized_value_bytes();

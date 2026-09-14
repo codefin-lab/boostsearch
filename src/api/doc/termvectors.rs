@@ -1,6 +1,10 @@
 //! What a document's text became, term by term.
 
 use super::*;
+use boostcore::DocSet;
+use boostcore::postings::Postings;
+use boostcore::query::Bm25StatisticsProvider;
+use boostcore::schema::IndexRecordOption;
 
 /// `_termvectors` -- what a document's text became once analysed.
 ///
@@ -46,25 +50,16 @@ pub async fn termvectors(
             }),
         );
     };
-    let want_stats = body
-        .get("term_statistics")
-        .and_then(|v| v.as_bool())
-        .or_else(|| p.get("term_statistics").map(|v| v == "true"))
-        .unwrap_or(false);
     // what a field holds across the index is reported unless it is refused;
     // what each term is worth is reported only when it is asked for
-    let want_field_stats = body
-        .get("field_statistics")
-        .and_then(|v| v.as_bool())
-        .or_else(|| p.get("field_statistics").map(|v| v != "false"))
-        .unwrap_or(true);
+    let shape = Shape::of(&body, &p);
     let only: Option<Vec<String>> = body
         .get("fields")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .or_else(|| p.get("fields").map(|f| f.split(',').map(|s| s.trim().to_string()).collect()));
 
-    let mut fields = term_vectors_of(&g, &source, want_stats, want_field_stats, only.as_deref());
+    let mut fields = term_vectors_of(&g, &source, shape, only.as_deref());
     crate::security::narrow_term_vectors(&store, &g.name, &mut fields);
     respond(
         &p,
@@ -77,14 +72,47 @@ pub async fn termvectors(
 
 /// The terms each field of a document became once analysed.
 /// What the index holds for one field: how many documents each of its terms
-/// is in, added up, and how many documents there are.
-fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64) {
+/// is in, added up; how many times they stand there, added up; and how many
+/// documents hold the field.
+fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64, u64) {
     let searcher = g.reader.searcher();
     // Which field of the index holds this one's terms, and under which path:
     // a field the mapping declares lives in the untouched view rather than
     // among the dynamic JSON, and asking the dynamic field for it found
     // nothing -- `sum_doc_freq` came back zero for a keyword every document
     // had, where the reference reports one for each of them.
+    let (held, path) = held_path(g, field);
+    let mut start = boostcore::Term::from_field_json_path(held, &path, true);
+    start.append_type_and_str("");
+    let prefix = start.serialized_value_bytes().to_vec();
+    let mut sum_doc_freq = 0u64;
+    // `sum_ttf` is every token the field holds, which is every occurrence of
+    // every term: it was the sum of the term frequencies of this one
+    // document, so a field of 402 tokens across the index reported 330
+    let mut sum_ttf = 0u64;
+    for reader in searcher.segment_readers() {
+        let Ok(inverted) = reader.inverted_index(held) else { continue };
+        let Ok(mut stream) = inverted.terms().stream() else { continue };
+        while let Some((bytes, info)) = stream.next() {
+            if bytes.starts_with(&prefix) {
+                sum_doc_freq += info.doc_freq as u64;
+                if let Ok(mut postings) =
+                    inverted.read_postings_from_terminfo(info, IndexRecordOption::WithFreqs)
+                {
+                    while postings.doc() != boostcore::TERMINATED {
+                        sum_ttf += postings.term_freq() as u64;
+                        postings.advance();
+                    }
+                }
+            }
+        }
+    }
+    let docs = searcher.path_statistics(&start).map(|(docs, _)| docs).filter(|d| *d > 0);
+    (sum_doc_freq, sum_ttf, docs.unwrap_or_else(|| searcher.num_docs()))
+}
+
+/// The field of the index a field's terms are kept in, and the path under it.
+fn held_path(g: &IdxState, field: &str) -> (boostcore::schema::Field, String) {
     let ctx = crate::query::Ctx {
         fields: &g.fields,
         mapping: &g.mapping,
@@ -99,53 +127,87 @@ fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64) {
         vectors: &g.vectors,
     };
     let (held, path, _) = ctx.resolve(field, false);
-    let path = path.replace('.', "\u{1}");
-    let mut start = boostcore::Term::from_field_json_path(held, &path, true);
-    start.append_type_and_str("");
-    let prefix = start.serialized_value_bytes().to_vec();
-    let mut sum_doc_freq = 0u64;
-    for reader in searcher.segment_readers() {
-        let Ok(inverted) = reader.inverted_index(held) else { continue };
-        let Ok(mut stream) = inverted.terms().stream() else { continue };
-        while let Some((bytes, info)) = stream.next() {
-            if bytes.starts_with(&prefix) {
-                sum_doc_freq += info.doc_freq as u64;
-            }
+    (held, path.replace('.', "\u{1}"))
+}
+
+/// What of each token a term vector reports.
+#[derive(Clone, Copy)]
+pub(crate) struct Shape {
+    pub term_statistics: bool,
+    pub field_statistics: bool,
+    pub positions: bool,
+    pub offsets: bool,
+}
+
+impl Shape {
+    pub(crate) fn of(body: &Value, p: &Params) -> Shape {
+        let flag = |key: &str, default: bool| {
+            body.get(key)
+                .and_then(|v| v.as_bool())
+                .or_else(|| p.get(key).map(|v| v != "false"))
+                .unwrap_or(default)
+        };
+        Shape {
+            term_statistics: flag("term_statistics", false),
+            field_statistics: flag("field_statistics", true),
+            positions: flag("positions", true),
+            offsets: flag("offsets", true),
         }
     }
-    (sum_doc_freq, searcher.num_docs())
 }
 
 pub(crate) fn term_vectors_of(
     g: &IdxState,
     source: &Value,
-    want_stats: bool,
-    want_field_stats: bool,
+    shape: Shape,
     only: Option<&[String]>,
 ) -> Value {
     let mut fields = serde_json::Map::new();
     let Some(obj) = source.as_object() else { return Value::Object(fields) };
-    for (name, value) in obj {
-        if only.map(|f| !f.iter().any(|w| w == name)).unwrap_or(false) {
-            continue;
-        }
-        let Some(text) = value.as_str() else { continue };
+    // The fields asked for by name are looked up by name, a multi-field
+    // included: `body.english` is not a key of the source, it is `body` cut
+    // by another analyzer, and asking for it answered nothing at all.
+    let named: Vec<(String, String)> = match only {
+        Some(asked) => asked
+            .iter()
+            .filter_map(|name| {
+                let pointer = |n: &str| format!("/{}", n.replace('.', "/"));
+                if let Some(text) = source.pointer(&pointer(name)).and_then(|v| v.as_str()) {
+                    return Some((name.clone(), text.to_string()));
+                }
+                let (parent, _) = name.rsplit_once('.')?;
+                g.mapping.type_of(name)?;
+                let text = source.pointer(&pointer(parent))?.as_str()?;
+                Some((name.clone(), text.to_string()))
+            })
+            .collect(),
+        None => obj
+            .iter()
+            .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+            .collect(),
+    };
+    for (name, text) in named {
+        let text = text.as_str();
         // a keyword holds its whole value as one term; anything else is cut
-        // by its analyzer
-        let mut spans = if g.mapping.type_of(name) == Some("keyword") {
+        // by the analyzer the field was written with
+        let chain = g
+            .mapping
+            .field_option(&name, "analyzer")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .and_then(|named| g.analysis.get(&named));
+        let mut spans = if g.mapping.type_of(&name) == Some("keyword") {
             vec![(text.to_string(), 0usize, 0usize, text.len(), 1usize)]
         } else {
-            crate::query::analyze_spans(&g.index, text, None)
+            match &chain {
+                Some(chain) => chain.tokens(text),
+                None => crate::query::analyze_spans(&g.index, text, None),
+            }
         };
         // the offsets go out as Java counts them, not as bytes
         crate::analysis::reported_offsets(text, &mut spans);
         // a chain that hangs the token's kind on it as a payload has it read
         // back here, and the kind of a word is `<ALPHANUM>`
-        let payload = g
-            .mapping
-            .field_option(name, "analyzer")
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .and_then(|named| g.analysis.get(&named))
+        let payload = chain
             .map(|chain| chain.carries_type_payload())
             .unwrap_or(false)
             .then_some("PEFMUEhBTlVNPg==");
@@ -159,57 +221,66 @@ pub(crate) fn term_vectors_of(
             terms.entry(t).or_default().push((pos, from, to));
         }
         let searcher = g.reader.searcher();
+        let (held, path) = held_path(g, &name);
         let mut out = serde_json::Map::new();
-        let mut sum_doc_freq = 0u64;
-        let mut sum_ttf = 0u64;
         for (term, spots) in &terms {
-            let mut entry = json!({
-                "term_freq": spots.len(),
-                "tokens": spots.iter().map(|(pos, from, to)| {
-                    let mut token = json!({
-                        "position": pos, "start_offset": from, "end_offset": to,
-                    });
-                    if let Some(payload) = payload {
-                        token["payload"] = json!(payload);
+            let mut entry = json!({ "term_freq": spots.len() });
+            if shape.positions || shape.offsets {
+                entry["tokens"] = spots
+                    .iter()
+                    .map(|(pos, from, to)| {
+                        let mut token = json!({});
+                        if shape.positions {
+                            token["position"] = json!(pos);
+                        }
+                        if shape.offsets {
+                            token["start_offset"] = json!(from);
+                            token["end_offset"] = json!(to);
+                        }
+                        if let Some(payload) = payload {
+                            token["payload"] = json!(payload);
+                        }
+                        token
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+            if shape.term_statistics {
+                // how many documents hold this term, and how many times it
+                // stands in all of them -- `ttf` was this document's own
+                // count, so a term twice here and fifteen times in the index
+                // reported two
+                let mut exact = boostcore::Term::from_field_json_path(held, &path, true);
+                exact.append_type_and_str(term);
+                let mut doc_freq = 0u64;
+                let mut ttf = 0u64;
+                for reader in searcher.segment_readers() {
+                    let Ok(inverted) = reader.inverted_index(held) else { continue };
+                    let Ok(Some(mut postings)) =
+                        inverted.read_postings(&exact, IndexRecordOption::WithFreqs)
+                    else {
+                        continue;
+                    };
+                    while postings.doc() != boostcore::TERMINATED {
+                        doc_freq += 1;
+                        ttf += postings.term_freq() as u64;
+                        postings.advance();
                     }
-                    token
-                }).collect::<Vec<_>>(),
-            });
-            if want_stats {
-                // how many documents hold this term, counted rather than assumed
-                let ctx = crate::query::Ctx {
-                    fields: &g.fields,
-                    mapping: &g.mapping,
-                    analysis: &g.analysis,
-                    index: &g.index,
-                    max_terms_count: g.max_terms_count(),
-                    max_regex_length: g.max_regex_length(),
-                    allow_expensive: true,
-                    observed_kinds: &g.observed_kinds,
-                    kinds_complete: g.kinds_complete,
-                    stats: &g.stats,
-                    vectors: &g.vectors,
-                };
-                let freq = crate::query::build(&ctx, &json!({"match": {name.clone(): term}}))
-                    .ok()
-                    .and_then(|q| searcher.search(&q, &boostcore::collector::Count).ok())
-                    .unwrap_or(1) as u64;
-                entry["doc_freq"] = json!(freq);
-                entry["ttf"] = json!(spots.len());
-                sum_doc_freq += freq;
-                sum_ttf += spots.len() as u64;
+                }
+                entry["doc_freq"] = json!(doc_freq.max(1));
+                entry["ttf"] = json!(ttf.max(spots.len() as u64));
             }
             out.insert(term.clone(), entry);
         }
         let mut field = json!({"terms": Value::Object(out)});
-        if want_field_stats {
+        if shape.field_statistics {
             // the field's statistics are the index's, whatever this one
             // document holds of it
-            let (held_doc_freq, doc_count) = field_statistics_of(g, name);
+            let (sum_doc_freq, sum_ttf, doc_count) = field_statistics_of(g, &name);
             field["field_statistics"] = json!({
-                "sum_doc_freq": held_doc_freq.max(sum_doc_freq),
+                "sum_doc_freq": sum_doc_freq,
                 "doc_count": doc_count,
-                "sum_ttf": sum_ttf.max(held_doc_freq),
+                "sum_ttf": sum_ttf,
             });
         }
         fields.insert(name.clone(), field);
@@ -308,12 +379,14 @@ pub async fn mtermvectors(
             .filter(|_| crate::security::doc_visible(&store, &g, &id))
         {
             Some(src) => {
-                let want_stats = body
+                let mut shape = Shape::of(&d, &p);
+                shape.term_statistics = body
                     .get("term_statistics")
                     .and_then(|v| v.as_bool())
+                    .or_else(|| d.get("term_statistics").and_then(|v| v.as_bool()))
                     .or_else(|| p.get("term_statistics").map(|v| v == "true"))
                     .unwrap_or(false);
-                let mut tv = term_vectors_of(&g, &src, want_stats, true, None);
+                let mut tv = term_vectors_of(&g, &src, shape, None);
                 crate::security::narrow_term_vectors(&store, &g.name, &mut tv);
                 out.push(json!({
                     "_index": g.name, "_id": id, "_version": g.version_of(&id),

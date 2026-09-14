@@ -255,7 +255,9 @@ fn query_shard(
                 let why = e.to_string();
                 // a query that reads well but cannot be run over the field it
                 // names fails on the shard rather than in the parser
-                if why.starts_with("Cannot create intervals") {
+                if why.starts_with("Cannot create intervals")
+                    || why.starts_with("failed to create query:")
+                {
                     return Err(err_caused_by(
                         "search_phase_execution_exception",
                         "all shards failed",
