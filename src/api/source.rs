@@ -62,6 +62,10 @@ pub async fn get_source(
     Path((index, id)): Path<(String, String)>,
     Query(p): Query<Params>,
 ) -> Response {
+    if let Some(why) = store.single_index_refusal(&index) {
+        return err(StatusCode::BAD_REQUEST, "illegal_argument_exception", why);
+    }
+    let p = crate::api::read_routing(&store, &index, &p);
     refresh_before_read(&store, &index, &p);
     let Some(st) = store.get(&index) else {
         return if ignored(&p, StatusCode::NOT_FOUND) {
@@ -71,6 +75,9 @@ pub async fn get_source(
         };
     };
     let g = st.read();
+    if let Some(refusal) = crate::api::read_routing_refusal(&g, &id, &p) {
+        return refusal;
+    }
     if !source_enabled(&g) {
         return err(
             StatusCode::NOT_FOUND,

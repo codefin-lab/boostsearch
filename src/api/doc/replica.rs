@@ -43,8 +43,16 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
         return false;
     }
     let existed = exists_doc(st, &op.id);
-    if let Some(r) = &op.routing {
-        st.routing.insert(op.id.clone(), r.clone());
+    // a write carries the routing it was made with, and a write without one
+    // was made without one: a routing the document had before is gone
+    match (&op.routing, &op.source) {
+        (Some(r), _) => {
+            st.routing.insert(op.id.clone(), r.clone());
+        }
+        (None, Some(_)) => {
+            st.routing.remove(&op.id);
+        }
+        (None, None) => {}
     }
     st.set_replicated_version(&op.id, op.version, op.source.is_some(), op.seq);
     let written_in = op.doc_term.unwrap_or(op.term);
@@ -63,7 +71,9 @@ fn apply_replicated_inner(st: &mut IdxState, op: &ReplicaOp, force: bool) -> boo
             if !st.mapping.vector_fields.is_empty() {
                 st.vectors.write().write(&st.mapping.vector_fields, &op.id, &indexed);
             }
-            let doc = crate::store::make_doc(&st.fields, &st.mapping, &op.id, indexed, raw, op.seq);
+            let mut doc =
+                crate::store::make_doc(&st.fields, &st.mapping, &op.id, indexed, raw, op.seq);
+            crate::store::add_routing(&mut doc, &st.fields, op.routing.as_deref());
             if existed {
                 st.queue_op_for(&op.id, shard, crate::store::PendingOp::Delete(op.id.clone()));
             }

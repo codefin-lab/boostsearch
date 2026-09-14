@@ -471,13 +471,28 @@ pub(crate) fn stats_value(
                 "num_docs": s.pointer("/docs/count").cloned().unwrap_or(json!(0))});
             let seq = json!({"max_seq_no": max_seq, "local_checkpoint": local, "global_checkpoint": global});
             let mut shards = serde_json::Map::new();
+            // each shard counts the documents routed to it; what was deleted
+            // is not placed, so the first shard carries it
+            let per_shard = st.read().docs_per_shard();
+            let docs_of = |shard: u64| {
+                let mut docs = s.get("docs").cloned().unwrap_or(json!({}));
+                if docs.is_object() {
+                    docs["count"] = json!(per_shard.get(shard as usize).copied().unwrap_or(0));
+                    if shard > 0 {
+                        docs["deleted"] = json!(0);
+                    }
+                }
+                docs
+            };
             let mut copies: Vec<_> = live.routing.shards_of(n).collect();
             if copies.is_empty() {
-                shards.insert("0".into(), json!([{
-                    "routing": {"state": "STARTED", "primary": true, "node": me.as_str(), "relocating_node": null},
-                    "docs": s.get("docs").cloned().unwrap_or(json!({})),
-                    "commit": commit, "seq_no": seq,
-                }]));
+                for shard in 0..per_shard.len().max(1) as u64 {
+                    shards.insert(shard.to_string(), json!([{
+                        "routing": {"state": "STARTED", "primary": true, "node": me.as_str(), "relocating_node": null},
+                        "docs": docs_of(shard),
+                        "commit": commit.clone(), "seq_no": seq.clone(),
+                    }]));
+                }
             } else {
                 copies.sort_by_key(|c| (c.shard, !c.primary));
                 for c in copies {
@@ -487,7 +502,7 @@ pub(crate) fn stats_value(
                             "routing": {"state": c.state.as_str(), "primary": c.primary,
                                 "node": c.node.as_ref().map(|x| x.as_str().to_string()),
                                 "relocating_node": c.relocating_node.as_ref().map(|x| x.as_str().to_string())},
-                            "docs": s.get("docs").cloned().unwrap_or(json!({})),
+                            "docs": docs_of(c.shard as u64),
                             "commit": commit.clone(), "seq_no": seq.clone(),
                         }));
                     }

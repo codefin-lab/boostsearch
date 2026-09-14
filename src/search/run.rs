@@ -771,8 +771,27 @@ pub fn run(
     // for `derived` fields, or an aggregation running a search of its own,
     // must not have the filter laid over it a second time under a name the
     // alias does not cover.
+    //
+    // A search narrowed by `routing` or `preference=_shards:` is narrowed the
+    // same way, for the same reason: the shards it may ask are a property of
+    // the request, and each index's share of it is kept to the documents
+    // those shards hold.
     if crate::security::layer::ALIAS_FILTERS.try_with(|_| ()).is_err() {
-        let filters = store.alias_filters(expr);
+        let mut filters = store.alias_filters(expr);
+        let narrowed = store.search_narrowing(
+            expr,
+            p.get("routing").map(|s| s.as_str()),
+            p.get("preference").map(|s| s.as_str()),
+        );
+        for (name, shards) in narrowed {
+            let Some(st) = store.get(&name) else { continue };
+            let on_shards = st.read().on_shards_filter(&shards);
+            let combined = match filters.remove(&name) {
+                Some(alias) => json!({"bool": {"filter": [alias, on_shards]}}),
+                None => on_shards,
+            };
+            filters.insert(name, combined);
+        }
         if !filters.is_empty() {
             return crate::security::layer::ALIAS_FILTERS
                 .sync_scope(filters, || run(store, expr, body, p));
@@ -827,7 +846,6 @@ pub fn run(
         "profile",
         "suggest",
         "fields",
-        "runtime_mappings",
         "slice",
         "pit",
         "stats",
@@ -1089,19 +1107,6 @@ pub fn run(
                 "must_not": [{"ids": {"values": excluded_ids.clone()}}],
             }
         }));
-    }
-    // A document's routing is not part of it -- it is how the document was
-    // addressed -- so asking which documents have one is asking after a list
-    // of ids rather than after a column.
-    if let Some(q) = query_json.as_mut()
-        && extras.routing_exists
-    {
-        let ids: Vec<String> = targets
-            .iter()
-            .filter_map(|n| store.get(n))
-            .flat_map(|st| st.read().routing.keys().cloned().collect::<Vec<_>>())
-            .collect();
-        replace_routing_exists(q, &ids);
     }
     // what a join asked to list is read before the join is rewritten away
     let mut join_inner_hits: Vec<(String, String, Value, Value)> = Vec::new();
@@ -1907,6 +1912,7 @@ pub fn run(
             if let Some(o) = hit.as_object_mut() {
                 o.remove("_index");
                 o.remove("_id");
+                o.remove("_routing");
             }
         }
     }
@@ -2266,7 +2272,9 @@ fn run_with_derived(
     }
     // every document of the index, written into the scratch one as it was
     let all = json!({"query": {"match_all": {}}, "size": 10_000});
-    let found = run(store, expr, &all, &Params::new())?;
+    // a copy the server makes for itself is not a page a caller asked for,
+    // so the result window does not bound it
+    let found = crate::search::as_the_server(|| run(store, expr, &all, &Params::new()))?;
     {
         let mut g = st.write();
         for hit in &found.hits {

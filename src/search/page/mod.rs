@@ -102,6 +102,10 @@ pub(crate) fn write_page(
                 "_id": h.id,
                 "_score": if keep_score { json!(h.score) } else { Value::Null },
             });
+            // a document written with a routing says so on every hit
+            if let Some(r) = searchers[h.shard_idx].2.read().routing.get(&h.id) {
+                hit["_routing"] = json!(r);
+            }
             // a selector on the URL is the narrower instruction and wins over
             // one in the body
             let sel = crate::api::source_selector_from_params_pub(p).or_else(|| source_sel.clone());
@@ -171,7 +175,8 @@ pub(crate) fn write_page(
                 });
                 // an explained hit says which shard answered for it, and which
                 // node that shard is on
-                hit["_shard"] = json!(format!("[{}][{}]", h.index, h.shard_idx));
+                let shard = searchers[h.shard_idx].2.read().shard_of_doc(&h.id);
+                hit["_shard"] = json!(format!("[{}][{}]", h.index, shard));
                 hit["_node"] = json!("node-0");
             }
             if !h.sort.is_empty() {

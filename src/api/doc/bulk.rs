@@ -131,6 +131,10 @@ pub async fn bulk(
             ops.par_iter().map(prepare).collect()
         };
 
+    // the index routing each name the bulk writes through carries, looked up
+    // once per name
+    let mut alias_routings: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     // consume the prepared documents rather than cloning them back out
     for (o, prep) in ops.into_iter().zip(prepared) {
         // an index action may carry `op_type: create` in its metadata, which
@@ -249,6 +253,7 @@ pub async fn bulk(
         // the index that had just been rolled out of
         // the alias with no write index was refused above, so what is left
         // here is a name that has one, or a name that is not an alias
+        let named = idx.clone();
         let idx = store.write_target(&idx).unwrap_or(idx);
         let st = match store.ensure(&idx) {
             Ok(s) => s,
@@ -367,11 +372,69 @@ pub async fn bulk(
                 }
             }
         }
+        // the routing this item carries: its own, or the one the alias it was
+        // written through supplies -- read before this index is locked, since
+        // looking an alias up reads every index
+        let asked_routing = meta.get("routing").and_then(scalar_str);
+        let item_routing = match pipeline_routing.clone() {
+            Some(r) => Ok(r),
+            None => {
+                let alias_routing = alias_routings
+                    .entry(named.clone())
+                    .or_insert_with(|| store.alias_index_routing(&named))
+                    .clone();
+                routing_through(&named, alias_routing, asked_routing)
+            }
+        };
+        let item_routing = match item_routing {
+            Ok(r) => r,
+            Err(refusal) => {
+                errors = true;
+                items.push(failed_item(&op, &idx, id_opt.as_deref().unwrap_or(""), refusal));
+                continue;
+            }
+        };
         let mut g = st.write();
         let id_was_given = id_was_given_before;
         let id = id_opt.unwrap_or_else(|| g.next_auto_id());
+        let refusal = match op.as_str() {
+            "index" | "create" => routing_refusal(&g, &id, item_routing.as_deref()),
+            _ => {
+                let mut asked = Params::new();
+                if let Some(r) = &item_routing {
+                    asked.insert("routing".into(), r.clone());
+                }
+                read_routing_refusal(&g, &id, &asked)
+            }
+        };
+        if let Some(refusal) = refusal {
+            errors = true;
+            let status = refusal.status().as_u16();
+            let error = match refusal.extensions().get::<crate::api::shared::ErrorKind>() {
+                Some(k) if k.kind == "routing_missing_exception" => {
+                    crate::api::shared::routing_missing_cause(&g.name, &id)
+                }
+                Some(k) => json!({"type": k.kind, "reason": k.reason}),
+                None => json!({"type": "exception", "reason": "refused"}),
+            };
+            items.push(json!({ op.clone(): {
+                "_index": g.name, "_id": id, "status": status, "error": error,
+            }}));
+            continue;
+        }
+        let mut routed_params = Params::new();
+        if let Some(r) = &item_routing {
+            routed_params.insert("routing".into(), r.clone());
+        }
 
         let item = match op.as_str() {
+            "delete" if !routing_matches(&g, &id, &routed_params) => {
+                // the shard the routing names does not hold the document
+                json!({ "delete": {
+                    "_index": g.name, "_id": id, "_version": 1, "result": "not_found",
+                    "_shards": shards_of(&g), "_seq_no": 0, "_primary_term": 1, "status": 404,
+                }})
+            }
             "delete" => {
                 let (body, status) = delete_doc(&mut g, &id);
                 // a delete the index refused is an error in this bulk, and
@@ -428,15 +491,7 @@ pub async fn bulk(
                 let src = source.unwrap_or_else(|| json!({}));
                 // a routing named on the action line places the document, and
                 // has to be remembered the same way a single write's does
-                let routing_now: Option<String> = match pipeline_routing {
-                    Some(r) => r,
-                    None => meta
-                        .get("routing")
-                        .and_then(|v| v.as_str())
-                        .filter(|r| !r.is_empty())
-                        .map(|s| s.to_string()),
-                };
-                match routing_now {
+                match item_routing.clone() {
                     Some(r) => {
                         g.routing.insert(id.clone(), r);
                     }
@@ -481,7 +536,17 @@ pub async fn bulk(
                 }
             }
             "update" => {
-                let existing = read_source(&g, &id);
+                let existing =
+                    read_source(&g, &id).filter(|_| routing_matches(&g, &id, &routed_params));
+                // a routing named on the item is the one the document is
+                // written with
+                // written with -- unless it names another shard than the one
+                // holding the document, which it then leaves alone
+                if let Some(r) = &item_routing
+                    && (existing.is_some() || !exists_doc(&g, &id))
+                {
+                    g.routing.insert(id.clone(), r.clone());
+                }
                 // the same conditional write the single-document update takes,
                 // reported per item rather than as the whole request failing
                 let stale =

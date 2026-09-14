@@ -43,6 +43,18 @@ pub async fn update_doc(
             }
         }
     }
+    // an alias with an index routing supplies the routing of an update
+    // through it, as it does for any other write
+    let p = match write_routing(&store, &index, p.get("routing").cloned()) {
+        Ok(Some(r)) => {
+            let mut p = p;
+            p.insert("routing".into(), r);
+            p
+        }
+        Ok(None) => p,
+        Err(refusal) => return refusal,
+    };
+    let index = store.write_target(&index).unwrap_or(index);
     // an update makes the index it is aimed at, the way any other write does:
     // OpenSearch creates it and then says the document is not in it
     let st = match store.get(&index) {
@@ -65,6 +77,9 @@ pub async fn update_doc(
         }
     };
     let mut g = st.write();
+    if let Some(refusal) = read_routing_refusal(&g, &id, &p) {
+        return refusal;
+    }
     // the wrong routing reaches nothing, so there is no document to update
     let existing = read_source(&g, &id).filter(|_| routing_matches(&g, &id, &p));
     // `if_seq_no` makes the write conditional on the document not having moved
@@ -266,6 +281,11 @@ pub async fn update_doc(
                 }
             }
         }
+        // a routing given on the update is the one the document keeps, and
+        // it is written with it
+        if let Some(r) = p.get("routing").filter(|r| !r.is_empty()) {
+            g.routing.insert(id.clone(), r.clone());
+        }
         match write_doc(&mut g, &id, next.clone(), "index") {
             Ok((mut b, _)) => {
                 b["result"] = json!(result);
@@ -278,18 +298,6 @@ pub async fn update_doc(
     let sel = patch.get("_source").cloned().or_else(|| source_selector_from_params(&p));
     if let Some(sel) = sel.as_ref().filter(|v| **v != json!(false)) {
         body_out["get"] = json!({"_source": apply_source_selector(&next, sel), "found": true});
-    }
-    // a routing given on the update is the one the document keeps
-    match p.get("routing").filter(|r| !r.is_empty()) {
-        Some(r) => {
-            g.routing.insert(id.clone(), r.clone());
-            body_out["_routing"] = json!(r);
-        }
-        None => {
-            if let Some(r) = g.routing.get(&id) {
-                body_out["_routing"] = json!(r);
-            }
-        }
     }
     let shard = g.shard_of_doc(&id);
     if let Err(r) = maybe_refresh(&mut g, &p, Some(shard)) {

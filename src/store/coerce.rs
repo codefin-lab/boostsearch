@@ -545,6 +545,25 @@ pub fn make_doc(
     d
 }
 
+/// The key a document's routing is kept under in the untouched view.
+///
+/// The routing is how a document was addressed rather than part of its
+/// source, so it was held in memory alone: a restart after a commit forgot
+/// it, and the document answered to any routing or none. Written into the
+/// document itself it is committed with it, a `term` on `_routing` finds it,
+/// and a search narrowed to some shards can read where each document lives.
+/// The reference forbids a source field of this name, so nothing collides.
+pub const ROUTING_KEY: &str = "_routing";
+
+/// Put the routing a document was written with into its indexed form.
+pub fn add_routing(doc: &mut TantivyDocument, fields: &Fields, routing: Option<&str>) {
+    if let Some(r) = routing {
+        let mut one = BTreeMap::new();
+        one.insert(ROUTING_KEY.to_string(), OwnedValue::Str(r.to_string()));
+        doc.add_object_to(&[fields.raw], one);
+    }
+}
+
 /// Split one object into what the analysed view holds and what the untouched
 /// view holds, keeping the paths identical in both.
 ///

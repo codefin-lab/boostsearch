@@ -124,12 +124,59 @@ impl Tally {
 ///
 /// The walk reads them all before it writes any: writing while the reader is
 /// still open would have it read what the walk itself had just written.
+///
+/// The walk reads a batch at a time, the way the reference scrolls, so a
+/// batch -- not the number of documents walked -- is what the index's
+/// `max_result_window` bounds. The request's `routing` and `preference` keep
+/// the walk to the shards they name, as they keep a search.
 fn found(
     store: &Store,
     expr: &str,
     body: &Value,
     limit: usize,
+    p: &Params,
+    batch: usize,
 ) -> std::result::Result<Vec<Seen>, Response> {
+    let window = store
+        .resolve_open(expr)
+        .iter()
+        .filter_map(|n| store.get(n))
+        .filter_map(|st| st.read().numeric_setting("max_result_window"))
+        .min()
+        .unwrap_or(10_000);
+    if batch as u64 > window {
+        let reason = format!(
+            "Batch size is too large, size must be less than or equal to: [{window}] but was \
+             [{batch}]. Scroll batch sizes cost as much memory as result windows so they are \
+             controlled by the [index.max_result_window] index level setting."
+        );
+        // the reference fails the first shard's scroll with it, and says so
+        // the way a failed search phase does
+        let cause = json!({"type": "illegal_argument_exception", "reason": reason});
+        let mut caused_by = cause.clone();
+        caused_by["caused_by"] = cause.clone();
+        let index = store.resolve_open(expr).into_iter().next().unwrap_or_default();
+        let body = json!({
+            "error": {
+                "root_cause": [cause.clone()],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "phase": "query",
+                "grouped": true,
+                "failed_shards": [{"shard": 0, "index": index,
+                    "node": crate::cluster::identity().id.as_str(), "reason": cause}],
+                "caused_by": caused_by,
+            },
+            "status": 400,
+        });
+        return Err((StatusCode::BAD_REQUEST, axum::Json(body)).into_response());
+    }
+    let mut asked = Params::new();
+    for key in ["routing", "preference"] {
+        if let Some(v) = p.get(key) {
+            asked.insert(key.into(), v.clone());
+        }
+    }
     let query = body.get("query").cloned().unwrap_or_else(|| json!({"match_all": {}}));
     // the sequence number each document stood at is what makes a write
     // conditional: one written since is a conflict, not a document to write
@@ -138,7 +185,8 @@ fn found(
     if let Some(sort) = body.get("sort") {
         request["sort"] = sort.clone();
     }
-    let answer = crate::search::run(store, expr, &request, &Params::new())?;
+    let answer =
+        crate::search::as_the_server(|| crate::search::run(store, expr, &request, &asked))?;
     // a walk rewrites what it reads, so a document whose source was never
     // stored is one it cannot carry over
     for hit in &answer.hits {
@@ -735,7 +783,7 @@ pub async fn delete_by_query(
             "Validation Failed: 1: query is missing;",
         );
     }
-    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
+    let hits = match found(&store, &index, &body, max_docs(&p, &body), &p, batch_size(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
@@ -800,7 +848,7 @@ pub async fn update_by_query(
         }
         None => None,
     };
-    let hits = match found(&store, &index, &body, max_docs(&p, &body)) {
+    let hits = match found(&store, &index, &body, max_docs(&p, &body), &p, batch_size(&p, &body)) {
         Ok(hits) => hits,
         Err(e) => return e,
     };
@@ -1024,10 +1072,12 @@ pub async fn reindex(
                 Err(e) => return remote_failure(format!("{e}")),
             }
         }
-        None => match found(&store, &from, &source, wanted) {
-            Ok(hits) => hits,
-            Err(e) => return e,
-        },
+        None => {
+            match found(&store, &from, &source, wanted, &Params::new(), batch_size(&p, &source)) {
+                Ok(hits) => hits,
+                Err(e) => return e,
+            }
+        }
     };
     // a document may be written only where it is not already, if asked
     let create_only = dest.get("op_type").and_then(|v| v.as_str()) == Some("create");

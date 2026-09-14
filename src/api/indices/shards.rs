@@ -17,10 +17,12 @@ pub(crate) fn shards_over(store: &Store, names: &[String]) -> Value {
     json!({"total": total, "successful": total, "failed": 0})
 }
 
-/// The shards of one index, which is what a write to it reports.
+/// The copies of the one shard a write lands on, which is what the write
+/// reports: the primary and each replica, of which only the primary is on
+/// a node of its own here. A cluster puts in what its copies said.
 pub(crate) fn shards_of(st: &IdxState) -> Value {
-    let n = st.numeric_setting("number_of_shards").unwrap_or(1).max(1);
-    json!({"total": n, "successful": n, "failed": 0})
+    let replicas: u64 = st.setting("number_of_replicas").and_then(|v| v.parse().ok()).unwrap_or(1);
+    json!({"total": 1 + replicas, "successful": 1, "failed": 0})
 }
 
 /// `_shard_stores` -- where each shard's copies are.
