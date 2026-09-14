@@ -277,10 +277,12 @@ pub async fn msearch(
             }
         }
         // a bad parameter in any sub-request fails the whole msearch
-        if let Some(why) = crate::security::item_refusal(
+        if let Some(why) = crate::security::item_refusal_audited(
             &store,
             &["indices:data/read/search"],
+            &expr,
             &crate::security::layer::indices_for_expr(&store, &expr),
+            || Some(req.to_string()),
         ) {
             responses.push(json!({"error": crate::security::item_error(&why), "status": 403}));
             continue;

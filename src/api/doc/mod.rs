@@ -220,12 +220,19 @@ fn write_doc_within(
     };
     st.has_doc_count |= source.get("_doc_count").is_some();
     if let Err(field) = st.mapping.apply_dynamic_templates(&source) {
+        // the refusal names the mode the mapping is in: `strict` and
+        // `strict_allow_templates` both refuse here, and a caller reading
+        // the one they did not set is sent looking for templates they never had
+        let mode = match st.mapping.raw.get("dynamic").and_then(|v| v.as_str()) {
+            Some("strict_allow_templates") => "strict_allow_templates",
+            _ => "strict",
+        };
         return Err(err(
             StatusCode::BAD_REQUEST,
             "strict_dynamic_mapping_exception",
             format!(
-                "mapping set to strict_allow_templates, dynamic introduction of [{field}] \
-                 within [_doc] is not allowed"
+                "mapping set to {mode}, dynamic introduction of [{field}] within [_doc] is not \
+                 allowed"
             ),
         ));
     }

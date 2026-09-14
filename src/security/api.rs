@@ -83,17 +83,30 @@ fn ok_json(v: Value) -> Response {
     (StatusCode::OK, axum::Json(v)).into_response()
 }
 
+/// The name the on-behalf-of token route is judged under, as a cluster
+/// permission.
+pub const OBO_ACTION: &str = "security:obo/create";
+
+/// Why the API refused a caller, carried on the refusal for the security
+/// layer to write down: the plugin audits the refusal with its reason as the
+/// privilege, and only the layer holds the request the record quotes.
+#[derive(Clone, Debug)]
+pub struct ApiRefused(pub String);
+
 /// The plugin's "not allowed" answer for the API itself.
 fn api_forbidden(caller: &Caller) -> Response {
-    reply(
+    let why = format!(
+        "User {} with Security roles [{}] does not have any role privileged for admin access. No client TLS certificate found in request",
+        caller.name,
+        caller.roles.join(", ")
+    );
+    let mut r = reply(
         StatusCode::FORBIDDEN,
         "FORBIDDEN",
-        format!(
-            "No permission to access REST API: User {} with Security roles [{}] does not have any role privileged for admin access. No client TLS certificate found in request",
-            caller.name,
-            caller.roles.join(", ")
-        ),
-    )
+        format!("No permission to access REST API: {why}"),
+    );
+    r.extensions_mut().insert(ApiRefused(why));
+    r
 }
 
 /// Who is asking, or why they may not be answered.
@@ -453,15 +466,36 @@ pub async fn list(
     State(store): State<Store>,
     Extension(caller): Extension<Caller>,
     Path(kind): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Response {
     if let Err(r) = admin_for(&store, &caller, &kind, "GET") {
         return r;
     }
     let cfg = store.security.config.read();
     match kind.as_str() {
-        "internalusers" | "roles" | "rolesmapping" | "actiongroups" | "tenants" => {
-            ok_json(listing(&cfg, &kind))
+        "internalusers" => {
+            // `filterBy=service` lists the service accounts, `internal` the
+            // rest; anything else, or nothing, lists everyone
+            let filter =
+                query.as_deref().unwrap_or("").split('&').find_map(|pair| {
+                    pair.strip_prefix("filterBy=").map(|v| v.to_ascii_lowercase())
+                });
+            let mut all = listing(&cfg, &kind);
+            if let (Some(filter), Some(o)) = (filter.as_deref(), all.as_object_mut()) {
+                let wanted = match filter {
+                    "service" => Some(true),
+                    "internal" => Some(false),
+                    _ => None,
+                };
+                if let Some(wanted) = wanted {
+                    o.retain(|name, _| {
+                        cfg.users.get(name).map(is_service_account).unwrap_or(false) == wanted
+                    });
+                }
+            }
+            ok_json(all)
         }
+        "roles" | "rolesmapping" | "actiongroups" | "tenants" => ok_json(listing(&cfg, &kind)),
         "securityconfig" => ok_json(cfg.document("config")),
         "nodesdn" => ok_json(json!({})),
         "allowlist" | "whitelist" => ok_json(json!({"config": {"enabled": false, "requests": {}}})),
@@ -536,6 +570,32 @@ pub async fn put_one(
     }
     if let Err(r) = required_fields(&kind, &body) {
         return r;
+    }
+    // A service account is given no secret by whoever creates it: it is
+    // refused one, and gets a random one nobody knows until a token is asked
+    // for. The hash is made before the configuration is locked, as bcrypt is
+    // slow by design.
+    if kind == "internalusers"
+        && body
+            .pointer("/attributes/service")
+            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    {
+        let given = |field: &str| {
+            body.get(field).and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+        };
+        if given("password") {
+            return bad_request(format!(
+                "A password cannot be provided for a service account. Failed to register service account: {name}"
+            ));
+        }
+        if given("hash") {
+            return bad_request(format!(
+                "A password hash cannot be provided for service account. Failed to register service account: {name}"
+            ));
+        }
+        body["hash"] = json!(hash_password(&service_password()));
     }
     let mut cfg = store.security.config.write();
     if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
@@ -805,6 +865,202 @@ pub async fn patch_all(
     reply(StatusCode::OK, "OK", "Resource updated.")
 }
 
+// ---- service accounts and on-behalf-of tokens ----------------------------------------
+
+/// Whether an internal user is a service account.
+fn is_service_account(u: &InternalUser) -> bool {
+    u.attributes.get("service").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false)
+}
+
+/// A service account's secret: eight to fifteen letters and digits, with a
+/// lowercase letter, an uppercase letter and a digit among them, as the
+/// plugin generates it.
+fn service_password() -> String {
+    const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const DIGIT: &[u8] = b"0123456789";
+    let mut bytes: Vec<u8> = Vec::new();
+    while bytes.len() < 32 {
+        use base64::Engine;
+        let token = crate::store::random_token();
+        bytes.extend(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token).unwrap_or_default(),
+        );
+    }
+    let len = 8 + (bytes[0] % 8) as usize;
+    let all: Vec<u8> = [LOWER, UPPER, DIGIT].concat();
+    let mut out: Vec<u8> = bytes[1..=len].iter().map(|b| all[*b as usize % all.len()]).collect();
+    out[0] = LOWER[bytes[len + 1] as usize % LOWER.len()];
+    out[1] = UPPER[bytes[len + 2] as usize % UPPER.len()];
+    out[2] = DIGIT[bytes[len + 3] as usize % DIGIT.len()];
+    // where the three required kinds fall is random too
+    for i in (1..out.len()).rev() {
+        let j = bytes[len + 4 + (i % 12)] as usize % (i + 1);
+        out.swap(i, j);
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// `POST _plugins/_security/api/internalusers/{name}/authtoken`: a new secret
+/// for an enabled service account, answered in the plugin's words.
+///
+/// The reference (3.1) answers with the new secret but writes the new hash
+/// somewhere it is never read from, so the secret it hands out does not log
+/// in. Here the hash is stored, so the credentials answered are credentials.
+pub async fn service_authtoken(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Err(r) = admin_for(&store, &caller, "internalusers", "POST") {
+        return r;
+    }
+    let refused = || bad_request("An auth token could not be generated for the specified account.");
+    let usable = {
+        let cfg = store.security.config.read();
+        match cfg.users.get(&name) {
+            None => return not_found("user", &name),
+            Some(u) if u.hidden => return not_found("user", &name),
+            Some(u) => {
+                is_service_account(u)
+                    && u.attributes
+                        .get("enabled")
+                        .map(|v| v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)
+            }
+        }
+    };
+    if !usable {
+        return refused();
+    }
+    let password = service_password();
+    let hash = hash_password(&password);
+    {
+        let mut cfg = store.security.config.write();
+        let before = cfg.document("internalusers");
+        let Some(u) = cfg.users.get_mut(&name) else { return refused() };
+        u.hash = hash;
+        cfg.merge_documents(&[]);
+        let _ = cfg.save();
+        store.security.touch(&cfg);
+        super::spread::after_write(&store, &cfg);
+        let after = cfg.document("internalusers");
+        store.security.audit.internal_config_written_with(
+            &caller,
+            &caller.remote_address,
+            "internalusers",
+            Some(&before),
+            Some(&after),
+        );
+    }
+    reply(
+        StatusCode::OK,
+        "OK",
+        format!(
+            "'{name}' authtoken generated Basic auth token with user={name}, password={password}"
+        ),
+    )
+}
+
+/// Any method but `POST` on a route that has only that one.
+pub async fn post_only(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(json!({
+            "error": format!("Incorrect HTTP method for uri [{}] and method [{}], allowed: [POST]", uri.path(), method),
+            "status": 405,
+        })),
+    )
+        .into_response()
+}
+
+fn text_reply(status: StatusCode, message: &str) -> Response {
+    let mut r = (status, message.to_string()).into_response();
+    r.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; charset=UTF-8"),
+    );
+    r
+}
+
+/// `POST _plugins/_security/api/generateonbehalfoftoken`: a token the caller
+/// hands a service to act as the caller for a few minutes. The security layer
+/// has already judged `security:obo/create`.
+pub async fn generate_obo_token(
+    State(store): State<Store>,
+    Extension(caller): Extension<Caller>,
+    body: String,
+) -> Response {
+    if !store.security.enabled {
+        return disabled();
+    }
+    let (settings, roles) = {
+        let cfg = store.security.config.read();
+        let settings = super::obo::OboSettings::from_dynamic(&cfg.dynamic).filter(|s| s.enabled);
+        // the roles the caller is mapped to, but not by where it is calling
+        // from: a token must not carry a role its holder's address earned
+        let own = cfg.users.get(&caller.name).map(|u| u.security_roles.clone()).unwrap_or_default();
+        let roles = cfg.map_roles(&caller.name, &caller.backend_roles, &own, "");
+        (settings, roles)
+    };
+    let Some(settings) = settings else {
+        return text_reply(
+            StatusCode::BAD_REQUEST,
+            "The OnBehalfOf token generating API has been disabled, see {link to doc} for more information on this feature.",
+        );
+    };
+    let error = |status: StatusCode, message: &str| {
+        (status, axum::Json(json!({"error": message}))).into_response()
+    };
+    let unexpected = || {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "An unexpected error occurred. Please check the input and try again.",
+        )
+    };
+    let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(&body) else {
+        return unexpected();
+    };
+    for key in fields.keys() {
+        if !["durationSeconds", "description", "service"]
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(key))
+        {
+            return error(StatusCode::BAD_REQUEST, &format!("Unrecognized parameter: {key}"));
+        }
+    }
+    let seconds = match fields.get("durationSeconds") {
+        None => super::obo::DEFAULT_SECONDS,
+        Some(Value::Number(n))
+            if n.is_i64() && n.as_i64().map(|v| v.abs() <= i32::MAX as i64).unwrap_or(false) =>
+        {
+            n.as_i64().unwrap_or_default()
+        }
+        Some(Value::String(s)) if s.parse::<i64>().is_ok() => s.parse::<i64>().unwrap_or_default(),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "durationSeconds must be a number."),
+    };
+    if matches!(fields.get("description"), Some(v) if !v.is_string() && !v.is_null()) {
+        return unexpected();
+    }
+    let service = match fields.get("service") {
+        None | Some(Value::Null) => "self-issued".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => return unexpected(),
+    };
+    if service.is_empty() {
+        return unexpected();
+    }
+    match settings.issue(&caller.name, &service, seconds, &roles) {
+        Ok((token, lives)) => ok_json(json!({
+            "user": caller.name,
+            "authenticationToken": token,
+            "durationSeconds": lives,
+        })),
+        Err(why) if why.starts_with("The expiration") => error(StatusCode::BAD_REQUEST, &why),
+        Err(_) => unexpected(),
+    }
+}
+
 // ---- account, authinfo, certs -------------------------------------------------------
 
 pub async fn account(State(store): State<Store>, Extension(caller): Extension<Caller>) -> Response {
@@ -821,10 +1077,21 @@ pub async fn account(State(store): State<Store>, Extension(caller): Extension<Ca
         "is_internal_user": caller.is_internal,
         "user_requested_tenant": caller.requested_tenant,
         "backend_roles": caller.backend_roles,
-        "custom_attribute_names": caller.attributes.keys().map(|k| format!("attr.internal.{k}")).collect::<Vec<_>>(),
+        "custom_attribute_names": caller.attributes.keys().map(|k| attribute_name(k)).collect::<Vec<_>>(),
         "tenants": tenants,
         "roles": caller.roles,
     }))
+}
+
+/// The name a caller's attribute goes by: an internal user's own attributes
+/// are `attr.internal.*`; what a token or a directory supplied already carries
+/// its source (`attr.jwt.*`, `attr.ldap.*`, `ldap.dn`).
+fn attribute_name(k: &str) -> String {
+    if k.starts_with("attr.") || k.starts_with("ldap.") {
+        k.to_string()
+    } else {
+        format!("attr.internal.{k}")
+    }
 }
 
 fn tenants_of(cfg: &SecurityConfig, caller: &Caller) -> Value {
@@ -894,7 +1161,7 @@ pub async fn authinfo(
     let cfg = store.security.config.read();
     let mut attrs = Map::new();
     for (k, v) in &caller.attributes {
-        attrs.insert(format!("attr.internal.{k}"), json!(v));
+        attrs.insert(attribute_name(k), json!(v));
     }
     ok_json(json!({
         "user": caller.describe(),

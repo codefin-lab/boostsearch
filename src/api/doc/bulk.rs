@@ -111,7 +111,8 @@ pub async fn bulk(
             .into_iter()
             .filter_map(|(idx, list)| {
                 let targets = crate::security::layer::indices_for_expr(&store, &idx);
-                crate::security::item_refusal(&store, &list, &targets).map(|why| (idx, why))
+                crate::security::item_refusal_audited(&store, &list, &idx, &targets, || None)
+                    .map(|why| (idx, why))
             })
             .collect()
     };

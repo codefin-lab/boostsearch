@@ -137,11 +137,14 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         return bad_headers_response();
     }
     let caller = {
+        let path_asked = req.uri().path().to_string();
         let presented = super::authc::Presented {
             headers: req.headers(),
             query: &query,
             remote: remote.clone(),
             peer_dn,
+            path: &path_asked,
+            method: req.method().as_str(),
         };
         match sec.caller_for(&presented).await {
             Ok(c) => c,
@@ -162,6 +165,17 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
             }
         }
     };
+    // the tenant a Dashboards caller works in comes with every request, in
+    // either of the two headers the plugin reads; it is part of who the
+    // caller is for this request, and every refusal names it
+    let mut caller = caller;
+    if !caller.admin_cert
+        && let Some(t) = ["securitytenant", "security_tenant"]
+            .iter()
+            .find_map(|h| req.headers().get(*h).and_then(|v| v.to_str().ok()))
+    {
+        caller.requested_tenant = Some(t.to_string());
+    }
     // the body is copied for the log only when a record would quote it;
     // a bulk of a megabyte is otherwise passed straight through
     let path_now = req.uri().path().to_string();
@@ -186,12 +200,50 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     let method = req.method().clone();
     // the security API and account endpoints decide for themselves
     if path.starts_with("/_plugins/_security/") {
+        let obo = path.trim_end_matches('/') == "/_plugins/_security/api/generateonbehalfoftoken";
+        if obo && method == Method::POST {
+            // the token endpoint is a named route: judged by its own name as a
+            // cluster permission, not by whether the caller administers security
+            let allowed = sec.config.read().cluster_allowed(&caller, super::api::OBO_ACTION);
+            if !allowed {
+                audit.missing_privileges_rest(&caller, super::api::OBO_ACTION, &info);
+                let reason = format!(
+                    "no permissions for [{}] and {}",
+                    super::api::OBO_ACTION,
+                    caller.describe()
+                );
+                let mut r = (StatusCode::UNAUTHORIZED, reason).into_response();
+                r.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=UTF-8"),
+                );
+                return r;
+            }
+            audit.granted_rest(&caller, &info);
+            return run_as(caller, req, next).await;
+        }
         if path.starts_with("/_plugins/_security/api/") && sec.may_administer(&caller) {
             audit.granted_rest(&caller, &info);
         }
-        return run_as(caller, req, next).await;
+        let who = caller.clone();
+        let response = run_as(caller, req, next).await;
+        // the API refuses in its handlers, which know which endpoint and which
+        // method was refused; the record of it needs the request, which is here
+        if let Some(refused) = response.extensions().get::<super::api::ApiRefused>() {
+            audit.missing_privileges_rest(&who, &refused.0, &info);
+        }
+        return response;
     }
     let Some(action) = action_for(&method, &path) else {
+        // an endpoint this node does not have is answered as OpenSearch
+        // answers it, to anyone it has authenticated: there is no handler, so
+        // there is nothing to be refused permission for
+        if !served_here(&path) {
+            let body = json!({
+                "error": format!("no handler found for uri [{path}] and method [{method}]")
+            });
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
         // a path with no action is a path nothing judged. Running it was
         // how `_upgrade` listed every index and its size to a caller with
         // read on one of them.
@@ -216,14 +268,40 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     let mut resolved: Vec<String>;
     // the indices a partial grant narrows the request to
     let mut narrowed: Option<Vec<String>> = None;
+    // the tenant's own index a Dashboards request is moved to
+    let mut tenant_index: Option<String> = None;
     // the guard must be gone before the handler is awaited
     let refusal = {
         let cfg = sec.config.read();
+        let no_tenant = caller.requested_tenant.as_deref().unwrap_or("").is_empty();
         if is_cluster_action(&action) || named.is_empty() && !action.starts_with("indices:") {
             // the plugin resolves a cluster request to every index it touches
             resolved = store.resolve("*");
             resolved.sort();
-            if cfg.cluster_allowed(&caller, &action) { None } else { Some(action.clone()) }
+            // A bulk with no tenant is only asked whether the cluster action
+            // is granted -- its items are judged one index at a time later.
+            // Anything else a service account asks at the cluster level is
+            // refused whatever its roles grant.
+            let bulk_shortcut = action == "indices:data/write/bulk" && no_tenant;
+            if (caller.is_service_account() && !bulk_shortcut)
+                || !cfg.cluster_allowed(&caller, &action)
+            {
+                Some(action.clone())
+            } else {
+                if !bulk_shortcut {
+                    let local = resolve_indices(&store, &named);
+                    match dashboards_tenant(&cfg, &caller, &action, &named, &local) {
+                        TenantVerdict::Continue => {}
+                        TenantVerdict::Granted(moved) => tenant_index = moved,
+                        // the plugin writes the refusal down and then lets the
+                        // request through on its cluster permission
+                        TenantVerdict::Denied => {
+                            audit.missing_privileges(&caller, &action, &info, &named, &local)
+                        }
+                    }
+                }
+                None
+            }
         } else {
             // an index action naming no index is over every index there is
             let indices = if named.is_empty() || named.iter().any(|n| n == "_all") {
@@ -234,18 +312,31 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
                 resolve_indices(&store, &named)
             };
             resolved = indices.clone();
-            match cfg.index_verdict(&caller, &action, &indices) {
-                Verdict::Allowed => None,
-                // allowed for some of what was asked: the request is
-                // narrowed to those before it runs, which is what
-                // do_not_fail_on_forbidden means -- not that the rest is
-                // reached anyway
-                Verdict::Partial(granted) => {
-                    resolved = granted.clone();
-                    narrowed = Some(granted);
+            match dashboards_tenant(&cfg, &caller, &action, &named, &indices) {
+                TenantVerdict::Continue => match cfg.index_verdict(&caller, &action, &indices) {
+                    Verdict::Allowed => None,
+                    // allowed for some of what was asked: the request is
+                    // narrowed to those before it runs, which is what
+                    // do_not_fail_on_forbidden means -- not that the rest is
+                    // reached anyway
+                    Verdict::Partial(granted) => {
+                        resolved = granted.clone();
+                        narrowed = Some(granted);
+                        None
+                    }
+                    Verdict::Denied { missing } => Some(missing),
+                },
+                // allowed by the tenant, not by any index permission
+                TenantVerdict::Granted(moved) => {
+                    tenant_index = moved;
                     None
                 }
-                Verdict::Denied { missing } => Some(missing),
+                // the plugin writes this refusal down twice: once where the
+                // tenant is judged, once where the request is refused
+                TenantVerdict::Denied => {
+                    audit.missing_privileges(&caller, &action, &info, &named, &resolved);
+                    Some(action.clone())
+                }
             }
         }
     };
@@ -258,6 +349,10 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
             return no_permissions(&action, &caller);
         }
         narrow_request(&mut req, &named, &granted);
+    }
+    if let Some(moved) = tenant_index {
+        narrow_request(&mut req, &named, std::slice::from_ref(&moved));
+        resolved = vec![moved];
     }
     let admin_action = action.starts_with("indices:admin/")
         && !action.starts_with("indices:admin/get")
@@ -280,6 +375,159 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         audit.index_event(&caller, &action, &info, &named, &resolved, Some(&body_text));
     }
     run_as(caller, req, next).await
+}
+
+/// What the Dashboards tenant a request names makes of it.
+enum TenantVerdict {
+    /// nothing: the request is judged by its index permissions
+    Continue,
+    /// allowed, and moved to this tenant index where one is named
+    Granted(Option<String>),
+    Denied,
+}
+
+/// The actions a read-only tenant allows.
+const TENANT_READ_ACTIONS: &[&str] = &[
+    "indices:admin/get",
+    "indices:data/read/get",
+    "indices:data/read/search",
+    "indices:data/read/msearch",
+    "indices:data/read/mget",
+    "indices:data/read/mget[shard]",
+];
+
+/// The index a tenant's saved objects live in: the Dashboards index, the
+/// tenant name's Java hash, and the name lowercased to its letters and digits.
+pub fn tenant_index_name(dashboards_index: &str, tenant: &str) -> String {
+    let hash = tenant.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32));
+    let plain: String = tenant
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .collect();
+    format!("{dashboards_index}_{hash}_{plain}")
+}
+
+/// The plugin's multitenancy, for a request by a caller other than the
+/// Dashboards server: a request to the Dashboards index alone is moved to the
+/// index of the tenant the caller asked for, if the caller may work in that
+/// tenant, and refused if not; with no tenant asked for, the global tenant is
+/// the one judged. A request naming a tenant's own index directly is allowed
+/// to a caller who may work in that tenant.
+fn dashboards_tenant(
+    cfg: &super::SecurityConfig,
+    caller: &super::Caller,
+    action: &str,
+    named: &[String],
+    resolved: &[String],
+) -> TenantVerdict {
+    let kibana = cfg.dynamic.pointer("/dynamic/kibana");
+    let setting = |k: &str| kibana.and_then(|v| v.get(k));
+    if caller.unrestricted
+        || !setting("multitenancy_enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+    {
+        return TenantVerdict::Continue;
+    }
+    let server = setting("server_username").and_then(|v| v.as_str()).unwrap_or("kibanaserver");
+    let index = setting("index").and_then(|v| v.as_str()).unwrap_or(".kibana");
+    let requested = caller.requested_tenant.as_deref().unwrap_or("");
+    if requested == "__user__"
+        && !setting("private_tenant_enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+    {
+        return TenantVerdict::Denied;
+    }
+    let by_server = caller.name == server;
+    let dashboards_only = !by_server && !named.is_empty() && named.iter().all(|n| n == index);
+    let write = !TENANT_READ_ACTIONS.contains(&action);
+    if requested.is_empty() {
+        if dashboards_only && !cfg.tenant_privilege(caller, "global_tenant", write) {
+            return TenantVerdict::Denied;
+        }
+        return TenantVerdict::Continue;
+    }
+    let private = requested == "__user__" || requested == caller.name;
+    let tenant = if private { caller.name.as_str() } else { requested };
+    let own_index = tenant_index_name(index, tenant);
+    let local_all = named.is_empty() || named.iter().any(|n| n == "_all" || n == "*");
+    if !by_server
+        && !local_all
+        && resolved.len() == 1
+        && resolved[0].starts_with(&own_index)
+        && (private || cfg.tenant_privilege(caller, tenant, write))
+    {
+        return TenantVerdict::Granted(None);
+    }
+    if dashboards_only {
+        if !private && !cfg.tenant_privilege(caller, tenant, write) {
+            return TenantVerdict::Denied;
+        }
+        return TenantVerdict::Granted(Some(own_index));
+    }
+    TenantVerdict::Continue
+}
+
+/// The first path segments this node has endpoints under: a path beginning
+/// with any other `_` word has no handler at all.
+const SERVED: &[&str] = &[
+    "_alias",
+    "_aliases",
+    "_all",
+    "_analyze",
+    "_boost",
+    "_boostsearch",
+    "_bulk",
+    "_cache",
+    "_cat",
+    "_cluster",
+    "_component_template",
+    "_count",
+    "_data_stream",
+    "_delete_by_query",
+    "_field_caps",
+    "_flush",
+    "_forcemerge",
+    "_index_template",
+    "_ingest",
+    "_list",
+    "_mapping",
+    "_mget",
+    "_msearch",
+    "_mtermvectors",
+    "_nodes",
+    "_opendistro",
+    "_plugins",
+    "_rank_eval",
+    "_recovery",
+    "_refresh",
+    "_reindex",
+    "_remote",
+    "_render",
+    "_resolve",
+    "_script_context",
+    "_script_language",
+    "_scripts",
+    "_search",
+    "_search_shards",
+    "_segments",
+    "_settings",
+    "_shard_stores",
+    "_snapshot",
+    "_stats",
+    "_tasks",
+    "_template",
+    "_update_by_query",
+    "_upgrade",
+    "_validate",
+];
+
+/// Whether a path could reach an endpoint here: one naming an index first
+/// may, one beginning with an `_` word only if that word is served. A path
+/// of one word alone is the index routes' to answer, as it is OpenSearch's:
+/// `GET /_x` is an index with a name no index may have, not a missing handler.
+fn served_here(path: &str) -> bool {
+    let mut segs = path.trim_matches('/').split('/');
+    let first = segs.next().unwrap_or("");
+    !first.starts_with('_') || SERVED.contains(&first) || segs.next().is_none()
 }
 
 /// The request with its body read into memory, and that body as text.
@@ -527,6 +775,12 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             "DELETE" => "cluster:admin/search/pipeline/delete",
             _ => "cluster:admin/search/pipeline/put",
         },
+        // continuing a scroll, or letting one go, is the cluster's business:
+        // the plugin judges it as the scroll action, not as a search
+        (false, "_search", "DELETE") if rest.get(1) == Some(&"scroll") => {
+            "indices:data/read/scroll/clear"
+        }
+        (false, "_search", _) if rest.get(1) == Some(&"scroll") => "indices:data/read/scroll",
         (_, "_search", _) => "indices:data/read/search",
         (_, "_msearch", _) => "indices:data/read/msearch",
         (_, "_count", _) => "indices:data/read/search",

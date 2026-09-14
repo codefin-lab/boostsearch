@@ -130,10 +130,12 @@ pub async fn mget(
             }));
             continue;
         }
-        if let Some(why) = crate::security::item_refusal(
+        if let Some(why) = crate::security::item_refusal_audited(
             &store,
             &["indices:data/read/mget[shard]"],
+            &idx,
             &crate::security::layer::indices_for_expr(&store, &idx),
+            || None,
         ) {
             docs.push(
                 json!({"_index": idx, "_id": id, "error": crate::security::item_error(&why)}),
