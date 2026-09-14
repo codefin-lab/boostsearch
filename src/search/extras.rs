@@ -11,30 +11,6 @@ pub(crate) fn expensive_allowed(store: &Store) -> bool {
         .unwrap_or(true)
 }
 
-/// Turn that question into the list of documents it is really about.
-pub(crate) fn replace_routing_exists(node: &mut Value, ids: &[String]) {
-    match node {
-        Value::Object(o) => {
-            if o.get("exists").and_then(|e| e.get("field")).and_then(|f| f.as_str())
-                == Some("_routing")
-            {
-                o.remove("exists");
-                o.insert("ids".into(), json!({"values": ids}));
-                return;
-            }
-            for (_, v) in o.iter_mut() {
-                replace_routing_exists(v, ids);
-            }
-        }
-        Value::Array(a) => {
-            for v in a {
-                replace_routing_exists(v, ids);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
     match node {
         Value::Object(o) => {
@@ -45,11 +21,6 @@ pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
                     }
                     "distance_feature" => out.distance_feature = true,
                     "_name" => out.named = true,
-                    "exists" => {
-                        if v.get("field").and_then(|f| f.as_str()) == Some("_routing") {
-                            out.routing_exists = true;
-                        }
-                    }
                     "nested" => {
                         out.nested_query = true;
                         if v.get("inner_hits").is_some() {

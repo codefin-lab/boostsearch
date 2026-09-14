@@ -22,6 +22,7 @@ pub mod api;
 pub mod audit;
 pub mod authc;
 pub mod layer;
+pub mod obo;
 pub mod saml;
 pub mod spread;
 pub mod view;
@@ -697,6 +698,13 @@ impl Caller {
             self.requested_tenant.as_deref().unwrap_or("null")
         )
     }
+
+    /// Whether this is a service account: an internal user whose `service`
+    /// attribute is `true`. The plugin allows such an account no cluster
+    /// action at all, whatever its roles say.
+    pub fn is_service_account(&self) -> bool {
+        self.is_internal && self.attributes.get("service").map(|v| v == "true").unwrap_or(false)
+    }
 }
 
 /// `${user_name}` and the caller's attributes, written into a pattern.
@@ -883,6 +891,42 @@ impl SecurityConfig {
         } else {
             Verdict::Denied { missing: action.to_string() }
         }
+    }
+
+    /// Whether the caller may read, or write, in a Dashboards tenant, as the
+    /// plugin's tenant privileges answer it: a role's tenant patterns reach
+    /// only tenants that are defined, `kibana_all_write` (anything resolving
+    /// to `kibana:saved_objects/*/write`) is both read and write, anything
+    /// else is read. A caller with `kibana_user` and no read access to the
+    /// global tenant is given it anyway, which the plugin keeps for old
+    /// configurations.
+    pub fn tenant_privilege(&self, caller: &Caller, tenant: &str, write: bool) -> bool {
+        if caller.unrestricted {
+            return true;
+        }
+        if !self.tenants.contains_key(tenant) {
+            return false;
+        }
+        let granted = |write: bool| {
+            caller.roles.iter().filter_map(|r| self.roles.get(r)).any(|role| {
+                role.tenant_permissions.iter().any(|tp| {
+                    let writes = self
+                        .resolve_actions(&tp.allowed_actions)
+                        .contains("kibana:saved_objects/*/write");
+                    (writes || !write)
+                        && tp
+                            .tenant_patterns
+                            .iter()
+                            .any(|p| pattern_matches(&substitute(p, caller), tenant))
+                })
+            })
+        };
+        if granted(write) {
+            return true;
+        }
+        tenant == "global_tenant"
+            && caller.roles.iter().any(|r| r == "kibana_user")
+            && !granted(false)
     }
 
     /// The document-level filters and field rules that apply to a caller on
@@ -1369,6 +1413,12 @@ fn presented_digest(p: &authc::Presented<'_>) -> [u8; 32] {
     }
     h.update(p.query.as_bytes());
     h.update([2u8]);
+    // the two requests an on-behalf-of token does not authenticate are never
+    // answered by a caller the same token authenticated for another request
+    let token_refused = (p.method == "POST"
+        && p.path.trim_end_matches('/').ends_with("/api/generateonbehalfoftoken"))
+        || (p.method == "PUT" && p.path.trim_end_matches('/').ends_with("/api/account"));
+    h.update([token_refused as u8]);
     h.update(p.remote.as_bytes());
     h.update([3u8]);
     if let Some(dn) = &p.peer_dn {
@@ -1571,6 +1621,25 @@ pub fn item_refusal(
         return None;
     }
     Some(format!("no permissions for [{}] and {}", actions.join(", "), caller.describe()))
+}
+
+/// The same, with a refusal written to the audit log the way the plugin
+/// writes it for the transport request the item stands for: `actions[0]` is
+/// that request's action, `named` the index expression the item gave.
+pub fn item_refusal_audited(
+    store: &crate::store::Store,
+    actions: &[&str],
+    named: &str,
+    indices: &[String],
+    body: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let why = item_refusal(store, actions, indices)?;
+    if let Some((audit, caller)) = audit_of() {
+        let named: Vec<String> =
+            named.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        audit.missing_privileges_item(&caller, actions[0], &named, indices, body().as_deref());
+    }
+    Some(why)
 }
 
 /// A `security_exception` body for one item of a many-item request.

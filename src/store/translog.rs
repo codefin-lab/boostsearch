@@ -190,8 +190,90 @@ impl IdxState {
     /// Which shard a document lands on: by the routing it was written with if
     /// it was given one, and by its id otherwise.
     pub fn shard_of_doc(&self, id: &str) -> u64 {
-        let routing = self.routing.get(id).map(|s| s.as_str()).unwrap_or(id);
-        self.shard_for(routing)
+        self.shard_of(id, self.routing.get(id).map(|s| s.as_str()))
+    }
+
+    /// `index.routing_partition_size`: how many shards one routing value may
+    /// spread over. One, the default, is no spreading at all.
+    pub fn partition_size(&self) -> u64 {
+        self.numeric_setting("routing_partition_size").unwrap_or(1).max(1)
+    }
+
+    /// Which shard a document with this id and routing lands on, as the
+    /// reference's `generateShardId` works it out: the id alone where there is
+    /// no routing, and in a partitioned index the routing's hash moved on by
+    /// the id's hash folded into the partition size.
+    pub fn shard_of(&self, id: &str, routing: Option<&str>) -> u64 {
+        let shards = self.shard_count().max(1);
+        let rns = self.numeric_setting("boost_routing_shards");
+        match routing {
+            None => crate::search::routing_shard_in(id, shards, rns),
+            Some(r) => {
+                let size = self.partition_size();
+                let offset = match size {
+                    1 => 0,
+                    _ => (crate::search::routing_hash(id) as i64).rem_euclid(size as i64) as i32,
+                };
+                crate::search::routing_shard_offset(r, offset, shards, rns)
+            }
+        }
+    }
+
+    /// Every shard a search with this routing value has to ask: one, or one
+    /// per partition in a partitioned index.
+    pub fn shards_for_routing(&self, routing: &str) -> std::collections::BTreeSet<u64> {
+        let shards = self.shard_count().max(1);
+        let rns = self.numeric_setting("boost_routing_shards");
+        (0..self.partition_size())
+            .map(|offset| crate::search::routing_shard_offset(routing, offset as i32, shards, rns))
+            .collect()
+    }
+
+    /// The query clause that keeps a search to the documents these shards
+    /// hold, carrying the fold it has to redo per document.
+    pub fn on_shards_filter(&self, shards: &std::collections::BTreeSet<u64>) -> Value {
+        serde_json::json!({"_bs_on_shards": {
+            "shards": shards.iter().collect::<Vec<_>>(),
+            "of": self.shard_count().max(1),
+            "routing_shards": self.numeric_setting("boost_routing_shards"),
+            "partition": self.partition_size(),
+        }})
+    }
+
+    /// Whether the mapping says no document may be written or read by id
+    /// without a routing value.
+    pub fn routing_required(&self) -> bool {
+        self.mapping
+            .raw
+            .pointer("/_routing/required")
+            .map(|v| v == true || v == "true")
+            .unwrap_or(false)
+    }
+
+    /// How many live documents each shard holds in what a search can see,
+    /// worked out from each document's id and routing the way a write places
+    /// it.
+    pub fn docs_per_shard(&self) -> Vec<u64> {
+        let shards = self.shard_count().max(1) as usize;
+        let mut out = vec![0u64; shards];
+        let searcher = self.reader.searcher();
+        for seg in searcher.segment_readers() {
+            let Ok(Some(ids)) = seg.fast_fields().str("_id") else { continue };
+            let alive = seg.alive_bitset();
+            let mut id = String::new();
+            for doc in 0..seg.max_doc() {
+                if alive.map(|a| a.is_deleted(doc)).unwrap_or(false) {
+                    continue;
+                }
+                let Some(ord) = ids.term_ords(doc).next() else { continue };
+                id.clear();
+                if ids.ord_to_str(ord, &mut id).is_ok() {
+                    let shard = self.shard_of_doc(&id) as usize;
+                    out[shard.min(shards - 1)] += 1;
+                }
+            }
+        }
+        out
     }
 
     /// Hold a write until the shard it belongs to is refreshed.

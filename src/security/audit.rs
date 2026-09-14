@@ -803,6 +803,64 @@ impl AuditLog {
         self.send(m);
     }
 
+    /// One part of a many-part request refused: a bulk's share for one
+    /// index, one get of an mget, one search of an msearch. The plugin judges
+    /// each as a transport request of its own, so each refusal is written down
+    /// as one, with the index it named; the parts a bulk or an msearch sends
+    /// out carry the task of the request they came from as their parent.
+    pub fn missing_privileges_item(
+        &self,
+        caller: &Caller,
+        action: &str,
+        indices: &[String],
+        resolved: &[String],
+        body: Option<&str>,
+    ) {
+        let cfg = self.current();
+        if !self.transport_allowed(&cfg, "MISSING_PRIVILEGES")
+            || self.ignored_user(&cfg, Some(&caller.name))
+        {
+            return;
+        }
+        let request_type = transport_request_type(action, "", "");
+        if self.ignored_request(&cfg, &request_type) {
+            return;
+        }
+        let req = RequestInfo {
+            remote: caller.remote_address.clone(),
+            body: body.map(|b| b.to_string()),
+            ..Default::default()
+        };
+        let mut m = self.base("MISSING_PRIVILEGES");
+        if action != "indices:data/read/mget[shard]" {
+            let seq = self.task_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            m.insert(
+                "audit_trace_task_parent_id".into(),
+                json!(format!("{}:{seq}", self.node.node_id)),
+            );
+        }
+        self.add_transport(&cfg, &mut m, caller, action, &request_type, &req, indices, resolved);
+        self.send(m);
+    }
+
+    /// The security REST API refused to a caller. The plugin records the
+    /// refusal at the REST layer, and what it records as the privilege is the
+    /// reason it gave rather than an action name.
+    pub fn missing_privileges_rest(&self, caller: &Caller, privilege: &str, req: &RequestInfo) {
+        let cfg = self.current();
+        if !self.rest_allowed(&cfg, "MISSING_PRIVILEGES")
+            || self.ignored_user(&cfg, Some(&caller.name))
+            || self.ignored_request(&cfg, &req.path)
+        {
+            return;
+        }
+        let mut m = self.base("MISSING_PRIVILEGES");
+        self.add_rest(&cfg, &mut m, req, true);
+        m.insert("audit_request_effective_user".into(), json!(caller.name));
+        m.insert("audit_request_privilege".into(), json!(privilege));
+        self.send(m);
+    }
+
     /// A transport-level action allowed; off by default.
     pub fn granted_privileges(
         &self,
@@ -1249,8 +1307,10 @@ pub fn transport_request_type(action: &str, method: &str, _path: &str) -> String
         "indices:data/read/search" => "SearchRequest",
         "indices:data/read/msearch" => "MultiSearchRequest",
         "indices:data/read/scroll" => "SearchScrollRequest",
+        "indices:data/read/scroll/clear" => "ClearScrollRequest",
         "indices:data/read/get" => "GetRequest",
         "indices:data/read/mget" => "MultiGetRequest",
+        "indices:data/read/mget[shard]" => "MultiGetShardRequest",
         "indices:data/read/explain" => "ExplainRequest",
         "indices:data/read/field_caps" => "FieldCapabilitiesRequest",
         "indices:data/read/tv" => "TermVectorsRequest",

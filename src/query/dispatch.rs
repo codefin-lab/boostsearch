@@ -33,6 +33,8 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             }
         }
         "match_none" => Box::new(EmptyQuery),
+        // the documents some shards hold, for a search narrowed to them
+        "_bs_on_shards" => Box::new(OnShards::from_json(&body)?),
         "script" => {
             let Some(spec) = body.get("script") else {
                 return Err(anyhow!(
@@ -68,6 +70,22 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             }
             // `_id` is a field of its own, not part of either JSON view, so a
             // term naming it has to be built against that field directly
+            // the routing a document was written with is kept in the
+            // untouched view under a key no source field may use
+            if field == "_routing" {
+                let text = match &val {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Ok(Box::new(ConstScore::new(
+                    any_of(term_for(
+                        ctx.fields.raw,
+                        crate::store::ROUTING_KEY,
+                        &serde_json::json!(text),
+                    )),
+                    1.0,
+                )));
+            }
             if field == "_id" {
                 let text = match &val {
                     Value::String(s) => s.clone(),
@@ -183,6 +201,21 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
                     o.insert(format!("{field}.name"), vals.clone());
                 }
                 return build(ctx, &serde_json::json!({ "terms": spec }));
+            }
+            if field == "_routing" {
+                let items: Vec<Value> = match &vals {
+                    Value::Array(a) => a.clone(),
+                    other => vec![other.clone()],
+                };
+                let terms: Vec<Term> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => Value::String(s.clone()),
+                        other => Value::String(other.to_string()),
+                    })
+                    .flat_map(|v| term_for(ctx.fields.raw, crate::store::ROUTING_KEY, &v))
+                    .collect();
+                return Ok(Box::new(ConstScore::new(any_of(terms), 1.0)));
             }
             if field == "_id" {
                 let items: Vec<Value> = match &vals {
@@ -345,6 +378,10 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             // every document has an id, an index and a sequence number
             if field == "_id" || field == "_index" || field == "_seq_no" || field == "_version" {
                 return Ok(Box::new(AllQuery));
+            }
+            // only a document written with a routing has one
+            if field == "_routing" {
+                return regex_query(ctx.fields.raw, crate::store::ROUTING_KEY, ".*");
             }
             ctx.exists_query(field)?
         }
@@ -810,6 +847,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
 /// a complaint about the name rather than about the text.
 pub(crate) fn unknown_clause(name: &str) -> bool {
     const CLAUSES: &[&str] = &[
+        "_bs_on_shards",
         "bool",
         "boosting",
         "combined_fields",

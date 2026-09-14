@@ -420,6 +420,14 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_security/api/ssl/certs", get(security::api::certs))
         .route("/_plugins/_security/api/authtoken", post(security::api::authtoken))
         .route(
+            "/_plugins/_security/api/internalusers/{name}/authtoken",
+            post(security::api::service_authtoken).fallback(security::api::post_only),
+        )
+        .route(
+            "/_plugins/_security/api/generateonbehalfoftoken",
+            post(security::api::generate_obo_token).fallback(security::api::post_only),
+        )
+        .route(
             "/_plugins/_security/api/audit",
             get(security::api::audit_get)
                 .patch(security::api::audit_patch)

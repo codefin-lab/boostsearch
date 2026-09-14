@@ -32,6 +32,29 @@ pub(crate) fn flatten_settings(v: &Value, prefix: &str, out: &mut serde_json::Ma
     }
 }
 
+/// Take a setting out of every spelling it may have been written in: under
+/// `index` or at the top, flat or nested, with its `index.` prefix or without.
+fn forget_setting(settings: &mut Value, key: &str) {
+    fn remove_path(node: &mut Value, parts: &[&str]) {
+        let Some(o) = node.as_object_mut() else { return };
+        // the rest of the path written flat under this object
+        o.remove(&parts.join("."));
+        if parts.len() > 1
+            && let Some(child) = o.get_mut(parts[0])
+        {
+            remove_path(child, &parts[1..]);
+        }
+    }
+    let parts: Vec<&str> = key.split('.').collect();
+    let prefixed: Vec<&str> = std::iter::once("index").chain(parts.iter().copied()).collect();
+    remove_path(settings, &parts);
+    remove_path(settings, &prefixed);
+    if let Some(index) = settings.get_mut("index") {
+        remove_path(index, &parts);
+        remove_path(index, &prefixed);
+    }
+}
+
 /// `human` asks for a readable form beside each machine one.
 pub(crate) fn add_human_settings(view: &mut Value, st: &IdxState) {
     let created = st.created_millis();
@@ -164,6 +187,44 @@ pub async fn put_settings(
     let patch = patch.get("index").unwrap_or(patch).clone();
     // `preserve_existing` says to fill in only what is not already set
     let preserve = p.get("preserve_existing").map(|v| v != "false").unwrap_or(false);
+    // how an open index places its documents is fixed when it is made: a
+    // shard count or a routing fold changed under it would move every
+    // document it holds to a shard it is not on
+    let mut named = serde_json::Map::new();
+    flatten_settings(&patch, "", &mut named);
+    let fixed: Vec<String> = named
+        .keys()
+        .map(|k| k.strip_prefix("index.").unwrap_or(k).to_string())
+        .filter(|k| {
+            matches!(
+                k.as_str(),
+                "number_of_shards" | "number_of_routing_shards" | "routing_partition_size"
+            )
+        })
+        .map(|k| format!("index.{k}"))
+        .collect();
+    if !fixed.is_empty() {
+        let open: Vec<String> = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .filter(|st| !st.read().closed)
+            .map(|st| {
+                let g = st.read();
+                format!("{}/{}", g.name, g.uuid)
+            })
+            .collect();
+        if !open.is_empty() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!(
+                    "Can't update non dynamic settings [[{}]] for open indices [[{}]]",
+                    fixed.join(", "),
+                    open.join(", ")
+                ),
+            );
+        }
+    }
     for n in targets {
         let Some(st) = store.get(&n) else { continue };
         let mut g = st.write();
@@ -179,6 +240,18 @@ pub async fn put_settings(
         }
         let slot = entry_of(&mut settings, "index", || json!({}));
         crate::store::deep_merge(slot, &patch);
+        // A null resets a setting to its default. Merged in, it only covered
+        // one of the places a setting can be written, and the value the index
+        // was created with -- kept outside `index`, or spelled flat -- showed
+        // through again: `max_result_window` made 20, set to 10000 and reset
+        // read 20 where the reference reads the default.
+        let mut flat = serde_json::Map::new();
+        flatten_settings(&patch, "", &mut flat);
+        for (key, value) in flat {
+            if value.is_null() {
+                forget_setting(&mut settings, key.strip_prefix("index.").unwrap_or(&key));
+            }
+        }
         g.settings = settings;
         g.refresh_knobs();
         g.apply_analysis();

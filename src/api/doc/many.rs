@@ -114,15 +114,9 @@ pub async fn mget(
         };
         // an alias in front of several indices names no one document, so a
         // get through it cannot say which was meant
-        let behind = store.resolve(&idx);
-        if store.is_alias(&idx) && behind.len() > 1 {
-            let listed = behind.join(", ");
-            let reason = format!(
-                "alias [{idx}] has more than one index associated with it [{listed}], can't \
-                 execute a single index op"
-            );
+        if let Some(reason) = store.single_index_refusal(&idx) {
             docs.push(json!({
-                "_index": idx, "_id": id, "found": false,
+                "_index": idx, "_id": id,
                 "error": {
                     "type": "illegal_argument_exception", "reason": reason,
                     "root_cause": [{"type": "illegal_argument_exception", "reason": reason}],
@@ -130,21 +124,34 @@ pub async fn mget(
             }));
             continue;
         }
-        if let Some(why) = crate::security::item_refusal(
+        if let Some(why) = crate::security::item_refusal_audited(
             &store,
             &["indices:data/read/mget[shard]"],
+            &idx,
             &crate::security::layer::indices_for_expr(&store, &idx),
+            || None,
         ) {
             docs.push(
                 json!({"_index": idx, "_id": id, "error": crate::security::item_error(&why)}),
             );
             continue;
         }
+        // the document's own routing, else the request's, else the one the
+        // alias it was named through routes by
+        let mut asked = Params::new();
+        if let Some(r) = want_routing.or_else(|| p.get("routing").cloned()) {
+            asked.insert("routing".into(), r);
+        }
+        let asked = read_routing(&store, &idx, &asked);
         let g = st.read();
-        let routing_ok = match g.routing.get(&id) {
-            Some(have) => want_routing.as_deref() == Some(have.as_str()),
-            None => true,
-        };
+        if read_routing_refusal(&g, &id, &asked).is_some() {
+            let cause = crate::api::shared::routing_missing_cause(&g.name, &id);
+            let mut error = cause.clone();
+            error["root_cause"] = json!([cause]);
+            docs.push(json!({"_index": g.name, "_id": id, "error": error}));
+            continue;
+        }
+        let routing_ok = routing_matches(&g, &id, &asked);
         match read_source_as_asked(&g, &id, &p)
             .filter(|_| routing_ok)
             .filter(|_| crate::security::doc_visible(&store, &g, &id))

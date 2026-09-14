@@ -57,6 +57,18 @@ pub(crate) struct ShardOut {
     pub(crate) profile: Option<Value>,
 }
 
+/// How many shards a filter keeps a search to, where it keeps it to some.
+pub(crate) fn narrowed_shard_count(filter: &Value) -> Option<u64> {
+    match filter {
+        Value::Object(o) => match o.get("_bs_on_shards") {
+            Some(on) => on.get("shards").and_then(|v| v.as_array()).map(|a| a.len() as u64),
+            None => o.values().find_map(narrowed_shard_count),
+        },
+        Value::Array(a) => a.iter().find_map(narrowed_shard_count),
+        _ => None,
+    }
+}
+
 /// Search one index, as one shard of the whole request.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_one_shard(
@@ -115,7 +127,10 @@ pub(crate) fn search_one_shard(
     let mut agg_req: Option<Aggregations> = None;
     let mut agg_meta: Vec<(String, Value)> = Vec::new();
     let mut bucket_orders: Vec<(String, String, bool)> = Vec::new();
-    shards += g.shard_count();
+    // a search narrowed to some of the shards reports only those
+    shards += crate::security::layer::alias_filter_for(name)
+        .and_then(|f| narrowed_shard_count(&f))
+        .unwrap_or_else(|| g.shard_count());
     let ctx = Ctx {
         fields: &g.fields,
         mapping: &g.mapping,
