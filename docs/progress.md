@@ -7609,3 +7609,32 @@ differences each branch measured and left are named in its paragraph above.
 Building them found five engine bugs, one of them a P1. **The block-skipping range scan kept only the matches of its last run of blocks**, so a range query on a date or a number could silently miss documents -- some date ranges over the sales data of example 24 did. A composite with `missing_bucket` lost documents missing only some of its keys; dynamic templates ignored `path_match` and mapped dotted names literally; `_doc_count` weighting reordered histogram buckets, was not applied to calendar histograms and was forgotten after a restart; and a range on `_seq_no` was added. Left: continuous checkpoints are per index rather than per shard, `search_source_indices` is not honoured, and a cardinality metric in a rollup is refused.
 
 Gates on main with everything merged: unit 291, clippy clean, corpus 1,427/1,427, phase1 398, replays 60/61, 45/45, 40/43, canonical 166/183, `run-all.sh` 22/22, disk fault, refusal, DLS, restart, health and ISM 6/6. The bench gate, a thirty-minute soak and the two-hundred-run chaos gate are running on this build, in that order, with nothing else on the machine.
+
+### The chaos gate passes: two hundred runs, all clean
+
+On the build with every branch of this round merged, `tools/cluster_chaos.py`
+ran two hundred times in a row, ninety seconds of isolations, SIGTERM
+restarts, SIGSTOP pauses and heals across three nodes under a write load
+each, with nothing else on the machine: 200 clean, 0 with a copy behind, 0
+lost, 0 disagreeing, 0 without a result. The previous gates read 181 of 188,
+111 of 114, and a hunt stopped at 19 on a disagreement.
+
+That closes the two cluster P1s. The stray write that survived on a copy
+after promotion (chaos run 20) is closed by a replica taking an operation in
+a term only from that term's primary -- two hundred runs without a
+disagreement, where the last hunts found one in about fifty. The copy found
+behind for a few seconds was, in the one run whose logs were read (run 45),
+the check reading a copy the manager was moving; the check now reads again
+when the routing changes under it, and two hundred runs found no copy behind.
+Whether run 52's was the same is not known, and is recorded as such.
+
+Before it, on the same build: a thirty-minute soak, 2,332,983 writes
+acknowledged, every one there after a restart, the control search 0.8 ms at
+the start and 0.7 ms at the end. The bench gate read three dimensions more
+than 5% below the baseline of 2026-09-10 (indexing 91,954 against 106,447
+documents a second, resident memory 291 against 261 MB); the build from
+before any of this round's work, `72ffb96`, measured the same on the same
+machine in the same hour (93,464 and 294 MB), and every branch's own binary
+fell between 86,891 and 97,030, so the drop is the machine's state, not the
+code. The gate is to be rerun on a quiet machine. Still ahead of OpenSearch
+3.1.0 on all 34 dimensions.
