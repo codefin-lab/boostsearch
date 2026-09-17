@@ -1,0 +1,239 @@
+[
+  {
+    "name": "ConnectorTool",
+    "description": "Invokes external service. Required: 'connector_id'. Returns: service response.",
+    "type": "ConnectorTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "IndexInsightTool",
+    "description": "Use this tool to get details of one index according to different task type, including STATISTICAL_DATA: the data distribution and index mapping of the index, FIELD_DESCRIPTION: The description of each column, LOG_RELATED_INDEX_CHECK: Whether the index is related to log/trace and whether it contains trace/log fields",
+    "type": "IndexInsightTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "        {\n            \"type\": \"object\",\n            \"properties\": {\n                \"index\": {\n                    \"type\": \"string\",\n                    \"description\": \"OpenSearch index name\"\n                },\n                \"question\": {\n                    \"type\": \"string\",\n                    \"description\": \"Natural language question to query data from opensearch index\"\n                }\n            }\n        },\n        \"strict\": false\n      }\n",
+      "strict": false
+    }
+  },
+  {
+    "name": "QueryPlanningTool",
+    "description": "Use this tool to generate OpenSearch Query DSL from natural language queries.Provide a 'question' parameter containing the complete natural language query with all necessary context, requirements, filters, and constraints.The question should be self-contained with all information needed to generate the OpenSearch DSL.Provide 'index_name' to help generate more accurate queries based on the index structure.Optionally provide embedding model ID to be used for neural search The tool will return a valid OpenSearch query that can be used to search your data.",
+    "type": "QueryPlanningTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "DataDistributionTool",
+    "description": "Analyzes field value distributions in a target time range, optionally compared to a baseline. Use to identify which fields changed most when investigating anomalies. Two modes: (1) Comparison (baseline provided): ranks fields by divergence. (2) Single (no baseline): summarizes field distributions.",
+    "type": "DataDistributionTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"string\",\"description\":\"Target OpenSearch index name\"},\"timeField\":{\"type\":\"string\",\"description\":\"Date/time field for filtering\"},\"selectionTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of target period (format: yyyy-MM-dd HH:mm:ss)\"},\"selectionTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of target period (format: yyyy-MM-dd HH:mm:ss)\"},\"baselineTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of baseline period (format: yyyy-MM-dd HH:mm:ss). Must pair with baselineTimeRangeEnd\"},\"baselineTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of baseline period (format: yyyy-MM-dd HH:mm:ss). Must pair with baselineTimeRangeStart\"},\"size\":{\"type\":\"integer\",\"description\":\"Max documents to sample (default: 1000, max: 10000)\"},\"queryType\":{\"type\":\"string\",\"description\":\"Query type: 'dsl' (default) or 'ppl'\"},\"filter\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional DSL filter clauses as JSON strings\"},\"dsl\":{\"type\":\"string\",\"description\":\"Complete DSL query as JSON string\"},\"ppl\":{\"type\":\"string\",\"description\":\"PPL query without time filtering (added automatically)\"}},\"required\":[\"index\",\"timeField\",\"selectionTimeRangeStart\",\"selectionTimeRangeEnd\"],\"additionalProperties\":false}",
+      "strict": false
+    }
+  },
+  {
+    "name": "SearchAnomalyResultsTool",
+    "description": "This is a tool that searches anomaly results. It takes 9 arguments named detectorId which defines the detector ID to filter for (default is null), and realtime which defines whether the anomaly results are from a realtime detector (set to false to only get results from historical analyses) (default is null), and anomalyGradeThreshold which defines the threshold for anomaly grade (a number between 0 and 1 that indicates how anomalous a data point is) (default is greater than 0), and dataStartTime which defines the start time of the anomaly data in epoch milliseconds (default is null), and dataEndTime which defines the end time of the anomaly data in epoch milliseconds (default is null), and sortOrder which defines the order of the results (options are asc or desc, and default is desc), and sortString which defines how to sort the results (default is data_start_time), and size which defines the number of anomalies to be returned (default is 20), and startIndex which defines the paginated index to start from (default is 0). The tool returns 2 values: a list of anomaly results (where each result contains the detector ID, the anomaly grade, and the confidence), and the total number of anomaly results.",
+    "type": "SearchAnomalyResultsTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "VisualizationTool",
+    "description": "Searches for saved visualizations by name. Required: 'input' (visualization name, supports partial matches). Returns: list of matching visualizations with their titles and IDs.",
+    "type": "VisualizationTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Visualization name to search for\"}},\"required\":[\"input\"],\"additionalProperties\":false}",
+      "strict": false
+    }
+  },
+  {
+    "name": "McpSseTool",
+    "description": "A tool from MCP Server",
+    "type": "McpSseTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "PPLTool",
+    "description": "\"Use this tool when user ask question based on the data in the cluster or parse user statement about which index to use in a conversion.\nAlso use this tool when question only contains index information.\n1. If uesr question contain both question and index name, the input parameters are {'question': UserQuestion, 'index': IndexName}.\n2. If user question contain only question, the input parameter is {'question': UserQuestion}.\n3. If uesr question contain only index name, find the original human input from the conversation histroy and formulate parameter as {'question': UserQuestion, 'index': IndexName}\nThe index name should be exactly as stated in user's input.",
+    "type": "PPLTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "RAGTool",
+    "description": "Use this tool to retrieve helpful information to optimize the output of the large language model to answer questions.",
+    "type": "RAGTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "CreateAlertTool",
+    "description": "This is a tool that helps to create an alert(i.e. monitor with triggers), some parameters should be parsed based on user's question and context. The parameters should include: \n1. indices: The input indices of the monitor, should be a list of string in json format.\n",
+    "type": "CreateAlertTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "LogPatternTool",
+    "description": "Log Pattern Tool",
+    "type": "LogPatternTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "MetricChangeAnalysisTool",
+    "description": "Compares percentile distributions (P50, P90) of numeric fields between two time ranges. Returns top fields ranked by change score. Use for root cause analysis when investigating metric anomalies. Keep both time ranges short (e.g. 15-30 minutes) and similar in duration for accurate comparison.",
+    "type": "MetricChangeAnalysisTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"string\",\"description\":\"Target OpenSearch index name\"},\"timeField\":{\"type\":\"string\",\"description\":\"Date/time field for filtering\"},\"selectionTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of target period (format: yyyy-MM-dd HH:mm:ss)\"},\"selectionTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of target period (format: yyyy-MM-dd HH:mm:ss)\"},\"baselineTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of baseline period (format: yyyy-MM-dd HH:mm:ss)\"},\"baselineTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of baseline period (format: yyyy-MM-dd HH:mm:ss). Should be at or before selectionTimeRangeStart\"},\"size\":{\"type\":\"integer\",\"description\":\"Maximum number of documents to analyze (default: 1000, max: 10000)\"},\"topN\":{\"type\":\"integer\",\"description\":\"Number of top fields to return, ranked by change score (default: 10)\"},\"queryType\":{\"type\":\"string\",\"description\":\"Query type: 'ppl' or 'dsl' (default: 'dsl')\"},\"filter\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional DSL query conditions (optional)\"},\"dsl\":{\"type\":\"string\",\"description\":\"Complete raw DSL query as JSON string (optional)\"},\"ppl\":{\"type\":\"string\",\"description\":\"Complete PPL statement without time information (optional)\"}},\"required\":[\"index\",\"timeField\",\"selectionTimeRangeStart\",\"selectionTimeRangeEnd\",\"baselineTimeRangeStart\",\"baselineTimeRangeEnd\"]}"
+    }
+  },
+  {
+    "name": "AgentTool",
+    "description": "Use this tool to run any agent.",
+    "type": "AgentTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "WriteToScratchPadTool",
+    "description": "Save research plans, findings, and progress updates to a persistent scratchpad.",
+    "type": "WriteToScratchPadTool",
+    "version": "1",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"notes\":{\"type\":\"string\",\"description\":\"The notes to be saved to the scratchpad.\"}},\"required\":[\"notes\"]}",
+      "strict": true
+    }
+  },
+  {
+    "name": "NeuralSparseSearchTool",
+    "description": "Use this tool to search data in OpenSearch index.",
+    "type": "NeuralSparseSearchTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "VectorDBTool",
+    "description": "Use this tool to perform knn-based dense retrieval. It takes an 'input' argument (natural language query string). Optionally accepts 'index' (index name) and 'embedding_field' (knn_vector field name) to override registered defaults. The tool returns the dense retrieval results for the query.",
+    "type": "VectorDBTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "WebSearchTool",
+    "description": "This tool performs a web search using the specified query or fetches the next page of a previous search. It accepts one mandatory argument: `query`, which is a search term used to initiate a new search, and one optional argument: `next_page`, which is a link to retrieve the next set of search results from a previous response. The tool returns the raw documents retrieved from the search engine, along with a `next_page` field for pagination.",
+    "type": "WebSearchTool",
+    "version": "1.0",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search term to query using the configured search engine. This is the primary input used to perform the search.\"},\"next_page\":{\"type\":\"string\",\"description\":\"URL to the next page of search results. If provided, the tool will fetch and return results from this page instead of executing a new search query.\"}},\"required\":[\"query\"]}",
+      "strict": false
+    }
+  },
+  {
+    "name": "McpStreamableHttpTool",
+    "description": "A tool from MCP Streamable HTTP Server",
+    "type": "McpStreamableHttpTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "SearchMonitorsTool",
+    "description": "This is a tool that searches alerting monitors. It takes 10 optional arguments named monitorId which defines the monitor ID to filter for (default is null), and monitorName which defines explicit name of the monitor (default is null), and monitorNamePattern which is a wildcard query to match monitor name (default is null), and enabled which defines whether the monitor is enabled (default is null, indicating both enabled and disabled), and hasTriggers which defines whether the monitor has triggers enabled (default is null, indicating both), and indices which defines the index being monitored (default is null), and sortOrder which defines the order of the results (options are asc or desc, and default is asc), and sortString which defines how to sort the results (default is name.keyword), and size which defines the size of the request to be returned (default is 20), and startIndex which defines the paginated index to start from (default is 0).  The tool returns 2 values: a list of alerting monitors (each containining monitor ID, monitor name, monitor type (indicating query-level, document-level, or bucket-level monitor types), enabled, enabled time in epoch milliseconds, last update time in epoch milliseconds), and the total number of alerting monitors.",
+    "type": "SearchMonitorsTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "SearchIndexTool",
+    "description": "Use this tool to search an index by providing two parameters: 'index' for the index name, and 'query' for the OpenSearch DSL formatted query. Only use this tool when both index name and DSL query is available. Returns documents matching the query in the provided index.",
+    "type": "SearchIndexTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"string\",\"description\":\"OpenSearch index name. Example: index1\"},\"query\":{\"type\":\"object\",\"description\":\"OpenSearch Query DSL as a JSON object. You need to get index mapping to write correct search query. The object MUST follow OpenSearch Query DSL and MUST include a top-level 'query' field. Preferred format for reliable parsing. Example: {\\\"query\\\":{\\\"match\\\":{\\\"field\\\":\\\"value\\\"}},\\\"size\\\":10}. String format is also supported for backward compatibility, but object format is strongly recommended.\"}},\"required\":[\"index\",\"query\"],\"additionalProperties\":false}",
+      "strict": true
+    }
+  },
+  {
+    "name": "SearchAlertsTool",
+    "description": "This is a tool that finds alerts. It takes 12 optional argument named sortOrder which defines the order of the results (options are asc or desc, and default is asc), and sortString which defines how to sort the results (default is monitor_name.keyword), and size which defines the size of the request to be returned (default is 20), and startIndex which defines the paginated index to start from (default is 0), and searchString which defines the search string to use for searching a specific alert (default is an empty String), and severityLevel which defines the severity level to filter for as an integer (default is ALL), and alertState which defines the alert state to filter for (options are ALL, ACTIVE, ERROR, COMPLETED, or ACKNOWLEDGED, default is ALL), and monitorId which defines the associated monitor ID to filter for, and alertIndex which defines the alert index to search from (default is null), and monitorIds which defines the list of monitor IDs to filter for, and workflowIds which defines the list of workflow IDs to filter for（default is null), and alertIds which defines the list of alert IDs to filter for (default is null). The tool returns 2 values: a list of alerts (each containining the alert id, version, schema version, monitor ID, workflow ID, workflow name, monitor name, monitor version, monitor user, trigger ID, trigger name, finding IDs, related doc IDs, state, start time in epoch milliseconds, end time in epoch milliseconds, last notification time in epoch milliseconds, acknowledged time in epoch milliseconds, error message, error history, severity, action execution results, aggregation result bucket, execution ID, associated alert IDs), and the total number of alerts.",
+    "type": "SearchAlertsTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "ReadFromScratchPadTool",
+    "description": "Retrieve previous research work and notes from the persistent scratchpad.",
+    "type": "ReadFromScratchPadTool",
+    "version": "1",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{}}",
+      "strict": true
+    }
+  },
+  {
+    "name": "SearchAnomalyDetectorsTool",
+    "description": "This is a tool that searches anomaly detectors. It takes 12 optional arguments named detectorName which is the explicit name of the detector (default is null), and detectorNamePattern which is a wildcard query to match detector name (default is null), and indices which defines the index or index pattern the detector is detecting over (default is null), and highCardinality which defines whether the anomaly detector is high cardinality (synonymous with multi-entity) of non-high-cardinality (synonymous with single-entity) (default is null, indicating both), and lastUpdateTime which defines the latest update time of the anomaly detector in epoch milliseconds (default is null), and sortOrder which defines the order of the results (options are asc or desc, and default is asc), and sortString which defines how to sort the results (default is name.keyword), and size which defines the size of the request to be returned (default is 20), and startIndex which defines the paginated index to start from (default is 0), and running which defines whether the anomaly detector is running (default is null, indicating both), and failed which defines whether the anomaly detector has failed (default is null, indicating both). The tool returns 2 values: a list of anomaly detectors (each containing the detector id, detector name, detector type indicating multi-entity or single-entity (where multi-entity also means high-cardinality), detector description, name of the configured index, last update time in epoch milliseconds), and the total number of anomaly detectors.",
+    "type": "SearchAnomalyDetectorsTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "CreateAnomalyDetectorTool",
+    "description": "This is a tool used to help creating anomaly detector. It takes a required argument which is the name of the index, extract the index mappings and let the LLM to give the suggested aggregation field, aggregation method, category field and the date field which are required to create an anomaly detector.",
+    "type": "CreateAnomalyDetectorTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "LogPatternAnalysisTool",
+    "description": "Analyzes log patterns in a target time range, optionally compared to a baseline. Use when investigating incidents to find new, spiking, or anomalous log messages. Three modes: (1) Sequence analysis (traceFieldName + baseline): groups logs by trace ID, returns exceptional trace sequences. (2) Pattern diff (baseline, no traceFieldName): compares pattern frequencies, returns highest-lift patterns. (3) Log insight (no baseline): finds top error/warning patterns with sample logs.",
+    "type": "LogPatternAnalysisTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"string\",\"description\":\"Target OpenSearch index name\"},\"timeField\":{\"type\":\"string\",\"description\":\"Date/time field for filtering\"},\"logFieldName\":{\"type\":\"string\",\"description\":\"Field containing log message text\"},\"traceFieldName\":{\"type\":\"string\",\"description\":\"Trace/correlation ID field. Enables sequence analysis mode when provided with baseline time range\"},\"baseTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of baseline period (format: yyyy-MM-dd HH:mm:ss). Must pair with baseTimeRangeEnd\"},\"baseTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of baseline period (format: yyyy-MM-dd HH:mm:ss). Must pair with baseTimeRangeStart\"},\"selectionTimeRangeStart\":{\"type\":\"string\",\"description\":\"Start of target/incident period (format: yyyy-MM-dd HH:mm:ss)\"},\"selectionTimeRangeEnd\":{\"type\":\"string\",\"description\":\"End of target/incident period (format: yyyy-MM-dd HH:mm:ss)\"},\"filter\":{\"type\":\"string\",\"description\":\"PPL boolean expression to filter logs (e.g. serviceName='ts-auth-service' or severity='ERROR'). Applied as additional where clause. Not applicable for sequence analysis mode (when traceFieldName is provided with baseline), as sequence analysis requires all logs within a trace\"}},\"required\":[\"index\",\"timeField\",\"logFieldName\",\"selectionTimeRangeStart\",\"selectionTimeRangeEnd\"],\"additionalProperties\":false}",
+      "strict": false
+    }
+  },
+  {
+    "name": "MLModelTool",
+    "description": "Use this tool to run any model.",
+    "type": "MLModelTool",
+    "version": "undefined",
+    "attributes": {}
+  },
+  {
+    "name": "IndexMappingTool",
+    "description": "This tool returns index mappings and settings for specified indices. Required argument: 'index' - comma-delimited list of one or more indices (supports wildcards like 'my-index-*'). Optional argument: 'local' - if true, returns info from local node only instead of cluster manager (default: false). Response format: For each index, 'mappings' contains field definitions under 'properties' (each field has a 'type'), and 'settings' contains configuration as a flattened key-value map.",
+    "type": "IndexMappingTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"array\",\"description\":\"OpenSearch index name list, separated by comma. for example: [\\\"index1\\\", \\\"index2\\\"]\",\"items\":{\"type\":\"string\"}}},\"required\":[\"index\"],\"additionalProperties\":false}",
+      "strict": true
+    }
+  },
+  {
+    "name": "ListIndexTool",
+    "description": "This tool returns information about indices in the OpenSearch cluster along with the index `health`, `status`, `index`, `uuid`, `pri`, `rep`, `docs.count`, `docs.deleted`, `store.size`, `pri.store. size `, `pri.store.size`, `pri.store`. Optional arguments: 1. `indices`, a comma-delimited list of one or more indices to get information from (default is an empty list meaning all indices). Use only valid index names. 2. `local`, whether to return information from the local node only instead of the cluster manager node (Default is false)",
+    "type": "ListIndexTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"indices\":{\"type\":\"array\",\"items\": {\"type\": \"string\"},\"description\":\"OpenSearch index name list, separated by comma. for example: [\\\"index1\\\", \\\"index2\\\"], use empty array [] to list all indices in the cluster\"}},\"additionalProperties\":false}",
+      "strict": false
+    }
+  },
+  {
+    "name": "SearchAroundDocumentTool",
+    "description": "Use this tool to search documents around a specific document by providing: 'index' for the index name, 'doc_id' for the target document ID, 'timestamp_field' for the field to order by, and 'count' for the number of documents before and after. Returns N documents before, the target document, and N documents after.",
+    "type": "SearchAroundDocumentTool",
+    "version": "undefined",
+    "attributes": {
+      "input_schema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"index\": {\n      \"type\": \"string\",\n      \"description\": \"OpenSearch index name\"\n    },\n    \"doc_id\": {\n      \"type\": \"string\",\n      \"description\": \"Target document ID\"\n    },\n    \"timestamp_field\": {\n      \"type\": \"string\",\n      \"description\": \"Timestamp field for ordering (e.g., @timestamp)\"\n    },\n    \"count\": {\n      \"type\": \"integer\",\n      \"description\": \"Number of documents before and after the target\"\n    }\n  },\n  \"required\": [\"index\", \"doc_id\", \"timestamp_field\", \"count\"],\n  \"additionalProperties\": false\n}\n"
+    }
+  }
+]

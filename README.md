@@ -306,3 +306,14 @@ Snowball stemmers for Catalan, Basque, Irish, Lithuanian, Estonian and
 Armenian, and the original Porter algorithm, are generated from the Snowball
 project's own definitions by its compiler and used under the BSD 3-clause
 licence in `LICENSE-SNOWBALL`.
+
+A few read paths answer with a catalogue that describes the OpenSearch
+interface itself, and those catalogues are OpenSearch's own text, taken from a
+3.8.0 node and used under the Apache 2.0 licence the project publishes them
+under: the machine-learning tool descriptors in
+`src/api/plugins/ml_tools.json`, the workflow step catalogue in
+`src/api/flow_framework.rs`, the security-analytics rule categories in
+`src/api/plugins/security_analytics.rs` and the notification channel types in
+`src/api/notifications.rs`. Each one names what a request field may say, so
+matching it is what makes a client's own validation come out the same here as
+it does there.

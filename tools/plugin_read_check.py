@@ -9,6 +9,13 @@ empty registry, counters at zero, and a backing index reported as not there.
 This holds the engine to it, so a route that stops answering -- or starts
 answering something invented -- is caught.
 
+Two of these are not empty, and are not meant to be. The ML tool descriptors
+and the security-analytics rule categories enumerate what a request field may
+say rather than what has been configured, so they carry the reference's own
+list and are checked against it whole. Nothing on this node runs a tool or a
+rule; the catalogues describe the interface, and the counters beside them stay
+this node's own.
+
 The shapes were taken from OpenSearch 3.8.0. Run it against a node:
 
     ./target/release/velosearch
@@ -23,6 +30,68 @@ import urllib.request
 NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9200")
 DETECTORS = ".opendistro-anomaly-detectors"
 failures = []
+
+# The tool descriptors the ML API publishes, in the order 3.8.0 lists them.
+# Nothing here runs a tool; the list says which `type` an agent definition may
+# name, and a client checks its definition against it before sending one.
+ML_TOOLS = [
+    "ConnectorTool",
+    "IndexInsightTool",
+    "QueryPlanningTool",
+    "DataDistributionTool",
+    "SearchAnomalyResultsTool",
+    "VisualizationTool",
+    "McpSseTool",
+    "PPLTool",
+    "RAGTool",
+    "CreateAlertTool",
+    "LogPatternTool",
+    "MetricChangeAnalysisTool",
+    "AgentTool",
+    "WriteToScratchPadTool",
+    "NeuralSparseSearchTool",
+    "VectorDBTool",
+    "WebSearchTool",
+    "McpStreamableHttpTool",
+    "SearchMonitorsTool",
+    "SearchIndexTool",
+    "SearchAlertsTool",
+    "ReadFromScratchPadTool",
+    "SearchAnomalyDetectorsTool",
+    "CreateAnomalyDetectorTool",
+    "LogPatternAnalysisTool",
+    "MLModelTool",
+    "IndexMappingTool",
+    "ListIndexTool",
+    "SearchAroundDocumentTool",
+]
+
+# The detector types the security-analytics API spells, in 3.8.0's order.
+RULE_CATEGORIES = [
+    "s3",
+    "others_compliance",
+    "github",
+    "others_application",
+    "dns",
+    "gworkspace",
+    "others_cloud",
+    "others_web",
+    "windows",
+    "cloudtrail",
+    "others_macos",
+    "ad_ldap",
+    "test_windows",
+    "network",
+    "apache_access",
+    "vpcflow",
+    "linux",
+    "m365",
+    "others_apt",
+    "okta",
+    "waf",
+    "others_proxy",
+    "azure",
+]
 
 
 def req(method, path, body=None):
@@ -113,9 +182,49 @@ def machine_learning():
     answers("/_plugins/_ml/context_management", {"total": 0, "templates": []})
     for path in ("/_plugins/_ml/profile", "/_plugins/_ml/profile/models", "/_plugins/_ml/profile/tasks"):
         expect(f"GET {path}", req("GET", path)[1], {})
-    # no tool implementation is shipped, and the list says so rather than
-    # naming a tool that would never answer
-    expect("the ML tool list", req("GET", "/_plugins/_ml/tools")[1], [])
+    # the tool descriptors are the reference's own: the list names what a
+    # `type` in an agent's tool list may say, which is the same vocabulary
+    # here even though no agent runs
+    tools = req("GET", "/_plugins/_ml/tools")[1]
+    expect("the ML tool list is a list", isinstance(tools, list), True)
+    expect("the ML tool list's length", len(tools) if isinstance(tools, list) else None, 29)
+    if isinstance(tools, list):
+        expect(
+            "the ML tool names, in the reference's order",
+            [t.get("name") for t in tools],
+            ML_TOOLS,
+        )
+        for tool in tools:
+            expect(f"{tool.get('name')} keys", list(tool),
+                   ["name", "description", "type", "version", "attributes"])
+            expect(f"{tool.get('name')} type", tool.get("type"), tool.get("name"))
+            expect(f"{tool.get('name')} describes itself",
+                   bool(tool.get("description")), True)
+        one = next((t for t in tools if t.get("name") == "ConnectorTool"), {})
+        expect(
+            "ConnectorTool, whole",
+            one,
+            {
+                "name": "ConnectorTool",
+                "description": (
+                    "Invokes external service. Required: 'connector_id'. "
+                    "Returns: service response."
+                ),
+                "type": "ConnectorTool",
+                "version": "undefined",
+                "attributes": {},
+            },
+        )
+        # a tool that declares an input schema carries it, so a client can
+        # check an agent definition against it
+        schema = next(
+            (t for t in tools if t.get("name") == "ReadFromScratchPadTool"), {}
+        ).get("attributes")
+        expect(
+            "ReadFromScratchPadTool's input schema",
+            schema,
+            {"input_schema": '{"type":"object","properties":{}}', "strict": True},
+        )
 
 
 def time_series():
@@ -268,13 +377,19 @@ def security_analytics():
         "/_plugins/_security_analytics/correlationAlerts",
         {"correlationAlerts": [], "total_alerts": 0},
     )
-    # no rule set is installed, so no category is offered
-    answers("/_plugins/_security_analytics/rules/categories", {"rule_categories": []})
+    # the categories name the detector types the API spells, so they are the
+    # reference's list even though no rule set stands behind any of them
+    answers(
+        "/_plugins/_security_analytics/rules/categories",
+        {"rule_categories": [{"key": c, "display_name": c} for c in RULE_CATEGORIES]},
+    )
     answers("/_plugins/_security_analytics/threat_intel/alerts", {"alerts": [], "total_alerts": 0})
     answers(
         "/_plugins/_security_analytics/threat_intel/findings/_search",
         {"total_findings": 0, "ioc_findings": []},
     )
+    # the indicator total counts downloaded rows, so it stays this node's own:
+    # no feed is configured and nothing fetches one
     answers("/_plugins/_security_analytics/threat_intel/iocs", {"total": 0, "iocs": []})
 
 

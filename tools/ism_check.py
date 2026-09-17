@@ -378,7 +378,6 @@ def plugin_read_surface():
         "/_insights/top_queries": {"top_queries": []},
         "/_insights/live_queries": {"live_queries": []},
         "/_plugins/_query/_datasources": [],
-        "/_plugins/_flow_framework/workflow/_steps": {},
         "/_plugins/_replication/autofollow_stats": {
             "num_success_start_replication": 0,
             "num_failed_start_replication": 0,
@@ -404,17 +403,136 @@ def plugin_read_surface():
         one = next(iter(under.values()), {}) if isinstance(under, dict) else {}
         for key in keys:
             expect(f"GET {path} reports {key}", key in one, True)
+    # the insights settings are a settings read, so where an operator has
+    # written nothing the reference's own default is what comes back
     expect(
-        "the query insights collectors are reported off",
-        (req("GET", "/_insights/settings").get("persistent") or {}).get("latency", {}).get(
-            "enabled"
-        ),
-        False,
+        "the query insights settings read back their defaults",
+        req("GET", "/_insights/settings").get("persistent"),
+        {
+            "latency": {"enabled": True, "top_n_size": 10, "window_size": "5m"},
+            "cpu": {"enabled": True, "top_n_size": 10, "window_size": "5m"},
+            "memory": {"enabled": True, "top_n_size": 10, "window_size": "5m"},
+            "grouping": {"group_by": "none"},
+            "exporter": {"type": "local_index", "delete_after_days": 7},
+        },
+    )
+    # and what the operator writes stands in place of the default
+    req(
+        "PUT",
+        "/_cluster/settings",
+        {
+            "persistent": {
+                "search.insights.top_queries.cpu.enabled": False,
+                "search.insights.top_queries.latency.top_n_size": 25,
+                "search.insights.top_queries.grouping.group_by": "similarity",
+                "search.insights.top_queries.exporter.type": "none",
+            }
+        },
+    )
+    written = req("GET", "/_insights/settings").get("persistent") or {}
+    expect("a collector an operator turned off", written.get("cpu", {}).get("enabled"), False)
+    expect("a size an operator set", written.get("latency", {}).get("top_n_size"), 25)
+    expect("a grouping an operator chose", written.get("grouping"), {"group_by": "similarity"})
+    expect(
+        "an exporter an operator turned off",
+        written.get("exporter"),
+        {"type": "none", "delete_after_days": 7},
     )
     expect(
-        "no notification channel type may be configured",
-        req("GET", "/_plugins/_notifications/features").get("allowed_config_type_list"),
-        [],
+        "a default the operator left alone",
+        written.get("memory"),
+        {"enabled": True, "top_n_size": 10, "window_size": "5m"},
+    )
+    req(
+        "PUT",
+        "/_cluster/settings",
+        {
+            "persistent": {
+                "search.insights.top_queries.cpu.enabled": None,
+                "search.insights.top_queries.latency.top_n_size": None,
+                "search.insights.top_queries.grouping.group_by": None,
+                "search.insights.top_queries.exporter.type": None,
+            }
+        },
+    )
+    expect(
+        "the defaults come back once the operator's values are cleared",
+        (req("GET", "/_insights/settings").get("persistent") or {}).get("cpu"),
+        {"enabled": True, "top_n_size": 10, "window_size": "5m"},
+    )
+    # the channel types name what a notification configuration may be, so the
+    # list is the reference's even though no configuration is kept here
+    expect(
+        "the notification channel types the API spells",
+        req("GET", "/_plugins/_notifications/features"),
+        {
+            "allowed_config_type_list": [
+                "slack",
+                "chime",
+                "microsoft_teams",
+                "webhook",
+                "email",
+                "sns",
+                "ses_account",
+                "smtp_account",
+                "email_group",
+            ],
+            "plugin_features": {"tooltip_support": "true"},
+        },
+    )
+    # the workflow steps name what a template may say; nothing provisions one
+    steps = req("GET", "/_plugins/_flow_framework/workflow/_steps")
+    expect("the workflow step catalogue's size", len(steps), 21)
+    expect(
+        "the workflow steps, in the reference's order",
+        list(steps),
+        [
+            "update_search_pipeline",
+            "update_ingest_pipeline",
+            "reindex",
+            "register_model_group",
+            "undeploy_model",
+            "register_remote_model",
+            "register_local_sparse_encoding_model",
+            "create_index",
+            "delete_agent",
+            "create_ingest_pipeline",
+            "register_local_pretrained_model",
+            "update_index",
+            "create_tool",
+            "noop",
+            "create_connector",
+            "register_agent",
+            "deploy_model",
+            "create_search_pipeline",
+            "register_local_custom_model",
+            "delete_connector",
+            "delete_model",
+        ],
+    )
+    expect(
+        "a step that takes nothing and gives nothing",
+        steps.get("noop"),
+        {"inputs": [], "outputs": [], "required_plugins": []},
+    )
+    expect(
+        "a step that names the plugin it needs and how long it waits",
+        steps.get("deploy_model"),
+        {
+            "inputs": ["model_id"],
+            "outputs": ["model_id"],
+            "required_plugins": ["opensearch-ml"],
+            "timeout": "15s",
+        },
+    )
+    expect(
+        "a step with no plugin behind it",
+        steps.get("create_index"),
+        {
+            "inputs": ["index_name", "configurations"],
+            "outputs": ["index_name"],
+            "required_plugins": [],
+        },
     )
     # the follower and leader counters are zero, and zero for every index
     for path in ("follower_stats", "leader_stats"):
