@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/velosearch-logo-dark.png">
+    <img src="docs/assets/velosearch-logo.png" alt="VeloSearch" width="560">
+  </picture>
+</p>
+
 # VeloSearch
 
 [![ci](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml)
