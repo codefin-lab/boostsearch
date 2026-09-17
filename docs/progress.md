@@ -7638,3 +7638,32 @@ machine in the same hour (93,464 and 294 MB), and every branch's own binary
 fell between 86,891 and 97,030, so the drop is the machine's state, not the
 code. The gate is to be rerun on a quiet machine. Still ahead of OpenSearch
 3.1.0 on all 34 dimensions.
+
+### Linux, and a node running as a service
+
+Everything until now was measured on one Apple M4 Max. The build was taken to
+a Google Compute Engine machine in asia-southeast1 -- `n2-standard-8`, eight
+vCPUs, Ubuntu 24.04, an SSD -- and built there in 7m57s with no errors and no
+clippy warnings. On it: 291 unit tests, the core corpus 1,427 of 1,427, phase1
+398 of 398, `restart_check`, `refusal_check`, `dls_check`, `health_check` 9/9,
+all twenty-two shared examples, a ten-minute soak, and twenty-five chaos runs
+of three nodes -- all clean, the same answers as on the Mac. Two failures in
+the first pass were the machine's, not the code's: the TLS checks had no
+certificates until `study/security`'s test material was copied over, and
+example 24 failed once on the shared node and passed on its own and on every
+run since.
+
+The bench numbers are the machine's own: 24,876 documents a second indexed
+against the Mac's 91,954, 391 queries a second on one client against 1,391,
+`p50` 2.03 ms against 0.60. A baseline was taken on the VM and a second run
+compared with it moved one dimension more than 5% -- resident memory after
+the search run, 187 MB then 250 MB, which is the allocator rather than a
+change in the code. The OpenSearch figures the gate prints beside these were
+measured on the Mac and are not a comparison on this machine.
+
+The node runs there as a service: its own user, `/var/lib/boostsearch` for its
+data, `/etc/boostsearch` for its configuration, `/var/log/boostsearch` for its
+logs, started at boot, restarted if it dies, and **listening on 127.0.0.1
+only** -- reached through an SSH tunnel, since nothing about opening a port to
+the internet has been decided. A write survived a restart of the service, and
+`_cluster/health` reads green.
