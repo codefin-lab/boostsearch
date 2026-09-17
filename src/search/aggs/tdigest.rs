@@ -1,48 +1,59 @@
 //! The t-digest OpenSearch estimates percentiles with, ported step for step.
 //!
-//! OpenSearch 3.x keeps a `MergingDigest` from t-digest 3.3 (its
+//! OpenSearch 3.1 keeps an `AVLTreeDigest` from t-digest 3.3 (its
 //! `TDigestState`), and a percentile it reports is that sketch's estimate, not
 //! the exact value at the rank. The estimate depends on everything the sketch
-//! went through: the order the values arrived in, when its buffer filled, and
-//! every merge and copy on the way from the shard to the answer. So the port
-//! keeps the library's arithmetic as it is -- the same scale function, the
-//! same buffer sizes, the same order of floating-point operations -- and
-//! `percentiles` and `median_absolute_deviation` replay the same journey the
-//! reference's sketches take.
+//! went through: the order the values arrived in, which centroid each one was
+//! folded into, and how the shards' sketches were merged into one. So the port
+//! keeps the library's arithmetic as it is -- the same scale function, the same
+//! nearest-centroid search, the same order of floating-point operations -- and
+//! `percentiles`, `percentile_ranks` and `median_absolute_deviation` replay the
+//! same journey the reference's sketches take.
+//!
+//! The library holds its centroids in a balanced tree; here they are a pair of
+//! vectors kept in the same order, which the sketch is small enough for. The
+//! tree's rule that a centroid inserted next to an equal one comes after it is
+//! kept, because the order of equal centroids decides which of them a later
+//! value is folded into.
+//!
+//! Two things the vectors cannot follow, and both need a value that repeats.
+//! The library's tree carries the weight of each subtree alongside it, and a
+//! centroid whose weight grows without its mean moving -- which is what adding
+//! a value it already stands for does -- is written in place, leaving those
+//! sums one short. The weight before a centroid is what decides how much room
+//! it has, so from there the reference admits a merge this port refuses: over
+//! 2,000 whole numbers drawn from 0 to 5,000 the reference's 99th percentile
+//! reads 4957.2 where this reads 4960.0. And where a value falls exactly
+//! between two centroids the library picks one of them at random, so the
+//! reference does not settle on one answer either: over 300 documents holding
+//! ten distinct values it gave six different medians in six asks.
 
-/// `MergingDigest` with the `K_2` scale function and the weight limit on,
-/// which are the library's defaults.
+/// `AVLTreeDigest` with the `K_2` scale function, the library's default.
 #[derive(Clone)]
-pub(crate) struct MergingDigest {
-    merge_count: u32,
-    public_compression: f64,
+pub(crate) struct AvlTreeDigest {
     compression: f64,
-    last_used_cell: usize,
-    total_weight: f64,
-    weight: Vec<f64>,
-    mean: Vec<f64>,
-    unmerged_weight: f64,
-    temp_used: usize,
-    temp_weight: Vec<f64>,
-    temp_mean: Vec<f64>,
-    order: Vec<usize>,
+    means: Vec<f64>,
+    counts: Vec<i64>,
+    count: i64,
     min: f64,
     max: f64,
 }
 
-/// `K_2`: `Z = 4 log(n / compression) + 24`.
-fn normalizer(compression: f64, n: f64) -> f64 {
-    compression / (4.0 * java_log(n / compression) + 24.0)
+/// `ScaleFunction.K_2.max`: the largest share of the data one centroid may
+/// stand for at `q`, where `Z = 4 log(n / compression) + 24`.
+fn scale_max(q: f64, compression: f64, n: f64) -> f64 {
+    let z = 4.0 * java_log(n / compression) + 24.0;
+    z * q * (1.0 - q) / compression
 }
 
 /// The natural logarithm as Java's `Math.log` gives it, which is fdlibm's.
 ///
 /// The platform's `ln` rounds differently in the last place for a few
-/// arguments in every hundred, and the scale function's normaliser is taken
-/// from it: one place out in the normaliser moves a centroid's edge, and a
-/// percentile came out a hair from the reference's.
+/// arguments in every hundred, and the scale function is taken from it: one
+/// place out moves a centroid's edge, and a percentile came out a hair from
+/// the reference's. The cardinality sketch counts with the same logarithm.
 #[allow(clippy::excessive_precision)] // fdlibm's constants, as it writes them
-fn java_log(x: f64) -> f64 {
+pub(crate) fn java_log(x: f64) -> f64 {
     const LN2_HI: f64 = 6.93147180369123816490e-01;
     const LN2_LO: f64 = 1.90821492927058770002e-10;
     const TWO54: f64 = 1.80143985094819840000e+16;
@@ -118,10 +129,6 @@ fn java_log(x: f64) -> f64 {
     dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
 }
 
-fn scale_max(q: f64, normalizer: f64) -> f64 {
-    q * (1.0 - q) / normalizer
-}
-
 /// The library's weighted mean of two points, kept between them.
 fn weighted_average(x1: f64, w1: f64, x2: f64, w2: f64) -> f64 {
     let sorted = |x1: f64, w1: f64, x2: f64, w2: f64| {
@@ -131,312 +138,361 @@ fn weighted_average(x1: f64, w1: f64, x2: f64, w2: f64) -> f64 {
     if x1 <= x2 { sorted(x1, w1, x2, w2) } else { sorted(x2, w2, x1, w1) }
 }
 
-impl MergingDigest {
-    pub(crate) fn new(compression: f64) -> MergingDigest {
-        let mut compression = compression;
-        if compression < 10.0 {
-            compression = 10.0;
-        }
-        // the weight limit is on, which leaves room for a few more centroids
-        let mut size_fudge = 10.0;
-        if compression < 30.0 {
-            size_fudge += 20.0;
-        }
-        let mut size = (2.0 * compression + size_fudge).max(-1.0) as i64;
-        let mut buffer_size = 5 * size;
-        if buffer_size <= 2 * size {
-            buffer_size = 2 * size;
-        }
-        // two levels of compression: the buffer is merged at a finer grain
-        let scale = ((buffer_size / size) - 1).max(1) as f64;
-        let public_compression = compression;
-        let internal = scale.sqrt() * public_compression;
-        if (size as f64) < internal + size_fudge {
-            size = (internal + size_fudge).ceil() as i64;
-        }
-        if buffer_size <= 2 * size {
-            buffer_size = 2 * size;
-        }
-        MergingDigest {
-            merge_count: 0,
-            public_compression,
-            compression: internal,
-            last_used_cell: 0,
-            total_weight: 0.0,
-            weight: vec![0.0; size as usize],
-            mean: vec![0.0; size as usize],
-            unmerged_weight: 0.0,
-            temp_used: 0,
-            temp_weight: vec![0.0; buffer_size as usize],
-            temp_mean: vec![0.0; buffer_size as usize],
-            order: vec![0; buffer_size as usize],
+impl AvlTreeDigest {
+    pub(crate) fn new(compression: f64) -> AvlTreeDigest {
+        AvlTreeDigest {
+            compression,
+            means: Vec::new(),
+            counts: Vec::new(),
+            count: 0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
         }
     }
 
-    /// `add(double)` and `add(double, int)`.
-    pub(crate) fn add(&mut self, x: f64, w: u64) {
+    pub(crate) fn size(&self) -> i64 {
+        self.count
+    }
+
+    /// `AVLGroupTree.floor`: the last centroid whose mean is below `x`.
+    fn floor(&self, x: f64) -> Option<usize> {
+        let at = self.means.partition_point(|m| *m < x);
+        (at > 0).then(|| at - 1)
+    }
+
+    /// Where the tree would put a centroid of this mean: after any that are
+    /// equal to it, since it treats a new node as the greater of two equals.
+    fn insertion_point(&self, mean: f64) -> usize {
+        self.means.partition_point(|m| *m <= mean)
+    }
+
+    fn insert(&mut self, mean: f64, count: i64) {
+        let at = self.insertion_point(mean);
+        self.means.insert(at, mean);
+        self.counts.insert(at, count);
+    }
+
+    /// The weight of every centroid before this one.
+    fn head_sum(&self, at: usize) -> i64 {
+        self.counts[..at].iter().sum()
+    }
+
+    /// `add(double x, int w)`: the value folded into the nearest centroid that
+    /// has room for it, or kept as a centroid of its own.
+    pub(crate) fn add(&mut self, x: f64, w: i64) {
         if x.is_nan() {
             return;
         }
-        if self.temp_used >= self.temp_weight.len() - self.last_used_cell - 1 {
-            self.merge_new_values(false, self.compression);
-        }
-        let at = self.temp_used;
-        self.temp_used += 1;
-        self.temp_weight[at] = w as f64;
-        self.temp_mean[at] = x;
-        self.unmerged_weight += w as f64;
         if x < self.min {
             self.min = x;
         }
         if x > self.max {
             self.max = x;
         }
-    }
-
-    /// `add(TDigest)`: each centroid of the other added as a weighted point.
-    pub(crate) fn add_digest(&mut self, other: &mut MergingDigest) {
-        for (m, w) in other.centroids() {
-            self.add(m, w);
-        }
-    }
-
-    /// `add(List<TDigest>)`: the other's centroids merged in all at once.
-    pub(crate) fn add_all(&mut self, other: &mut MergingDigest) {
-        other.compress();
-        let n = other.last_used_cell;
-        if n == 0 {
+        if self.means.is_empty() {
+            self.insert(x, w);
+            self.count = w;
             return;
         }
-        let mut m = vec![0.0; n.max(n + self.last_used_cell)];
-        let mut w = vec![0.0; n.max(n + self.last_used_cell)];
-        m[..n].copy_from_slice(&other.mean[..n]);
-        w[..n].copy_from_slice(&other.weight[..n]);
-        let mut total = 0.0;
-        for x in &w[..n] {
-            total += x;
-        }
-        let mut order = vec![0usize; n + self.last_used_cell];
-        self.merge(&mut m, &mut w, n, &mut order, total, false, self.compression);
-    }
-
-    fn merge_new_values(&mut self, force: bool, compression: f64) {
-        if self.total_weight == 0.0 && self.unmerged_weight == 0.0 {
-            return;
-        }
-        if force || self.unmerged_weight > 0.0 {
-            let mut m = std::mem::take(&mut self.temp_mean);
-            let mut w = std::mem::take(&mut self.temp_weight);
-            let mut order = std::mem::take(&mut self.order);
-            let backwards = self.merge_count % 2 == 1;
-            self.merge(
-                &mut m,
-                &mut w,
-                self.temp_used,
-                &mut order,
-                self.unmerged_weight,
-                backwards,
-                compression,
-            );
-            self.temp_mean = m;
-            self.temp_weight = w;
-            self.order = order;
-            self.merge_count += 1;
-            self.temp_used = 0;
-            self.unmerged_weight = 0.0;
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn merge(
-        &mut self,
-        incoming_mean: &mut [f64],
-        incoming_weight: &mut [f64],
-        incoming_count: usize,
-        order: &mut [usize],
-        unmerged_weight: f64,
-        run_backwards: bool,
-        compression: f64,
-    ) {
-        let last = self.last_used_cell;
-        incoming_mean[incoming_count..incoming_count + last].copy_from_slice(&self.mean[..last]);
-        incoming_weight[incoming_count..incoming_count + last]
-            .copy_from_slice(&self.weight[..last]);
-        let count = incoming_count + last;
-        // a stable sort: equal means keep the order they came in
-        for (i, o) in order.iter_mut().enumerate().take(count) {
-            *o = i;
-        }
-        order[..count].sort_by(|a, b| {
-            incoming_mean[*a].partial_cmp(&incoming_mean[*b]).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        self.total_weight += unmerged_weight;
-        if run_backwards {
-            order[..count].reverse();
-        }
-        self.last_used_cell = 0;
-        self.mean[0] = incoming_mean[order[0]];
-        self.weight[0] = incoming_weight[order[0]];
-        let mut so_far = 0.0f64;
-        let norm = normalizer(compression, self.total_weight);
-        for (i, &ix) in order.iter().enumerate().take(count).skip(1) {
-            let at = self.last_used_cell;
-            let proposed = self.weight[at] + incoming_weight[ix];
-            let q0 = so_far / self.total_weight;
-            let q2 = (so_far + proposed) / self.total_weight;
-            let mut add_this =
-                proposed <= self.total_weight * scale_max(q0, norm).min(scale_max(q2, norm));
-            if i == 1 || i == count - 1 {
-                // the first and last centroids stay single points
-                add_this = false;
+        let mut start = self.floor(x).unwrap_or(0);
+        let mut min_distance = f64::MAX;
+        let mut last_neighbor = self.means.len();
+        let mut neighbor = start;
+        while neighbor < self.means.len() {
+            let z = (self.means[neighbor] - x).abs();
+            if z < min_distance {
+                start = neighbor;
+                min_distance = z;
+            } else if z > min_distance {
+                // as soon as the distance grows, the nearest is behind us
+                last_neighbor = neighbor;
+                break;
             }
-            if add_this {
-                self.weight[at] += incoming_weight[ix];
-                self.mean[at] = self.mean[at]
-                    + (incoming_mean[ix] - self.mean[at]) * incoming_weight[ix] / self.weight[at];
-                incoming_weight[ix] = 0.0;
-            } else {
-                so_far += self.weight[at];
-                self.last_used_cell += 1;
-                let at = self.last_used_cell;
-                self.mean[at] = incoming_mean[ix];
-                self.weight[at] = incoming_weight[ix];
-                incoming_weight[ix] = 0.0;
+            neighbor += 1;
+        }
+        // Among the centroids exactly as near as each other, the library takes
+        // one at random; the first is taken here. They are only ever more than
+        // one when a value falls midway between two centroids or sits on
+        // several with the same mean, and the reference's own answer is not
+        // settled in that case.
+        let mut closest = None;
+        for neighbor in start..last_neighbor {
+            let q0 = self.head_sum(neighbor) as f64 / self.count as f64;
+            let q1 = q0 + self.counts[neighbor] as f64 / self.count as f64;
+            let n = self.count as f64;
+            let k = n * scale_max(q0, self.compression, n).min(scale_max(q1, self.compression, n));
+            if (self.counts[neighbor] + w) as f64 <= k {
+                closest = Some(neighbor);
+                break;
             }
         }
-        self.last_used_cell += 1;
-        let n = self.last_used_cell;
-        if run_backwards {
-            self.mean[..n].reverse();
-            self.weight[..n].reverse();
+        match closest {
+            None => self.insert(x, w),
+            Some(at) => {
+                let mean = weighted_average(self.means[at], self.counts[at] as f64, x, w as f64);
+                let count = self.counts[at] + w;
+                if mean == self.means[at] {
+                    // the tree updates a centroid in place when its mean does
+                    // not move, which keeps equal centroids from shuffling
+                    self.counts[at] = count;
+                } else {
+                    self.means.remove(at);
+                    self.counts.remove(at);
+                    self.insert(mean, count);
+                }
+            }
         }
-        if self.total_weight > 0.0 {
-            self.min = self.min.min(self.mean[0]);
-            self.max = self.max.max(self.mean[n - 1]);
+        self.count += w;
+        if self.means.len() as f64 > 20.0 * self.compression {
+            // may happen when the values arrive in order
+            self.compress();
+        }
+    }
+
+    /// `add(TDigest other)`: the other's centroids added one at a time, in
+    /// order, which is how a shard's sketch reaches the merged one.
+    pub(crate) fn add_digest(&mut self, other: &AvlTreeDigest) {
+        for (mean, count) in other.centroids() {
+            self.add(mean, count);
         }
     }
 
     pub(crate) fn compress(&mut self) {
-        self.merge_new_values(true, self.public_compression);
+        if self.means.len() <= 1 {
+            return;
+        }
+        let total = self.count as f64;
+        let limit = |n: f64| total * scale_max(n / total, self.compression, total);
+        let mut n0 = 0.0;
+        let mut k0 = limit(n0);
+        let mut node = 0usize;
+        let mut w0 = self.counts[node];
+        let mut n1 = n0 + w0 as f64;
+        let mut w1 = 0i64;
+        loop {
+            let after = node + 1;
+            while after < self.means.len() {
+                w1 = self.counts[after];
+                let k1 = limit(n1 + w1 as f64);
+                if (w0 + w1) as f64 > k0.min(k1) {
+                    break;
+                }
+                let mean =
+                    weighted_average(self.means[node], w0 as f64, self.means[after], w1 as f64);
+                self.means[node] = mean;
+                self.counts[node] = w0 + w1;
+                self.means.remove(after);
+                self.counts.remove(after);
+                n1 += w1 as f64;
+                w0 += w1;
+            }
+            if after >= self.means.len() {
+                break;
+            }
+            node = after;
+            n0 = n1;
+            k0 = limit(n0);
+            w0 = w1;
+            n1 = n0 + w0 as f64;
+        }
     }
 
-    pub(crate) fn size(&self) -> f64 {
-        self.total_weight + self.unmerged_weight
+    pub(crate) fn centroids(&self) -> Vec<(f64, i64)> {
+        self.means.iter().copied().zip(self.counts.iter().copied()).collect()
     }
 
-    /// `centroids()`, which compresses first.
-    ///
-    /// Each comes out as a `Centroid` object, whose constructor adds the mean
-    /// to an empty centroid of the same weight: `0 + w * (mean - 0) / w`,
-    /// which is not always the mean it was given, by one place in the last
-    /// digit. Reading the mean straight from the array put a percentile over
-    /// several shards a hair from the reference's.
-    pub(crate) fn centroids(&mut self) -> Vec<(f64, u64)> {
-        self.compress();
-        (0..self.last_used_cell)
-            .map(|i| {
-                let count = self.weight[i] as i32;
-                let mean = 0.0 + (count as f64 * (self.mean[i] - 0.0)) / count as f64;
-                (mean, count as u64)
-            })
-            .collect()
-    }
-
-    pub(crate) fn quantile(&mut self, q: f64) -> f64 {
-        self.merge_new_values(false, self.compression);
-        let n = self.last_used_cell;
-        if n == 0 {
+    pub(crate) fn quantile(&self, q: f64) -> f64 {
+        let size = self.means.len();
+        if size == 0 {
             return f64::NAN;
         }
-        if n == 1 {
-            return self.mean[0];
+        if size == 1 {
+            return self.means[0];
         }
-        let (mean, weight, total) = (&self.mean, &self.weight, self.total_weight);
-        let index = q * total;
+        let count = self.count as f64;
+        // where the value would sit if the samples were a sorted array
+        let index = q * count;
         if index < 1.0 {
             return self.min;
         }
-        if weight[0] > 1.0 && index < weight[0] / 2.0 {
-            return self.min + (index - 1.0) / (weight[0] / 2.0 - 1.0) * (mean[0] - self.min);
-        }
-        if index > total - 1.0 {
+        if index >= count - 1.0 {
             return self.max;
         }
-        if weight[n - 1] > 1.0 && total - index <= weight[n - 1] / 2.0 {
-            return self.max
-                - (total - index - 1.0) / (weight[n - 1] / 2.0 - 1.0) * (self.max - mean[n - 1]);
+        let mut current = 0usize;
+        let mut current_weight = self.counts[current];
+        if current_weight == 2 && index <= 2.0 {
+            // the first centroid holds two samples, one of them the minimum,
+            // so the other one's place is known
+            return 2.0 * self.means[current] - self.min;
         }
-        let mut so_far = weight[0] / 2.0;
-        for i in 0..n - 1 {
-            let dw = (weight[i] + weight[i + 1]) / 2.0;
-            if so_far + dw > index {
+        if self.counts[size - 1] == 2 && index > count - 2.0 {
+            return 2.0 * self.means[size - 1] - self.max;
+        }
+        // the weight to the left of the current centroid's centre
+        let mut so_far = current_weight as f64 / 2.0;
+        if index < so_far {
+            // between the minimum and the first centroid, with the sample that
+            // stands at the minimum left out of the interpolation
+            return weighted_average(self.min, so_far - index, self.means[current], index - 1.0);
+        }
+        for _ in 0..size - 1 {
+            let next = current + 1;
+            let next_weight = self.counts[next];
+            let dw = (current_weight + next_weight) as f64 / 2.0;
+            if index < so_far + dw {
                 let mut left = 0.0;
-                if weight[i] == 1.0 {
-                    if index - so_far < 0.5 {
-                        return mean[i];
+                if current_weight == 1 {
+                    if index < so_far + 0.5 {
+                        return self.means[current];
                     }
                     left = 0.5;
                 }
                 let mut right = 0.0;
-                if weight[i + 1] == 1.0 {
-                    if so_far + dw - index <= 0.5 {
-                        return mean[i + 1];
+                if next_weight == 1 {
+                    if index >= so_far + dw - 0.5 {
+                        return self.means[next];
                     }
                     right = 0.5;
                 }
-                let z1 = index - so_far - left;
-                let z2 = so_far + dw - index - right;
-                return weighted_average(mean[i], z2, mean[i + 1], z1);
+                let w1 = index - so_far - left;
+                let w2 = so_far + dw - index - right;
+                return weighted_average(self.means[current], w2, self.means[next], w1);
             }
             so_far += dw;
+            current = next;
+            current_weight = next_weight;
         }
-        let z1 = index - total - weight[n - 1] / 2.0;
-        let z2 = weight[n - 1] / 2.0 - z1;
-        weighted_average(mean[n - 1], z1, self.max, z2)
+        // in the right half of the last centroid, interpolating to the maximum
+        let w1 = index - so_far;
+        let w2 = count - 1.0 - index;
+        weighted_average(self.means[current], w2, self.max, w1)
     }
 
-    /// The sketch as it arrives on the other side of the wire: the library's
-    /// bytes, read back into a new digest, which `TDigestState` then merges
-    /// into one more.
-    pub(crate) fn round_trip(&mut self) -> MergingDigest {
-        // `TDigestState.write` asks the size and then the bytes, and each
-        // compresses the sketch again, every other time from the other end
-        self.compress();
-        self.compress();
-        let mut read = MergingDigest::new(self.public_compression);
-        read.min = self.min;
-        read.max = self.max;
-        let n = self.last_used_cell;
-        read.last_used_cell = n;
-        for i in 0..n {
-            read.weight[i] = self.weight[i];
-            read.mean[i] = self.mean[i];
-            read.total_weight += self.weight[i];
+    /// The share of the data at or below `x`, which is what a
+    /// `percentile_ranks` aggregation reports.
+    pub(crate) fn cdf(&self, x: f64) -> f64 {
+        let size = self.means.len();
+        if size == 0 {
+            return f64::NAN;
         }
-        let mut state = MergingDigest::new(self.public_compression);
-        // reading back, it looks at the centroids to see whether there are
-        // any, which compresses the copy once before it is merged in
-        if !read.centroids().is_empty() {
-            state.add_all(&mut read);
+        let n = self.count as f64;
+        if size == 1 {
+            if x < self.means[0] {
+                return 0.0;
+            } else if x > self.means[0] {
+                return 1.0;
+            }
+            return 0.5;
         }
-        state
+        if x < self.min {
+            return 0.0;
+        }
+        if x == self.min {
+            // one or more centroids stand at x; they count as one
+            let mut dw = 0.0;
+            for i in 0..size {
+                if self.means[i] != x {
+                    break;
+                }
+                dw += self.counts[i] as f64;
+            }
+            return dw / 2.0 / n;
+        }
+        if x > self.max {
+            return 1.0;
+        }
+        if x == self.max {
+            let mut dw = 0.0;
+            let mut i = size;
+            while i > 0 && self.means[i - 1] == x {
+                dw += self.counts[i - 1] as f64;
+                i -= 1;
+            }
+            return (n - dw / 2.0) / n;
+        }
+        let first_mean = self.means[0];
+        if x < first_mean {
+            return self.interpolate_tail(x, 0, first_mean, self.min);
+        }
+        let last_mean = self.means[size - 1];
+        if x > last_mean {
+            return 1.0 - self.interpolate_tail(x, size - 1, last_mean, self.max);
+        }
+        let mut a_mean = self.means[0];
+        let mut a_weight = self.counts[0] as f64;
+        if x == a_mean {
+            return a_weight / 2.0 / n;
+        }
+        let mut b = 1usize;
+        let mut b_mean = self.means[b];
+        let mut b_weight = self.counts[b] as f64;
+        let mut so_far = 0.0;
+        while b_weight > 0.0 {
+            if x == b_mean {
+                so_far += a_weight;
+                while b + 1 < size {
+                    b += 1;
+                    if x == self.means[b] {
+                        b_weight += self.counts[b] as f64;
+                    } else {
+                        break;
+                    }
+                }
+                return (so_far + b_weight / 2.0) / n;
+            }
+            if x < b_mean {
+                // strictly between the two centroids
+                if a_weight == 1.0 {
+                    if b_weight == 1.0 {
+                        // all of a is passed and none of b, nothing to spread
+                        return (so_far + 1.0) / n;
+                    }
+                    let partial = (x - a_mean) / (b_mean - a_mean) * b_weight / 2.0;
+                    return (so_far + 1.0 + partial) / n;
+                } else if b_weight == 1.0 {
+                    let partial = (x - a_mean) / (b_mean - a_mean) * a_weight / 2.0;
+                    return (so_far + a_weight / 2.0 + partial) / n;
+                }
+                let partial = (x - a_mean) / (b_mean - a_mean) * (a_weight + b_weight) / 2.0;
+                return (so_far + a_weight / 2.0 + partial) / n;
+            }
+            so_far += a_weight;
+            if b + 1 < size {
+                a_mean = b_mean;
+                a_weight = b_weight;
+                b += 1;
+                b_mean = self.means[b];
+                b_weight = self.counts[b] as f64;
+            } else {
+                b_weight = 0.0;
+            }
+        }
+        f64::NAN
+    }
+
+    fn interpolate_tail(&self, x: f64, at: usize, mean: f64, extreme: f64) -> f64 {
+        let count = self.counts[at] as f64;
+        let n = self.count as f64;
+        if count == 2.0 {
+            // the other sample must be on the other side of the mean
+            return 1.0 / n;
+        }
+        // the weight there is to spread, and how much of it is below x
+        let weight = count / 2.0 - 1.0;
+        let partial = (extreme - x) / (extreme - mean) * weight;
+        (partial + 1.0) / n
     }
 
     /// `computeMedianAbsoluteDeviation`: the median of how far each centroid
-    /// lies from the median, one point per value the centroid stands for.
-    pub(crate) fn median_absolute_deviation(&mut self) -> Option<f64> {
-        if self.size() == 0.0 {
+    /// lies from the median, weighted by the values it stands for.
+    pub(crate) fn median_absolute_deviation(&self) -> Option<f64> {
+        if self.count == 0 {
             return None;
         }
         let median = self.quantile(0.5);
-        let mut deviations = MergingDigest::new(self.public_compression);
-        for (m, w) in self.centroids() {
-            let d = (median - m).abs();
-            for _ in 0..w {
-                deviations.add(d, 1);
-            }
+        let mut deviations = AvlTreeDigest::new(self.compression);
+        for (mean, count) in self.centroids() {
+            deviations.add((median - mean).abs(), count);
         }
         Some(deviations.quantile(0.5))
     }
@@ -448,13 +504,14 @@ mod tests {
 
     #[test]
     fn a_handful_of_values_are_kept_whole() {
-        let mut d = MergingDigest::new(100.0);
+        let mut d = AvlTreeDigest::new(100.0);
         for v in [1.0, 2.0, 3.0] {
             d.add(v, 1);
         }
         assert_eq!(d.quantile(0.5), 2.0);
         assert_eq!(d.quantile(0.0), 1.0);
         assert_eq!(d.quantile(1.0), 3.0);
+        assert_eq!(d.centroids(), vec![(1.0, 1), (2.0, 1), (3.0, 1)]);
     }
 
     #[test]
@@ -469,11 +526,30 @@ mod tests {
         }
     }
 
+    /// The sketch the reference builds over the aggregation corpus, whose
+    /// centroids and percentiles were read back from t-digest 3.3 itself.
     #[test]
-    fn the_buffer_sizes_are_the_librarys() {
-        let d = MergingDigest::new(100.0);
-        assert_eq!(d.weight.len(), 210);
-        assert_eq!(d.temp_weight.len(), 1050);
-        assert_eq!(d.compression, 200.0);
+    fn the_corpus_sketch_is_the_librarys() {
+        let xs = [
+            0.0, 5.286, 10.571, 1.429, 6.714, 12.0, 2.857, 8.143, 13.429, 4.286, 9.571, 0.429,
+            5.714, 11.0, 1.857, 7.143, 12.429, 3.286, 8.571, 13.857, 4.714, 10.0, 0.857, 6.143,
+            11.429, 2.286, 7.571, 12.857, 3.714, 9.0, 14.286, 5.143, 10.429, 1.286, 6.571, 11.857,
+            2.714, 8.0, 13.286, 4.143, 9.429, 0.286, 5.571, 10.857, 1.714, 7.0, 12.286, 3.143,
+            8.429, 13.714, 4.571, 9.857, 0.714, 6.0, 11.286, 2.143, 7.429, 12.714, 3.571, 8.857,
+        ];
+        let mut d = AvlTreeDigest::new(100.0);
+        for x in xs {
+            d.add(x, 1);
+        }
+        assert_eq!(d.quantile(0.01), 0.0);
+        assert_eq!(d.quantile(0.25), 3.286);
+        assert_eq!(d.quantile(0.5), 7.0715);
+        assert_eq!(d.quantile(0.75), 10.857);
+        assert_eq!(d.quantile(0.99), 14.286);
+        assert_eq!(d.cdf(3.0) * 100.0, 21.666666666666668);
+        assert_eq!(d.cdf(12.0) * 100.0, 84.16666666666667);
+        // the first centroid to hold two values, where the sketch stops being
+        // able to keep every value apart
+        assert_eq!(d.centroids()[15], (3.6425, 2));
     }
 }

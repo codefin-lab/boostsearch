@@ -120,26 +120,25 @@ pub(crate) fn run_hdr_percentiles(
     // reports is the sketch's rather than the one at the rank. The value at
     // the rank was reported here, which is the true median -- 72.87 over the
     // sales of example 24 where the reference answers 72.45.
-    let mut digest: Option<crate::search::aggs::tdigest::MergingDigest> = None;
+    let mut digest: Option<AvlTreeDigest> = None;
     if hdr {
         for v in collect_field_values(store, targets, &query, &field, missing)? {
             hist.record(v);
         }
     } else {
-        let compression = spec
-            .pointer("/tdigest/compression")
-            .or_else(|| spec.get("compression"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(100.0);
-        digest = Some(percentile_digest(store, targets, &query, &field, missing, compression)?);
+        digest = Some(percentile_digest(
+            store,
+            targets,
+            &query,
+            &field,
+            missing,
+            tdigest_compression(&spec),
+        )?);
     }
     let value_at = |p: f64| -> Option<f64> {
         match digest.as_ref() {
             None => hist.value_at(p),
-            Some(d) => {
-                let mut d = d.clone();
-                (d.size() > 0.0).then(|| d.quantile(p / 100.0)).filter(|v| !v.is_nan())
-            }
+            Some(d) => (d.size() > 0).then(|| d.quantile(p / 100.0)).filter(|v| !v.is_nan()),
         }
     };
 
@@ -272,11 +271,25 @@ pub(crate) fn run_percentile_ranks(
         .unwrap_or_default();
     let keyed = spec.get("keyed").and_then(|v| v.as_bool()).unwrap_or(true);
     let query = combine(main_query, None);
+    let hdr = spec.get("hdr").is_some();
+    // Without `hdr` the reference answers from its t-digest's `cdf`, which is
+    // not the exact share of the data at or below the value: where a centroid
+    // stands for several values the weight either side of it is spread across
+    // the gap to its neighbour. The exact share was reported here, which over
+    // the aggregation corpus reads 53.33 against the reference's 52.92.
+    let digest = (!hdr)
+        .then(|| {
+            percentile_digest(store, targets, &query, &field, missing, tdigest_compression(&spec))
+        })
+        .transpose()?;
     let mut values = collect_field_values(store, targets, &query, &field, missing)?;
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     let rank = |v: f64| -> Option<f64> {
         if values.is_empty() {
             return None;
+        }
+        if let Some(d) = digest.as_ref() {
+            return Some(d.cdf(v).clamp(0.0, 1.0) * 100.0);
         }
         // a value that is there counts for half: the share of the documents
         // below it, plus half of those standing at it
@@ -367,28 +380,80 @@ pub(crate) fn run_mad_agg(
     let (field, missing) = agg_field_and_missing(&spec);
     let query = combine(main_query, None);
     let compression = spec.get("compression").and_then(|v| v.as_f64()).unwrap_or(1000.0);
-    // The deviation is the reference's estimate from its t-digest, worked out
-    // where the sketch is: on the shard when there is one shard, whose answer
-    // is carried as it is, and on the merged sketch when there are several.
-    let shards = shard_sketches(store, targets, &query, &field, missing, compression)?;
-    let value = match shards.len() {
-        0 => None,
-        1 => shards.into_iter().next().and_then(|mut s| s.median_absolute_deviation()),
-        _ => {
-            let mut merged = MergingDigest::new(compression);
-            for mut s in shards {
-                // each shard answered before its sketch was sent
-                let _ = s.median_absolute_deviation();
-                let mut sent = s.round_trip();
-                merged.add_digest(&mut sent);
-            }
-            merged.median_absolute_deviation()
-        }
-    };
+    // The deviation is the reference's estimate, taken from the one sketch the
+    // shards' sketches are merged into rather than from any shard's own.
+    let value = percentile_digest(store, targets, &query, &field, missing, compression)?
+        .median_absolute_deviation();
     Ok(json!({ "value": value }))
 }
 
-use crate::search::aggs::tdigest::MergingDigest;
+use crate::search::aggs::hll::{DEFAULT_PRECISION, HyperLogLogPlusPlus, precision_from_threshold};
+use crate::search::aggs::tdigest::AvlTreeDigest;
+
+/// `cardinality`: the reference's HyperLogLog++ estimate over the hashes of
+/// the values, which is not a count of the distinct ones -- at a coarse
+/// `precision_threshold` the sketch cannot tell every value apart.
+pub(crate) fn run_cardinality_agg(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    def: &Value,
+) -> std::result::Result<Value, Response> {
+    let spec = def.get("cardinality").cloned().unwrap_or(json!({}));
+    let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let precision = match spec.get("precision_threshold").and_then(|v| v.as_i64()) {
+        Some(t) => precision_from_threshold(t),
+        None => DEFAULT_PRECISION,
+    };
+    let query = combine(main_query, None);
+    // A whole number is hashed as the long the column holds; anything else as
+    // the bits of its double, which is what the reference hashes.
+    let ty = targets
+        .iter()
+        .filter_map(|n| store.get(n))
+        .find_map(|st| st.read().mapping.type_of(&field).map(|t| t.to_string()));
+    let integral = matches!(
+        ty.as_deref(),
+        Some("long" | "integer" | "short" | "byte" | "date" | "date_nanos" | "boolean")
+    );
+    let hash_of = |held: &Held| -> i64 {
+        match held {
+            Held::Number(n) if integral => crate::search::aggs::hll::mix64(*n as i64),
+            Held::Number(n) => crate::search::aggs::hll::mix64(n.to_bits() as i64),
+            Held::Text(s) => crate::search::aggs::hll::murmur3_h1(s.as_bytes()),
+        }
+    };
+    let substitute = spec.get("missing").and_then(|m| match m {
+        Value::String(s) => Some(Held::Text(s.clone())),
+        Value::Number(n) => n.as_f64().map(Held::Number),
+        Value::Bool(b) => Some(Held::Number(f64::from(*b))),
+        _ => None,
+    });
+    let mut sketch = HyperLogLogPlusPlus::new(precision);
+    for shard in shard_docs(store, targets, &query, &[&field])? {
+        for (_, values) in &shard.docs {
+            let held = &values[0];
+            if held.is_empty() {
+                if let Some(m) = substitute.as_ref() {
+                    sketch.collect(hash_of(m));
+                }
+                continue;
+            }
+            for value in held {
+                sketch.collect(hash_of(value));
+            }
+        }
+    }
+    Ok(json!({ "value": sketch.cardinality() }))
+}
+
+/// The compression a `percentiles` or `percentile_ranks` sketch is built with.
+fn tdigest_compression(spec: &Value) -> f64 {
+    spec.pointer("/tdigest/compression")
+        .or_else(|| spec.get("compression"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(100.0)
+}
 
 /// One t-digest per shard that holds any of the values, each fed the values
 /// in the order the shard holds its documents.
@@ -399,11 +464,11 @@ fn shard_sketches(
     field: &str,
     missing: Option<f64>,
     compression: f64,
-) -> std::result::Result<Vec<MergingDigest>, Response> {
+) -> std::result::Result<Vec<AvlTreeDigest>, Response> {
     let mut out = Vec::new();
     for shard in shard_docs(store, targets, query, &[field])? {
         // a shard with nothing to add still answers, with an empty sketch
-        let mut digest = MergingDigest::new(compression);
+        let mut digest = AvlTreeDigest::new(compression);
         for (_, values) in &shard.docs {
             let mut numbers: Vec<f64> = values[0]
                 .iter()
@@ -428,9 +493,10 @@ fn shard_sketches(
 }
 
 /// The sketch a `percentiles` aggregation reads its answer from, after the
-/// journey the reference's takes: from a single shard it arrives serialised
-/// and read back; from several, each arrives that way, they are merged, and
-/// the merged sketch is serialised and read back once more.
+/// journey the reference's takes: one sketch per shard, and each shard's
+/// centroids added in turn to the empty sketch the answer is read from. The
+/// merge is there even for a single shard, because the reference reduces one
+/// shard's answer the same way it reduces several.
 fn percentile_digest(
     store: &Store,
     targets: &[String],
@@ -438,24 +504,12 @@ fn percentile_digest(
     field: &str,
     missing: Option<f64>,
     compression: f64,
-) -> std::result::Result<MergingDigest, Response> {
-    let shards = shard_sketches(store, targets, query, field, missing, compression)?;
-    Ok(match shards.len() {
-        0 => MergingDigest::new(compression),
-        1 => shards
-            .into_iter()
-            .next()
-            .map(|mut s| s.round_trip())
-            .unwrap_or_else(|| MergingDigest::new(compression)),
-        _ => {
-            let mut merged = MergingDigest::new(compression);
-            for mut s in shards {
-                let mut sent = s.round_trip();
-                merged.add_digest(&mut sent);
-            }
-            merged.round_trip()
-        }
-    })
+) -> std::result::Result<AvlTreeDigest, Response> {
+    let mut merged = AvlTreeDigest::new(compression);
+    for shard in shard_sketches(store, targets, query, field, missing, compression)? {
+        merged.add_digest(&shard);
+    }
+    Ok(merged)
 }
 
 /// The metric aggregations that take a value per document, where the value is

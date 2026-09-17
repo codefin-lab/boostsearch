@@ -1,6 +1,8 @@
 //! Aggregations: the ones VeloCore parses, and the ones this engine walks
 //! itself a bucket at a time.
 
+pub(crate) mod hll;
+mod hll_tables;
 mod matrix;
 pub(crate) use matrix::*;
 mod bucket;

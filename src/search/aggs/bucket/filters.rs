@@ -157,6 +157,8 @@ pub(crate) fn run_peeled_agg(
         run_mad_agg(store, targets, query_json, def)
     } else if def.get("percentiles").is_some() {
         run_hdr_percentiles(store, targets, query_json, def)
+    } else if def.get("cardinality").is_some() && def.pointer("/cardinality/script").is_none() {
+        run_cardinality_agg(store, targets, query_json, def)
     } else if def
         .get("terms")
         .and_then(|t| t.get("field"))
