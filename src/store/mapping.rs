@@ -335,6 +335,15 @@ impl Mapping {
                 path.truncate(base);
                 continue;
             }
+            // a handful of types are written as objects and are still one
+            // field: the ends of a range, the coordinates of a point, the
+            // input and weight of a suggestion. What the object holds names
+            // parts of the value, not fields, so a `geo_point` stays one
+            // `geo_point` rather than growing a `lat` and a `lon` beside it.
+            if kind.is_some_and(structured_leaf) {
+                path.truncate(base);
+                continue;
+            }
             let known = kind.is_some();
             // a value that is an object, or a list of them, is looked into
             // even where the object itself is mapped: its fields may not be
@@ -910,6 +919,28 @@ fn template_for(templates: &[Value], path: &str, kind: &str) -> Option<Value> {
 
 fn pointer_of(path: &str) -> String {
     format!("/properties/{}", path.replace('.', "/properties/"))
+}
+
+/// Whether a type is written as an object and is still a single field.
+///
+/// `object`, `nested` and `flat_object` hold fields; these hold the parts of
+/// one value, and dynamic mapping must not turn those parts into fields.
+pub(crate) fn structured_leaf(ty: &str) -> bool {
+    ty.ends_with("_range")
+        || matches!(
+            ty,
+            "geo_point"
+                | "geo_shape"
+                | "xy_point"
+                | "xy_shape"
+                | "point"
+                | "shape"
+                | "join"
+                | "completion"
+                | "knn_vector"
+                | "rank_features"
+                | "aggregate_metric_double"
+        )
 }
 
 /// Walk a mapping's properties, gathering the analyzer each path names.

@@ -747,6 +747,17 @@ pub fn run(
     body: &Value,
     p: &Params,
 ) -> std::result::Result<Outcome, Response> {
+    // a `wrapper` carries its query as base64 JSON: it is opened first, so
+    // that everything below reads the query it holds
+    let unwrapped;
+    let body = if crate::search::extras::names_a_wrapper(body) {
+        let mut copy = body.clone();
+        crate::search::extras::unwrap_wrappers(&mut copy)?;
+        unwrapped = copy;
+        &unwrapped
+    } else {
+        body
+    };
     // a stored script named by id is the script it names, from here on
     let inlined;
     let body = if mentions_a_script(body) {
@@ -930,6 +941,15 @@ pub fn run(
     validate_params(body, p)?;
     let from = as_usize(body_or_param(body, p, "from")).unwrap_or(0);
     let size = as_usize(body_or_param(body, p, "size")).unwrap_or(10);
+    // A request carrying a suggester and nothing else asks the term
+    // dictionary a question about words, not the index a question about
+    // documents. There is no query to run, so none is run and no hits are
+    // reported -- not even the ones a `match_all` nobody wrote would match.
+    let suggest_only = body.get("suggest").is_some()
+        && body.get("query").is_none()
+        && body.get("aggs").is_none()
+        && body.get("aggregations").is_none();
+    let size = if suggest_only { 0 } else { size };
     // reading documents skips the closed indices a pattern would otherwise
     // reach; a closed index named outright is a different complaint
     // `pit` names a point in time rather than an index expression: it carries
@@ -1156,6 +1176,27 @@ pub fn run(
                 "[joining] queries cannot be executed when 'search.allow_expensive_queries' is \
                  set to false.",
             ));
+        }
+        // A clause the mapping makes impossible is the shard's complaint and
+        // is answered as one: a relation asked of an index with no join
+        // field used to come back as an unknown query, because the rewrite
+        // that turns a relation into two passes quietly left the clause
+        // alone and nothing downstream knew the name.
+        let has_join = join_field(store, &targets).is_some();
+        if let Some(index) = targets.first()
+            && let Some(st) = store.get(index)
+        {
+            let g = st.read();
+            if let Some((reason, behind)) =
+                crate::search::extras::mapping_complaint(q, index, &g.mapping, has_join)
+            {
+                let uuid = g.setting("uuid").unwrap_or_else(|| crate::store::index_uuid(index));
+                return Err(crate::api::shared::all_shards_failed(
+                    StatusCode::BAD_REQUEST,
+                    index,
+                    crate::api::shared::query_shard_cause(index, &uuid, &reason, behind.as_deref()),
+                ));
+            }
         }
         collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
@@ -1998,6 +2039,9 @@ pub fn run(
             }
         }
     }
+
+    // see `suggest_only`: the words are the whole answer
+    let (total, max_score) = if suggest_only { (0, None) } else { (total, max_score) };
 
     // a node answering a coordinator stops here: the page, with the order
     // each hit's write arrived in, and the aggregations still intermediate

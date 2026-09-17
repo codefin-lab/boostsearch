@@ -11,6 +11,157 @@ pub(crate) fn expensive_allowed(store: &Store) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether a `wrapper` key holds a wrapper clause rather than a field of
+/// that name: the clause carries the payload under `query`, so a `term` over
+/// a field called `wrapper` is not mistaken for one.
+fn is_wrapper_clause(spec: &Value) -> bool {
+    spec.as_object().is_some_and(|o| o.is_empty() || o.contains_key("query"))
+}
+
+/// Whether a body names a wrapper clause anywhere, so the common request is
+/// not copied to rewrite nothing.
+pub(crate) fn names_a_wrapper(node: &Value) -> bool {
+    match node {
+        Value::Object(o) => {
+            o.get("wrapper").is_some_and(is_wrapper_clause) || o.values().any(names_a_wrapper)
+        }
+        Value::Array(items) => items.iter().any(names_a_wrapper),
+        _ => false,
+    }
+}
+
+/// Replace every `wrapper` clause with the query its payload holds.
+///
+/// A `wrapper` carries a query as base64-encoded JSON, so a client can hand
+/// one through a layer that would otherwise read it. It is the query it holds
+/// and nothing else, so it is opened before anything looks at the query tree:
+/// an `expand_joins` or a `scan_extras` that ran first would have seen a
+/// clause with nothing in it.
+pub(crate) fn unwrap_wrappers(node: &mut Value) -> std::result::Result<(), Response> {
+    use base64::Engine as _;
+    match node {
+        Value::Object(o) => {
+            if let Some(spec) = o.get("wrapper").cloned().filter(is_wrapper_clause) {
+                let malformed = || {
+                    err(StatusCode::BAD_REQUEST, "parsing_exception", "[wrapper] query malformed")
+                };
+                let encoded = spec.get("query").and_then(|v| v.as_str()).ok_or_else(malformed)?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| malformed())?;
+                let inner: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        "x_content_parse_exception",
+                        "Failed to derive xcontent",
+                    )
+                })?;
+                *node = inner;
+                // a payload may itself be a wrapper
+                return unwrap_wrappers(node);
+            }
+            for v in o.values_mut() {
+                unwrap_wrappers(v)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for v in items {
+                unwrap_wrappers(v)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// What a shard says about a query whose clause does not fit the mapping.
+///
+/// These are the shard's complaints, not the coordinator's: the clause parses
+/// and only the mapping makes it impossible -- a relation asked of an index
+/// with no join field, a vector clause over a field that holds no vectors, a
+/// `rank_feature` over a field that carries no feature, a `percolate` over a
+/// field that holds no query. The reason is returned with the illegal
+/// argument behind it, where the reference words it that way.
+pub(crate) fn mapping_complaint(
+    query: &Value,
+    index: &str,
+    mapping: &crate::store::Mapping,
+    has_join: bool,
+) -> Option<(String, Option<String>)> {
+    // the field a clause is written against, which these all name the same
+    // way: either `{"field": "x"}` or `{"x": {...}}`
+    fn named_field(spec: &Value) -> Option<String> {
+        if let Some(f) = spec.get("field").and_then(|f| f.as_str()) {
+            return Some(f.to_string());
+        }
+        spec.as_object()?.keys().next().cloned()
+    }
+    fn walk(
+        node: &Value,
+        index: &str,
+        mapping: &crate::store::Mapping,
+        has_join: bool,
+    ) -> Option<(String, Option<String>)> {
+        match node {
+            Value::Object(o) => {
+                for (key, spec) in o {
+                    let own = match key.as_str() {
+                        "has_child" | "has_parent" if !has_join => {
+                            Some((format!("[{key}] no join field has been configured"), None))
+                        }
+                        "parent_id" if !has_join => Some((
+                            format!("[parent_id] no join field found for index [{index}]"),
+                            None,
+                        )),
+                        "knn" => named_field(spec)
+                            .filter(|f| mapping.type_of(f) != Some("knn_vector"))
+                            .map(|f| {
+                                let behind = format!("Field '{f}' is not knn_vector type.");
+                                (format!("failed to create query: {behind}"), Some(behind))
+                            }),
+                        // a `rank_feature` over a field nobody mapped matches
+                        // nothing and complains about nothing
+                        "rank_feature" => named_field(spec)
+                            .and_then(|f| mapping.type_of(&f).map(|t| t.to_string()))
+                            .filter(|t| !matches!(t.as_str(), "rank_feature" | "rank_features"))
+                            .map(|t| {
+                                let behind = format!(
+                                    "[rank_feature] query only works on [rank_feature] fields \
+                                     and features of [rank_features] fields, not [{t}]"
+                                );
+                                (format!("failed to create query: {behind}"), Some(behind))
+                            }),
+                        "percolate" => named_field(spec)
+                            .filter(|f| mapping.type_of(f) != Some("percolator"))
+                            .map(|f| match mapping.type_of(&f) {
+                                Some(t) => (
+                                    format!(
+                                        "expected field [{f}] to be of type [percolator], but \
+                                         is of type [{t}]"
+                                    ),
+                                    None,
+                                ),
+                                None => (format!("field [{f}] does not exist"), None),
+                            }),
+                        _ => None,
+                    };
+                    if own.is_some() {
+                        return own;
+                    }
+                    if let Some(deeper) = walk(spec, index, mapping, has_join) {
+                        return Some(deeper);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items.iter().find_map(|v| walk(v, index, mapping, has_join)),
+            _ => None,
+        }
+    }
+    walk(query, index, mapping, has_join)
+}
+
 pub(crate) fn scan_extras(node: &Value, out: &mut Extras) {
     match node {
         Value::Object(o) => {

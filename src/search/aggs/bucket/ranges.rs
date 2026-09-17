@@ -962,10 +962,26 @@ pub(crate) fn run_auto_date_histogram(
     if let Some(z) = spec.get("time_zone") {
         request["date_histogram"]["time_zone"] = z.clone();
     }
-    if let Some(sa) = sub_aggs {
+    if let Some(sa) = sub_aggs.clone() {
         request["aggs"] = sa;
     }
     let mut out = run_calendar_histogram(store, targets, main_query, &request)?;
+    // A year is the coarsest rounding there is, and a span of many years
+    // still has more years in it than the caller asked for buckets. The
+    // reference then merges whole years in runs -- five, ten, twenty, fifty
+    // or a hundred -- and names the interval after the run; the merged bucket
+    // keeps the first year's key. Without this, a request for two buckets
+    // over three years was answered with three.
+    let mut label = label.to_string();
+    if label == "1y" {
+        let n = out.get("buckets").and_then(|b| b.as_array()).map(|a| a.len()).unwrap_or(0) as u64;
+        if n > want {
+            const RUNS: &[u64] = &[5, 10, 20, 50, 100];
+            let run = RUNS.iter().copied().find(|m| n.div_ceil(*m) <= want).unwrap_or(100);
+            merge_bucket_runs(store, targets, main_query, &field, &sub_aggs, &mut out, run)?;
+            label = format!("{run}y");
+        }
+    }
     // the keys are written the way the request asked for them
     if let Some(format) = spec.get("format").and_then(|f| f.as_str())
         && let Some(buckets) = out.get_mut("buckets").and_then(|b| b.as_array_mut())
@@ -980,4 +996,62 @@ pub(crate) fn run_auto_date_histogram(
     }
     out["interval"] = json!(label);
     Ok(out)
+}
+
+/// Fold each run of `run` consecutive buckets into one.
+///
+/// The merged bucket keeps the first bucket's key and holds the documents of
+/// the whole run, so its sub-aggregations are asked again over that span
+/// rather than added up from the buckets: a maximum or a cardinality is not
+/// the sum of the parts.
+fn merge_bucket_runs(
+    store: &Store,
+    targets: &[String],
+    main_query: &Option<Value>,
+    field: &Value,
+    sub_aggs: &Option<Value>,
+    out: &mut Value,
+    run: u64,
+) -> std::result::Result<(), Response> {
+    let Some(buckets) = out.get("buckets").and_then(|b| b.as_array()).cloned() else {
+        return Ok(());
+    };
+    let Some(name) = field.as_str() else { return Ok(()) };
+    let base = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
+    let mut merged: Vec<Value> = Vec::new();
+    let run = run as usize;
+    for (nth, chunk) in buckets.chunks(run).enumerate() {
+        let Some(first) = chunk.first() else { continue };
+        let mut bucket = first.clone();
+        let count: u64 =
+            chunk.iter().filter_map(|b| b.get("doc_count").and_then(|c| c.as_u64())).sum();
+        bucket["doc_count"] = json!(count);
+        if let Some(aggs) = sub_aggs {
+            // the run reaches from its first bucket up to the bucket after
+            // its last, which is where the next run starts
+            let from = first.get("key").and_then(|k| k.as_i64());
+            let after =
+                buckets.get((nth + 1) * run).and_then(|b| b.get("key")).and_then(|k| k.as_i64());
+            let mut span = serde_json::Map::new();
+            if let Some(from) = from {
+                span.insert("gte".into(), json!(from));
+            }
+            if let Some(after) = after {
+                span.insert("lt".into(), json!(after));
+            }
+            let narrowed = json!({
+                "bool": {"filter": [base.clone(), {"range": {name: Value::Object(span)}}]}
+            });
+            let (_, sub) =
+                count_with_sub_aggs(store, targets, &narrowed, &Some(aggs.clone()), false)?;
+            if let Some(Value::Object(o)) = sub {
+                for (k, v) in o {
+                    bucket[k] = v;
+                }
+            }
+        }
+        merged.push(bucket);
+    }
+    out["buckets"] = json!(merged);
+    Ok(())
 }

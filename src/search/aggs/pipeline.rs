@@ -474,7 +474,10 @@ pub(crate) fn keys_at(aggs: &Value, path: &str, wanted: f64) -> Vec<String> {
                 .map(|v| v == wanted)
                 .unwrap_or(false)
         })
-        .filter_map(|b| match b.get("key") {
+        // a bucket is named the way it reads, not the way it is held: the
+        // bucket of a date histogram is named by its date, and reporting the
+        // milliseconds behind it gave a key no caller could match up
+        .filter_map(|b| match b.get("key_as_string").or_else(|| b.get("key")) {
             Some(Value::String(s)) => Some(s.clone()),
             Some(other) => Some(other.to_string()),
             None => None,

@@ -66,6 +66,58 @@ pub fn err(status: StatusCode, kind: &str, reason: impl Into<String>) -> Respons
     r
 }
 
+/// A search no shard could carry out, in the shape the reference gives it.
+///
+/// A query the coordinator accepts and a shard then refuses is not a parsing
+/// error: the shard's own complaint is reported as the root cause, again
+/// under the shard that raised it, and the search phase around it says only
+/// that every shard failed.
+pub fn all_shards_failed(status: StatusCode, index: &str, cause: Value) -> Response {
+    // the root cause is the complaint itself; what caused the complaint is
+    // named only where the shard reports it
+    let mut root = cause.clone();
+    if let Some(o) = root.as_object_mut() {
+        o.remove("caused_by");
+    }
+    let mut r = (
+        status,
+        axum::Json(json!({
+            "error": {
+                "root_cause": [root],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "phase": "query",
+                "grouped": true,
+                "failed_shards": [
+                    {"shard": 0, "index": index, "node": "node-0", "reason": cause},
+                ],
+            },
+            "status": status.as_u16(),
+        })),
+    )
+        .into_response();
+    r.extensions_mut().insert(ErrorKind {
+        kind: "search_phase_execution_exception".to_string(),
+        reason: "all shards failed".to_string(),
+    });
+    r
+}
+
+/// What a shard says about a query it cannot build: where it happened, and,
+/// where the reference words it that way, the illegal argument behind it.
+pub fn query_shard_cause(index: &str, uuid: &str, reason: &str, behind: Option<&str>) -> Value {
+    let mut cause = json!({
+        "type": "query_shard_exception",
+        "reason": reason,
+        "index": index,
+        "index_uuid": uuid,
+    });
+    if let Some(behind) = behind {
+        cause["caused_by"] = json!({"type": "illegal_argument_exception", "reason": behind});
+    }
+    cause
+}
+
 /// Where a document's refusal happened: the index, its uuid and the shard.
 #[derive(Clone, Debug)]
 pub struct DocWhere {

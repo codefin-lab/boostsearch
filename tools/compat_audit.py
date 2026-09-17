@@ -231,7 +231,13 @@ def answer_of(path, body):
     return body
 
 
-VOLATILE = re.compile(r'^(took|_shards|_seq_no|_primary_term|_version|timed_out|max_score|_score|_id|uuid|cluster_uuid|start_time.*|end_time.*|duration.*|_index|_node|node|name|version|build.*)$')
+# `index_uuid` and `creation_date` belong here for the same reason as `uuid`
+# and the timings: two engines given the same request cannot answer them the
+# same way and are not meant to. An index made twice has two uuids and two
+# creation stamps, so a shard failure naming the uuid -- which is most of
+# them -- or a GET _settings would differ forever, saying nothing about what
+# either engine does.
+VOLATILE = re.compile(r'^(took|_shards|_seq_no|_primary_term|_version|timed_out|max_score|_score|_id|uuid|index_uuid|cluster_uuid|creation_date|start_time.*|end_time.*|duration.*|_index|_node|node|name|version|build.*)$')
 
 def scrub(node, keep_scores):
     """Drop what two engines are allowed to disagree about."""

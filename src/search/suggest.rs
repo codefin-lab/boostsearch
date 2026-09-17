@@ -305,8 +305,10 @@ pub(crate) fn term_suggest(
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     let size = spec.get("size").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
-    // every word the field actually holds, gathered once
-    let mut vocabulary: std::collections::HashSet<String> = Default::default();
+    // every word the field actually holds, gathered once, with the number of
+    // documents holding it: that count is the `freq` reported beside a
+    // suggestion, so it is counted per document and not per occurrence
+    let mut vocabulary: std::collections::HashMap<String, u64> = Default::default();
     for name in targets {
         let Some(st) = store.get(name) else { continue };
         let g = st.read();
@@ -327,10 +329,14 @@ pub(crate) fn term_suggest(
                 }
                 _ => Vec::new(),
             };
+            let mut here: std::collections::HashSet<String> = Default::default();
             for t in texts {
                 for word in t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
-                    vocabulary.insert(word.to_lowercase());
+                    here.insert(word.to_lowercase());
                 }
+            }
+            for word in here {
+                *vocabulary.entry(word).or_default() += 1;
             }
         }
     }
@@ -342,18 +348,22 @@ pub(crate) fn term_suggest(
         offset = start + word.len();
         let lower = word.to_lowercase();
         // a word the index already has needs no correction
-        let mut options: Vec<(usize, String)> = if vocabulary.contains(&lower) {
+        let mut options: Vec<(f64, u64, String)> = if vocabulary.contains_key(&lower) {
             Vec::new()
         } else {
             vocabulary
                 .iter()
-                .filter_map(|cand| {
+                .filter_map(|(cand, freq)| {
                     let d = edit_distance(&lower, cand);
-                    (d > 0 && d <= 2).then(|| (d, cand.clone()))
+                    (d > 0 && d <= 2)
+                        .then(|| (suggestion_score(&lower, cand, d), *freq, cand.clone()))
                 })
                 .collect()
         };
-        options.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        // the better suggestion first, then the commoner word, then the
+        // earlier one alphabetically, which is the order a spell checker
+        // hands them back in
+        options.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
         options.truncate(size);
         entries.push(json!({
             "text": word,
@@ -365,15 +375,25 @@ pub(crate) fn term_suggest(
             "length": word.chars().count(),
             "options": options
                 .into_iter()
-                .map(|(d, t)| json!({
+                .map(|(score, freq, t)| json!({
                     "text": t,
-                    "score": 1.0 - (d as f64) / 10.0,
-                    "freq": 1,
+                    "score": score,
+                    "freq": freq,
                 }))
                 .collect::<Vec<_>>(),
         }));
     }
     Ok(Value::Array(entries))
+}
+
+/// How good a suggestion is, on the scale a spell checker reports.
+///
+/// The edits are counted against the shorter of the two words, so that one
+/// edit weighs more in a short word than in a long one: `quik` -> `quick` is
+/// 0.75, while `elephnt` -> `elephant` is about 0.857.
+fn suggestion_score(word: &str, candidate: &str, distance: usize) -> f64 {
+    let shorter = word.chars().count().min(candidate.chars().count()).max(1);
+    1.0 - (distance as f64) / (shorter as f64)
 }
 
 /// How many single-character edits turn one word into the other.
