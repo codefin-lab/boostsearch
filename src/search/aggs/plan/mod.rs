@@ -260,6 +260,9 @@ pub(crate) fn plan_aggs(
                     // sketch, which is approximate where OpenSearch's is exact
                     // over the handful of values these aggregations see
                     || def.get("percentiles").is_some()
+                    // a distinct count is the reference's sketch's estimate,
+                    // which is not always the number of distinct values
+                    || cardinality_here(def)
                     // `_index` is metadata, not a column: bucket it ourselves
                     || def.get("global").is_some()
                     || def
@@ -427,6 +430,7 @@ pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> b
         "diversified_sampler",
     ];
     OWN.iter().any(|k| def.get(k).is_some())
+        || cardinality_here(def)
         // `_index` is not a column but a property of the whole index, so a
         // terms over it is counted here whatever it sits under; left to
         // VeloCore under another bucket, it found no column and no buckets
@@ -450,6 +454,13 @@ pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> b
         // a metric whose value is worked out per document rather than read
         // out of a column
         || crate::search::aggs::metric::scripted_metric_kind(def).is_some()
+}
+
+/// A `cardinality` over a field, which is answered by the sketch the
+/// reference estimates with rather than by counting the distinct values. One
+/// whose values a script makes is still counted where the script runs.
+pub(crate) fn cardinality_here(def: &Value) -> bool {
+    def.get("cardinality").is_some() && def.pointer("/cardinality/script").is_none()
 }
 
 /// A date histogram this engine has to walk itself, a bucket at a time: one

@@ -2196,6 +2196,8 @@ pub(crate) fn finish_search(
             total,
             &query_json,
             &mut shard_profiles,
+            store,
+            &targets,
         );
     }
 

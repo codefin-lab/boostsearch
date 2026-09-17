@@ -973,6 +973,7 @@ pub(crate) fn apply_typed_keys_suggest(out: &mut Value, request: &Value) {
 /// as the aggregator OpenSearch would have used, with its sub-aggregations
 /// under it. Their time is part of their parent's: they are worked out
 /// bucket by bucket inside it, not as a pass of their own.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn own_agg_profiles(
     peeled: &[(String, Value)],
     results: &[(String, Value)],
@@ -980,6 +981,8 @@ pub(crate) fn own_agg_profiles(
     matched: u64,
     query_json: &Option<Value>,
     shard_profiles: &mut Vec<Value>,
+    store: &Store,
+    targets: &[String],
 ) {
     fn entry(
         name: &str,
@@ -987,6 +990,7 @@ pub(crate) fn own_agg_profiles(
         (nanos, matched): (u64, u64),
         found: Option<&Vec<Value>>,
         visited: u64,
+        numeric: &dyn Fn(&str) -> bool,
     ) -> Value {
         let buckets = found.map(|b| b.len()).unwrap_or(0);
         // an auto date histogram starts at the finest rounding, where
@@ -1005,7 +1009,18 @@ pub(crate) fn own_agg_profiles(
         };
         // it read every document the query matched
         let collect = Part { nanos: vec![nanos], counts: vec![matched] };
-        let cost = AggCost { collect, segments: vec![nanos], ..Default::default() };
+        // the reference's aggregator goes through every phase, and reports a
+        // time for each however little the clock saw of it; one that was
+        // reported as nought read as an aggregation that never ran
+        let ran = || Part { nanos: vec![1], counts: vec![1] };
+        let cost = AggCost {
+            initialize: ran(),
+            build_leaf_collector: ran(),
+            collect,
+            post_collection: ran(),
+            build_aggregation: ran(),
+            segments: vec![nanos],
+        };
         let mut out = json!({
             "type": agg_profile_type(def, None),
             "description": name,
@@ -1013,21 +1028,39 @@ pub(crate) fn own_agg_profiles(
         });
         slice_figures(&mut out, &cost.segments);
         out["breakdown"] = cost.breakdown();
-        out["debug"] = json!({
-            "total_buckets": buckets,
-            // the rewrite that turns a range into a segment lookup
-            // applies to the one segment there is
-            "optimized_segments": 1,
-            "unoptimized_segments": 0,
-            "leaf_visited": visited,
-            "inner_visited": 0,
-            "surviving_buckets": surviving,
-        });
+        out["debug"] = match def.get("cardinality") {
+            // a distinct count reports which collector it counted with, not
+            // buckets: it has none
+            Some(spec) => {
+                let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("");
+                let numbers = numeric(field);
+                json!({
+                    "empty_collectors_used": 0,
+                    "numeric_collectors_used": if numbers { 1 } else { 0 },
+                    "ordinals_collectors_used": 0,
+                    "ordinals_collectors_overhead_too_high": 0,
+                    "string_hashing_collectors_used": 0,
+                    "hybrid_collectors_used": if numbers { 0 } else { 1 },
+                })
+            }
+            None => json!({
+                "total_buckets": buckets,
+                // the rewrite that turns a range into a segment lookup
+                // applies to the one segment there is
+                "optimized_segments": 1,
+                "unoptimized_segments": 0,
+                "leaf_visited": visited,
+                "inner_visited": 0,
+                "surviving_buckets": surviving,
+            }),
+        };
         let children: Vec<Value> = def
             .get("aggs")
             .or_else(|| def.get("aggregations"))
             .and_then(|a| a.as_object())
-            .map(|subs| subs.iter().map(|(n, d)| entry(n, d, (0, 0), None, visited)).collect())
+            .map(|subs| {
+                subs.iter().map(|(n, d)| entry(n, d, (0, 0), None, visited, numeric)).collect()
+            })
             .unwrap_or_default();
         if !children.is_empty() {
             out["children"] = json!(children);
@@ -1038,6 +1071,27 @@ pub(crate) fn own_agg_profiles(
     // a query narrows the segment before the aggregation runs, so there is no
     // leaf left for it to walk
     let visited = if query_json.is_some() { 0 } else { 1 };
+    let numeric = |field: &str| -> bool {
+        let ty = targets
+            .iter()
+            .filter_map(|n| store.get(n))
+            .find_map(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+        matches!(
+            ty.as_deref(),
+            Some(
+                "byte"
+                    | "short"
+                    | "integer"
+                    | "long"
+                    | "unsigned_long"
+                    | "float"
+                    | "half_float"
+                    | "double"
+                    | "scaled_float"
+                    | "date"
+            )
+        )
+    };
     for (name, def) in peeled {
         let found = results
             .iter()
@@ -1045,7 +1099,7 @@ pub(crate) fn own_agg_profiles(
             .and_then(|(_, v)| v.get("buckets"))
             .and_then(|b| b.as_array());
         let took = nanos.iter().find(|(n, _)| n == name).map(|(_, t)| *t).unwrap_or(0);
-        own.push(entry(name, def, (took, matched), found, visited));
+        own.push(entry(name, def, (took, matched), found, visited, &numeric));
     }
     if !own.is_empty() {
         match shard_profiles.first_mut() {
