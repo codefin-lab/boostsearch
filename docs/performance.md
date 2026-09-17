@@ -1,9 +1,62 @@
 # Performance against OpenSearch
 
-Thirty-four dimensions, the same corpus, the same machine, both engines
-driven by the same client (`tools/bench.py`). BoostSearch is ahead on all 34.
+Thirty-four dimensions, the same corpus, the same machine, both engines driven
+by the same client (`tools/bench.py`). BoostSearch is ahead on all 34, on both
+machines it has been measured on.
 
-## How these numbers were taken
+## On a cloud machine, both engines measured the same day
+
+A Google Compute Engine `n2-standard-8`: eight vCPUs, 32 GB, Ubuntu 24.04, an
+SSD. OpenSearch 3.1.0 from `opensearchproject/opensearch:3.1.0` with security
+off, BoostSearch as this repository builds it. Each was measured on 2026-09-17
+with nothing else running on the machine, five runs each, three query rounds
+per run; the median is shown. The runs are kept in `bench/results/vm-bs-*.json`
+and `bench/results/vm-os-3.1.0-*.json`.
+
+| dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
+|---|---|---|---|---|
+| queries a second, one client | q/s | 134.9 | 378.7 | +181% |
+| memory, idle | MB | 1,501 | 37.7 | +97% |
+| memory, after the search run | MB | 1,664 | 204.1 | +88% |
+| memory, after indexing 200k | MB | 1,614 | 216.5 | +87% |
+| agg nested p50 c1 | ms | 6.6 | 1.2 | +82% |
+| agg date hist p50 c1 | ms | 6.5 | 1.2 | +81% |
+| time range agg p50 c1 | ms | 6.4 | 1.4 | +79% |
+| agg terms p50 c1 | ms | 6.0 | 1.4 | +77% |
+| term numeric p50 c1 | ms | 7.5 | 1.9 | +75% |
+| match all p50 c1 | ms | 6.6 | 1.8 | +73% |
+| term keyword p50 c1 | ms | 6.5 | 1.8 | +72% |
+| latency p50, one client | ms | 7.0 | 2.2 | +69% |
+| match text p50 c1 | ms | 8.5 | 2.6 | +69% |
+| time range p50 c1 | ms | 6.6 | 2.7 | +59% |
+| sort paged p50 c1 | ms | 8.7 | 3.6 | +58% |
+| queries a second, eight clients | q/s | 425.8 | 665.9 | +56% |
+| range numeric p50 c1 | ms | 7.2 | 3.6 | +50% |
+| latency p90, one client | ms | 9.1 | 4.7 | +48% |
+| bool filter p50 c1 | ms | 9.1 | 4.8 | +46% |
+| agg date hist p50 c8 | ms | 16.3 | 8.8 | +46% |
+| term numeric p50 c8 | ms | 16.6 | 9.1 | +45% |
+| match text p50 c8 | ms | 18.5 | 10.5 | +43% |
+| time range agg p50 c8 | ms | 14.1 | 8.1 | +42% |
+| term keyword p50 c8 | ms | 15.8 | 9.2 | +41% |
+| match all p50 c8 | ms | 14.8 | 8.8 | +40% |
+| agg terms p50 c8 | ms | 14.7 | 9.2 | +37% |
+| latency p50, eight clients | ms | 16.4 | 10.3 | +37% |
+| agg nested p50 c8 | ms | 15.3 | 9.6 | +37% |
+| time range p50 c8 | ms | 16.1 | 10.1 | +37% |
+| range numeric p50 c8 | ms | 16.9 | 11.4 | +33% |
+| latency p90, eight clients | ms | 23.9 | 16.4 | +31% |
+| sort paged p50 c8 | ms | 17.6 | 12.6 | +29% |
+| bool filter p50 c8 | ms | 18.6 | 14.5 | +22% |
+| indexing throughput | docs/s | 21,725 | 24,921 | +15% |
+
+Read the ratios rather than the absolute numbers: this machine is a third the
+speed of the laptop below, for both engines. The memory figures are the one
+server process's resident set, the container's own figure for OpenSearch.
+
+## On a laptop, OpenSearch measured once and kept
+
+### How these numbers were taken
 
 - **OpenSearch 3.1.0** was measured once, five runs, on 2026-08-27, from the
   official image with security off; the runs are kept in
@@ -23,7 +76,7 @@ this table is what those numbers say beside the kept OpenSearch measurement.
 Measuring OpenSearch again is a thing to do when the version it is compared to
 changes.
 
-## The table
+### The table
 
 | dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
 |---|---|---|---|---|

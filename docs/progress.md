@@ -7680,3 +7680,18 @@ five scores as OpenSearch 3.8.0 to four decimal places, where they were a
 thousandth low. Nothing else moved: 291 unit tests, clippy clean, the corpus
 1,427 of 1,427, phase1 398, the replays 60/61, 45/45 and 40/43, the canonical
 corpus 166 of 183.
+
+### Both engines, one machine, one day
+
+The performance table in the README was OpenSearch measured once in August and
+BoostSearch measured in September, each on the laptop. Both were measured
+again on the Google Compute Engine machine the node now runs on -- eight
+vCPUs, Ubuntu 24.04 -- on the same day, with the same corpus of 200,000
+web-log documents and the same client driving each in turn with nothing else
+running: OpenSearch 3.1.0 from its official image with security off, five
+runs, and this build, five runs. BoostSearch is ahead on all thirty-four
+dimensions: 378.7 queries a second against 134.9 on one client, 665.9 against
+425.8 on eight, 24,921 documents a second indexed against 21,725, 37.7 MB
+resident when idle against 1,501, and every query shape between 22% and 82%
+quicker. The runs are kept in `bench/results/vm-*.json`, and the README and
+`docs/performance.md` now carry that table, with the laptop's beneath it.

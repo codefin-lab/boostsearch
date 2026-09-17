@@ -19,7 +19,7 @@ rather than believed.
 |---|---|---|
 | OpenSearch's core suite | **1,427 of 1,427** not skipped, over all 409 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
 | its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Polish, Ukrainian and Beider-Morse data in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
-| the same answer as OpenSearch 3.1.0 | **163 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
+| the same answer as OpenSearch 3.1.0 | **166 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
 | REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
 | against OpenSearch 3.1.0, 34 dimensions | **ahead on all 34**, the full table with how it was measured in [docs/performance.md](docs/performance.md) | `tools/bench.py`, `tools/bench_gate.py` |
@@ -36,6 +36,9 @@ rather than believed.
 | a TLS deployment, verified rather than waved through | **13 checks**: the chain and the hostname checked against a pinned CA, plain http refused on the TLS port, no credentials and wrong passwords refused, a user held to the one role it was given | `tools/tls_auth_check.py` |
 | malformed input at everything that parses | **2,000 probes**, node still answering | `tools/fuzz_check.py` |
 | OpenSearch Dashboards' own API suite, against the console's server | **146 of 166**, none failed that the Node server passes (it scores 140) | `tools/dashboards_gate.py` |
+| three nodes, faults, and every acknowledged write | **200 runs of 200 clean**: ninety seconds each of isolations, SIGTERM restarts, SIGSTOP pauses and heals under a write load, then every acknowledged document checked on every copy -- none lost, none behind, the copies agreeing | `tools/cluster_chaos.py` |
+| the same on Linux | the build, the corpus, the examples, the checks and twenty-five chaos runs on an eight-core Ubuntu 24.04 machine: the same answers as on the Mac | the scripts above, on a GCE `n2-standard-8` |
+| twenty-six worked examples | each a project of its own -- product search, logs, facets, geo, vectors, security, ingest, scripting, nine languages, SQL, joins, snapshots, failover, reindex, deep paging, relevance, percolation, data streams, search pipelines, background jobs, service accounts, clause search, attachments, analytics, a runbook, routing -- run against a real node with every answer checked | `examples/run-all.sh` |
 
 The ten sections that do not pass are named, with the reason, in
 `docs/progress.md`; five more are set aside as tests of the test framework
@@ -44,66 +47,68 @@ every run.
 
 ## Against OpenSearch, dimension by dimension
 
-The same corpus (200,000 web-log documents), the same machine, the same client
-(`tools/bench.py`) driving both engines. OpenSearch 3.1.0 was measured once and
-its numbers kept (`bench/results/final-os-clean-*.json`, median of five runs);
-BoostSearch is the current build (`tools/bench_baseline.json`, median of three).
-Every change is held to BoostSearch's own last numbers by `tools/bench_gate.py`;
-how the numbers were taken and what not to read into them is in
-[docs/performance.md](docs/performance.md).
+Both engines measured on the same machine, on the same day, with the same
+corpus and the same client: a Google Compute Engine `n2-standard-8` (eight
+vCPUs, Ubuntu 24.04, SSD), 200,000 web-log documents, `tools/bench.py` driving
+each in turn with nothing else running -- OpenSearch 3.1.0 from its official
+image with security off, BoostSearch as this repository builds it. Five runs
+each, the median shown. **BoostSearch is ahead on all 34 dimensions.**
 
 | dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
 |---|---|---|---|---|
-| queries a second, one client | q/s | 380.9 | 1,414.8 | +271% |
-| memory, idle | MB | 1,095.2 | 19.0 | +98% |
-| time range agg p50 c1 | ms | 2.4 | 0.4 | +82% |
-| agg terms p50 c1 | ms | 2.3 | 0.5 | +81% |
-| agg date hist p50 c1 | ms | 2.3 | 0.4 | +81% |
-| agg nested p50 c1 | ms | 2.4 | 0.5 | +81% |
-| latency p50, one client | ms | 2.5 | 0.6 | +78% |
-| term numeric p50 c1 | ms | 2.3 | 0.5 | +78% |
-| term keyword p50 c1 | ms | 2.3 | 0.5 | +78% |
-| match all p50 c1 | ms | 2.1 | 0.5 | +77% |
-| memory, after indexing 200k | MB | 1,085.6 | 261.3 | +76% |
-| memory, after the search run | MB | 1,112.4 | 269.2 | +76% |
-| match text p50 c1 | ms | 2.7 | 0.8 | +71% |
-| sort paged p50 c1 | ms | 3.1 | 0.9 | +71% |
-| time range p50 c1 | ms | 2.5 | 0.8 | +70% |
-| latency p90, one client | ms | 3.2 | 1.1 | +68% |
-| bool filter p50 c1 | ms | 3.0 | 1.1 | +63% |
-| range numeric p50 c1 | ms | 2.4 | 0.9 | +63% |
-| indexing throughput | docs/s | 72,704.0 | 106,447.0 | +46% |
-| queries a second, eight clients | q/s | 1,621.9 | 2,307.6 | +42% |
-| agg nested p50 c8 | ms | 4.9 | 2.9 | +41% |
-| agg date hist p50 c8 | ms | 4.8 | 3.0 | +37% |
-| term numeric p50 c8 | ms | 4.6 | 2.9 | +36% |
-| time range agg p50 c8 | ms | 4.5 | 2.9 | +36% |
-| match all p50 c8 | ms | 4.6 | 3.0 | +35% |
-| term keyword p50 c8 | ms | 4.5 | 3.0 | +34% |
-| match text p50 c8 | ms | 4.9 | 3.2 | +33% |
-| agg terms p50 c8 | ms | 4.4 | 3.0 | +33% |
-| latency p50, eight clients | ms | 4.6 | 3.2 | +31% |
-| latency p90, eight clients | ms | 5.9 | 4.3 | +28% |
-| range numeric p50 c8 | ms | 4.6 | 3.4 | +27% |
-| time range p50 c8 | ms | 4.6 | 3.4 | +26% |
-| sort paged p50 c8 | ms | 5.0 | 3.7 | +25% |
-| bool filter p50 c8 | ms | 5.0 | 3.8 | +25% |
+| queries a second, one client | q/s | 134.9 | 378.7 | +181% |
+| memory, idle | MB | 1,501 | 37.7 | +97% |
+| memory, after the search run | MB | 1,664 | 204.1 | +88% |
+| memory, after indexing 200k | MB | 1,614 | 216.5 | +87% |
+| agg nested p50 c1 | ms | 6.6 | 1.2 | +82% |
+| agg date hist p50 c1 | ms | 6.5 | 1.2 | +81% |
+| time range agg p50 c1 | ms | 6.4 | 1.4 | +79% |
+| agg terms p50 c1 | ms | 6.0 | 1.4 | +77% |
+| term numeric p50 c1 | ms | 7.5 | 1.9 | +75% |
+| match all p50 c1 | ms | 6.6 | 1.8 | +73% |
+| term keyword p50 c1 | ms | 6.5 | 1.8 | +72% |
+| latency p50, one client | ms | 7.0 | 2.2 | +69% |
+| match text p50 c1 | ms | 8.5 | 2.6 | +69% |
+| time range p50 c1 | ms | 6.6 | 2.7 | +59% |
+| sort paged p50 c1 | ms | 8.7 | 3.6 | +58% |
+| queries a second, eight clients | q/s | 425.8 | 665.9 | +56% |
+| range numeric p50 c1 | ms | 7.2 | 3.6 | +50% |
+| latency p90, one client | ms | 9.1 | 4.7 | +48% |
+| bool filter p50 c1 | ms | 9.1 | 4.8 | +46% |
+| agg date hist p50 c8 | ms | 16.3 | 8.8 | +46% |
+| term numeric p50 c8 | ms | 16.6 | 9.1 | +45% |
+| match text p50 c8 | ms | 18.5 | 10.5 | +43% |
+| time range agg p50 c8 | ms | 14.1 | 8.1 | +42% |
+| term keyword p50 c8 | ms | 15.8 | 9.2 | +41% |
+| match all p50 c8 | ms | 14.8 | 8.8 | +40% |
+| agg terms p50 c8 | ms | 14.7 | 9.2 | +37% |
+| latency p50, eight clients | ms | 16.4 | 10.3 | +37% |
+| agg nested p50 c8 | ms | 15.3 | 9.6 | +37% |
+| time range p50 c8 | ms | 16.1 | 10.1 | +37% |
+| range numeric p50 c8 | ms | 16.9 | 11.4 | +33% |
+| latency p90, eight clients | ms | 23.9 | 16.4 | +31% |
+| sort paged p50 c8 | ms | 17.6 | 12.6 | +29% |
+| bool filter p50 c8 | ms | 18.6 | 14.5 | +22% |
+| indexing throughput | docs/s | 21,725 | 24,921 | +15% |
 
-Lower is better for latency and memory, higher for throughput; "better by" is
-the margin in BoostSearch's favour either way. Single node; the
-queries-a-second rows are what a Python client reached, not either engine's
-ceiling.
+Memory is the resident set of the one server process, the container's own
+figure for OpenSearch. On an Apple M4 Max the same comparison reads higher for
+both -- BoostSearch indexes 92,000 documents a second there and answers 1,391
+queries a second on one client -- and the ratios are of the same shape. How
+the numbers are taken, and what not to read into them, is in
+[docs/performance.md](docs/performance.md); every change is held to this
+repository's own last numbers by `tools/bench_gate.py`.
 
 ## What it does
 
 | | |
 |---|---|
-| **Search** | every query the suite names, aggregations, sorting, highlighting, collapse, nested and parent-join, point-in-time, search templates, `rank_eval`, suggesters, profiling |
-| **Writing** | documents, bulk, update, `_update_by_query`, `_delete_by_query`, `_reindex` including from another cluster over HTTP |
+| **Search** | every query the suite names, aggregations, sorting, three highlighters, collapse, nested and parent-join, spans and intervals, percolation, the `hybrid` query with score normalisation, point-in-time, search templates, `rank_eval`, suggesters, asynchronous search, profiling |
+| **Writing** | documents, bulk, update, `_update_by_query`, `_delete_by_query` and `_reindex` -- including from another cluster over HTTP -- run as real background tasks, throttled, sliced, listed and cancellable through `_tasks` |
 | **Analysis** | the built-in analyzers token for token, ICU, Japanese, Korean and Chinese by dictionary, phonetic and phone-number filters, Thai segmentation |
 | **Scripting** | Painless — lexer, parser and evaluator — in every context the suite uses, plus Lucene expressions and Mustache |
-| **Ingest** | the thirty processors the corpus names, grok and dissect, geoip, user-agent, attachment extraction, and search pipelines |
-| **Cluster** | consensus, allocation, replication, peer recovery, cross-node search; checked in a seeded simulation and against real nodes with real partitions |
+| **Ingest** | the thirty processors the corpus names, grok and dissect, geoip, user-agent, text out of HTML, RTF, PDF, Word, Excel, PowerPoint, OpenDocument and EPUB, and search pipelines with request, response and phase processors |
+| **Cluster** | consensus, allocation, replication, peer recovery, cross-node search, routing that narrows a search to its shards; checked in a seeded simulation and against real nodes with real partitions, two hundred fault runs of three nodes with nothing lost |
 | **Security** | TLS, users and roles, API keys, document- and field-level security inside the query rather than in front of it, SAML, OIDC, LDAP, the audit log |
 | **Snapshots** | filesystem, URL, S3, Google Cloud Storage and Azure repositories |
 | **Index management** | ISM policies, transitions, rollover, snapshot management, transforms, rollups and searching a rollup index |

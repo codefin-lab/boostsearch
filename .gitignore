@@ -28,6 +28,9 @@
 !/bench/results/obsearch-phase2.json
 !/bench/results/final-obs-clean-*.json
 !/bench/results/final-os-clean-*.json
+# both engines measured on one cloud machine, 2026-09-17
+!/bench/results/vm-bs-*.json
+!/bench/results/vm-os-*.json
 
 # the operating system's and the interpreter's leavings
 .DS_Store
