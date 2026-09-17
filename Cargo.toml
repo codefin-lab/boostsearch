@@ -29,7 +29,7 @@ postcard = { version = "1.0", features = ["alloc"] }
 #     [patch."https://github.com/codefin-lab/boostcore"]
 #     boostcore = { path = "../boostcore" }
 #     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2", features = ["zstd-compression"] }
+boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed", features = ["zstd-compression"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -81,7 +81,7 @@ encoding_rs = "0.8"
 # it -- the Word streams -- is read in src/ingest/attachment/office.rs.
 cfb = "0.14"
 boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "08e39fc28e00523cb195256bf8963ba2dbaf53d2" }
+boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed" }
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"

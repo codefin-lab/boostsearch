@@ -7667,3 +7667,16 @@ logs, started at boot, restarted if it dies, and **listening on 127.0.0.1
 only** -- reached through an SSH tunnel, since nothing about opening a port to
 the internet has been decided. A write survived a restart of the service, and
 `_cluster/health` reads green.
+
+### The pin moves to BoostCore b3819c5
+
+The fork's commit is on its remote, so `Cargo.toml` pins `b3819c5` instead of
+`08e39fc`. It is the exact per-path token count: an average field length read
+off the one-byte length codes was short -- 14,190 tokens where the documents
+held 14,362 -- and every score on a field of long values was a little under
+the reference's. On four hundred documents of twenty to a hundred and twenty
+words in three segments, a `match` and a `combined_fields` now return the same
+five scores as OpenSearch 3.8.0 to four decimal places, where they were a
+thousandth low. Nothing else moved: 291 unit tests, clippy clean, the corpus
+1,427 of 1,427, phase1 398, the replays 60/61, 45/45 and 40/43, the canonical
+corpus 166 of 183.
