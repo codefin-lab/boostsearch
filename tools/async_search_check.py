@@ -41,7 +41,8 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 NAMES = ["as0", "as1", "as2"]
-ADMIN = ("admin", "admin")
+ADMIN_PASSWORD = "Async-Check-Key-2026"
+ADMIN = ("admin", ADMIN_PASSWORD)
 ALICE = ("alice", "Wz7-qLm2#rTv9k")
 BOB = ("bob", "Hp4!nVx8-sQe3j")
 
@@ -72,12 +73,18 @@ class Cluster:
                 "VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES": ",".join(NAMES),
                 "VELOSEARCH_DISABLED": "false",
                 "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+                # a secured node has no user until one is given a password
+                "VELOSEARCH_INITIAL_ADMIN_PASSWORD": ADMIN_PASSWORD,
             }
         )
         log = open(d / "node.log", "ab")
         self.procs[i] = subprocess.Popen([self.binary], env=env, stdout=log, stderr=subprocess.STDOUT)
+        # A secured node of a cluster answers 503 until it holds the
+        # configuration the manager published, and the manager is elected only
+        # once enough nodes are up -- so a node is up when it answers at all,
+        # and the cluster is ready when its health says so.
         for _ in range(240):
-            if self.call(i, "GET", "/")[0] == 200:
+            if self.call(i, "GET", "/")[0] not in (0,):
                 return
             time.sleep(0.25)
         raise SystemExit(f"{NAMES[i]} did not start; see {d / 'node.log'}")

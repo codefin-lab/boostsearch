@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.request
 
+ADMIN_PASSWORD = "Pit-Check-Key-2026"
 HTTP = [9751, 9752, 9753]
 TRANSPORT = [9851, 9852, 9853]
 NAMES = ["n1", "n2", "n3"]
@@ -95,11 +96,13 @@ class Nodes:
             if security:
                 env["VELOSEARCH_DISABLED"] = "false"
                 env["VELOSEARCH_RESTAPI_ROLES_ENABLED"] = "all_access"
+                # a secured node has no user until one is given a password
+                env["VELOSEARCH_INITIAL_ADMIN_PASSWORD"] = ADMIN_PASSWORD
             else:
                 env["VELOSEARCH_DISABLED"] = "true"
             log = open(os.path.join(self.root, f"{NAMES[i]}.log"), "ab")
             self.procs.append(subprocess.Popen([binary], env=env, stdout=log, stderr=subprocess.STDOUT))
-        self.auth = ("admin", "admin") if security else None
+        self.auth = ("admin", ADMIN_PASSWORD) if security else None
         for base in self.bases:
             self.wait_up(base)
         if count > 1:
