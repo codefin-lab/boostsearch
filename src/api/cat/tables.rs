@@ -327,7 +327,16 @@ pub async fn cat_indices(
     // a pattern written with a leading dot is reaching for the dot-prefixed
     // indices, which are the hidden ones by convention
     let dot_pattern = expr.split(',').any(|n| n.trim().starts_with('.'));
-    let show_hidden = named_outright || asked_for_hidden || dot_pattern;
+    // `system` keeps the table to system indices or away from them, and
+    // asking for them sweeps in the hidden ones they are unless the request
+    // names its own wildcards -- OpenSearch 3.9's filter: a system index
+    // created hidden appeared under `*tasks-*` only with `system=true`, and
+    // not at all under `system=true&expand_wildcards=open`
+    let system = p.get("system").map(|v| v != "false");
+    let show_hidden = named_outright
+        || asked_for_hidden
+        || dot_pattern
+        || (system == Some(true) && !p.contains_key("expand_wildcards"));
     let mut rows = Vec::new();
     // the columns read off an index's statistics are worked out only when a
     // caller names its columns; the default table does not show them
@@ -423,6 +432,10 @@ pub async fn cat_indices(
         if !show_hidden && g.setting("hidden").map(|v| v == "true").unwrap_or(false) {
             continue;
         }
+        let described = crate::api::system_index_description(&g.name);
+        if system.is_some_and(|wanted| wanted != described.is_some()) {
+            continue;
+        }
         // health is the cluster's answer about the index, not this node's
         // share of it: a copy held here says nothing about the copy elsewhere
         let only = vec![g.name.clone()];
@@ -461,6 +474,8 @@ pub async fn cat_indices(
             // when the index was made, as the epoch and as text
             ("creation.date", g.created_millis().to_string()),
             ("creation.date.string", g.created_string()),
+            ("system", described.is_some().to_string()),
+            ("system.description", described.unwrap_or_default().to_string()),
         ];
         if wants_stats {
             let stats = (!g.closed).then(|| {
@@ -471,22 +486,24 @@ pub async fn cat_indices(
         rows.push(row);
     }
     rows.sort_by(|a, b| a[2].1.cmp(&b[2].1));
-    let rows = cat_only_default(
-        rows,
-        &[
-            "health",
-            "status",
-            "index",
-            "uuid",
-            "pri",
-            "rep",
-            "docs.count",
-            "docs.deleted",
-            "store.size",
-            "pri.store.size",
-        ],
-        &p,
-    );
+    // the system columns are in the default table only when the request
+    // asked about system indices at all
+    let mut defaults = vec![
+        "health",
+        "status",
+        "index",
+        "uuid",
+        "pri",
+        "rep",
+        "docs.count",
+        "docs.deleted",
+        "store.size",
+        "pri.store.size",
+    ];
+    if system.is_some() {
+        defaults.extend(["system", "system.description"]);
+    }
+    let rows = cat_only_default(rows, &defaults, &p);
     cat_render_cols(CAT_INDEX_COLS, rows, &p)
 }
 

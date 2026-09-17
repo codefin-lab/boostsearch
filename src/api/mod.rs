@@ -176,7 +176,17 @@ pub const CAT_INDEX_COLS: &[&str] = &[
     "pri.store.size",
     "creation.date",
     "creation.date.string",
+    "system",
+    "system.description",
 ];
+
+/// What a system index is for, by the pattern of the descriptor that claims
+/// it -- the descriptors the reference registers in its core. A dot-prefixed
+/// name no descriptor matches is not a system index.
+pub(crate) fn system_index_description(name: &str) -> Option<&'static str> {
+    const DESCRIPTORS: &[(&str, &str)] = &[(".tasks", "Task Result Index")];
+    DESCRIPTORS.iter().find(|(prefix, _)| name.starts_with(prefix)).map(|(_, d)| *d)
+}
 
 pub const CAT_TEMPLATE_COLS: &[&str] =
     &["name", "index_patterns", "order", "version", "composed_of"];

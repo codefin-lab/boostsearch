@@ -20,6 +20,7 @@
   "cat.health/10_basic.yml",
   "cat.indices/10_basic.yml",
   "cat.indices/20_hidden.yml",
+  "cat.indices/30_system.yml",
   "cat.nodeattrs/10_basic.yml",
   "cat.nodes/10_basic.yml",
   "cat.plugins/10_basic.yml",
