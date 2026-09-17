@@ -9,12 +9,49 @@
 {"method": "POST", "path": "/_ingest/pipeline/r17-p2/_simulate", "body": {"docs": [{"_source": {"line": "GET /a 200", "q": "a=1&b=2", "payload": "{\"k\":[1,2]}", "parts": ["x", "y"]}}]}}
 {"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"fail": {"message": "no {{name}}", "if": "ctx.name == 'x'"}}]}, "docs": [{"_source": {"name": "x"}}, {"_source": {"name": "y"}}]}}
 {"method": "POST", "path": "/_ingest/pipeline/_simulate?verbose=true", "body": {"pipeline": {"processors": [{"set": {"field": "a", "value": 1}}, {"set": {"field": "b", "value": "{{a}}-x"}}]}, "docs": [{"_source": {}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "text", "separator": ",", "target_fields": ["first", "second"]}}]}, "docs": [{"_source": {"text": "alpha,beta"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "text", "separator": ",", "target_fields": ["a", "b", "c"]}}]}, "docs": [{"_source": {"text": "x,y"}}, {"_source": {"text": "x,y,z,w"}}, {"_source": {"text": "x,y,"}}, {"_source": {"text": ""}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "text", "separator": "\\s+", "target_fields": ["a", "b"]}}]}, "docs": [{"_source": {"text": "x   y"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "nope", "separator": ",", "target_fields": ["a"]}}]}, "docs": [{"_source": {"text": "x,y"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "nope", "separator": ",", "target_fields": ["a"], "ignore_missing": true}}]}, "docs": [{"_source": {"text": "x,y"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"split_to_fields": {"field": "text", "separator": ",", "target_fields": ["a"]}}]}, "docs": [{"_source": {"text": null}}, {"_source": {"text": 1}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-split", "body": {"processors": [{"split_to_fields": {"field": "text", "separator": ","}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-split", "body": {"processors": [{"split_to_fields": {"field": "text", "separator": ",", "target_fields": ["a"], "bogus": 1}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3, "overlap_rate": 0}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "one two three four five six"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3, "overlap_rate": 0.5}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "one two three four five six"}}, {"_source": {"text": "   a b c d  "}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3, "max_chunk_limit": 2}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "1 2 3 4 5 6 7 8 9 10 11 12"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"delimiter": {"delimiter": "."}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "a..b"}}, {"_source": {"text": "a.b."}}, {"_source": {"text": "abc"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"delimiter": {}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "p1\n\np2\n\np3"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_char_length": {"char_limit": 4, "overlap_rate": 0.5}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": "abcdefghij"}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3}}, "field_map": {"a": {"b": "chunks"}}}}]}, "docs": [{"_source": {"a": {"b": "one two three four"}}}, {"_source": {"a": {"x": "one two"}}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3}}, "field_map": {"text": "chunks"}}}]}, "docs": [{"_source": {"text": ["one two three four", "five six"]}}, {"_source": {"text": ""}}, {"_source": {"text": null}}, {"_source": {"text": 5}}, {"_source": {"text": [1]}}, {"_source": {"text": [["a"]]}}]}}
+{"method": "POST", "path": "/_ingest/pipeline/_simulate", "body": {"pipeline": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 3}}, "field_map": {"nope": "chunks"}, "ignore_missing": true}}]}, "docs": [{"_source": {"text": "one two"}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {"field_map": {"a": "b"}}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {"algorithm": {"nope": {}}, "field_map": {"a": "b"}}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"overlap_rate": 0.9}}, "field_map": {"a": "b"}}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {"algorithm": {"fixed_token_length": {"token_limit": 0}}, "field_map": {"a": "b"}}}]}}
+{"method": "PUT", "path": "/_ingest/pipeline/r17-chunk", "body": {"processors": [{"text_chunking": {"algorithm": {"delimiter": {}}, "field_map": {"a": "b"}, "bogus": 1}}]}}
 {"method": "PUT", "path": "/r17-ing", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0, "index.default_pipeline": "r17-p1"}}}
 {"method": "PUT", "path": "/r17-ing/_doc/0?refresh=true", "body": {"Name": "ALICE", "code": "ab-c", "note": "  hi  ", "tags": "x,y", "n": "12", "junk": 1, "when": "2026-01-02"}}
 {"method": "PUT", "path": "/r17-ing/_doc/1?refresh=true", "body": {"Name": "Bob", "n": "3"}}
 {"method": "PUT", "path": "/r17-ing/_doc/2?refresh=true", "body": {"code": "z-z", "tags": "solo"}}
 {"method": "PUT", "path": "/r17-ing/_doc/9?refresh=true&pipeline=_none", "body": {"Name": "RAW"}}
 {"method": "POST", "path": "/r17-ing/_search", "body": {"query": {"match_all": {}}, "sort": ["_id"]}}
+{"method": "DELETE", "path": "/_search/pipeline/r17-sp", "body": null}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {}}]}}
+{"method": "GET", "path": "/_search/pipeline/r17-sp", "body": null}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {"enabled": true, "tag": "t", "description": "d", "two_phase_parameter": {"prune_ratio": 0.4, "expansion_rate": 5.0, "max_window_size": 10000}}}], "response_processors": [{"agentic_context": {"agent_steps_summary": true, "dsl_query": true}}]}}
+{"method": "GET", "path": "/_search/pipeline/r17-sp", "body": null}
+{"method": "POST", "path": "/r17-ing/_search?search_pipeline=r17-sp", "body": {"query": {"match_all": {}}}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {"two_phase_parameter": {"prune_ratio": 1.5}}}]}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {"two_phase_parameter": {"expansion_rate": 0.5}}}]}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {"two_phase_parameter": {"max_window_size": 49}}}]}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"request_processors": [{"neural_sparse_two_phase_processor": {"enabled": "false"}}]}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"response_processors": [{"agentic_context": {"memory_id": true}}]}}
+{"method": "PUT", "path": "/_search/pipeline/r17-sp-bad", "body": {"response_processors": [{"agentic_context": {"dsl_query": "yes"}}]}}
+{"method": "DELETE", "path": "/_search/pipeline/r17-sp", "body": null}
+{"method": "GET", "path": "/_search/pipeline/r17-sp", "body": null}
 {"method": "GET", "path": "/r17-ing/_doc/0", "body": null}
 {"method": "PUT", "path": "/r17-a", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"owner": {"type": "keyword"}, "n": {"type": "long"}}}}}
 {"method": "PUT", "path": "/r17-b", "body": {"settings": {"number_of_shards": 1, "number_of_replicas": 0}, "mappings": {"properties": {"owner": {"type": "keyword"}, "n": {"type": "long"}}}}}

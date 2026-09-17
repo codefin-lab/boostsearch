@@ -322,6 +322,22 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                 _ => {}
             }
         }
+        "split_to_fields" => {
+            c.str_req("field")?;
+            c.str_req("separator")?;
+            if c.list_opt("target_fields")?.is_none() {
+                return Err(c.missing("target_fields"));
+            }
+        }
+        "text_chunking" => {
+            if c.map_opt("field_map")?.is_none() {
+                return Err(c.missing("field_map"));
+            }
+            let Some(algorithm) = c.map_opt("algorithm")? else {
+                return Err(c.missing("algorithm"));
+            };
+            super::chunking::Algorithm::parse(&algorithm).map_err(|why| thrown(&spec.kind, why))?;
+        }
         "fail" => {
             c.str_req("message")?;
         }
@@ -483,6 +499,106 @@ fn unresolved(doc: &IngestDoc, path: &str) -> String {
         };
     }
     format!("field [{path}] not present as part of path [{path}]")
+}
+
+/// What Java says when a value is not of the class the code asked it to be.
+fn java_cast(value: &Value, wanted: &str) -> String {
+    let from = type_name(value);
+    format!(
+        "class {from} cannot be cast to class {wanted} ({from} and {wanted} are in module \
+         java.base of loader 'bootstrap')"
+    )
+}
+
+/// Cut each field a `text_chunking` processor's `field_map` names, writing
+/// the pieces where the map says. A map inside the map is a step into the
+/// object at that field: both the field read and the field written stand
+/// inside it.
+fn chunk_fields(
+    at: &mut Value,
+    field_map: &Map<String, Value>,
+    algorithm: &super::chunking::Algorithm,
+    ignore_missing: bool,
+) -> Result<(), IngestError> {
+    let mismatch = |field: &str, wanted: &str, found: &Value| {
+        IngestError::illegal(format!(
+            "[{field}] configuration doesn't match actual value type, configuration type is: \
+             {wanted}, actual value type is: {}",
+            type_name(found)
+        ))
+    };
+    for (field, target) in field_map {
+        if let Value::Object(inner) = target {
+            match at.get_mut(field) {
+                Some(nested) if nested.is_object() => {
+                    chunk_fields(nested, inner, algorithm, ignore_missing)?;
+                }
+                None | Some(Value::Null) => {}
+                Some(other) => return Err(mismatch(field, "java.util.Map", &other.clone())),
+            }
+            continue;
+        }
+        let name = match target {
+            Value::String(s) => s.clone(),
+            other => super::hash::java_text(other),
+        };
+        let pieces = match at.get(field) {
+            // a field that is not there has no pieces, and the reference
+            // still writes the empty list unless told to leave it alone
+            None | Some(Value::Null) => {
+                if ignore_missing {
+                    continue;
+                }
+                Vec::new()
+            }
+            Some(Value::String(text)) => algorithm.chunks(text),
+            Some(Value::Array(list)) => {
+                let mut all = Vec::new();
+                for one in list {
+                    match one {
+                        Value::String(text) => all.extend(algorithm.chunks(text)),
+                        Value::Array(_) => {
+                            return Err(IngestError::illegal(format!(
+                                "list type field [{field}] is nested list type, cannot process it"
+                            )));
+                        }
+                        _ => {
+                            return Err(IngestError::illegal(format!(
+                                "list type field [{field}] has non string value, cannot process it"
+                            )));
+                        }
+                    }
+                }
+                all
+            }
+            Some(found) if found.is_object() => {
+                return Err(mismatch(field, "java.lang.String", &found.clone()));
+            }
+            Some(_) => {
+                return Err(IngestError::illegal(format!(
+                    "map type field [{field}] is neither string nor nested type, cannot process it"
+                )));
+            }
+        };
+        if let Some(o) = at.as_object_mut() {
+            o.insert(name, json!(pieces));
+        }
+    }
+    Ok(())
+}
+
+/// A processor that checks its own configuration by throwing, rather than by
+/// telling the parser which property was wrong: the exception reaches the
+/// caller wrapped, with the Java class that raised it written into the
+/// reason and the exception itself underneath.
+fn thrown(kind: &str, reason: String) -> IngestError {
+    IngestError {
+        kind: "exception".into(),
+        reason: format!("java.lang.IllegalArgumentException: {reason}"),
+        processor_type: Some(kind.to_string()),
+        caused_by: Some(json!({"type": "illegal_argument_exception", "reason": reason})),
+        ..IngestError::illegal("")
+    }
 }
 
 fn no_field(field: &str) -> IngestError {
@@ -862,6 +978,68 @@ fn run_body(
                 }
             }
             doc.set(&target, Value::Array(parts)).map_err(IngestError::illegal)?;
+        }
+        "split_to_fields" => {
+            // the field is read as a path and not as a template: the
+            // reference looks `{{a}}` up as a field of that name
+            let field = c.str_req("field")?;
+            let sep = c.str_req("separator")?;
+            let targets = c.list_opt("target_fields")?.unwrap_or_default();
+            let text = match doc.get(&field) {
+                None => {
+                    if ignore_missing {
+                        return Ok(Some(doc));
+                    }
+                    return Err(IngestError::illegal(unresolved(&doc, &field)));
+                }
+                Some(Value::Null) => {
+                    if ignore_missing {
+                        return Ok(Some(doc));
+                    }
+                    return Err(IngestError::illegal(format!(
+                        "field [{field}] is null, cannot split."
+                    )));
+                }
+                Some(Value::String(s)) => s,
+                Some(other) => {
+                    return Err(IngestError::illegal(format!(
+                        "field [{field}] of type [{}] cannot be cast to [java.lang.String]",
+                        type_name(&other)
+                    )));
+                }
+            };
+            let re = regex::Regex::new(&sep).map_err(|e| IngestError::illegal(e.to_string()))?;
+            let mut parts: Vec<&str> = re.split(&text).collect();
+            // Java's `split` leaves out the empty string a separator at the
+            // very start would make, and the empty strings at the end
+            if parts.first() == Some(&"")
+                && re.find(&text).is_some_and(|m| m.start() == 0 && m.is_empty())
+            {
+                parts.remove(0);
+            }
+            while parts.len() > 1 && parts.last() == Some(&"") {
+                parts.pop();
+            }
+            // a part with no field to go in is dropped, and a field with no
+            // part left for it is not written
+            for (target, part) in targets.iter().zip(parts) {
+                let Value::String(name) = target else {
+                    return Err(IngestError::of(
+                        "class_cast_exception",
+                        java_cast(target, "java.lang.String"),
+                    ));
+                };
+                doc.set(name, json!(part)).map_err(IngestError::illegal)?;
+            }
+        }
+        "text_chunking" => {
+            let field_map = c.map_opt("field_map")?.unwrap_or_default();
+            let algorithm =
+                super::chunking::Algorithm::parse(&c.map_opt("algorithm")?.unwrap_or_default())
+                    .map_err(|why| thrown(&spec.kind, why))?;
+            let mut source = doc.source.clone();
+            chunk_fields(&mut source, &field_map, &algorithm, ignore_missing)?;
+            doc.source = source;
         }
         "join" => {
             let field = field_of(&doc, c, "field")?;
@@ -2211,5 +2389,234 @@ fn foreign_within(v: &crate::painless::Value, seen: &mut Vec<usize>) -> bool {
             m.borrow().iter().any(|(_, x)| foreign_within(x, seen))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::{Pipeline, run_pipeline};
+
+    /// One processor over one document, and the source it leaves.
+    fn through(processor: Value, source: Value) -> Result<Value, IngestError> {
+        let pipeline = Pipeline::parse("p", &json!({"processors": [processor]}))?;
+        let doc = IngestDoc::new("i", "1", source);
+        let (mut steps, mut depth) = (Vec::new(), Vec::new());
+        let out = run_pipeline(&Store::scratch(), &pipeline, doc, &mut steps, &mut depth)?;
+        Ok(out.map(|d| d.source).unwrap_or(Value::Null))
+    }
+
+    fn done(processor: Value, source: Value) -> Value {
+        through(processor, source).expect("the processor ran")
+    }
+
+    fn refused(processor: Value, source: Value) -> IngestError {
+        through(processor, source).expect_err("the processor was refused")
+    }
+
+    fn unread(processor: Value) -> IngestError {
+        Pipeline::parse("p", &json!({"processors": [processor]})).expect_err("refused")
+    }
+
+    #[test]
+    fn split_to_fields_puts_each_part_in_the_field_named_for_it() {
+        let split = json!({"split_to_fields": {
+            "field": "text", "separator": ",", "target_fields": ["first", "second"]
+        }});
+        assert_eq!(
+            done(split, json!({"text": "alpha,beta"})),
+            json!({
+                "text": "alpha,beta", "first": "alpha", "second": "beta"
+            })
+        );
+    }
+
+    #[test]
+    fn a_part_with_no_field_and_a_field_with_no_part() {
+        // more parts than fields drops what is left over
+        let few = json!({"split_to_fields": {
+            "field": "text", "separator": ",", "target_fields": ["a"]
+        }});
+        assert_eq!(done(few, json!({"text": "x,y,z"})), json!({"text": "x,y,z", "a": "x"}));
+        // fewer parts than fields leaves the rest of them unwritten
+        let many = json!({"split_to_fields": {
+            "field": "text", "separator": ",", "target_fields": ["a", "b", "c"]
+        }});
+        assert_eq!(
+            done(many.clone(), json!({"text": "x,y"})),
+            json!({
+                "text": "x,y", "a": "x", "b": "y"
+            })
+        );
+        // and a separator at the end makes no part, as Java's split gives none
+        assert_eq!(
+            done(many, json!({"text": "x,y,"})),
+            json!({
+                "text": "x,y,", "a": "x", "b": "y"
+            })
+        );
+    }
+
+    #[test]
+    fn split_to_fields_reads_a_regular_expression_as_the_separator() {
+        let ws = json!({"split_to_fields": {
+            "field": "text", "separator": "\\s+", "target_fields": ["a", "b"]
+        }});
+        assert_eq!(
+            done(ws, json!({"text": "x   y"})),
+            json!({
+                "text": "x   y", "a": "x", "b": "y"
+            })
+        );
+        // an empty separator cuts between every character, and Java leaves
+        // out the empty part before the first one
+        let each = json!({"split_to_fields": {
+            "field": "text", "separator": "", "target_fields": ["a", "b"]
+        }});
+        assert_eq!(done(each, json!({"text": "ab"})), json!({"text": "ab", "a": "a", "b": "b"}));
+    }
+
+    #[test]
+    fn a_field_split_to_fields_cannot_read() {
+        let one = |extra: Value| {
+            let mut cfg = json!({"field": "text", "separator": ",", "target_fields": ["a"]});
+            for (k, v) in extra.as_object().into_iter().flatten() {
+                cfg[k] = v.clone();
+            }
+            json!({"split_to_fields": cfg})
+        };
+        assert_eq!(
+            refused(one(json!({"field": "nope"})), json!({"text": "x,y"})).reason,
+            "field [nope] not present as part of path [nope]"
+        );
+        assert_eq!(
+            refused(one(json!({})), json!({"text": null})).reason,
+            "field [text] is null, cannot split."
+        );
+        assert_eq!(
+            refused(one(json!({})), json!({"text": 1})).reason,
+            "field [text] of type [java.lang.Integer] cannot be cast to [java.lang.String]"
+        );
+        // told to ignore a missing field, it hands the document back as it was
+        assert_eq!(
+            done(one(json!({"field": "nope", "ignore_missing": true})), json!({"text": "x,y"})),
+            json!({"text": "x,y"})
+        );
+    }
+
+    #[test]
+    fn split_to_fields_says_which_property_is_missing() {
+        let e = unread(json!({"split_to_fields": {}}));
+        assert_eq!(e.reason, "[field] required property is missing");
+        assert_eq!(e.property_name.as_deref(), Some("field"));
+        assert_eq!(
+            unread(json!({"split_to_fields": {"field": "a"}})).reason,
+            "[separator] required property is missing"
+        );
+        assert_eq!(
+            unread(json!({"split_to_fields": {"field": "a", "separator": ","}})).reason,
+            "[target_fields] required property is missing"
+        );
+        assert_eq!(
+            unread(json!({"split_to_fields": {
+                "field": "a", "separator": ",", "target_fields": "b"
+            }}))
+            .reason,
+            "[target_fields] property isn't a list, but of type [java.lang.String]"
+        );
+    }
+
+    #[test]
+    fn text_chunking_writes_the_pieces_where_the_field_map_says() {
+        let chunk = json!({"text_chunking": {
+            "algorithm": {"fixed_token_length": {"token_limit": 3, "overlap_rate": 0}},
+            "field_map": {"text": "chunks"}
+        }});
+        assert_eq!(
+            done(chunk, json!({"text": "one two three four five six"})),
+            json!({
+                "text": "one two three four five six",
+                "chunks": ["one two three ", "four five six"]
+            })
+        );
+    }
+
+    #[test]
+    fn a_field_map_inside_a_field_map_steps_into_the_object() {
+        let chunk = json!({"text_chunking": {
+            "algorithm": {"fixed_token_length": {"token_limit": 3}},
+            "field_map": {"a": {"b": "chunks"}}
+        }});
+        assert_eq!(
+            done(chunk.clone(), json!({"a": {"b": "one two three four"}})),
+            json!({
+                "a": {"b": "one two three four", "chunks": ["one two three ", "four"]}
+            })
+        );
+        // a field that is not there is cut into nothing, and the empty list
+        // is still written
+        assert_eq!(
+            done(chunk, json!({"a": {"x": "one two"}})),
+            json!({
+                "a": {"x": "one two", "chunks": []}
+            })
+        );
+    }
+
+    #[test]
+    fn a_list_of_strings_is_cut_element_by_element() {
+        let chunk = json!({"text_chunking": {
+            "algorithm": {"fixed_token_length": {"token_limit": 3}},
+            "field_map": {"text": "chunks"}
+        }});
+        assert_eq!(
+            done(chunk.clone(), json!({"text": ["one two three four", "five six seven eight"]})),
+            json!({
+                "text": ["one two three four", "five six seven eight"],
+                "chunks": ["one two three ", "four", "five six seven ", "eight"]
+            })
+        );
+        assert_eq!(
+            refused(chunk.clone(), json!({"text": [1]})).reason,
+            "list type field [text] has non string value, cannot process it"
+        );
+        assert_eq!(
+            refused(chunk.clone(), json!({"text": [["a"]]})).reason,
+            "list type field [text] is nested list type, cannot process it"
+        );
+        assert_eq!(
+            refused(chunk, json!({"text": 5})).reason,
+            "map type field [text] is neither string nor nested type, cannot process it"
+        );
+    }
+
+    #[test]
+    fn text_chunking_refuses_an_algorithm_it_cannot_run() {
+        let e = unread(json!({"text_chunking": {
+            "algorithm": {"fixed_token_length": {"overlap_rate": 0.9}},
+            "field_map": {"a": "b"}
+        }}));
+        assert_eq!(e.kind, "exception");
+        assert_eq!(
+            e.reason,
+            "java.lang.IllegalArgumentException: Parameter [overlap_rate] must be between 0.0 \
+             and 0.5"
+        );
+        assert_eq!(e.status(), 500);
+        assert_eq!(
+            e.caused_by,
+            Some(json!({
+                "type": "illegal_argument_exception",
+                "reason": "Parameter [overlap_rate] must be between 0.0 and 0.5"
+            }))
+        );
+        assert_eq!(
+            unread(json!({"text_chunking": {}})).reason,
+            "[field_map] required property is missing"
+        );
+        assert_eq!(
+            unread(json!({"text_chunking": {"field_map": {"a": "b"}}})).reason,
+            "[algorithm] required property is missing"
+        );
     }
 }
