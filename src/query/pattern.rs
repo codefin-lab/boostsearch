@@ -17,7 +17,11 @@ pub(crate) fn json_term_prefix_regex(field: Field, path: &str) -> String {
 }
 
 pub(crate) fn regex_query(field: Field, path: &str, pattern: &str) -> Result<Box<dyn Query>> {
-    let anchored = format!("{}{pattern}", json_term_prefix_regex(field, path));
+    // The pattern is grouped before the path is put in front of it, so that a
+    // top-level alternation stays inside the pattern: `a|b` anchored by
+    // concatenation alone reads as `<path>a` or `b`, and the second branch,
+    // having no path in front of it, matches no term at all.
+    let anchored = format!("{}({pattern})", json_term_prefix_regex(field, path));
     let re = Regex::new(&anchored).map_err(|e| anyhow!("bad regex `{pattern}`: {e}"))?;
     Ok(Box::new(JsonAutomatonQuery {
         field,

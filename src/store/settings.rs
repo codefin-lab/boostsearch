@@ -92,18 +92,32 @@ impl IdxState {
     }
 
     fn observe_inner(&mut self, source: &Value) {
-        fn walk(v: &Value, prefix: &str, out: &mut HashMap<String, String>) {
+        fn walk(
+            v: &Value,
+            prefix: &str,
+            mapping: &crate::store::Mapping,
+            out: &mut HashMap<String, String>,
+        ) {
             match v {
                 Value::Object(o) => {
                     for (k, child) in o {
                         let path =
                             if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                        walk(child, &path, out);
+                        // a type written as an object is one field still: the
+                        // parts of a point or of a range's ends are not
+                        // fields of their own, and are not reported as any
+                        if mapping
+                            .type_of(&path)
+                            .is_some_and(crate::store::mapping::structured_leaf)
+                        {
+                            continue;
+                        }
+                        walk(child, &path, mapping, out);
                     }
                 }
                 Value::Array(a) => {
                     for x in a {
-                        walk(x, prefix, out);
+                        walk(x, prefix, mapping, out);
                     }
                 }
                 leaf if !prefix.is_empty() => {
@@ -125,7 +139,9 @@ impl IdxState {
                 _ => {}
             }
         }
-        walk(source, "", &mut self.dynamic_types);
+        let mut types = std::mem::take(&mut self.dynamic_types);
+        walk(source, "", &self.mapping, &mut types);
+        self.dynamic_types = types;
     }
 
     /// Every field path known for this index, explicit mappings taking priority.

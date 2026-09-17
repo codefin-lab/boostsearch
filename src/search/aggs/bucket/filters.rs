@@ -622,6 +622,21 @@ pub(crate) fn run_sampler_agg(
     let field = spec.get("field").and_then(|v| v.as_str()).map(|s| s.to_string());
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
 
+    // A sampler narrows what something else sees. With nothing under it there
+    // is nothing to narrow, and the reference refuses the request rather than
+    // reporting the size of a sample no aggregation reads.
+    let has_children = sub_aggs.as_ref().and_then(|a| a.as_object()).is_some_and(|o| !o.is_empty());
+    if !has_children {
+        return Err(crate::api::shared::all_shards_failed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            targets.first().map(|s| s.as_str()).unwrap_or(""),
+            json!({
+                "type": "aggregation_execution_exception",
+                "reason": "Sampler aggregation must be used with child aggregations.",
+            }),
+        ));
+    }
+
     // `shard_size` is a count per shard: the sample is the best `shard_size`
     // documents of each shard, and a two-shard index samples twice as many.
     // It was taken as a count for the whole request, so the sub-aggregations
