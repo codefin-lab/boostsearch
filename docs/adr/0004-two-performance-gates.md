@@ -1,28 +1,29 @@
 # Two performance gates, because they answer different questions
 
-Beating OpenSearch on every dimension is a promise this project makes, and a
-promise nobody checks is a promise nobody keeps. But a single hard gate would
-have blocked the translog -- durability cost 23% of indexing throughput, and
-that was the right trade -- so the check is split in two.
+Being quicker or lighter than OpenSearch on every dimension, measured beside it
+on the same machine, is a promise this project makes, and a promise nobody
+checks is a promise nobody keeps. But a single hard gate would block a change
+like the translog -- durability costs 23% of indexing throughput, and that is
+the right trade -- so the check is split in two.
 
 **Every commit** is measured against *our own last measurement*, and CI fails
 if any dimension falls more than 5%. This is what keeps performance a design
 concern while features are being written: a change that costs throughput has to
 say so in its commit message rather than be noticed a quarter later.
 
-**Every release** is measured against OpenSearch, and every dimension must be
-ahead. Red means no release, not a warning. Between releases a dimension may be
-behind while a feature lands; it may not be behind on the day the version is
-cut.
+**Every release** is measured beside OpenSearch, and every dimension must be
+quicker or lighter. Red means no release, not a warning. Between releases a
+dimension may fall short while a feature lands; it may not on the day the
+version is cut.
 
 ## Consequences
 
 Correctness comes first and tuning comes after, but not silently: a dimension
-that is behind is visible in CI from the commit that made it so, and the
-release gate is what forces it to be paid back before anyone else sees it. Only
-dimensions ahead by more than 20% are claimed publicly; between 5% and 20% we
-report parity, because a number that close is one tuning pass on the other side
-away from being wrong.
+that falls short is visible in CI from the commit that made it so, and the
+release gate is what forces it to be paid back before a release. Every
+dimension is published with how it was measured; a margin under 20% is
+reported as measured and not made a headline, because a number that close is
+one tuning pass on the other side away from being wrong.
 
 ## Status
 
@@ -37,14 +38,15 @@ nobody believes. It also records which machine it was taken on: on another
 machine the comparison is printed and nothing fails, because a slower laptop
 is not a regression.
 
-The release gate -- every dimension ahead of OpenSearch -- does not need
-OpenSearch running every time. It was measured once, on this corpus, on one
+The release gate -- every dimension quicker or lighter than OpenSearch -- does
+not need OpenSearch running every time. It was measured once, on this corpus, on one
 machine, beside this engine measured the same way; both sets of numbers are in
 `bench/results/final-os-clean-*.json` and `final-velosearch-clean-*.json`, and every
-run of the gate reports what they said: **ahead on all 34 dimensions**. That is
+run of the gate reports what they said: **quicker or lighter on all 34
+dimensions**. That is
 a reading of a file rather than a fresh measurement, and it is labelled as
-such. Measuring against OpenSearch again is a thing to do when the reference
-version changes, not a thing to do on every commit.
+such. Measuring OpenSearch again is a thing to do when the version compared to
+changes, not a thing to do on every commit.
 
 What is still not automatic: `.github/workflows/ci.yml` runs the gate, but a
 GitHub runner is not the machine the baseline was taken on, so there it prints

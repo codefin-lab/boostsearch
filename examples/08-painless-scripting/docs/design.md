@@ -83,8 +83,8 @@ arithmetic on numeric fields they are faster than Painless and cannot do
 anything else -- no strings, no conditionals, no `_source`.
 
 They still read their fields through `doc[...]`: a bare field name is a link
-error, in this engine and in the reference alike. An earlier draft of this
-example wrote `litres_per_100km * 35` and was refused by both.
+error. `litres_per_100km * 35` is refused; `doc['litres_per_100km'].value * 35`
+is not.
 
 For `a * b`, use them. For anything with an `if`, do not.
 

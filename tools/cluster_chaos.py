@@ -454,9 +454,9 @@ def main():
     # A GET with preference=_local on a node whose copy is taken away while
     # the check reads it answers 404 until the copy is gone and then forwards
     # to a copy elsewhere, so the check read hundreds of documents as missing
-    # that were never missing (run 45 of r41hunt: publication timed out after
-    # the load stopped, the manager moved the replica, and 239 documents were
-    # "behind" and all there half a second later). Which copies exist is
+    # that were never missing (a publication that timed out after the load
+    # stopped had the manager move a replica, and 239 documents read as
+    # "behind" were all there half a second later). Which copies exist is
     # taken again after the pass, and a pass the copies moved under is
     # thrown away and read again once the cluster is green.
     def placement():

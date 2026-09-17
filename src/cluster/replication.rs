@@ -347,35 +347,21 @@ fn shards_of_written(written: &[(String, u32, u64)]) -> Vec<(String, u32)> {
 ///
 /// A node that takes a write believing itself the primary writes the
 /// documents down before it finds out otherwise, and the caller is told the
-/// write did not happen. The documents stay. Nothing took them away again:
-/// a resync trims a copy the new primary can see, and this copy was not in
-/// the set; a fill replaces a copy from the primary, and this copy was the
-/// one others were filled *from*. A copy filled from it inherited a document
-/// nobody had acknowledged, and the two copies answered one search
-/// differently for as long as the index lived -- once in about eighty chaos
-/// runs. The reference fails a primary that finds a newer term, and so does
-/// this: the manager takes those copies out of the in-sync set and they are
-/// filled again from the primary that really is one.
+/// write did not happen. The documents stay where they were written unless
+/// something takes them away: a resync trims only a copy the new primary can
+/// see, and a fill replaces a copy from the primary, so a copy that was
+/// filled *from* this one would inherit a document nobody acknowledged.
+/// OpenSearch fails a primary that finds a newer term, and so does this: the
+/// manager takes those copies out of the in-sync set and they are filled
+/// again from the primary that really is one.
 ///
-/// Failing only this node's own copy was not enough, and the gate found it
-/// out: the write had already been copied to the other nodes before the
-/// refusal, and the document survived on one of *them*. So every copy the
-/// write reached is named here, and the manager decides what to do with each.
-///
-/// This does not close the hole, and the ledger says so rather than the code
-/// implying otherwise. The manager will not fail the copy it now calls the
-/// primary -- it is what every other copy is filled from, and failing it on
-/// the word of a node that did not know it was not one is how a cluster
-/// loses acknowledged writes. So when the stray write reached the node that
-/// is promoted next, its documents stay there and the other copies never get
-/// them: two copies, one search, two answers. The gate reproduces it in
-/// about one run in fifty.
-///
-/// What closes it is what the reference does, and it is not another guard at
-/// this call site: a primary that takes over trims the operations it holds
-/// from a term that was not its own and that nobody acknowledged. That needs
-/// the term kept per operation on a copy and a trim at promotion, which is a
-/// mechanism this does not have yet.
+/// Every copy the write reached is named here, this node's own included,
+/// because the write may already have been copied to the others before the
+/// refusal. The manager decides what to do with each, and will not fail the
+/// copy it now calls the primary -- that copy is what the others are filled
+/// from. The write never reaches a replica in the first place when the
+/// sender is not the primary of the term it names: a replica takes an
+/// operation only from that term's primary (`not_from_the_primary`).
 async fn fail_copies_written(index: &str, shard: u32, why: &str, also: &[NodeId]) {
     let Some(rt) = super::runtime() else { return };
     let me = rt.local();
@@ -1031,7 +1017,7 @@ pub fn install(store: Store) {
                 // document in flight, stamped it with the new term, and this
                 // copy took it: the term was current. The node refused its
                 // caller, the copy it reached was not failed, and the document
-                // sat on one copy of two for good (chaos run 20). Within one
+                // sat on one copy of two for good. Within one
                 // term there is one primary, so an operation in the term this
                 // copy knows is taken only from the node that holds the
                 // primary in it, or the node the primary is moving to or from.

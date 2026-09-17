@@ -65,13 +65,13 @@ names it does not match.
 Nothing in step 8 creates `metrics-node-cpu`. The bulk goes to a name that
 does not exist; the server finds the highest-priority template matching the
 name, sees `data_stream: {}`, and makes the stream and its first backing index
-before writing. That is what lets a fleet of agents start sending
+before writing. That is what lets a fleet of collectors start sending
 `metrics-<anything>` without anyone provisioning each name.
 
 The explicit `PUT /_data_stream/{name}` in step 20 is still worth having. It
 makes the stream, and the backing index with its mapping, before any data
 arrives -- so a template mistake is found by whoever sets the stream up, not by
-the first agent whose samples are refused, and a dashboard pointed at the name
+the first collector whose samples are refused, and a dashboard pointed at the name
 answers empty rather than 404.
 
 ## The time field is not optional

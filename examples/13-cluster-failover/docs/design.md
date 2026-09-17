@@ -48,9 +48,8 @@ and looks fine; the disagreement only shows up as a result that changes between
 identical requests.
 
 `preference=_local` makes each node answer from its own copy, so the three
-answers can be compared. This is the same check `tools/cluster_chaos.py` makes
-after every chaos run, and it is the check that found the bug this repository's
-thirty-eighth review was hunting.
+answers can be compared. It is the check worth making after any failover test:
+a replica that silently missed writes is invisible to every other request.
 
 If the three counts differ, that is a correctness bug, not a timing artefact --
 wait for the cluster to go green first, then compare.

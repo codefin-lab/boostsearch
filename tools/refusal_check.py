@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """A write that is refused leaves what was there alone.
 
-The second review found a write that queued the delete of the document it was
-replacing before the validation that might refuse it: a refused write destroyed
-the document it failed to replace. Nothing in the suites noticed, because they
-check what a request answers and not what the index holds afterwards.
+A write that queued the delete of the document it was replacing before the
+validation that might refuse it would destroy the document it failed to
+replace, and no conformance suite would notice: they check what a request
+answers, not what the index holds afterwards.
 
 So this writes a document, sends a request that must be refused, and reads the
 document back. Every way a write can be refused, through every path that writes:

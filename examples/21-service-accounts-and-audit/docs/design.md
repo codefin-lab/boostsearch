@@ -80,13 +80,16 @@ internal user database, and it is what a service account on a cluster without an
 identity provider uses. `POST _plugins/_security/api/authtoken` exists, but it
 is the SAML token exchange and answers 401 without a SAML domain configured.
 
-There is no API-key endpoint in the plugin's REST surface as served here, and
-no on-behalf-of or service-account tokens: `POST
-_plugins/_security/api/generateonbehalfoftoken` answers 405, and
-`PUT _plugins/_security/api/internalusers/<name>` with
-`attributes.service: "true"` and no password is refused with `Please specify
-either 'hash' or 'password'`. A long-lived basic-auth password, rotated, is the
-service credential this example can show.
+The security plugin has no API-key endpoint. Its token-based alternatives are
+not for a plain service either: `POST
+_plugins/_security/api/generateonbehalfoftoken` answers 400 with `The
+OnBehalfOf token generating API has been disabled` while on-behalf-of tokens
+are off in the security configuration, which is the default; and a user
+written with `attributes.service: "true"` and no password is a service account
+for extensions, for which `POST .../internalusers/<name>/authtoken` answers
+`An auth token could not be generated for the specified account.` A
+long-lived basic-auth password, rotated, is the service credential this
+example shows.
 
 ## The audit log
 

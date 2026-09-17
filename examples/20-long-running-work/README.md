@@ -57,7 +57,7 @@ port with `PORT=9287 make serve` and `VS=http://127.0.0.1:9287`.
 
 - **Step 3** answers `{"task": "..."}` and nothing else -- no counts, because
   on a real cluster the job has barely started. Everything the client learns
-  from here on comes from `_tasks/<id>`. (On this node a job of 350 parcels has
+  from here on comes from `_tasks/<id>`. (Here a job of 350 parcels has
   already finished by the time the id comes back, about 100 ms; step 4's first
   poll says `completed=true`.)
 - **Step 5** is 6000 parcels in batches of 500 at 2000 a second. Twelve

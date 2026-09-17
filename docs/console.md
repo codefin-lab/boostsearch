@@ -3,7 +3,7 @@
 OpenSearch Dashboards is a browser application and a Node server. The
 application is a set of built bundles that boot from what the server tells
 them; the server serves those bundles, keeps the saved objects, and answers
-the few hundred routes the pages call. VeloSearch replaces the server. The
+the few hundred routes the pages call. VeloSearch provides that server. The
 application is not touched: it is served, byte for byte, from a Dashboards
 distribution the console is pointed at.
 
@@ -20,7 +20,7 @@ goes with the credentials in `VELOSEARCH_ENGINE` -- including the Dev Tools
 proxy, which by default forwards any path the page asks for
 (`VELOSEARCH_CONSOLE_PROXY_FILTER`, `.*` unless set, the same default the
 Node server has). Against a secured engine that means whoever can reach the
-console can do whatever those credentials can do. The Node server it replaces
+console can do whatever those credentials can do. The Node server
 behaves the same way without the security plugin's session handling; the
 answer is the same as there -- keep the console off any network you would not
 give those credentials to, and narrow the proxy filter.
@@ -49,7 +49,7 @@ starts Dashboards 3.1.0 and an OpenSearch behind it in Docker) and run:
 python3 tools/osd_pin.py --url http://127.0.0.1:5613 --engine http://127.0.0.1:9221
 ```
 
-Two things it learned: the engine behind the reference has to be alive, or
+Two things to know: the engine behind the reference has to be running, or
 the probe that writes one object of each type finds nothing and records no
 migration versions at all; and the index is read through its alias, since a
 Dashboards that has had a suite run against it has migrated more than once.
@@ -87,7 +87,7 @@ reference does not serve either. Multiple data sources and workspaces.
 - `tools/dashboards_check.py`: six areas that suite never asks about.
 - Every flow driven by hand in a browser -- Discover, Visualize, a
   dashboard, saved objects, Index Management, Dev Tools -- against a
-  VeloSearch node, in `docs/progress.md` under 13.6.
+  VeloSearch node.
 
 Every request that changes something must carry the `osd-xsrf` header, as
 the pages do; the suite does not, so the console it tests is started with
@@ -95,6 +95,6 @@ the pages do; the suite does not, so the console it tests is started with
 the suite starts the Node server with.
 
 The suite needs the Dashboards repository bootstrapped
-(`study/OpenSearch-Dashboards`, Node 20, `yarn osd bootstrap`) and the
+(cloned to `study/OpenSearch-Dashboards`, Node 20, `yarn osd bootstrap`) and the
 server it tests started with `--server.xsrf.disableProtection=true`, which
 is the difference between 76 and 140 for the Node server itself.

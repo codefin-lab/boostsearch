@@ -83,7 +83,7 @@ and the corpus, which is the point of the whole thing:
 ```bash
 VELOSEARCH_NODE_ATTRS=testattr=test ./target/release/velosearch &
 python3 tools/yaml_runner.py --manifest tools/phase1_manifest.json    # 398/398
-python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json    # 1,100/1,100
+python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json    # 1,428/1,428
 python3 tools/module_gate.py                                          # 880/890
 ```
 
@@ -118,10 +118,10 @@ Every number in the README is produced by one of these.
 
 ## What to read first
 
-`docs/plan-v1.md` is the work and its order. `CONTEXT.md` is what the words
-mean. `docs/adr/` is why seven decisions were made the way they were -- read
-0001 before touching analysis and 0002 before touching anything that will
-become the cluster.
+`CONTEXT.md` is what the words mean. `docs/adr/` is why eight decisions were
+made the way they were -- read 0001 before touching analysis, 0002 before
+touching the cluster, and 0005 before touching anything a search can read.
+`CHANGELOG.md` is what is provided and how it is measured.
 
 ## The rules that are not style
 

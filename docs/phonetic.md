@@ -42,9 +42,10 @@ does anything else.
 **With those files in place the whole phonetic suite passes**, including
 `30_beider_morse.yml` and its `languageset: polish` -- checked against
 commons-codec 1.18.0's own rule files, pointed at from outside this
-repository: `~/velo-fixtures/phonetic-rules`, which `tools/gate_node.sh`
-passes and `VELO_FIXTURES` moves. The hundred and twenty-seven files are the
-`org/apache/commons/codec/language/bm` entries of the jar. What is missing is the data, not the code, and whether a release
+repository: `phonetic-rules` under `$VELO_FIXTURES` (default
+`~/velo-fixtures`), which `tools/gate_node.sh` passes. The hundred and
+twenty-seven files are the `org/apache/commons/codec/language/bm` entries of
+the jar. What is missing is the data, not the code, and whether a release
 carries a hundred and twenty-seven files of somebody else's data -- even under
 a licence that allows it -- is a decision to make rather than something to
 slip into a commit.

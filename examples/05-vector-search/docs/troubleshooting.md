@@ -50,8 +50,9 @@ the real value. Step 8 says which constant it used.
 
 ## `_plugins/_knn/stats` returns 404
 
-The k-NN plugin is not answered for by this node. The `knn` query and
-`script_score` may still work; check:
+`VS` is pointing at a server without the k-NN plugin, or through a proxy that
+does not pass `_plugins/` paths on. Check that `opensearch-knn` is listed by the
+server the example is talking to:
 
 ```bash
 curl -s 'localhost:9265/_cat/plugins?v'

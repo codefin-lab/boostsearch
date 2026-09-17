@@ -1,12 +1,10 @@
 # A value is written where it can be asked for, and nowhere else
 
-Every value in every document has been written into both of the two JSON views
-the schema keeps: `_dyn`, which is analysed into words with frequencies and
+Writing every value in every document into both of the two JSON views the
+schema keeps -- `_dyn`, which is analysed into words with frequencies and
 positions, and `_raw`, which is untouched and carries the column that sorting
-and aggregation read. Both views also carried a column, though only one of
-them was ever read from.
-
-That is what an index costs us 1.7 times what OpenSearch charges for the same
+and aggregation read -- with a column in each, though only one is ever read,
+makes an index cost 1.7 times what OpenSearch charges for the same
 documents. Measured on 200,000 log documents, force-merged to a single
 segment, with the stored source counted once:
 
@@ -14,7 +12,7 @@ segment, with the stored source counted once:
 |---|---|
 | untouched view only | 30 MiB |
 | analysed view only | 39 MiB |
-| both (what we have shipped) | 56 MiB |
+| both | 56 MiB |
 | OpenSearch 3.1.0, same documents | 27 MiB |
 
 Nothing in that gap is fragmentation and nothing in it is a setting. Both
@@ -43,10 +41,10 @@ Declaring the field is what removes the copy, in OpenSearch and here alike.
 
 **Columns live on the untouched view only.** A column is read to sort by a
 field or to aggregate over it, and neither is ever done on analysed words.
-Numeric aggregations read the analysed view's column for a while because a
-path holding only numbers resolves without a string column beside it; measured
-again over 200,000 documents that is worth 0.14ms on a date histogram and
-nothing measurable on avg, stats, histogram, numeric terms or numeric range.
+Reading numeric aggregations from the analysed view's column, where a path
+holding only numbers resolves without a string column beside it, is worth
+0.14ms on a date histogram over 200,000 documents and nothing measurable on
+avg, stats, histogram, numeric terms or numeric range.
 It is not worth a second column of every value in the index.
 
 ## What this costs, and what has to be built to pay it
@@ -54,8 +52,8 @@ It is not worth a second column of every value in the index.
 Three things stop working when a value is only in one place, and each is a
 piece of work rather than a caveat:
 
-**`exists` has to ask the right view.** It has been asking the column, which
-only the untouched view now has. A field whose values are analysed-only is
+**`exists` has to ask the right view.** A column is something only the
+untouched view has. A field whose values are analysed-only is
 asked through its postings instead -- has this document any term under this
 path -- which is what OpenSearch does through `_field_names`.
 
@@ -67,7 +65,7 @@ already in the index; those documents keep what they were written with, which
 is what a mapping change has always meant here and in OpenSearch.
 
 **The profiler names an aggregator after the column it reads.** With numerics
-on the untouched view it began reporting `GlobalOrdinalsStringTermsAggregator`
+on the untouched view it would report `GlobalOrdinalsStringTermsAggregator`
 where OpenSearch reports `NumericTermsAggregator`. The name is decided from
 the field's mapped type instead, which is where OpenSearch decides it too.
 
@@ -82,16 +80,16 @@ into a single segment, both given the same mapping:
 | seven of ten declared (what the bench uses) | 30.7 MiB | 27.1 MiB |
 | nothing declared | 33.0 MiB | -- |
 
-From 45.3MiB to 30.7 on the bench's own mapping, and from behind to ahead on
-an index whose fields are declared. The three fields the bench leaves
+From 45.3 MiB to 30.7 on the bench's own mapping, and from larger than
+OpenSearch's index to smaller on an index whose fields are declared. The three fields the bench leaves
 undeclared are what remains: a string nobody has typed is written twice by
 both engines, and ours is the more expensive of the two duplicates. The bench
 mapping is deliberately left as it was rather than being completed to flatter
 the number.
 
-Nothing was traded for it that the gates can see: unit 71/71, phase 1 398/398,
-the core corpus 1,100/1,100 and the module corpus at its unchanged 820/895,
-file for file. Indexing, updates and deletes are within noise of where they
+Nothing was traded for it that the gates can see: the unit tests and the core
+and module conformance suites pass the same sections before and after, file
+for file. Indexing, updates and deletes are within noise of where they
 were, and every query shape got faster, because a smaller index is a smaller
 thing to read.
 
@@ -108,6 +106,5 @@ document written under two mappings is two different indexes on disk. That was
 always true of OpenSearch and is why reindexing exists.
 
 The corpus is what says whether a view was chosen wrongly, and it says it
-loudly: routing columns to one view alone moved 142 sections from passing to
-failing in one build, each of them naming the field and the view it could not
-find. That is the check this change is made under.
+loudly: a column routed to the wrong view fails sections by the hundred, each
+of them naming the field and the view it could not find. That is the check this change is made under.

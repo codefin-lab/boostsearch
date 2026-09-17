@@ -45,8 +45,10 @@ some versions and ignored in others.
 
 ## `_search/point_in_time` returns 404
 
-Point-in-time is not answered for by this node. `search_after` without a PIT
-and `scroll` both still work; the freezing behaviour is what is lost.
+The index named in the path does not exist (`index_not_found_exception`), or
+the path is misspelled. Creating a PIT is a `POST` to
+`/<index>/_search/point_in_time?keep_alive=1m`; deleting one is a `DELETE` to
+`/_search/point_in_time` with the id in the body.
 
 ## A scroll returns fewer documents than expected per batch
 

@@ -139,9 +139,11 @@ They are often pressed together, and they do unrelated things:
 The thresholds are per index and per phase (`query`, `fetch`), with four
 levels each (`warn`, `info`, `debug`, `trace`). A search slower than a
 threshold is written at that level; `index.search.slowlog.level` is the lowest
-level that is written at all. In OpenSearch the entries go to
-`logs/<cluster>_index_search_slowlog.json` (and `.log`), one line per slow
-shard-level query, with the index, the time, and the source of the search.
+level that is written at all. Each entry is one line per slow shard-level
+query, with the index, the time, and the source of the search. OpenSearch
+writes them to `logs/<cluster>_index_search_slowlog.json` (and `.log`);
+VeloSearch writes them to the node's log output, and to
+`<cluster>_index_search_slowlog.log` in `VELOSEARCH_LOGS` when that is set.
 
 Step 19 sets `query.debug` to `0ms` so every search qualifies, which is how
 to catch a specific query once, and removes every threshold again afterwards:

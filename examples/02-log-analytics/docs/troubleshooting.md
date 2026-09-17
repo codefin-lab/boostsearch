@@ -19,7 +19,10 @@ curl -s 'localhost:9262/_plugins/_ism/explain/logs-000001' | jq .
 
 ## `_plugins/_ism/...` returns 404
 
-Index management is not answered by this node. Check what it does answer for:
+`VS` is pointing at a server without the index-management plugin, or through a
+proxy that does not pass `_plugins/` paths on. Check that
+`opensearch-index-management` is listed by the server the example is talking
+to:
 
 ```bash
 curl -s 'localhost:9262/_cat/plugins?v'

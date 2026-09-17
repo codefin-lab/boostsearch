@@ -5,8 +5,7 @@ The language this project uses, and what each word is bound to. Not a spec.
 ## The things
 
 **VeloSearch** — the search server. Speaks the OpenSearch HTTP API. One
-process, one node. Formerly called velosearch; the name changed on 2026-08-31
-and nothing else did.
+process is one node; several make a cluster.
 
 **VeloCore** — the search engine library VeloSearch is built on. A fork of
 tantivy 0.26.1, kept in its own repository so the parts of the engine the
@@ -23,16 +22,15 @@ a second version, and no claim is made about it.
 **The conformance corpus** — OpenSearch's own YAML REST tests, run against
 VeloSearch by `tools/yaml_runner.py`. Two parts, and a section is the unit:
 
-- *the core spec*: 409 files, 1,427 sections, from `rest-api-spec`
+- *the core spec*: 410 files, 1,428 sections not skipped, from `rest-api-spec`
 - *the module corpus*: 206 files, 895 sections, shipped by the modules and
   plugins that apply to a single node
 
-**The v1 target** — all 2,322 sections, plus what of the security plugin's own
-suite can be pointed at an HTTP server. Nothing is deferred to a later version;
-`docs/plan-v1.md` is the order it gets built in.
+**The v1 target** — every section of both parts, plus what of the security
+plugin's own suite can be pointed at an HTTP server.
 
 **A section** — one named test in a YAML file. The number that matters is
-sections passing out of 2,322, not files.
+sections passing, not files.
 
 **The behavioural diff** — what `tools/compat_audit.py replay` reports: the
 same request put to OpenSearch and to VeloSearch, with the answers compared.
@@ -40,15 +38,16 @@ An answer is the documents that came back in the order they came back, the
 numbers over them, and the tokens a text was cut into. Everything else --
 `took`, `_shards`, ids that are allowed to differ -- is not an answer.
 
-**The bench matrix** — `tools/bench_matrix.py`: index throughput, resident
-memory, and the median latency of ten query shapes, both engines, same corpus,
-same machine. "Winning a dimension" means a better number in that row.
+**The bench matrix** — `tools/bench_matrix.py` and `tools/bench.py`: index
+throughput, resident memory, and the latency of the query shapes, both engines,
+same corpus, same machine. A dimension is one row; "quicker or lighter" on it
+means a better number in that row.
 
 **The commit gate** — the matrix against our own previous numbers. Red at a 5%
 fall in any dimension.
 
-**The release gate** — the matrix against OpenSearch. Every dimension ahead, or
-there is no release.
+**The release gate** — the matrix beside OpenSearch on the same machine. Every
+dimension quicker or lighter, or there is no release.
 
 ## The analysis words
 

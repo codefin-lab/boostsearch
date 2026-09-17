@@ -111,11 +111,12 @@ the neural-search plugin, a pipeline with
 combines the scores of the sub-queries of a `hybrid` query -- typically a
 `match` and a `knn` -- after rescaling each to a common range (`min_max` or
 `l2` or `z_score`), or ranks them by reciprocal rank fusion with a
-`score-ranker-processor`. This server runs both the way the plugin does, with
-one difference that follows from how it stores an index: an index is one
-shard here, so the lists the pipeline combines are one per index, where an
-OpenSearch index with several shards collects one per shard and scores each
-with that shard's term statistics. The example leaves hybrid search out
+`score-ranker-processor`. VeloSearch runs both the way the plugin does: each
+shard collects each sub-query's best documents, and the pipeline scales and
+combines them before a page is taken. One detail differs: a sub-query's scores
+are computed with the term statistics of the whole index, where OpenSearch
+scores each shard's list with that shard's own statistics, so on a small index
+with several shards the scaled scores can differ slightly. The example leaves hybrid search out
 because the catalogue has only one sensible way to score a title; example 05
 mixes words and a vector, which is where a hybrid query earns its keep.
 

@@ -114,22 +114,21 @@ per shard, the time spent in each query clause (with a breakdown into
 collectors, in each aggregation, and in the fetch phase. That is how "this
 search is slow" becomes "the wildcard clause on shard 1 is slow".
 
-## Where this node differs, and what was left out of `run.sh`
+## What was left out of `run.sh`, and two details
 
-This node answers the endpoints above the way OpenSearch does: jobs sent off
+VeloSearch answers the endpoints above the way OpenSearch does: jobs sent off
 run in the background and show `completed: false` while they do, `_rethrottle`
 and `_tasks/<id>/_cancel` act on the running task, `slices` makes sub-tasks
 with their own counts, and asynchronous search and `profile` answer in the
-plugin's and the reference's shapes. They are still not in `run.sh`, because
-what they print depends on timing -- how far a job has got when it is asked,
-how long a clause took -- and a run's output is meant to read the same twice.
+same shapes as OpenSearch. They are still not in `run.sh`, because what they
+print depends on timing -- how far a job has got when it is asked, how long a
+clause took -- and a run's output is meant to read the same twice.
 
-Two things differ in detail:
+Two details differ from OpenSearch:
 
-- **`profile` per shard.** This node holds every shard of an index in one
-  reader, so it times each phase once, over the whole index. Each shard's entry
-  carries its own document counts, and the index's times shared out by the
-  documents each shard matched.
+- **`profile` per shard.** VeloSearch times each phase once, over the whole
+  index. Each shard's entry carries its own document counts, and the index's
+  times shared out by the documents each shard matched.
 - **Asynchronous search results** are kept in the node's memory until their
   `keep_alive` runs out, not in an index, so they do not survive a restart.
 

@@ -1,13 +1,13 @@
 # The transport is a trust boundary, and it is drawn at the connection
 
 Everything a node believes about the cluster arrives through the transport
-port. Until now that port answered anyone: the handshake read the peer's own
-description of itself and checked one thing, that the cluster name matched.
-Whoever could open a TCP connection to it was a node.
+port. Without a boundary, that port answers anyone: a handshake that reads the
+peer's own description of itself and checks only that the cluster name matches
+makes whoever can open a TCP connection to it a node.
 
-What that bought an attacker, with no credentials at all:
+What that would give an attacker, with no credentials at all:
 
-| one frame | what it did |
+| one frame | what it could do |
 |---|---|
 | `internal:transport/forward` | ran any REST request, as any user, with any roles: the forwarded envelope carries its own `caller` and the receiving node runs the request as it |
 | `internal:cluster/coordination/start_join` with `term: u64::MAX` | every node moves to that term, no election can ever reach it, and the cluster has no manager again |
@@ -17,7 +17,7 @@ What that bought an attacker, with no credentials at all:
 The security layer this project already has sits in the REST path
 ([0005](0005-security-is-in-the-query-path-not-in-front-of-it.md)). It judges
 what a user may do. It says nothing about what a *node* may do, because
-between nodes there was nothing to judge: a peer was a peer because it said
+between nodes, without this decision, a peer would be a peer because it said
 so.
 
 ## What was considered
@@ -38,7 +38,7 @@ What OpenSearch's security plugin does, and what its settings are already
 named for. A node presents a certificate signed by the cluster's CA; the
 other end verifies it before a single frame is read. There is no secret to
 leak into a log, the trust is per node rather than per cluster, and an
-operator who already runs the reference has the material to hand.
+operator who already runs OpenSearch with TLS has the material to hand.
 
 ## The decision
 
@@ -67,11 +67,11 @@ peer whose connection carried it.**
 
 ## What follows from it
 
-A cluster is configured now: with TLS off it is a single machine's cluster,
+A cluster has to be configured: with TLS off it is a single machine's cluster,
 and with TLS on there are certificates to issue and renew. That is the cost,
-and it is the reference's cost too.
+and it is OpenSearch's cost too.
 
-The forwarded `caller` is still taken as given. It is worth being plain about
-why that is now sound and was not before: the caller was authenticated by the
+The forwarded `caller` is taken as given. It is worth being plain about why
+that is sound: the caller was authenticated by the
 node that received the REST request, and that node is one this node verified
 by certificate. The trust is transitive through a boundary that exists.

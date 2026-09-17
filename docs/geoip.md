@@ -42,8 +42,8 @@ address its own databases do not know.
 Before a release, one of these has to be chosen:
 
 - **Ship them**, as OpenSearch does, with MaxMind's attribution and licence
-  text carried alongside. This is what makes the engine a drop-in replacement
-  for a cluster that relies on geoip out of the box.
+  text carried alongside. This is what lets a workload that relies on geoip
+  out of the box move across with nothing to set.
 - **Fetch them at install time**, from MaxMind directly with the user's own
   licence key, which is what MaxMind's terms are written for and what
   `geoipupdate` exists to do.
@@ -57,10 +57,10 @@ is not a decision about what a release contains.
 ## What the suites are run against
 
 `VELOSEARCH_GEOIP_PATH` points at a directory holding the three GeoLite2
-databases, copied out of OpenSearch's own container -- `~/velo-fixtures/geoip-db`
-by default, which `tools/gate_node.sh` passes and `VELO_FIXTURES` moves. They
-were kept in `/tmp` until a restart emptied it and seven sections failed for
-want of a file. The same shape is used
-for the Beider-Morse rules and for the repository fixture: the code is proved
+databases, copied out of OpenSearch's own container -- `geoip-db` under
+`$VELO_FIXTURES` (default `~/velo-fixtures`), which `tools/gate_node.sh`
+passes. Keep that directory somewhere a restart does not empty: without the
+files, the geoip sections fail for want of data rather than of code. The same
+shape is used for the Beider-Morse rules and for the repository fixture: the code is proved
 against the real data, and the data stays out of the tree until someone
 decides it belongs there.

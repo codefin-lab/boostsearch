@@ -57,8 +57,8 @@ Path parameters and query strings removed, deduplicated:
 
 ## Not called, and why
 
-Described in `docs/design.md`; left out of `run.sh` because this node's answer
-is not yet OpenSearch's:
+Described in `docs/design.md`; left out of `run.sh` because what they print
+depends on timing, and a run's output is meant to read the same twice:
 
 - `POST /_update_by_query/<task id>/_rethrottle`, `POST /_delete_by_query/<task id>/_rethrottle`
 - `POST /_tasks/<task id>/_cancel`

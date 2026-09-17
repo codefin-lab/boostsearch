@@ -2,13 +2,9 @@
 
 ## `_rank_eval` returns 404
 
-Rank evaluation is not answered for by this node:
-
-```bash
-curl -s 'localhost:9276/_cat/plugins?v'
-```
-
-Everything up to step 8 still works; the proof at steps 9 and 10 does not.
+The path is misspelled: it is `/<index>/_rank_eval`, with `GET` or `POST`.
+Rank evaluation is part of the server itself, not a plugin, so a 404 is about
+the path, not about what is installed.
 
 ## `metric_score` is 0 for every request
 

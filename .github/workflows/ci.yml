@@ -77,9 +77,8 @@ jobs:
       # The suites above ask for the right answer to a sensible question. These
       # three ask the other kind: what a caller may reach when they may not
       # reach it, what an index holds after a write it refused, and whether the
-      # node is still there after a body nobody would write on purpose. Two
-      # whole-codebase reviews found most of what was wrong in those three
-      # shapes, and none of the suites above went red for any of it.
+      # node is still there after a body nobody would write on purpose --
+      # three shapes of mistake the suites above cannot see.
       - name: Who may reach what
         run: |
           pkill -f 'release/velosearch' || true

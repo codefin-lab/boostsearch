@@ -86,8 +86,8 @@ badly on purpose.
 
 ## The console
 
-The console is a second program — `velosearch-console` — because the one it
-replaces is one too: an engine and the console in front of it are deployed
+The console is a second program — `velosearch-console` — because the
+Dashboards server is one too: an engine and the console in front of it are deployed
 apart as often as together, and a console that has to run beside its engine is
 a worse console.
 

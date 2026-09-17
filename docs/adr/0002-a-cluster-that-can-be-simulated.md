@@ -18,7 +18,7 @@ seed reproduces exactly, every time.
 ## Consequences
 
 Nothing in the cluster layer may call `std::time` or open a socket directly,
-and a review has to enforce that; the constraint is cheap while the code is
+and code review has to enforce that; the constraint is cheap while the code is
 being written and close to impossible to retrofit afterwards. It also means the
 simulation is only as honest as the model of the network beneath it, which is
 why it does not replace running the real binary on real machines with real

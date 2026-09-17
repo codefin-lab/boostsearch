@@ -118,18 +118,15 @@ VS=http://127.0.0.1:9284 examples/24-sales-analytics/run.sh
   sketch rather than sorting them. Do not reconcile a report against either
   to the cent.
 
-## What this node does not do yet
+## Left out of `run.sh`
 
-These were tried on the same data and left out of `run.sh`. OpenSearch 3.8
-answers all of them.
+`variable_width_histogram` was tried on the same data and left out: its
+buckets are the result of a clustering pass, and VeloSearch's differ from
+OpenSearch's on this data, so no fixed answer could be checked.
 
-| Asked for | This node answers |
-|---|---|
-| `top_metrics` | `400`, unknown aggregation type; step 11 uses `top_hits` |
-| `top_hits` under `rare_terms` or `composite` | `400` asking for `sort`; given one, `400` refusing `_source`; given neither, `200` with `hits` as `[{"sort":[null]}]`. Under `terms` and `multi_terms` it works |
-| `variable_width_histogram` | buckets that differ from OpenSearch's on the same data |
-| `missing` on a `histogram` | ignored: the unrated sales do not appear in bucket 0; step 15 uses `terms` |
-| `format` on `min` / `max` over a date | ignored: `value_as_string` is the full timestamp |
+`top_metrics` is not an OpenSearch aggregation (it is refused as an unknown
+type); step 11 uses `top_hits` with `size: 1` and a `sort` for the same
+question.
 
 ## This directory
 

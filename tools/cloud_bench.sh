@@ -1,8 +1,7 @@
 #!/bin/sh
 # The bench matrix on hardware a release would be cut on.
 #
-# The numbers in docs/progress.md are from a developer machine, which is not a
-# release gate: a laptop throttles, shares its disk with everything else on it,
+# Numbers from a developer machine are not a release gate: a laptop throttles, shares its disk with everything else on it,
 # and has a page cache the size of the corpus. This runs the same matrix on a
 # machine rented for the length of the run and gives it back afterwards.
 #

@@ -18,30 +18,51 @@ downgrading is not one of the things it can do.
 
 ## Unreleased
 
-The first release has not been cut. What is built, and how much of it is
-checked, is in [README.md](README.md); what it took and what was got wrong on
-the way is in [docs/progress.md](docs/progress.md), task by task.
+The first release has not been cut. VeloSearch implements the OpenSearch REST
+API and is checked with OpenSearch's own tests; every number below is produced
+by a script in `tools/`, and [README.md](README.md) says which.
 
-Against OpenSearch 3.1.0, measured rather than asserted:
+### How it is measured
 
-- **1,427 of 1,427** sections of OpenSearch's core suite that are not skipped
-- **880 of 890** sections of its module and plugin suites
-- **160 of 183** canonical requests answered identically once ids and timings
-  are scrubbed -- not byte for byte, which is what this used to say
+- **1,428 of 1,428** non-skipped sections of OpenSearch's core conformance
+  suite, over all 410 files of it
+- **880 of 890** sections of its module and plugin suites. Of the ten that do
+  not pass, the stempel and Ukrainian analysis sections need dictionaries that
+  are not redistributed here, and one asserts that its plugin is the only one
+  installed, which a single binary cannot be
+- **166 of 183** canonical requests answered identically to OpenSearch 3.1.0
+  once ids and timings are scrubbed (`tools/compat_audit.py replay`)
 - **146 of 167** REST APIs routed on every path and method their spec names,
-  8 more on some of them; what is not routed answers 404 or 501 rather than
-  pretending (`tools/endpoint_gate.py` counts them)
-- **17 of 18** bench dimensions ahead
+  8 more on some of them; what is not routed answers 404 or 501
+  (`tools/endpoint_gate.py`)
+- **quicker or lighter on all 34 dimensions**, measured beside OpenSearch 3.1.0
+  on the same Google Compute Engine `n2-standard-8`, with the same corpus and
+  the same client ([docs/performance.md](docs/performance.md))
+- **200 of 200** three-node fault runs -- isolations, restarts, pauses and
+  heals under a write load -- with no acknowledged write lost
+  (`tools/cluster_chaos.py`)
+- **146 of 166** cases of OpenSearch Dashboards' own API suite against the
+  console's server, none failed that the Node server passes; 14 MiB resident,
+  ready in 45 ms ([docs/console.md](docs/console.md))
 
-The ten sections that do not pass, and the one dimension that is behind, are
-named with their reasons in `docs/progress.md`. Two of the ten need
-dictionaries that are somebody else's to redistribute; one asserts that its
-plugin is the only one installed, which a single binary cannot be.
+### What it provides
 
-And the console's server (Phase 13): OpenSearch Dashboards' own browser
-application, served unchanged, on a server of this project's -- **146 of
-166** of Dashboards' own API suite, none failed that the Node server passes,
-14 MiB resident against its 223, ready in 45 ms.
+The search API, the analyzers, Painless, ingest, security including document-
+and field-level, a cluster with replication and recovery, snapshots, index
+management, vector search, SQL and PPL, and a server for OpenSearch
+Dashboards' browser application. Recently added:
 
-Not yet done: a run of the bench matrix on the hardware a release would be
-cut on rather than on a developer machine (`tools/cloud_bench_gcp.sh`).
+- highlighting with fragments, and the `fvh` highlighter
+- span and interval queries
+- percolation, with document slots and highlights
+- the `hybrid` query with score normalisation
+- search pipelines with request, response and phase processors
+- `_update_by_query`, `_delete_by_query` and `_reindex` as background tasks:
+  throttled, sliced, listed and cancellable through `_tasks`
+- asynchronous search
+- transforms and rollups, including searching a rollup index
+- data streams created from index templates
+- attachment extraction from HTML, RTF, PDF, Office, OpenDocument and EPUB
+- routing that narrows a search to the shards it names
+- service accounts and on-behalf-of tokens
+- scheduled refresh

@@ -564,15 +564,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         // query at all, which is why nothing caught this -- the document sets
         // differed as well as their order.
         //
-        // So the query is taken apart by term: each term becomes a
-        // disjunction over the fields, and the terms are put together by the
-        // operator. The documents are then the reference's documents. The
-        // score is not: the reference sums the term frequencies across the
-        // fields and scores the sum once, over a combined field length, and
-        // that needs statistics this engine does not gather per query. What
-        // is here scores each term's best field and adds those up, which
-        // ranks nearer than `cross_fields` did and is still an approximation.
-        // `docs/progress.md` says so rather than the name implying otherwise.
+        // So the query is taken apart by term, and each term is scored over
+        // the fields as one field (`CombinedTerm`, BM25F): its frequencies
+        // and lengths added with the fields' weights, as the reference's
+        // CombinedFieldQuery does. The terms are put together by the operator
+        // and `minimum_should_match`.
         "combined_fields" => {
             let fields: Vec<Value> =
                 body.get("fields").and_then(|f| f.as_array()).cloned().unwrap_or_default();
@@ -654,11 +650,11 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         // of the array satisfies the first and a *different* object satisfies
         // the second, where OpenSearch requires one object to satisfy both.
         // Closing it means indexing each nested object as a document of its
-        // own and joining the blocks at search time, which is the one thing
-        // the storage layer here does not do. It is written down in
-        // `docs/progress.md` and in the compatibility notes rather than
-        // hidden: a caller relying on nested queries to keep two fields of
-        // one object together does not get that here.
+        // own and joining the blocks at search time, which the storage layer
+        // here does not do. Where the clauses can be read off the source, the
+        // search settles them object by object afterwards
+        // (`search::extras::settleable_nested`); where they cannot, this is
+        // the answer.
         "nested" => {
             let inner =
                 body.get("query").ok_or_else(|| anyhow!("[nested] requires 'query' field"))?;

@@ -49,8 +49,11 @@ __pycache__/
 /compat-replay.json
 /security-replay.json
 
-# MEMANTO's project-local memory cache: one person's, not the project's
+# working notes kept outside the repository
 /MEMORY.md
+/docs/progress.md
+/docs/plan-v1.md
+/docs/production-readiness-review-*.md
 
 # terraform state for the cloud bench: credentials-adjacent and per-run
 /tools/cloud_bench/.terraform/

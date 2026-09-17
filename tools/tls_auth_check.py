@@ -12,7 +12,7 @@ raises:
     certificate, as a client with a CA bundle would
   * is plain http refused on the port that speaks TLS
   * is a caller with no credentials refused -- everywhere except the probe's
-    own path, which answers anyone by design (PR-09, the thirtieth review)
+    own path, which answers anyone by design
   * can the administrator administer, and is a user with one role held to it
   * is a wrong password refused
   * and does a node published on every interface with neither security

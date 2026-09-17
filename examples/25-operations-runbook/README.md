@@ -136,20 +136,18 @@ in step 1 would be placed and steps 2 to 10 would have nothing to diagnose.
 - **Step 20** checks that `_stats` counts what happened: three searches,
   `query_total` up by exactly three.
 
-## What this node does not answer yet
+## Where the answers have a different shape
 
-Some of the questions in this runbook get an answer from this node that is not
-the one OpenSearch gives. They are kept out of the checks, or the step says so
-where it runs:
+VeloSearch is not a JVM process, so two answers in this runbook are shaped like
+OpenSearch's but carry what the node has instead:
 
 - `_nodes/hot_threads` is the plain-text report with measured CPU times, but
-  where OpenSearch prints stack frames this node prints each thread's run
+  where OpenSearch prints stack frames VeloSearch prints each thread's run
   state.
-- `_nodes/stats` `jvm` reports what the allocator holds as the heap: there is
-  no JVM. Step 21 reads `_velosearch/memory` for the allocator's own view.
+- `_nodes/stats` `jvm` reports what the allocator holds as the heap. Step 21
+  reads `_velosearch/memory` for the allocator's own view.
 
-`docs/troubleshooting.md` has the detail of each, and what to use in the
-meantime.
+`docs/troubleshooting.md` has the detail of each.
 
 ## This directory
 

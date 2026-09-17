@@ -1,15 +1,16 @@
-# Performance against OpenSearch
+# Performance, measured beside OpenSearch
 
-Thirty-four dimensions, the same corpus, the same machine, both engines driven
-by the same client (`tools/bench.py`). VeloSearch is ahead on all 34, on both
-machines it has been measured on.
+VeloSearch implements the OpenSearch interface, so the same measurements apply
+to both. Thirty-four dimensions, the same corpus, the same machine, both
+engines driven by the same client (`tools/bench.py`). VeloSearch measured
+quicker or lighter on all 34, on both machines it has been measured on.
 
 ## On a cloud machine, both engines measured the same day
 
 A Google Compute Engine `n2-standard-8`: eight vCPUs, 32 GB, Ubuntu 24.04, an
 SSD. OpenSearch 3.1.0 from `opensearchproject/opensearch:3.1.0` with security
 off, VeloSearch as this repository builds it. Each was measured on 2026-09-17
-with nothing else running on the machine, five runs each, three query rounds
+with nothing else running on the machine, five runs each, three query passes
 per run; the median is shown. The runs are kept in `bench/results/vm-bs-*.json`
 and `bench/results/vm-os-3.1.0-*.json`.
 
@@ -129,6 +130,8 @@ with eight.
 - These are single-node numbers. A cluster adds replication to every write and
   a network hop to some reads; they have not been measured against an
   OpenSearch cluster.
-- The closest margins are the eight-client latencies, around +23% to +30%.
-  That is where a change is most likely to cost the lead, and where the gate's
-  5% matters most.
+- The closest margins are indexing throughput on the cloud machine (+15%)
+  and the eight-client latencies (+22% to +46% there, +25% to +41% on the
+  laptop).
+  That is where a change is most likely to close the margin, and where the
+  gate's 5% matters most.

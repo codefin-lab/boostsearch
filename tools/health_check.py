@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """The container's healthcheck, against the nodes it has to tell apart.
 
-The production-readiness review of 2026-09-07 (PR-09) found the image's
-healthcheck asking `_cluster/health` over plain http with no credentials: a
-node with authentication on answered 401 and a node with TLS on did not
-answer at all, so a healthy node was reported unhealthy. Its recheck asked
-for the image to be probed with security off, with authentication on and
-with TLS on, and to tell healthy from unready in each.
+A healthcheck that asks `_cluster/health` over plain http with no
+credentials reports a healthy node unhealthy: a node with authentication on
+answers 401 and a node with TLS on does not answer at all. The probe has to
+tell healthy from unready with security off, with authentication on and with
+TLS on.
 
 This starts a node of each kind and runs the probe the Dockerfile runs --
 https first, plain http after, no credentials -- against it, and the old

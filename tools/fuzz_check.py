@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Malformed input at everything that parses: does the node still answer?
 
-Two reviews found ten ways to end the process or a request with one body: a
-chain of `!` in a script, a `NOT` chain in SQL, a value that holds itself, a
-character cut in half by a byte offset, a pattern that expands factorially. All
-of them were reachable through an ordinary endpoint and none of them were in any
-suite, because a suite asks for the right answer to a sensible question.
+One request body can end a process or a request in many ways: a chain of `!`
+in a script, a `NOT` chain in SQL, a value that holds itself, a character cut
+in half by a byte offset, a pattern that expands factorially. Each is reachable
+through an ordinary endpoint and none is in a conformance suite, because a
+suite asks for the right answer to a sensible question.
 
 This asks nonsense. Every parser and analyser the server has -- Painless, SQL,
 PPL, the query DSL, mustache templates, grok, date math, time zones, the

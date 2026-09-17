@@ -26,8 +26,8 @@ rather than believed.
 
 | | | how |
 |---|---|---|
-| OpenSearch's core suite | **1,427 of 1,427** not skipped, over all 409 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
-| its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Polish, Ukrainian and Beider-Morse data in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
+| OpenSearch's core suite | **1,428 of 1,428** not skipped, over all 410 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
+| its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Beider-Morse rules in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
 | the same answer as OpenSearch 3.1.0 | **166 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
 | REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions quicker or lighter** | `tools/bench_matrix.py` |
@@ -49,8 +49,10 @@ rather than believed.
 | the same on Linux | the build, the corpus, the examples, the checks and twenty-five chaos runs on an eight-core Ubuntu 24.04 machine: the same answers as on the Mac | the scripts above, on a GCE `n2-standard-8` |
 | twenty-six worked examples | each a project of its own -- product search, logs, facets, geo, vectors, security, ingest, scripting, nine languages, SQL, joins, snapshots, failover, reindex, deep paging, relevance, percolation, data streams, search pipelines, background jobs, service accounts, clause search, attachments, analytics, a runbook, routing -- run against a real node with every answer checked | `examples/run-all.sh` |
 
-The ten sections that do not pass are named, with the reason, in
-`docs/progress.md`; five more are set aside as tests of the test framework
+Of the ten module sections that do not pass, the stempel (Polish) and
+Ukrainian analysis sections need dictionaries that are not redistributed here,
+and one asserts that its plugin is the only one installed, which a single
+binary cannot be. Five more are set aside as tests of the test framework
 rather than of a server, and `tools/module_gate.py` prints those and why on
 every run.
 
@@ -269,22 +271,20 @@ passes and adds them up.
 - routing hashes the way `Murmur3HashFunction` does, so a document lands on the
   shard OpenSearch would put it on
 
-`docs/adr/` records the decisions that were hard to reverse and why. `docs/progress.md`
-is the working ledger: every task, what it took, and what was got wrong on the
-way.
+`docs/adr/` records the decisions that were hard to reverse and why.
 
 ## The documents
 
 | | |
 |---|---|
-| [docs/plan-v1.md](docs/plan-v1.md) | the work, in the order it was done, and the gate each phase was measured by |
-| [docs/progress.md](docs/progress.md) | the ledger: every task, what it took, what was got wrong on the way |
+| [CHANGELOG.md](CHANGELOG.md) | what each version provides, and how it is measured |
 | [docs/settings.md](docs/settings.md) | every setting, the server's and the console's |
 | [docs/upgrading.md](docs/upgrading.md) | moving an existing workload onto it, and moving between versions of this |
 | [docs/console.md](docs/console.md) | the console's server: what it serves, what it pins, what it leaves out |
 | [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md) | the two processors that read data this does not ship |
+| [docs/performance.md](docs/performance.md) | both engines measured on the same machine, and what to read into it |
 | [docs/velocore.md](docs/velocore.md) | what was changed in the fork of tantivy, and why |
-| [docs/adr/](docs/adr/) | the seven decisions that were hard to reverse |
+| [docs/adr/](docs/adr/) | the eight decisions that were hard to reverse |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | where things are, and what to run before you push |
 | [CONTEXT.md](CONTEXT.md) | what the words mean |
 

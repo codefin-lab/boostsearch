@@ -1,13 +1,14 @@
-# Replacing OpenSearch, and moving between VeloSearch versions
+# Moving a workload onto VeloSearch, and moving between VeloSearch versions
 
-Two different things are called an upgrade here. One is putting VeloSearch
-where an OpenSearch cluster is now. The other is moving a VeloSearch cluster
+Two different things are called an upgrade here. One is moving a workload that
+runs on an OpenSearch cluster today onto VeloSearch. The other is moving a VeloSearch cluster
 from one version of itself to the next. This is both, in that order.
 
-## Part one: replacing an OpenSearch you already run
+## Part one: moving an existing OpenSearch workload
 
-The claim is that VeloSearch answers what OpenSearch answers. The claim is
-worth exactly as much as the check, so the check comes first and the cutover
+VeloSearch implements the same API and is held to the same conformance tests,
+so it should answer what OpenSearch answers. That is worth exactly as much as
+the check against your own workload, so the check comes first and the cutover
 comes after it.
 
 ### 1. Find out what your cluster actually uses
@@ -80,8 +81,8 @@ both formats with nothing checking it. Move the documents instead, by one of:
 
 Run both, send reads to both and compare, then send writes to both, then stop
 writing to the old one, then stop reading from it. Keep it until you are sure.
-Nothing about this is specific to VeloSearch; it is what you would do for any
-engine replacement, and it is the part that makes step 2's diff mean
+Nothing about this is specific to VeloSearch; it is what you would do when
+moving any workload between engines, and it is the part that makes step 2's diff mean
 something.
 
 ### What will not come across

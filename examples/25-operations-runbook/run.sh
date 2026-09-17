@@ -41,11 +41,9 @@ expect() {
 # settle -- wait, up to five seconds, for the cluster-wide health to agree with
 # the per-index health.
 #
-# Earlier builds of this node could, for about half a second after an index
-# was created, answer "green" from _cluster/health while counting an
-# unassigned shard, and while level=indices already said the new index was
-# yellow. The summary is now judged from the same state as the per-index view,
-# so this returns at once; it stays for a runbook pointed at an older node.
+# The summary and the per-index view are judged from the same state, so this
+# normally returns at once; a runbook keeps the guard so a status read just
+# after an index is created is never a stale "green" with unassigned shards.
 settle() {
   local i=0
   while [ "$i" -lt 25 ]; do
@@ -213,8 +211,8 @@ step "which searches are slow? -- the search slow log thresholds"
 reqf PUT /orders/_settings requests/13-slow-log-thresholds.json
 req GET "/orders/_settings/index.search.slowlog*"
 reqf GET /orders/_search requests/14-a-search-the-slow-log-would-catch.json
-note "with query.debug at 0ms, OpenSearch writes that search to logs/<cluster>_index_search_slowlog.json"
-note "this node writes the same entry to its log output, and to VELOSEARCH_LOGS when set -- see docs/troubleshooting.md"
+note "with query.debug at 0ms, every search on orders is written to the search slow log"
+note "the entry goes to the node's log output, and to VELOSEARCH_LOGS when set -- see docs/troubleshooting.md"
 reqf PUT /orders/_settings requests/15-slow-log-thresholds-removed.json
 expect "slow log settings left on orders" \
   "$(get '/orders/_settings' 'len(d["orders"]["settings"]["index"].get("search", {}))')" 0

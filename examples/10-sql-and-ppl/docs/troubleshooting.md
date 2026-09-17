@@ -2,13 +2,15 @@
 
 ## `/_plugins/_sql` returns 404
 
-SQL is not answered for by this node:
+`VS` is pointing at a server without the SQL plugin, or through a proxy that
+does not pass `_plugins/` paths on. Check that `opensearch-sql` is listed by
+the server the example is talking to:
 
 ```bash
 curl -s 'localhost:9270/_cat/plugins?v'
 ```
 
-The PPL steps use a different endpoint and may still work, or not, separately.
+The same plugin answers `/_plugins/_ppl`, so the PPL steps fail the same way.
 
 ## `SemanticCheckException` or "can't resolve Symbol"
 

@@ -17,11 +17,10 @@ whether this caller may see it.
 A filter that cannot be built is not a filter that is skipped. A document-level
 rule is stored as the text of a query, and the text can be one this engine
 cannot read -- a role written against a version that had a query this one does
-not, or a substitution that produced something malformed. That case used to
-drop the filter and answer the search without it, which is the one failure a
-document-level rule cannot have: the caller is shown every document the rule
-existed to hide. It now answers with a filter that matches nothing, and says so
-in the log.
+not, or a substitution that produced something malformed. Dropping the filter
+and answering the search without it is the one failure a document-level rule
+cannot have: the caller would be shown every document the rule exists to hide.
+So such a rule becomes a filter that matches nothing, and the log says so.
 
 ## Consequences
 
@@ -32,5 +31,5 @@ means visiting every aggregation, every sort and every fetch phase a second
 time, with the certainty that one of them will be missed and will leak.
 
 The security plugin is a separate repository with its own tests, so the
-conformance corpus grows: 2,296 sections from OpenSearch's own tests plus
-whatever of the security plugin's suite can be pointed at an HTTP server.
+conformance corpus grows: OpenSearch's own tests plus whatever of the security
+plugin's suite can be pointed at an HTTP server.

@@ -127,7 +127,7 @@ percolate it again by `index` and `id` (step 8).
 
 ## What would change at scale
 
-- **Percolation cost grows with the rules, not the events.** The reference
+- **Percolation cost grows with the rules, not the events.** OpenSearch
   narrows the candidates by extracting terms from each stored query at write
   time, so a document containing none of a rule's required terms never runs
   it. A rule with no extractable terms -- a bare `range`, a `wildcard` -- is

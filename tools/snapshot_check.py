@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Backup and restore, checked against what went in.
 
-The production-readiness review of 2026-09-07 asked for a backup and restore
-tested with data whose count and content can be compared, including a file
-that is damaged or missing. This is that test: documents with known content
+A backup and restore tested with data whose count and content can be
+compared, including a file that is damaged or missing: documents with known content
 are indexed, a snapshot is taken into a filesystem repository, and it is
 restored under another name and compared document by document -- count, ids
 and a digest of every source. Then the snapshot's documents file is cut

@@ -12,15 +12,15 @@ in order of likelihood:
 - **The query has no words in it.** A `term` on a keyword, a `range`, an
   `ids` query: there is nothing to mark. Give the field a `highlight_query`
   (step 5).
-- **The query is positional.** Span and interval queries find the clause, but
-  on this node they do not yet feed the highlighter; step 8 onwards print ids
-  for that reason. Highlight such a hit with a `highlight_query` made of the
-  same words as a `match`.
 
-## `fvh` is refused, or behaves like `unified`
+Span and interval queries mark the words their rules matched, the same as a
+`match` does, so they need no `highlight_query`.
 
-OpenSearch refuses the `fvh` highlighter on a field that was not mapped with
-`term_vector: with_positions_offsets`:
+## `fvh` is refused
+
+The `fvh` highlighter needs a field mapped with
+`term_vector: with_positions_offsets`; on any other field the search is
+refused:
 
 ```
 the field [title] should be indexed with term vector with position offsets
@@ -34,25 +34,32 @@ the mapping:
 curl -s localhost:9282/clauses/_mapping | jq '.clauses.mappings.properties.body'
 ```
 
-This node accepts `fvh` on any field and marks it the way `unified` would, so
-a request that works here may be refused by OpenSearch.
+Use `unified` on fields without term vectors; it needs nothing in the mapping.
 
 ## `fragment_size` and `number_of_fragments` seem to do nothing
 
 Every highlight in this example sets `number_of_fragments: 0`, which asks for
 the whole field; `fragment_size` is ignored in that case by design. With a
-number above zero, OpenSearch returns up to that many passages of about
-`fragment_size` characters around the matches.
+number above zero, up to that many passages of about `fragment_size`
+characters around the matches come back instead:
 
-On this node the whole value comes back whatever the two are set to, and
-`no_match_size` returns nothing for a field without a match. Neither is used
-in `run.sh` for that reason.
+```bash
+curl -s localhost:9282/clauses/_search -H 'Content-Type: application/json' -d '{
+  "_source": false, "query": {"match": {"body": "notice"}},
+  "highlight": {"fields": {"body": {"fragment_size": 30, "number_of_fragments": 2}}}}'
+```
 
-## A phrase highlight marks words outside the phrase
+A field with no match comes back with no highlight at all unless it sets
+`no_match_size`, which returns that many characters from the start of the
+field (with `require_field_match: false` so the field is considered).
 
-On this node a `match_phrase` for *other party* marks *party* in *Either party*
-as well as in *the other party*. OpenSearch marks only the words where the
-phrase matched. The hits are right; only the marking is broader.
+## A phrase highlight marks more than expected
+
+A `match_phrase` for *other party* marks *other* and *party* where the phrase
+matched, each word in its own tag: `the <em>other</em> <em>party</em>`. A
+*party* elsewhere in the clause, as in *Either party*, is not marked. If it
+is, the highlight is not running the phrase: check for a `highlight_query`
+made of a plain `match`, which marks every occurrence of every word.
 
 ## A phrase with `slop` matches nothing
 

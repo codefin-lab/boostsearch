@@ -88,16 +88,16 @@ follow it, but not by an aggregation outside `regions`.
 
 ## `top_metrics` answers 400
 
-Not implemented on this node. `top_hits` with `size: 1` and a `sort` gives the
-same answer with more around it (step 11).
+`top_metrics` is not one of OpenSearch's aggregations, so it is refused as an
+unknown type. `top_hits` with `size: 1` and a `sort` gives the same answer with
+more around it (step 11).
 
-## `top_hits` under `rare_terms` or `composite` answers 400
+## `top_hits` returns the wrong document of a bucket
 
-On this node `top_hits` inside those two aggregations needs a `sort` and then
-refuses `_source`; without `_source` it answers with hits that carry no
-document. Inside `terms` and `multi_terms` it works. Use a `min` or `max`
-sub-aggregation for a single value (step 8 uses `sum` and `min`), or run a
-second search filtered to the bucket's key.
+Without a `sort`, `top_hits` ranks a bucket's documents by score, and under a
+query with no scoring clause every score is the same. Give it a `sort` (step
+11 sorts by `revenue` and by `sold_at`) whether it sits under `terms`,
+`multi_terms`, `rare_terms` or `composite`.
 
 ## A median that is not the median
 

@@ -3,10 +3,10 @@
 
 The gates measure whether this server answers the way OpenSearch answers. They
 say nothing about what happens when a caller may *not* do what they asked, and
-that is where two reviews found most of what was wrong: a path the action table
-did not know ran unjudged, a path that merely ended with the token exchange ran
-with no credentials at all, and a request that named its indices in the body was
-judged on a cluster permission alone.
+that is where the most serious mistakes live: a path the action table does not
+know running unjudged, a path that merely ends with the token exchange running
+with no credentials, a request that names its indices in the body judged on a
+cluster permission alone.
 
 So this walks the router. Every route in `src/main.rs` is probed as five
 identities -- nobody at all, a caller with no roles, a reader and a writer on

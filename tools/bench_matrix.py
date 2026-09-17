@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Every dimension, both engines, same corpus, same machine.
 
-The claim is that VeloSearch beats OpenSearch everywhere, which is only worth
-saying if it is checked everywhere and checked again after every change. This
-writes the table that says so, and exits non-zero if any dimension is lost.
+A number about performance is only worth publishing if every dimension is
+measured, on both engines, and measured again after every change. This writes
+that table, and exits non-zero if VeloSearch is slower or heavier on any of
+them.
 
 Eighteen dimensions: eight about the work an engine does and how much of the
 machine it takes, and ten query shapes. The tail of each query is measured as

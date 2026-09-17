@@ -51,32 +51,31 @@ the bulk as a whole succeeds and each item carries its own status:
 ... | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["errors"], {i["index"]["status"] for i in d["items"]})'
 ```
 
-## Documents never become visible without `_refresh`
+## Documents are not visible straight after a write
 
-On this node, a document written without `refresh=true` or an explicit
-`_refresh` does not appear in `_search` or `_count`, however long you wait --
-with `refresh_interval` at its default, or set explicitly to `1s`. `GET` by id
-finds it at once. OpenSearch refreshes every `refresh_interval`, so the
-document would be searchable within about a second.
+A write becomes searchable at the next refresh: within `refresh_interval`
+(one second by default), at once with `?refresh=true`, or when the write
+returns with `?refresh=wait_for`. `GET` by id finds it straight away. If a
+document stays invisible, the index has `refresh_interval: -1` left over from
+a load (step 11 sets it and removes it again):
 
-That is why step 11 shows only the part that behaves the same on both: with
-`refresh_interval: -1` nothing is visible until `_refresh`, and afterwards
-everything is. Until the periodic refresh exists, write with
-`?refresh=wait_for` or call `_refresh` after a load.
+```bash
+curl -s 'localhost:9285/orders/_settings?filter_path=*.settings.index.refresh_interval'
+```
 
 ## Step 12 says one segment before the merge
 
 Segments are merged in the background as well, so the count before a force
-merge depends on timing. On this node a delete with `refresh=true` merged all
-eight segments of `orders` into one, which is why the force merge happens
-before step 15 deletes a document.
+merge depends on timing. A delete with `refresh=true` can merge all eight
+segments of `orders` into one, which is why the force merge happens before
+step 15 deletes a document.
 
 ## `_nodes/hot_threads` shows no stack frames
 
 The report is plain text in OpenSearch's layout, and the CPU time, the
 percentages and the thread names are measured. A stack of another running
 thread cannot be read without stopping it, so where OpenSearch prints frames
-this node prints what the kernel says the thread is doing: its run state, and
+VeloSearch prints what the kernel says the thread is doing: its run state, and
 on Linux the kernel function it sleeps in. For frames, use the operating
 system's own tools (`perf`, `sample` on macOS).
 

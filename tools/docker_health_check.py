@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """The image's own healthcheck, in the container, in every mode it ships for.
 
-PR-09 of the production-readiness review of 2026-09-07 asked for the image to
-be probed with security off, with authentication on and with TLS on, and for
-healthy to be told apart from unready. `tools/health_check.py` asks the
+The image is probed with security off, with authentication on and with TLS
+on, and healthy has to be told apart from unready. `tools/health_check.py` asks the
 questions of a binary; this asks them of the built image, which is what an
 orchestrator actually watches: Docker runs the HEALTHCHECK itself, and this
 reads the verdict back with `docker inspect`.

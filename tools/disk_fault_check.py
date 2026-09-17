@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """What a node does when the disk it writes to has no room left.
 
-The production-readiness review of 2026-09-07 asked for fault injection on
-storage, with a real restart, to show that acknowledged writes are not lost.
-This is that test. A node is started on a small memory-backed volume, loaded,
+Fault injection on storage, with a real restart, to show that acknowledged
+writes are not lost. A node is started on a small memory-backed volume, loaded,
 and then the volume is filled by a ballast file until nothing more will fit.
 The rules it must keep:
 

@@ -1,14 +1,16 @@
 # Troubleshooting
 
-## A tokenizer returns `unknown tokenizer [thai]` (or kuromoji, nori, smartcn, icu)
+## `failed to find tokenizer under [...]` (kuromoji, nori, smartcn, icu)
 
-That analysis plugin is not answered for by this node:
+The tokenizer name is misspelled, or the server the example is talking to does
+not have that analysis plugin (`analysis-kuromoji`, `analysis-nori`,
+`analysis-smartcn`, `analysis-icu`). Check what is installed:
 
 ```bash
 curl -s 'localhost:9269/_cat/plugins?v'
 ```
 
-The steps for the missing language will fail; the rest still run.
+The steps for a missing language will fail; the rest still run.
 
 ## Thai search matches nothing, and there is no error
 
