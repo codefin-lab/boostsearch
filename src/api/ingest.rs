@@ -489,12 +489,12 @@ pub(crate) async fn get_pipeline(
         .collect();
     // asking after one pipeline that is not there is a miss; asking after all
     // of them when there are none is simply an empty answer
+    // The miss is the status and nothing else: the reference answers a bare
+    // `{}` here, where a DELETE of the same name gets the exception. A client
+    // reading the body for a list would otherwise be handed an error object
+    // where it expected pipelines.
     if picked.is_empty() && want.as_deref().map(|w| !w.contains('*')).unwrap_or(false) {
-        return err(
-            StatusCode::NOT_FOUND,
-            "resource_not_found_exception",
-            format!("pipeline [{}] is missing", want.unwrap_or_default()),
-        );
+        return (StatusCode::NOT_FOUND, axum::Json(json!({}))).into_response();
     }
     respond(&p, Value::Object(picked))
 }

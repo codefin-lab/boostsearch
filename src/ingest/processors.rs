@@ -384,6 +384,7 @@ pub(crate) fn check(spec: &ProcessorSpec) -> Result<(), IngestError> {
                     kind: "script_exception".into(),
                     reason: e.kind.to_string(),
                     processor_type: Some("script".into()),
+                    named_after: false,
                     processor_tag: spec.tag.clone(),
                     property_name: None,
                     pipeline: None,

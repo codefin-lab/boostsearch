@@ -236,8 +236,10 @@ def answer_of(path, body):
 # same way and are not meant to. An index made twice has two uuids and two
 # creation stamps, so a shard failure naming the uuid -- which is most of
 # them -- or a GET _settings would differ forever, saying nothing about what
-# either engine does.
-VOLATILE = re.compile(r'^(took|_shards|_seq_no|_primary_term|_version|timed_out|max_score|_score|_id|uuid|index_uuid|cluster_uuid|creation_date|start_time.*|end_time.*|duration.*|_index|_node|node|name|version|build.*)$')
+# either engine does. `timestamp` is the same: a simulated pipeline stamps the
+# document with the moment it ran, and the two engines are asked a moment
+# apart.
+VOLATILE = re.compile(r'^(took|_shards|_seq_no|_primary_term|_version|timed_out|max_score|_score|_id|uuid|index_uuid|cluster_uuid|creation_date|timestamp|start_time.*|end_time.*|duration.*|_index|_node|node|name|version|build.*)$')
 
 def scrub(node, keep_scores):
     """Drop what two engines are allowed to disagree about."""

@@ -458,6 +458,12 @@ pub struct IngestError {
     pub processor_type: Option<String>,
     pub processor_tag: Option<String>,
     pub property_name: Option<String>,
+    /// the processor was named after the fact, because a document failed
+    /// going through it. The reference tells a client which processor a
+    /// *configuration* is wrong in, but a document that a processor could
+    /// not handle is reported as the exception alone, so a name stamped on
+    /// afterwards is kept for `_ingest` and left out of the error body.
+    pub named_after: bool,
     /// the pipeline, processor tag and type a failure carries in `_ingest`
     pub pipeline: Option<String>,
     /// the document as it stood, where a processor found nothing to do
@@ -481,6 +487,7 @@ impl IngestError {
             kind: "illegal_argument_exception".into(),
             reason: reason.into(),
             processor_type: None,
+            named_after: false,
             processor_tag: None,
             property_name: None,
             pipeline: None,
@@ -501,6 +508,7 @@ impl IngestError {
             kind: "parse_exception".into(),
             reason: reason.into(),
             processor_type: processor_type.map(|s| s.to_string()),
+            named_after: false,
             processor_tag: tag.map(|s| s.to_string()),
             property_name: property.map(|s| s.to_string()),
             pipeline: None,
@@ -519,10 +527,10 @@ impl IngestError {
     /// whole error body.
     pub fn cause_json(&self) -> Value {
         let mut c = json!({"type": self.kind, "reason": self.reason});
-        if let Some(t) = &self.processor_type {
+        if let Some(t) = self.processor_type.as_ref().filter(|_| !self.named_after) {
             c["processor_type"] = json!(t);
         }
-        if let Some(t) = &self.processor_tag {
+        if let Some(t) = self.processor_tag.as_ref().filter(|_| !self.named_after) {
             c["processor_tag"] = json!(t);
         }
         if let Some(p) = &self.property_name {
@@ -1164,6 +1172,7 @@ impl IngestError {
         // reference does not say which processor gave it
         if self.processor_type.is_none() && spec.kind != "fail" {
             self.processor_type = Some(spec.kind.clone());
+            self.named_after = true;
         }
         if self.processor_tag.is_none() {
             self.processor_tag = spec.tag.clone();
