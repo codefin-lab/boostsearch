@@ -14,6 +14,8 @@
 !/tools/modules_manifest.json
 # what the server Phase 13 replaces scores against its own suite
 !/tools/dashboards_baseline.json
+# who may reach what, as CI holds every change to it
+!/tools/auth_matrix_baseline.json
 
 # Benchmark output. Keep the Phase 2 progression and the final clean
 # head-to-head, which are what the docs report; the rest are working runs.
