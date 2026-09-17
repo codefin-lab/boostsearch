@@ -7695,3 +7695,18 @@ dimensions: 378.7 queries a second against 134.9 on one client, 665.9 against
 resident when idle against 1,501, and every query shape between 22% and 82%
 quicker. The runs are kept in `bench/results/vm-*.json`, and the README and
 `docs/performance.md` now carry that table, with the laptop's beneath it.
+
+### The two data sets the suites read live under the home directory now
+
+The geoip databases and the Beider-Morse rule files are somebody else's data
+and are not in this repository. They were kept in `/tmp`, which a restart
+empties, and the module gate then read 871 of 890 where it reads 880 -- seven
+geoip sections and the Beider-Morse one failing for want of a file rather than
+for anything the code does, which is exactly what this ledger and the README
+say those numbers mean. They are in `~/boost-fixtures/geoip-db` (the three
+GeoLite2 files out of OpenSearch's own container) and
+`~/boost-fixtures/phonetic-rules` (the hundred and twenty-seven
+`org/apache/commons/codec/language/bm` files of commons-codec 1.18.0) now, and
+`tools/gate_node.sh` points at them, with `BOOST_FIXTURES` to move them. The
+module gate reads 880 of 890 again: the six left are stempel, ukrainian and
+the analysis-phone plugin listing, as before.

@@ -57,7 +57,10 @@ is not a decision about what a release contains.
 ## What the suites are run against
 
 `BOOSTSEARCH_GEOIP_PATH` points at a directory holding the three GeoLite2
-databases, copied out of OpenSearch's own container. The same shape is used
+databases, copied out of OpenSearch's own container -- `~/boost-fixtures/geoip-db`
+by default, which `tools/gate_node.sh` passes and `BOOST_FIXTURES` moves. They
+were kept in `/tmp` until a restart emptied it and seven sections failed for
+want of a file. The same shape is used
 for the Beider-Morse rules and for the repository fixture: the code is proved
 against the real data, and the data stays out of the tree until someone
 decides it belongs there.

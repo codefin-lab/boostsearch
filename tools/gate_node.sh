@@ -22,6 +22,12 @@
 #     BOOST_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh
 set -e
 PORT=${BOOST_PORT:-9213}
+# The geoip databases and the Beider-Morse rule files are somebody else's data
+# and are not in this repository (docs/geoip.md, docs/phonetic.md). They used
+# to be looked for in /tmp, which a restart empties: the suites that read them
+# then failed for want of a file rather than for anything the code does. They
+# live under the home directory now, and BOOST_FIXTURES says where.
+FIXTURES=${BOOST_FIXTURES:-$HOME/boost-fixtures}
 DATA=${BOOST_DATA:-/tmp/boost-gate}
 REPO=${BOOST_URL_REPO:-/tmp/boost-url-repo}
 FIXTURE=${BOOST_URL_FIXTURE_PORT:-9280}
@@ -35,8 +41,8 @@ BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
 BOOSTSEARCH_TRANSPORT_PORT=${BOOST_TRANSPORT:-$((PORT + 100))} \
 BOOSTSEARCH_DATA="$DATA" \
 BOOSTSEARCH_NODE_ATTRS=testattr=test \
-BOOSTSEARCH_GEOIP_PATH=${BOOST_GEOIP:-/tmp/geoip-db} \
-BOOSTSEARCH_PHONETIC_RULES=${BOOST_PHONETIC:-/tmp/phonetic-rules} \
+BOOSTSEARCH_GEOIP_PATH=${BOOST_GEOIP:-$FIXTURES/geoip-db} \
+BOOSTSEARCH_PHONETIC_RULES=${BOOST_PHONETIC:-$FIXTURES/phonetic-rules} \
 BOOSTSEARCH_PATH_REPO="$REPO" \
 BOOSTSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:$FIXTURE*" \
 BOOSTSEARCH_REINDEX_ALLOWLIST="127.0.0.1:*" \
