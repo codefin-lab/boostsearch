@@ -20,6 +20,7 @@ pub mod engine;
 pub mod jobs;
 pub mod rollup;
 pub mod rollup_search;
+pub mod sm;
 pub mod transform;
 
 /// Where policies and the state of each managed index are kept.

@@ -53,6 +53,7 @@ pub mod perf_analyzer;
 pub mod plugins;
 pub mod replication;
 pub mod rollup;
+pub mod sm;
 pub mod sql;
 pub mod transform;
 pub use ingest::*;

@@ -175,6 +175,7 @@ pub(crate) fn snapshot_record(
     store: &Store,
     name: &str,
     indices: Vec<String>,
+    streams: Vec<String>,
     global: bool,
 ) -> Value {
     let now = IdxState::now_iso();
@@ -188,7 +189,7 @@ pub(crate) fn snapshot_record(
         // this server keeps no remote store, so no snapshot of it is shallow
         "remote_store_index_shallow_copy": false,
         "indices": indices,
-        "data_streams": [],
+        "data_streams": streams,
         "include_global_state": global,
         "state": "SUCCESS",
         "start_time": now,
@@ -199,6 +200,40 @@ pub(crate) fn snapshot_record(
         "failures": [],
         "shards": {"total": shards, "failed": 0, "successful": shards},
     })
+}
+
+/// The data streams a snapshot request reaches, as the reference records them.
+///
+/// A snapshot keeps the streams the caller asked for by name, not the streams
+/// its indices happen to belong to: naming `.ds-logs-app-000001` outright
+/// keeps that index and no stream, while naming `logs-app`, a pattern that
+/// fits it, or nothing at all keeps the stream. That list is what a restore
+/// puts the stream back from, so it is the difference between a restore that
+/// gives back a data stream and one that gives back two loose indices.
+fn streams_asked_for(store: &Store, asked: Option<&str>) -> Vec<String> {
+    let held = store.data_streams();
+    let mut out: Vec<String> = match asked {
+        Some(expr) => held
+            .keys()
+            .filter(|name| {
+                expr.split(',').map(|s| s.trim()).any(|part| {
+                    part == "_all" || part == *name || crate::store::glob_match(part, name)
+                })
+            })
+            .cloned()
+            .collect(),
+        None => held.keys().cloned().collect(),
+    };
+    out.sort();
+    out
+}
+
+/// The data streams a snapshot record says it holds.
+fn held_streams(record: &Value) -> Vec<String> {
+    record["data_streams"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default()
 }
 
 /// A repository's work, done here.
@@ -599,7 +634,8 @@ pub async fn create_snapshot(
     };
     let global = body.get("include_global_state").and_then(|v| v.as_bool()).unwrap_or(true);
     let partial = body.get("partial").and_then(|v| v.as_bool()).unwrap_or(false);
-    let mut record = snapshot_record(&store, &name, indices.clone(), global);
+    let streams = streams_asked_for(&store, asked.as_deref());
+    let mut record = snapshot_record(&store, &name, indices.clone(), streams, global);
     // whatever the caller attached to the snapshot travels with it
     if let Some(meta) = body.get("metadata") {
         record["metadata"] = meta.clone();
@@ -1141,7 +1177,13 @@ pub async fn clone_snapshot(
         None => held_indices.clone(),
     };
     let global = source["include_global_state"].as_bool().unwrap_or(true);
-    let mut record = snapshot_record(&store, &target, indices.clone(), global);
+    // a clone keeps the streams whose backing indices it chose to carry over,
+    // and not the ones whose indices it left behind
+    let streams: Vec<String> = held_streams(&source)
+        .into_iter()
+        .filter(|s| indices.iter().any(|n| n.starts_with(&format!(".ds-{s}-"))))
+        .collect();
+    let mut record = snapshot_record(&store, &target, indices.clone(), streams, global);
     // the shard counts come from the indices as they are now, and a clone is
     // of what the snapshot holds: what it recorded is what is carried over
     record["shards"] = source["shards"].clone();
@@ -1214,13 +1256,30 @@ pub async fn restore_snapshot(
             ),
         );
     }
-    let wanted: Vec<String> = match body.get("indices") {
+    let asked: Vec<String> = match body.get("indices") {
         Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).collect(),
         Some(Value::Array(a)) => {
             a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
         }
         _ => held_indices.clone(),
     };
+    // A data stream is asked back by its own name, which is not the name of
+    // anything the snapshot holds: the indices it holds are the stream's
+    // backing ones. A restore of `logs-app` was answered `no such index
+    // [logs-app]` for want of this, and the only way to get the stream back
+    // was to name every generation of it.
+    let streams = held_streams(source);
+    let wanted: Vec<String> = asked
+        .iter()
+        .flat_map(|want| {
+            let named: Vec<String> = streams
+                .iter()
+                .filter(|s| *want == **s || crate::store::glob_match(want, s))
+                .map(|s| format!(".ds-{s}-*"))
+                .collect();
+            if named.is_empty() { vec![want.clone()] } else { named }
+        })
+        .collect();
     let uuid = source.get("uuid").and_then(|v| v.as_str()).unwrap_or("_na_").to_string();
     // An index named outright that the snapshot does not hold is missing: it
     // was answered 200 with nothing restored, which reads as a restore that
@@ -1499,6 +1558,27 @@ pub async fn restore_snapshot(
     }
     if let Some(global) = global {
         crate::snapshot::apply_global(&store, &global);
+    }
+    // A stream is the name in front of its backing indices, so bringing the
+    // indices back leaves them loose until the name is put back too: the
+    // stream read as gone, a write to it made an ordinary index of its name,
+    // and the documents that were restored were not searchable under it. The
+    // streams the snapshot recorded come back with whichever of their backing
+    // indices this restore made, under whatever name those indices now have.
+    for stream in &streams {
+        let prefix = format!(".ds-{stream}-");
+        if !restored.iter().any(|n| n.starts_with(&prefix)) {
+            continue;
+        }
+        if store.data_streams().contains_key(stream) {
+            continue;
+        }
+        // the template is resolved now rather than remembered: a stream
+        // reports the template it fits today, as `GET _data_stream` does
+        let template = crate::api::data_stream_template(&store, stream)
+            .map(|(name, _)| name)
+            .unwrap_or_default();
+        store.add_data_stream(stream, &template);
     }
     let shards = restored.len().max(1);
     respond(

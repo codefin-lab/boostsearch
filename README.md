@@ -122,10 +122,10 @@ repository's own last numbers by `tools/bench_gate.py`.
 | **Ingest** | the thirty processors the corpus names, grok and dissect, geoip, user-agent, text out of HTML, RTF, PDF, Word, Excel, PowerPoint, OpenDocument and EPUB, and search pipelines with request, response and phase processors |
 | **Cluster** | consensus, allocation, replication, peer recovery, cross-node search, routing that narrows a search to its shards; checked in a seeded simulation and against real nodes with real partitions, two hundred fault runs of three nodes with nothing lost |
 | **Security** | TLS, users and roles, API keys, document- and field-level security inside the query rather than in front of it, SAML, OIDC, LDAP, the audit log |
-| **Snapshots** | filesystem, URL, S3, Google Cloud Storage and Azure repositories |
+| **Snapshots** | filesystem, URL, S3, Google Cloud Storage and Azure repositories, and the data streams a snapshot holds come back with it |
 | **Index management** | ISM policies, transitions, rollover, snapshot management, transforms, rollups and searching a rollup index |
 | **Vector search** | six distance spaces, exact and HNSW, filtered search, the k-NN API |
-| **SQL and PPL** | both languages, in jdbc, json, csv, raw and table shapes |
+| **SQL and PPL** | both languages, in jdbc, json, csv, raw and table shapes, with `fetch_size` paging a SQL result through a cursor |
 
 `_cat/plugins` lists what it answers for, because a client asking whether it
 may use `icu_tokenizer` deserves a true answer.

@@ -290,7 +290,11 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
     // judges each item, and this layer only writes the request down
     let query_language = matches!(
         path.trim_end_matches('/'),
-        "/_plugins/_sql" | "/_plugins/_ppl" | "/_plugins/_sql/_explain" | "/_plugins/_ppl/_explain"
+        "/_plugins/_sql"
+            | "/_plugins/_ppl"
+            | "/_plugins/_sql/_explain"
+            | "/_plugins/_ppl/_explain"
+            | "/_plugins/_sql/close"
     );
     if query_language {
         audit.granted_privileges(&caller, &action, &info, &[], &[]);
