@@ -698,6 +698,8 @@ async fn main() -> anyhow::Result<()> {
         // requests carried to the node they belong on
         cluster::replication::install(store.clone());
         cluster::search::install(store.clone());
+        // a snapshot's shards are written by the nodes holding their primaries
+        api::snapshot_install(store.clone());
         cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;

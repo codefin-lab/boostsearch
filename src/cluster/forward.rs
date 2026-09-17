@@ -116,6 +116,10 @@ pub fn classify(method: &Method, path: &str) -> Target {
             | "_reindex"
             | "_delete_by_query"
             | "_update_by_query" => Target::Manager,
+            // a search pipeline is the cluster's, kept and published by the
+            // manager like an ingest pipeline: written where it landed, it
+            // lived on that node until the next publish took it away
+            "_search" if first_segment(rest).0 == "pipeline" => Target::Manager,
             // a search is coordinated from the node it reached
             "_search" | "_msearch" | "_count" | "_search_shards" => Target::Local,
             // a task lives where the work ran: the manager, for the index
@@ -664,7 +668,7 @@ fn settles_custom(method: &Method, path: &str) -> Option<(&'static str, String, 
         "_component_template" => (("components", first_segment(rest).0), first_segment(rest).1),
         "_index_template" => (("templates", first_segment(rest).0), first_segment(rest).1),
         "_scripts" => (("scripts", first_segment(rest).0), first_segment(rest).1),
-        "_ingest" => {
+        "_ingest" | "_search" => {
             let (kind, after) = first_segment(rest);
             if kind != "pipeline" {
                 return None;
@@ -1636,6 +1640,7 @@ mod tests {
         assert_eq!(classify(&get, "/logs/_explain/1"), Target::Read("logs".into()));
         assert_eq!(classify(&post, "/_search/scroll"), Target::Local);
         assert_eq!(classify(&put, "/_ingest/pipeline/p"), Target::Manager);
+        assert_eq!(classify(&put, "/_search/pipeline/p"), Target::Manager);
         assert_eq!(classify(&get, "/_nodes/stats"), Target::Local);
     }
 }
