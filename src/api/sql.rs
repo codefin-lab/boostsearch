@@ -95,7 +95,10 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    if store.resolve(&planned.index).is_empty() {
+    // the indices the query reads, wherever in the cluster they are held: a
+    // node holding no copy of one answers for it as the node holding it would
+    let targets = crate::api::cluster_resolve(store, &planned.index);
+    if targets.is_empty() {
         return failed(
             StatusCode::NOT_FOUND,
             "IndexNotFoundException",
@@ -107,7 +110,7 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
     // resolve. This answered rows of nulls, so a typo looked like an empty
     // field. `SELECT *` names nothing, an aggregate names what it counts, and
     // a name a document taught the index dynamically counts as mapped.
-    if let Some(missing) = unresolved_column(store, &planned) {
+    if let Some(missing) = unresolved_column(store, &planned, &targets) {
         return failed(
             StatusCode::BAD_REQUEST,
             "SemanticCheckException",
@@ -116,18 +119,18 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
     }
     // the index is named in the body, where the security layer cannot see
     // it, so it is judged here the way a bulk item is
-    if let Some(why) = crate::security::item_refusal(
-        store,
-        &["indices:data/read/search"],
-        &crate::security::layer::indices_for_expr(store, &planned.index),
-    ) {
+    if let Some(why) = crate::security::item_refusal(store, &["indices:data/read/search"], &targets)
+    {
         return failed(StatusCode::FORBIDDEN, "SecurityException", why);
     }
+    // the search is coordinated from here like any other: the indices held on
+    // other nodes are asked of those nodes, and the pages and aggregations
+    // reduced over all of them
     let answer = match crate::search::run(store, &planned.index, &planned.body, &Params::new()) {
         Ok(out) => crate::search::envelope(out, &planned.body, &Params::new()),
         Err(r) => return r,
     };
-    let table = typed_by_mapping(store, &planned, rows::shape(&planned, &answer));
+    let table = typed_by_mapping(store, &planned, &targets, rows::shape(&planned, &answer));
     // the format decides the shape of the answer, not what is in it
     let format = p
         .get("format")
@@ -168,7 +171,12 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
 /// The search answers every metric as a double, so `max(units)` over a
 /// `long` came back `8.0` and typed `double`; the reference types it by the
 /// field it read. The mapping says what that field is.
-fn typed_by_mapping(store: &Store, planned: &plan::Planned, mut table: rows::Table) -> rows::Table {
+fn typed_by_mapping(
+    store: &Store,
+    planned: &plan::Planned,
+    targets: &[String],
+    mut table: rows::Table,
+) -> rows::Table {
     fn find<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
         let o = node.as_object()?;
         if let Some(found) = o.get(name) {
@@ -179,7 +187,7 @@ fn typed_by_mapping(store: &Store, planned: &plan::Planned, mut table: rows::Tab
         })
     }
     let Some(aggs) = planned.body.get("aggs") else { return table };
-    let first = store.resolve(&planned.index).into_iter().next();
+    let first = targets.first();
     for (at, read) in planned.reads.iter().enumerate() {
         let plan::Read::Metric(name) = read else { continue };
         let Some(def) = find(aggs, name) else { continue };
@@ -190,9 +198,8 @@ fn typed_by_mapping(store: &Store, planned: &plan::Planned, mut table: rows::Tab
         };
         let _ = kind;
         let mapped = first
-            .as_deref()
-            .and_then(|n| store.get(n))
-            .and_then(|st| st.read().mapping.type_of(field).map(|t| t.to_string()));
+            .and_then(|n| with_mapping(store, n, |m, _| m.type_of(field).map(|t| t.to_string())))
+            .flatten();
         let Some(mapped) =
             mapped.filter(|t| matches!(t.as_str(), "long" | "integer" | "short" | "byte"))
         else {
@@ -310,9 +317,33 @@ fn drawn(table: &rows::Table) -> String {
     out
 }
 
+/// What an index maps, and the field types it has learned: this node's own
+/// copy where it holds one, and the mapping the cluster published where it
+/// holds none.
+fn with_mapping<R>(
+    store: &Store,
+    index: &str,
+    f: impl FnOnce(&crate::store::Mapping, &[(String, String)]) -> R,
+) -> Option<R> {
+    if let Some(st) = store.get(index) {
+        let g = st.read();
+        return Some(f(&g.mapping, &g.all_field_types()));
+    }
+    let published =
+        crate::cluster::with_state(|s| s.indices.get(index).map(|m| m.mappings.clone()))?;
+    let mapping = crate::store::Mapping::from_body(&published);
+    let mut types: Vec<(String, String)> =
+        mapping.types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    types.sort();
+    Some(f(&mapping, &types))
+}
+
 /// The first column the query names that no index behind it maps.
-fn unresolved_column(store: &Store, planned: &crate::sql::plan::Planned) -> Option<String> {
-    let targets = store.resolve(&planned.index);
+fn unresolved_column(
+    store: &Store,
+    planned: &crate::sql::plan::Planned,
+    targets: &[String],
+) -> Option<String> {
     if targets.is_empty() {
         return None;
     }
@@ -322,18 +353,15 @@ fn unresolved_column(store: &Store, planned: &crate::sql::plan::Planned) -> Opti
             return true;
         }
         targets.iter().any(|n| {
-            store
-                .get(n)
-                .map(|st| {
-                    let g = st.read();
-                    g.mapping.type_of(name).is_some()
-                        || g.all_field_types().iter().any(|(f, _)| f == name)
-                        || name
-                            .rsplit_once('.')
-                            .map(|(head, _)| g.mapping.type_of(head).is_some())
-                            .unwrap_or(false)
-                })
-                .unwrap_or(false)
+            with_mapping(store, n, |mapping, types| {
+                mapping.type_of(name).is_some()
+                    || types.iter().any(|(f, _)| f == name)
+                    || name
+                        .rsplit_once('.')
+                        .map(|(head, _)| mapping.type_of(head).is_some())
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
         })
     };
     planned.wanted_fields.iter().find(|f| !known(f)).cloned()

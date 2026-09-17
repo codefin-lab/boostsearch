@@ -86,6 +86,15 @@ async fn search_answer(
     // `stats: [name]` tags the query so _stats can report per-group counts;
     // the shards count them as they search
     note_fielddata(&store, &expr, &body);
+    // a point in time names its own indices, and naming others beside it
+    // would be two answers to which indices are searched
+    if body.get("pit").is_some() && !expr.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: [indices] cannot be used with point in time;",
+        );
+    }
     if let Some(r) = check_scroll(&store, &expr, &body, &p) {
         return r;
     }
@@ -130,11 +139,12 @@ async fn search_answer(
     // count from the beginning every time, which costs more with every batch.
     // `_doc` is not that order: it numbers documents inside a segment, so the
     // same number comes back once per segment and a cursor built on it would
-    // step over whole segments. `_seq` is the write order of the index as a
-    // whole, so a batch can say where it ended and be believed.
+    // step over whole segments. `_shard_doc` is the write order of each index
+    // with the indices of the point in time laid end to end, so a batch can
+    // say where it ended and be believed, over one index or several.
     let implicit_sort = scrolling && body.get("sort").is_none() && !p.contains_key("sort");
     if implicit_sort {
-        body["sort"] = json!([{"_seq": "asc"}]);
+        body["sort"] = json!([{"_shard_doc": "asc"}]);
     }
     // A search that asks for no documents over an index nothing has touched
     // is the same question with the same answer every time it is asked, and a
@@ -181,6 +191,27 @@ async fn search_answer(
             return respond(&p, hit);
         }
     }
+    // A scroll reads through a point in time, opened before its first batch
+    // so that the first batch and the last read the same documents.
+    let asked_pit = body.pointer("/pit/id").cloned();
+    let mut scroll_pit: Option<String> = None;
+    if scrolling {
+        let keep = p
+            .get("scroll")
+            .and_then(|v| crate::api::shared::parse_keep_alive(v))
+            .map(|s| s * 1000)
+            .unwrap_or(crate::store::DEFAULT_KEEP_ALIVE_MS);
+        match crate::cluster::search::open_pit(&store, &expr, keep, true) {
+            Ok(opened) => {
+                body["pit"] = json!({"id": opened.id});
+                scroll_pit = Some(opened.id);
+            }
+            // nothing to hold -- an expression reaching no index: the search
+            // below gives the answer it gives, and the scroll reads as it can
+            Err(_) if implicit_sort => body["sort"] = json!([{"_seq": "asc"}]),
+            Err(_) => {}
+        }
+    }
     match crate::search::run(&store, &expr, &body, &p) {
         Ok(out) => {
             let n = out.hits.len();
@@ -211,9 +242,7 @@ async fn search_answer(
                 // single index; across several it would name one per index and
                 // the batch after it would be short. Those count from the
                 // beginning instead.
-                let cursor = (implicit_sort && store.resolve(&expr).len() == 1)
-                    .then(|| last_sort_of(&env))
-                    .flatten();
+                let cursor = implicit_sort.then(|| last_sort_of(&env)).flatten();
                 if implicit_sort {
                     strip_sort(&mut env);
                 }
@@ -222,22 +251,37 @@ async fn search_answer(
                     .and_then(|v| crate::api::shared::parse_keep_alive(v))
                     .map(|s| s * 1000)
                     .unwrap_or(crate::store::DEFAULT_KEEP_ALIVE_MS);
+                let mut kept = body.clone();
+                if let Some(o) = kept.as_object_mut() {
+                    o.remove("pit");
+                }
                 let id = store.open_scroll(
                     &expr,
-                    &body,
+                    &kept,
                     n.max(size).min(size.max(n)),
                     cursor,
                     implicit_sort,
                     keep,
+                    scroll_pit.clone().unwrap_or_default(),
                 );
                 env["_scroll_id"] = json!(id);
+            }
+            if let Some(id) = &asked_pit {
+                env["pit_id"] = id.clone();
             }
             if let Some(k) = cache_key {
                 store.request_cache.put(k, env.clone());
             }
             respond(&p, env)
         }
-        Err(r) => r,
+        Err(r) => {
+            // a scroll that did not open lets go of the point in time it would
+            // have read through
+            if let Some(id) = scroll_pit.as_deref().and_then(crate::store::PitId::decode) {
+                crate::cluster::search::close_pit(&store, &id);
+            }
+            r
+        }
     }
 }
 

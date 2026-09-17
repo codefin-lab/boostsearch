@@ -6,6 +6,7 @@ use super::*;
 impl Store {
     /// `size` is how many documents each batch returns; the cursor is placed
     /// after the batch the opening search already delivered.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_scroll(
         &self,
         expr: &str,
@@ -14,13 +15,17 @@ impl Store {
         after: Option<Vec<Value>>,
         implicit_sort: bool,
         keep_alive_ms: u64,
+        pit: String,
     ) -> String {
         self.sweep_contexts();
         let keep = keep_alive_ms;
-        let id = format!("velosearch-scroll-{}", random_token());
-        // the point in time is opened before the scrolls are locked: opening
-        // one sweeps the contexts that have run out, and that reads them
-        let pit = self.open_pit(expr, keep);
+        let token = random_token();
+        // the id names the node holding the scroll, so that the next batch
+        // can be asked of any node and still find it
+        let id = match crate::cluster::runtime() {
+            Some(rt) => format!("velosearch-scroll-{token}.{}", hex_of(rt.local().as_str())),
+            None => format!("velosearch-scroll-{token}"),
+        };
         self.scrolls.write().insert(
             id.clone(),
             ScrollState {
@@ -65,15 +70,55 @@ impl Store {
         }
     }
 
+    /// Let go of a scroll, if it is the caller's to let go of: a scroll id is
+    /// not a capability anyone who has seen it may spend. An administrator may
+    /// let go of anyone's.
     pub fn close_scroll(&self, id: &str) -> bool {
-        self.scrolls.write().remove(id).is_some()
+        let every = pit::caller_administers(self);
+        let mut all = self.scrolls.write();
+        match all.get(id) {
+            Some(s) if every || owner_matches(&s.owner) => {
+                let pit = s.pit.clone();
+                all.remove(id);
+                drop(all);
+                self.close_scroll_pit(&pit);
+                true
+            }
+            _ => false,
+        }
     }
 
+    /// Let go of every scroll the caller may: their own, or every one for an
+    /// administrator. How many were let go of.
     pub fn close_all_scrolls(&self) -> usize {
-        let mut s = self.scrolls.write();
-        let n = s.len();
-        s.clear();
-        n
+        let every = pit::caller_administers(self);
+        let mut all = self.scrolls.write();
+        let gone: Vec<String> = all
+            .iter()
+            .filter(|(_, s)| every || owner_matches(&s.owner))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let pits: Vec<String> = gone.iter().filter_map(|k| all.remove(k)).map(|s| s.pit).collect();
+        drop(all);
+        for pit in &pits {
+            self.close_scroll_pit(pit);
+        }
+        gone.len()
+    }
+
+    /// The point in time a scroll read through, let go of with it where it is
+    /// held here; a part on another node runs out on its own.
+    fn close_scroll_pit(&self, pit: &str) {
+        if let Some(id) = PitId::decode(pit) {
+            self.pits.write().remove(&id.token);
+        }
+    }
+
+    /// The node a scroll id says holds the scroll, where it names one.
+    pub fn scroll_owner(id: &str) -> Option<String> {
+        let rest = id.strip_prefix("velosearch-scroll-")?;
+        let (_, node) = rest.rsplit_once('.')?;
+        unhex(node)
     }
 
     /// Index templates, applied to any index created with a matching name.
@@ -386,4 +431,17 @@ impl Store {
         }
         *self.scripts.write() = map(v.get("scripts"));
     }
+}
+
+fn hex_of(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<String> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> =
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect();
+    String::from_utf8(bytes?).ok()
 }

@@ -476,12 +476,22 @@ pub fn run_spanning(
     // a terms lookup reads a document of another index; when one node holds
     // both, the search runs there and the lookup is a local read
     let lookups = lookup_indices(body);
-    let holder = super::with_state(|s| {
-        s.nodes
-            .keys()
-            .find(|n| plan.all.iter().chain(lookups.iter()).all(|i| active_here(s, n, i)))
-            .cloned()
-    });
+    // under a point in time the node holding every part is the one that can
+    // run the whole request, whatever copies the routing lists now
+    let holder = if body.get("pit").is_some() {
+        match (plan.local.is_empty(), plan.remote.len()) {
+            (true, 1) => plan.remote.keys().next().cloned(),
+            (false, 0) => Some(rt.local()),
+            _ => None,
+        }
+    } else {
+        super::with_state(|s| {
+            s.nodes
+                .keys()
+                .find(|n| plan.all.iter().chain(lookups.iter()).all(|i| active_here(s, n, i)))
+                .cloned()
+        })
+    };
     if !own.is_empty() || (!lookups.is_empty() && holder.is_some()) {
         return match holder {
             Some(n) => {
@@ -842,17 +852,270 @@ pub fn install(store: Store) {
             let from = from.clone();
             Box::pin(async move {
                 let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
-                let expr = v.get("expr").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let keep = v.get("keep_alive_ms").and_then(|x| x.as_u64()).unwrap_or(60_000);
-                let close = v.get("close").and_then(|x| x.as_str()).map(|s| s.to_string());
-                let out = match close {
-                    Some(id) => json!({"closed": store.close_pit(&id)}),
-                    None => json!({"id": store.open_pit(&expr, keep)}),
+                // a caller is carried only where the asking node knew one: a
+                // context opened with nobody named belongs to nobody, and
+                // standing a nameless caller in would make it somebody's
+                let caller: Option<crate::security::Caller> =
+                    v.get("caller").and_then(|c| serde_json::from_value(c.clone()).ok());
+                let out = match caller {
+                    Some(c) => {
+                        crate::security::layer::CALLER.sync_scope(c, || pit_here(&store, &v))
+                    }
+                    None => pit_here(&store, &v),
                 };
                 e.response(from, serde_json::to_vec(&out).unwrap_or_default())
             })
         }),
     );
+}
+
+/// This node's side of a point in time: open a part, let go of one or all of
+/// them, or list them, as the caller that asked.
+fn pit_here(store: &Store, v: &Value) -> Value {
+    match v.get("op").and_then(|o| o.as_str()).unwrap_or("") {
+        "open" => {
+            let id = v.get("id").and_then(|i| i.as_str()).and_then(crate::store::PitId::decode);
+            let indices: Vec<String> = v
+                .get("indices")
+                .and_then(|i| serde_json::from_value(i.clone()).ok())
+                .unwrap_or_default();
+            let keep = v.get("keep_alive_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let created = v.get("created_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let for_scroll = v.get("for_scroll").and_then(|x| x.as_bool()).unwrap_or(false);
+            match id {
+                Some(id) => match store.open_pit_part(&id, &indices, keep, created, for_scroll) {
+                    Ok(()) => json!({"opened": true}),
+                    Err(missing) => json!({"opened": false, "missing": missing}),
+                },
+                None => json!({"opened": false}),
+            }
+        }
+        "close" => {
+            let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("");
+            json!({"closed": store.close_pit(token)})
+        }
+        "close_all" => json!({"closed": store.close_visible_pits()}),
+        _ => json!({"pits": store.visible_pits().iter().map(pit_listing).collect::<Vec<_>>()}),
+    }
+}
+
+/// A point in time as `_search/point_in_time/_all` lists it.
+pub fn pit_listing(p: &crate::store::PitState) -> Value {
+    json!({"pit_id": p.id, "creation_time": p.created_ms, "keep_alive": p.keep_alive_ms})
+}
+
+/// A point in time, opened: its id, and how many shards it covers.
+pub struct OpenedPit {
+    pub id: String,
+    pub shards: u64,
+    pub created_ms: u64,
+}
+
+/// The name this node goes by in a point in time's id.
+fn own_part_name() -> String {
+    super::runtime().map(|rt| rt.local().as_str().to_string()).unwrap_or_default()
+}
+
+/// Ask every node named of one point-in-time operation, this one included,
+/// as the caller; each node's answer.
+fn ask_pit_nodes(nodes: &[NodeId], op: Value) -> Vec<(NodeId, Option<Value>)> {
+    let Some(rt) = super::runtime() else { return Vec::new() };
+    let mut ask = op;
+    ask["caller"] = json!(crate::security::layer::current_caller());
+    let bytes = serde_json::to_vec(&ask).unwrap_or_default();
+    let run = async {
+        let mut waits = Vec::new();
+        for node in nodes {
+            let rt = rt.clone();
+            let node = node.clone();
+            let bytes = bytes.clone();
+            waits.push(tokio::spawn(async move {
+                let answer = rt.call(&node, PIT, bytes, std::time::Duration::from_secs(30)).await;
+                let value = answer
+                    .filter(|e| e.kind != Kind::Error)
+                    .and_then(|e| serde_json::from_slice::<Value>(&e.body).ok());
+                (node, value)
+            }));
+        }
+        let mut out = Vec::new();
+        for w in waits {
+            if let Ok(r) = w.await {
+                out.push(r);
+            }
+        }
+        out
+    };
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(run))
+}
+
+/// Every node of the cluster, where there is one to ask.
+fn every_node() -> Vec<NodeId> {
+    match super::runtime() {
+        Some(_) => super::with_state(|s| s.nodes.keys().cloned().collect()),
+        None => Vec::new(),
+    }
+}
+
+/// Open a point in time over what an expression names: a part on every node
+/// that holds one of the indices, each part reading its indices as they stand
+/// now. The id says which node holds which, so it can be searched from any.
+pub fn open_pit(
+    store: &Store,
+    expr: &str,
+    keep_alive_ms: u64,
+    for_scroll: bool,
+) -> std::result::Result<OpenedPit, axum::response::Response> {
+    use axum::http::StatusCode;
+    let created_ms = crate::store::now_millis() as u64;
+    let token = crate::cluster::NodeId::random().as_str().to_string();
+    let spanning = plan(store, expr, None).filter(|p| p.spans_nodes());
+    let Some(plan) = spanning else {
+        let names = store.resolve(expr);
+        if names.is_empty() && !expr.is_empty() {
+            return Err(crate::api::shared::no_such_index(expr));
+        }
+        let mut parts = BTreeMap::new();
+        parts.insert(own_part_name(), names.clone());
+        let id = crate::store::PitId { token, parts };
+        store
+            .open_pit_part(&id, &names, keep_alive_ms, created_ms, for_scroll)
+            .map_err(|missing| crate::api::shared::no_such_index(&missing))?;
+        let shards = crate::api::shards_over(store, &names)["total"].as_u64().unwrap_or(0);
+        return Ok(OpenedPit { id: id.encode(), shards, created_ms });
+    };
+    if let Some(index) = plan.unavailable.first() {
+        return Err(crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "search_phase_execution_exception",
+            format!("no active copy of [{index}] to open a point in time over"),
+        ));
+    }
+    let mut parts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if !plan.local.is_empty() {
+        parts.insert(own_part_name(), plan.local.clone());
+    }
+    for (node, indices) in &plan.remote {
+        parts.insert(node.as_str().to_string(), indices.clone());
+    }
+    let id = crate::store::PitId { token: token.clone(), parts };
+    let encoded = id.encode();
+    let mut failed: Option<String> = None;
+    if !plan.local.is_empty()
+        && let Err(missing) =
+            store.open_pit_part(&id, &plan.local, keep_alive_ms, created_ms, for_scroll)
+    {
+        failed = Some(format!("no such index [{missing}]"));
+    }
+    let mut opened_on: Vec<NodeId> = Vec::new();
+    if failed.is_none() {
+        for (node, indices) in &plan.remote {
+            let answer = ask_pit_nodes(
+                std::slice::from_ref(node),
+                json!({"op": "open", "id": encoded, "indices": indices,
+                       "keep_alive_ms": keep_alive_ms, "created_ms": created_ms,
+                       "for_scroll": for_scroll}),
+            );
+            let opened = answer
+                .first()
+                .and_then(|(_, v)| v.as_ref())
+                .and_then(|v| v.get("opened"))
+                .and_then(|o| o.as_bool())
+                .unwrap_or(false);
+            if opened {
+                opened_on.push(node.clone());
+            } else {
+                failed = Some(format!("[{}] could not open its part", node.as_str()));
+                break;
+            }
+        }
+    }
+    if let Some(why) = failed {
+        // a point in time missing a part would answer without those indices,
+        // so what was opened is let go of again
+        store.close_pit(&token);
+        ask_pit_nodes(&opened_on, json!({"op": "close", "token": token}));
+        return Err(crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "search_phase_execution_exception",
+            why,
+        ));
+    }
+    let shards = super::with_state(|s| {
+        plan.all
+            .iter()
+            .map(|i| s.indices.get(i).map(|m| m.number_of_shards as u64).unwrap_or(1))
+            .sum()
+    });
+    Ok(OpenedPit { id: encoded, shards, created_ms })
+}
+
+/// The nodes a point in time asks, where any of them is not this one.
+pub fn pit_plan(id: &crate::store::PitId) -> Option<Plan> {
+    let rt = super::runtime()?;
+    let me = rt.local();
+    if id.parts.keys().all(|n| n.is_empty() || n == me.as_str()) {
+        return None;
+    }
+    let mut plan = Plan { all: id.indices(), ..Plan::default() };
+    for (node, indices) in &id.parts {
+        if node.is_empty() || node == me.as_str() {
+            plan.local.extend(indices.iter().cloned());
+        } else {
+            plan.remote.entry(NodeId(node.clone())).or_default().extend(indices.iter().cloned());
+        }
+    }
+    Some(plan)
+}
+
+/// Let go of a point in time on every node holding a part of it; whether any
+/// part was let go of.
+pub fn close_pit(store: &Store, id: &crate::store::PitId) -> bool {
+    let mut closed = false;
+    let mut others = Vec::new();
+    let me = own_part_name();
+    for node in id.parts.keys() {
+        if node.is_empty() || *node == me {
+            closed |= store.close_pit(&id.token);
+        } else {
+            others.push(NodeId(node.clone()));
+        }
+    }
+    for (_, answer) in ask_pit_nodes(&others, json!({"op": "close", "token": id.token})) {
+        closed |= answer.and_then(|v| v.get("closed").and_then(|c| c.as_bool())).unwrap_or(false);
+    }
+    closed
+}
+
+/// Every point in time the caller may see, from every node, each once.
+pub fn list_pits(store: &Store) -> Vec<Value> {
+    let mut all: Vec<Value> = store.visible_pits().iter().map(pit_listing).collect();
+    let me = own_part_name();
+    let others: Vec<NodeId> = every_node().into_iter().filter(|n| n.as_str() != me).collect();
+    for (_, answer) in ask_pit_nodes(&others, json!({"op": "list"})) {
+        if let Some(pits) = answer.and_then(|v| v.get("pits").and_then(|p| p.as_array()).cloned()) {
+            all.extend(pits);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|p| seen.insert(p.get("pit_id").and_then(|i| i.as_str()).unwrap_or("").to_string()));
+    all
+}
+
+/// Let go of every point in time the caller may, on every node; the ids.
+pub fn close_all_pits(store: &Store) -> Vec<String> {
+    let mut ids = store.close_visible_pits();
+    let me = own_part_name();
+    let others: Vec<NodeId> = every_node().into_iter().filter(|n| n.as_str() != me).collect();
+    for (_, answer) in ask_pit_nodes(&others, json!({"op": "close_all"})) {
+        if let Some(closed) = answer.and_then(|v| v.get("closed").cloned())
+            && let Ok(list) = serde_json::from_value::<Vec<String>>(closed)
+        {
+            ids.extend(list);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// The indices a terms lookup in this body reads its terms from.

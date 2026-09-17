@@ -760,6 +760,18 @@ pub fn run(
     } else {
         body
     };
+    // A point in time says which nodes hold its parts, and a search held to
+    // one is asked of those nodes whatever the routing says now: a copy made
+    // since does not hold the readers the point in time was opened over.
+    if let Some(pit_id) = body.pointer("/pit/id")
+        && !p.contains_key("_native_only")
+        && !p.contains_key("_local_only")
+    {
+        let id = pit_of(pit_id)?;
+        if let Some(plan) = crate::cluster::search::pit_plan(&id) {
+            return crate::cluster::search::run_spanning(store, "", body, p, plan);
+        }
+    }
     // An alias may be a narrower view of an index, and the filter that makes
     // it narrower belongs to the request rather than to the query: it is put
     // where every path that builds a query for one index can read it, which
@@ -811,6 +823,7 @@ pub fn run(
     // here, runs as it always did
     if !p.contains_key("_native_only")
         && !p.contains_key("_local_only")
+        && body.get("pit").is_none()
         && let Some(plan) =
             crate::cluster::search::plan(store, expr, p.get("preference").map(|s| s.as_str()))
         && plan.spans_nodes()
@@ -920,19 +933,40 @@ pub fn run(
     // reading documents skips the closed indices a pattern would otherwise
     // reach; a closed index named outright is a different complaint
     // `pit` names a point in time rather than an index expression: it carries
-    // both which indices to search and how far into each to look
-    let pit = body
-        .get("pit")
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
-        .and_then(|id| store.read_pit(id));
-    let expr: &str = match pit.as_ref() {
-        Some(p) if expr.is_empty() => &p.expr,
-        _ => expr,
+    // both which indices to search and the reader each is searched through
+    let pit = match body.pointer("/pit/id") {
+        Some(v) => {
+            let id = pit_of(v)?;
+            let keep = body
+                .pointer("/pit/keep_alive")
+                .and_then(|k| k.as_str())
+                .and_then(crate::api::shared::parse_keep_alive)
+                .map(|s| s * 1000);
+            let Some(held) = store.read_pit(&id.token, keep) else {
+                return Err(pit_missing(&id));
+            };
+            // an index deleted since, or made again under its name, is not
+            // the index the point in time read
+            let gone = held.parts.iter().any(|part| {
+                store.get(&part.index).map(|st| st.read().uuid != part.uuid).unwrap_or(true)
+            });
+            if gone {
+                return Err(pit_missing(&id));
+            }
+            Some(held)
+        }
+        None => None,
     };
-    let pit_ceiling: std::collections::HashMap<String, u64> =
-        pit.as_ref().map(|p| p.ceiling.clone()).unwrap_or_default();
-    let targets = store.resolve_open(expr);
+    let pit_expr = pit.as_ref().map(|h| h.names().join(","));
+    let expr: &str = pit_expr.as_deref().unwrap_or(expr);
+    let pit_parts: std::collections::HashMap<String, crate::store::PitPart> = pit
+        .as_ref()
+        .map(|h| h.parts.iter().map(|part| (part.index.clone(), part.clone())).collect())
+        .unwrap_or_default();
+    let targets = match &pit {
+        Some(held) => held.names(),
+        None => store.resolve_open(expr),
+    };
     store.refresh_for_search(&targets);
     // the result window is a ceiling on what a caller may page through; a
     // walk this server runs for itself -- a geo aggregation reading every
@@ -1174,9 +1208,6 @@ pub fn run(
     // holds still while a point in time is open, which is why it is refused
     // without one.
     for k in sort_keys.iter_mut() {
-        if k.field == "_shard_doc" {
-            k.field = "_seq".to_string();
-        }
         // a join field is sorted by the relation each document stands in,
         // which is what the field's own value is
         let joined = targets
@@ -1423,7 +1454,7 @@ pub fn run(
                     &query_json,
                     &sort_keys,
                     &search_after,
-                    &pit_ceiling,
+                    &pit_parts,
                     &agg_json,
                     &filters_aggs,
                     page_want,
@@ -2532,4 +2563,58 @@ fn decay_value(shape: &str, spec: &Value, source: &Value) -> Option<f32> {
         }
     };
     Some(value as f32)
+}
+
+/// The point in time an id names, or the refusal of an id that is not one.
+fn pit_of(id: &Value) -> std::result::Result<crate::store::PitId, Response> {
+    let text = match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    crate::store::PitId::decode(&text).ok_or_else(|| {
+        err(StatusCode::BAD_REQUEST, "illegal_argument_exception", format!("invalid id: [{text}]"))
+    })
+}
+
+/// The answer for a point in time that is no longer there -- let go of, run
+/// out, or never this caller's: every shard it covered failed for want of the
+/// context it was to be read through.
+pub(crate) fn pit_missing(id: &crate::store::PitId) -> Response {
+    use axum::response::IntoResponse;
+    let reason = format!("No search context found for id [{}]", id.token);
+    let mut failed = Vec::new();
+    for (node, indices) in &id.parts {
+        for index in indices {
+            let shards = crate::cluster::with_state(|s| {
+                s.indices.get(index).map(|m| m.number_of_shards).unwrap_or(1)
+            });
+            for shard in 0..shards {
+                failed.push(json!({
+                    "shard": shard, "index": index, "node": node,
+                    "reason": {"type": "search_context_missing_exception", "reason": reason},
+                }));
+            }
+        }
+    }
+    let cause = json!({"type": "search_context_missing_exception", "reason": reason});
+    let mut r = (
+        StatusCode::NOT_FOUND,
+        axum::Json(json!({
+            "error": {
+                "root_cause": [cause],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "phase": "query",
+                "grouped": true,
+                "failed_shards": failed,
+            },
+            "status": 404,
+        })),
+    )
+        .into_response();
+    r.extensions_mut().insert(crate::api::shared::ErrorKind {
+        kind: "search_phase_execution_exception".to_string(),
+        reason: "all shards failed".to_string(),
+    });
+    r
 }

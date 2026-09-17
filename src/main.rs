@@ -136,9 +136,18 @@ fn app(store: Store) -> Router {
         .route("/{alias}/_rollover", post(api::rollover))
         .route("/{alias}/_rollover/{new_index}", post(api::rollover))
         .route("/_cluster/pending_tasks", get(api::pending_tasks))
-        .route("/_search/point_in_time", post(api::create_pit).delete(api::delete_pit))
-        .route("/{index}/_search/point_in_time", post(api::create_pit))
-        .route("/_search/point_in_time/_all", get(api::get_all_pits).delete(api::delete_pit))
+        .route(
+            "/_search/point_in_time",
+            axum::routing::delete(api::delete_pit).fallback(api::pit_delete_only),
+        )
+        .route(
+            "/{index}/_search/point_in_time",
+            post(api::create_pit).fallback(api::pit_create_only),
+        )
+        .route(
+            "/_search/point_in_time/_all",
+            get(api::get_all_pits).delete(api::delete_all_pits).fallback(api::pit_list_or_delete),
+        )
         .route("/_cluster/stats", get(api::cluster_stats))
         .route("/_cluster/stats/{*rest}", get(api::cluster_stats))
         .route("/_shard_stores", get(api::shard_stores))
