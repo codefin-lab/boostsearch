@@ -552,6 +552,9 @@ async fn main() -> anyhow::Result<()> {
     // first request is answered
     api::recover(&store);
     security::audit::attach_store(&store);
+    // asynchronous search results kept before a restart are read back, and
+    // the ones whose time runs out are let go on a schedule
+    api::start_asynchronous_search(&store);
     // a node reachable from other machines with nobody asked who they are
     // is a choice an operator makes, not a default they fall into: the image
     // binds every interface, and without this check it would answer anyone

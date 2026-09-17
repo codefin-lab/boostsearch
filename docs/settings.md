@@ -21,7 +21,7 @@ which is an operator's decision rather than a client's.
 
 | | |
 |---|---|
-| `VELOSEARCH_NODE_ROLES` / `node.roles` | `cluster_manager`, `data`, `ingest`, `remote_cluster_client`. Default is all four. A cluster with no ingest node refuses a write that names a pipeline, because there is nowhere to run it. |
+| `VELOSEARCH_NODE_ROLES` / `node.roles` | `cluster_manager`, `data`, `ingest`, `remote_cluster_client`. Default is all four. An empty list, `node.roles: []`, is a coordinating-only node. A node without `data` is never given a copy of a shard, and an index made on one is placed on a data node. A cluster with no ingest node refuses a write that names a pipeline, because there is nowhere to run it. |
 | `VELOSEARCH_NODE_ATTRS` / `node.attr.*` | attributes as `name=value` pairs separated by commas, for allocation awareness and for anything that reads them back. |
 | `node.name`, `network.host`, `transport.port` | as in OpenSearch. |
 | `plugins.security.ssl.transport.enabled` | mutual TLS between nodes. With it, a peer is a peer because its certificate says so; without it, a node only listens for transport connections on loopback. |
@@ -70,6 +70,19 @@ are not claimed to be.
 | `VELOSEARCH_MAX_LIVE_WRITERS` | how many indices may hold a writer open at once. Past it, the least recently written is closed. |
 | `VELOSEARCH_WRITER_IDLE_SECS` | how long a writer with nothing to do is kept before its memory is given back. |
 | `VELOSEARCH_ISM_INTERVAL_MS` | how often index management looks at what it manages. Default is a job's own schedule. |
+
+## Asynchronous search
+
+Cluster settings, changed with `PUT _cluster/settings`. The first is the
+plugin's own; the other three are ours, and bound what one node and one user
+may hold.
+
+| | |
+|---|---|
+| `plugins.asynchronous_search.node_concurrent_running_searches` | how many asynchronous searches a node runs at once. Default 20. A submit past it is refused with 429. |
+| `plugins.asynchronous_search.user_concurrent_running_searches` | how many of those one user may run. Default 10. |
+| `plugins.asynchronous_search.node_retained_bytes` | how many bytes of results a node keeps for `keep_on_completion`, on disk under `<data>/_state/asynchronous_search`. Default `256mb`. A result that does not fit is answered `PERSIST_FAILED`, and a submit asking to keep another is refused with 429 until one is let go. |
+| `plugins.asynchronous_search.user_retained_bytes` | how many of those bytes one user's results may take. Default `128mb`. |
 
 ## For finding things out
 

@@ -488,6 +488,10 @@ pub struct Context<'a> {
     pub cluster: &'a ClusterSettings,
     /// where an index's primary data lives, for indices the manager holds
     pub primary_home: &'a BTreeMap<String, NodeId>,
+    /// the indices among those whose home already holds documents: a primary
+    /// that may not stay at home is moved from there rather than made again
+    /// empty somewhere else, which would lose them
+    pub home_holds_documents: &'a BTreeSet<String>,
     /// the index copies each node holds on disk: name, uuid and the
     /// allocation id the copy was given
     pub held: &'a BTreeMap<NodeId, Vec<(String, String, String)>>,
@@ -569,6 +573,9 @@ pub fn can_allocate(
 ) -> Vec<Verdict> {
     let mut out = Vec::new();
     let is = ctx.index_settings(&copy.index);
+    if let Some(v) = data_role_verdict(node) {
+        out.push(v);
+    }
     out.push(max_retry_verdict(&is, copy));
     if copy.primary {
         out.push(verdict(
@@ -660,7 +667,18 @@ pub fn can_allocate(
             && c.node.as_ref() == Some(&node.id)
             && c.allocation_id != copy.allocation_id
     });
+    // the copy itself counts too: a move to the node it is already on made a
+    // relocation from a node to itself, which no node could ever finish
+    let itself = copy.state != ShardState::Unassigned && copy.node.as_ref() == Some(&node.id);
     match twin {
+        _ if itself => out.push(verdict(
+            "same_shard",
+            Decision::No,
+            format!(
+                "the shard cannot be allocated to the same node on which it already exists {}",
+                short_summary(copy)
+            ),
+        )),
         Some(t) => out.push(verdict(
             "same_shard",
             Decision::No,
@@ -707,6 +725,20 @@ pub fn can_allocate(
         ),
     ));
     out
+}
+
+/// A node without the data role holds no copy of anything. OpenSearch leaves
+/// such nodes out of the routing nodes altogether, so none of its deciders
+/// is ever asked about them; here every node is in the state, and the
+/// refusal has to be said.
+fn data_role_verdict(node: &DiscoveryNode) -> Option<Verdict> {
+    (!node.is_data()).then(|| {
+        verdict(
+            "data_role",
+            Decision::No,
+            format!("node [{}] does not have the data role and cannot hold shard data", node.name),
+        )
+    })
 }
 
 /// Recoveries in flight on the node and on the primary's node, against the
@@ -1085,6 +1117,9 @@ pub fn can_remain(
 ) -> Vec<Verdict> {
     let mut out = Vec::new();
     let is = ctx.index_settings(&copy.index);
+    if let Some(v) = data_role_verdict(node) {
+        out.push(v);
+    }
     let mut filter_ok = true;
     if let Some((kind, f)) = ctx.cluster.filters.check(node) {
         filter_ok = false;
@@ -1225,9 +1260,36 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
             let fresh = !shards.contains_key(&shard);
             let copies = shards.entry(shard).or_default();
             if copies.iter().all(|c| !c.primary) {
-                // a new primary: at home if the index has one, else empty
-                match ctx.primary_home.get(name) {
-                    Some(home) if ctx.nodes.contains_key(home) => copies.insert(
+                // a new primary: at home if the index has one and the deciders
+                // let it be there, else placed like any unassigned copy. A home
+                // they refuse -- a node without the data role, one a filter
+                // excludes -- keeps the primary only when documents are already
+                // written there, and the move below takes it away at once.
+                let fresh_primary = ShardRouting {
+                    index: name.clone(),
+                    shard,
+                    primary: true,
+                    state: ShardState::Unassigned,
+                    node: None,
+                    relocating_node: None,
+                    allocation_id: None,
+                    unassigned: Some(unassigned_info(
+                        "INDEX_CREATED",
+                        m.creation_date.max(ctx.now),
+                        "no_attempt",
+                        0,
+                    )),
+                };
+                let at_home =
+                    ctx.primary_home.get(name).and_then(|home| ctx.nodes.get(home)).filter(
+                        |node| {
+                            ctx.home_holds_documents.contains(name)
+                                || overall(&can_allocate(ctx, table, &fresh_primary, node))
+                                    != Decision::No
+                        },
+                    );
+                match at_home.map(|n| n.id.clone()) {
+                    Some(home) => copies.insert(
                         0,
                         ShardRouting {
                             index: name.clone(),
@@ -1240,24 +1302,7 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
                             unassigned: None,
                         },
                     ),
-                    _ => copies.insert(
-                        0,
-                        ShardRouting {
-                            index: name.clone(),
-                            shard,
-                            primary: true,
-                            state: ShardState::Unassigned,
-                            node: None,
-                            relocating_node: None,
-                            allocation_id: None,
-                            unassigned: Some(unassigned_info(
-                                "INDEX_CREATED",
-                                m.creation_date.max(ctx.now),
-                                "no_attempt",
-                                0,
-                            )),
-                        },
-                    ),
+                    None => copies.insert(0, fresh_primary),
                 }
             }
             // the replica count follows the setting
@@ -1555,7 +1600,64 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
         }
     }
 
-    // 4. rebalance: a copy of an index from a heavy node to the lightest,
+    // 4. move what may not stay where it is: a copy on a node without the
+    // data role, or on a node a filter now excludes, goes to the lightest
+    // node the deciders allow, as OpenSearch's `moveShards` does before it
+    // balances. Only those two reasons move a copy: the others `can_remain`
+    // reports never moved one here, and a copy is a copy of the whole index,
+    // so the first shard is what moves and the rest follow it below.
+    let names: Vec<String> = t.indices.keys().cloned().collect();
+    for name in names {
+        let stuck: Vec<ShardRouting> = t
+            .shards_of(&name)
+            .filter(|c| c.shard == 0 && c.state == ShardState::Started)
+            .filter(|c| {
+                c.node.as_ref().and_then(|n| ctx.nodes.get(n)).is_some_and(|node| {
+                    can_remain(ctx, &t, c, node).iter().any(|v| {
+                        v.decision == Decision::No && matches!(v.decider, "data_role" | "filter")
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        for copy in stuck {
+            let Some(from) = copy.node.clone() else { continue };
+            let target = ranked(ctx, &t, &name)
+                .into_iter()
+                .map(|(n, _)| n)
+                .find(|n| {
+                    n.id != from && overall(&can_allocate(ctx, &t, &copy, n)) == Decision::Yes
+                })
+                .map(|n| n.id.clone());
+            let Some(to) = target else {
+                changes.notes.push(format!(
+                    "[{name}][{}] may not remain on {from} and no node will take it",
+                    copy.shard
+                ));
+                continue;
+            };
+            let copies = t.indices.get_mut(&name).unwrap().get_mut(&copy.shard).unwrap();
+            let Some(pos) = copies.iter().position(|c| c.allocation_id == copy.allocation_id)
+            else {
+                continue;
+            };
+            copies[pos].state = ShardState::Relocating;
+            copies[pos].relocating_node = Some(to.clone());
+            copies.push(ShardRouting {
+                index: name.clone(),
+                shard: copy.shard,
+                primary: copy.primary,
+                state: ShardState::Initializing,
+                node: Some(to.clone()),
+                relocating_node: Some(from.clone()),
+                allocation_id: Some(new_allocation_id()),
+                unassigned: None,
+            });
+            changes.relocating.push((name.clone(), copy.shard, copy.primary, from, to));
+        }
+    }
+
+    // 5. rebalance: a copy of an index from a heavy node to the lightest,
     // heaviest source first, while the difference is above the threshold;
     // one move per pass
     let names: Vec<String> = t.indices.keys().cloned().collect();
@@ -1614,7 +1716,7 @@ pub fn reroute(ctx: &Context, table: &RoutingTable) -> (RoutingTable, Changes) {
         }
     }
 
-    // 5. every shard of an index sits where its first shard sits.
+    // 6. every shard of an index sits where its first shard sits.
     //
     // A copy here is a copy of the whole index -- the store holds one index,
     // not a shard of one (ADR 0003) -- so the routing has to say the same:
@@ -2343,6 +2445,7 @@ mod tests {
         indices: BTreeMap<String, IndexMetadata>,
         cluster: ClusterSettings,
         home: BTreeMap<String, NodeId>,
+        home_documents: BTreeSet<String>,
         held: BTreeMap<NodeId, Vec<(String, String, String)>>,
         table: RoutingTable,
         now: Millis,
@@ -2356,6 +2459,7 @@ mod tests {
                 indices: indices.into_iter().map(|i| (i.name.clone(), i)).collect(),
                 cluster: ClusterSettings::default(),
                 home: home_map,
+                home_documents: BTreeSet::new(),
                 held: BTreeMap::new(),
                 table: RoutingTable::default(),
                 now: 10_000,
@@ -2368,6 +2472,7 @@ mod tests {
                 indices: &self.indices,
                 cluster: &self.cluster,
                 primary_home: &self.home,
+                home_holds_documents: &self.home_documents,
                 held: &self.held,
                 now: self.now,
             }
@@ -2495,6 +2600,115 @@ mod tests {
         let sl = vs.iter().find(|v| v.decider == "shards_limit").unwrap();
         assert_eq!(sl.decision, Decision::No);
         assert!(sl.explanation.starts_with("too many shards [2] allocated to this node for index [f], index setting [index.routing.allocation.total_shards_per_node=1]"), "{}", sl.explanation);
+    }
+
+    fn with_roles(mut n: DiscoveryNode, roles: &[&str]) -> DiscoveryNode {
+        n.roles = roles.iter().map(|r| r.to_string()).collect();
+        n
+    }
+
+    #[test]
+    fn a_new_index_made_on_a_manager_without_the_data_role_is_placed_on_a_data_node() {
+        let mut w = World::new(
+            vec![
+                with_roles(node("m", &[]), &["cluster_manager"]),
+                with_roles(node("d1", &[]), &["data"]),
+                with_roles(node("d2", &[]), &["data"]),
+                with_roles(node("c", &[]), &[]),
+            ],
+            vec![index("fresh", 2, 1, json!({}))],
+            "m",
+        );
+        w.reroute();
+        // never started where it was made: placed like any unassigned copy
+        assert_eq!(w.count("m", "fresh"), 0);
+        let primary = w.table.primary("fresh", 0).unwrap();
+        assert_eq!(primary.state, ShardState::Initializing);
+        assert!(matches!(primary.node.as_ref().map(|n| n.as_str()), Some("d1" | "d2")));
+        w.settle();
+        assert_eq!(w.count("m", "fresh") + w.count("c", "fresh"), 0);
+        assert_eq!(w.count("d1", "fresh") + w.count("d2", "fresh"), 4);
+        // and nothing may be put on either of them by hand
+        let copy = w.table.primary("fresh", 0).unwrap().clone();
+        for name in ["m", "c"] {
+            let vs = can_allocate(&w.ctx(), &w.table, &copy, &w.nodes[&NodeId(name.into())]);
+            assert!(vs.iter().any(|v| v.decider == "data_role" && v.decision == Decision::No));
+        }
+    }
+
+    #[test]
+    fn a_primary_whose_documents_are_on_a_node_without_the_data_role_is_moved_with_them() {
+        let mut w = World::new(
+            vec![
+                with_roles(node("m", &[]), &["cluster_manager"]),
+                with_roles(node("d1", &[]), &["data"]),
+            ],
+            vec![index("written", 1, 0, json!({}))],
+            "m",
+        );
+        w.home_documents.insert("written".into());
+        w.reroute();
+        // started where the documents are, and already on its way to a data
+        // node: made again empty there, the documents would be lost
+        let copies: Vec<&ShardRouting> = w.table.shards_of("written").collect();
+        assert!(copies.iter().any(|c| c.node == Some(NodeId("m".into()))
+            && c.state == ShardState::Relocating
+            && c.relocating_node == Some(NodeId("d1".into()))));
+        assert!(copies.iter().any(|c| c.node == Some(NodeId("d1".into()))
+            && c.state == ShardState::Initializing
+            && c.relocating_node == Some(NodeId("m".into()))));
+        w.settle();
+        assert_eq!(w.count("m", "written"), 0);
+        assert_eq!(w.count("d1", "written"), 1);
+    }
+
+    #[test]
+    fn a_home_a_filter_excludes_is_not_where_a_new_primary_starts() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("kept-off", 1, 0, json!({"index.routing.allocation.exclude._name": "a"}))],
+            "a",
+        );
+        w.settle();
+        assert_eq!(w.count("a", "kept-off"), 0);
+        assert_eq!(w.count("b", "kept-off"), 1);
+    }
+
+    #[test]
+    fn a_cluster_exclude_moves_what_the_node_holds() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("drained", 3, 0, json!({}))],
+            "a",
+        );
+        w.settle();
+        assert_eq!(w.count("a", "drained"), 3);
+        w.cluster.filters = filters_from(
+            &json!({"cluster.routing.allocation.exclude._name": "a"}),
+            "cluster.routing.allocation",
+        );
+        w.settle();
+        assert_eq!(w.count("a", "drained"), 0);
+        assert_eq!(w.count("b", "drained"), 3);
+    }
+
+    #[test]
+    fn a_copy_is_not_moved_to_the_node_it_is_on() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("here", 1, 0, json!({}))],
+            "a",
+        );
+        w.settle();
+        let copy = w.table.primary("here", 0).unwrap().clone();
+        let vs = can_allocate(&w.ctx(), &w.table, &copy, &w.nodes[&NodeId("a".into())]);
+        assert!(
+            vs.iter().any(|v| v.decider == "same_shard" && v.decision == Decision::No),
+            "{vs:?}"
+        );
+        let commands =
+            [json!({"move": {"index": "here", "shard": 0, "from_node": "a", "to_node": "a"}})];
+        assert!(apply_commands(&w.ctx(), &w.table, &commands, false).is_err());
     }
 
     #[test]
