@@ -9,13 +9,15 @@
 
 [![ci](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml)
 
-A drop-in replacement for OpenSearch, written in Rust, on top of
-[VeloCore](https://github.com/codefin-lab/velocore) (a fork of tantivy).
+A search engine written in Rust, on top of
+[VeloCore](https://github.com/codefin-lab/velocore) (a fork of tantivy), with
+the OpenSearch interface.
 
-It speaks the OpenSearch REST API — the same requests, the same JSON back, the
-same words in its errors — and is checked against OpenSearch's own conformance
-suite and against a running OpenSearch, rather than against a description of
-either.
+The REST API is the same one: the same requests, the same JSON back, the same
+words in its errors. So are the tests -- it runs OpenSearch's own conformance
+suite, and asks a running OpenSearch the same questions and compares the
+answers, so that a client, a dashboard or a script written for that API works
+with it unchanged.
 
 ## Where it stands
 
@@ -28,9 +30,9 @@ rather than believed.
 | its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Polish, Ukrainian and Beider-Morse data in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
 | the same answer as OpenSearch 3.1.0 | **166 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
 | REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
-| the bench matrix | **17 of 18 dimensions ahead** | `tools/bench_matrix.py` |
-| against OpenSearch 3.1.0, 34 dimensions | **ahead on all 34**, the full table with how it was measured in [docs/performance.md](docs/performance.md) | `tools/bench.py`, `tools/bench_gate.py` |
-| this build against this repository's own last numbers | 34 dimensions, nothing allowed to fall more than 5% past the machine's own spread; the run also reports the kept OpenSearch measurement (**ahead on 34 of 34**) | `tools/bench_gate.py` |
+| the bench matrix | **17 of 18 dimensions quicker or lighter** | `tools/bench_matrix.py` |
+| beside OpenSearch 3.1.0, on the same machine, 34 dimensions | **quicker or lighter on all 34**, the full table with how it was measured in [docs/performance.md](docs/performance.md) | `tools/bench.py`, `tools/bench_gate.py` |
+| this build against this repository's own last numbers | 34 dimensions, nothing allowed to fall more than 5% past the machine's own spread; the run also reports the kept OpenSearch measurement (**34 of 34**) | `tools/bench_gate.py` |
 | who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths, counted as the check makes them rather than written into it | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
@@ -52,14 +54,15 @@ The ten sections that do not pass are named, with the reason, in
 rather than of a server, and `tools/module_gate.py` prints those and why on
 every run.
 
-## Against OpenSearch, dimension by dimension
+## Performance
 
 Both engines measured on the same machine, on the same day, with the same
 corpus and the same client: a Google Compute Engine `n2-standard-8` (eight
 vCPUs, Ubuntu 24.04, SSD), 200,000 web-log documents, `tools/bench.py` driving
 each in turn with nothing else running -- OpenSearch 3.1.0 from its official
 image with security off, VeloSearch as this repository builds it. Five runs
-each, the median shown. **VeloSearch is ahead on all 34 dimensions.**
+each, the median shown. The same interface, so the same thirty-four
+measurements apply to both; VeloSearch measured quicker or lighter on each.
 
 | dimension | unit | OpenSearch 3.1.0 | VeloSearch | better by |
 |---|---|---|---|---|
@@ -164,7 +167,7 @@ OpenSearch spells it, and readable from the environment as
 ## The console
 
 OpenSearch Dashboards is two things: a browser application and a Node server
-it boots from. VeloSearch replaces the server and leaves the application as
+it boots from. VeloSearch provides the server and leaves the application as
 it is -- the same bundles, served from a Dashboards distribution you point it
 at, talking to a VeloSearch (or OpenSearch) engine:
 
@@ -200,9 +203,10 @@ Beider-Morse rule files for the phonetic filter (`docs/phonetic.md`), and the
 Polish and Ukrainian stemmers' dictionaries. Without them those filters say so
 rather than guessing.
 
-## Replacing an OpenSearch you already run
+## Checking a workload you already have
 
-`docs/upgrading.md` is the procedure. In short:
+The interface is the same, so the check is to ask both the same questions.
+`docs/upgrading.md` has the whole procedure. In short:
 
 ```bash
 # what your cluster actually uses, and whether this answers all of it
@@ -251,9 +255,8 @@ passes and adds them up.
   anomaly detection, observability -- are not written, and their pages say so.
 - **Not tested at every scale.** The cluster is checked in simulation across
   ten thousand seeds and on real nodes with real partitions, and the bench
-  matrix is measured on a developer machine. `tools/cloud_bench_gcp.sh` runs
-  it on a machine rented for the run; the numbers from one are not in yet, and
-  `docs/progress.md` says so.
+  numbers above come from one eight-core cloud machine and one laptop, not
+  from a fleet.
 
 ## How it is built
 
@@ -277,7 +280,7 @@ way.
 | [docs/plan-v1.md](docs/plan-v1.md) | the work, in the order it was done, and the gate each phase was measured by |
 | [docs/progress.md](docs/progress.md) | the ledger: every task, what it took, what was got wrong on the way |
 | [docs/settings.md](docs/settings.md) | every setting, the server's and the console's |
-| [docs/upgrading.md](docs/upgrading.md) | replacing an OpenSearch you run, and moving between versions of this |
+| [docs/upgrading.md](docs/upgrading.md) | moving an existing workload onto it, and moving between versions of this |
 | [docs/console.md](docs/console.md) | the console's server: what it serves, what it pins, what it leaves out |
 | [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md) | the two processors that read data this does not ship |
 | [docs/velocore.md](docs/velocore.md) | what was changed in the fork of tantivy, and why |
