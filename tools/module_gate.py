@@ -74,14 +74,18 @@ def main():
         failed += found["failed"]
         skipped += found["skipped"]
     print(f"  {'':18} {passed:4} of {total} sections, {failed} failed, {skipped} skipped")
-    # files that are not tests of a server at all, and why -- kept in sight so
-    # that setting one aside stays a decision somebody can argue with rather
-    # than a number that quietly moved
-    apart = manifest.get("not_a_server_test", {})
-    if apart:
-        print(f"\n  {len(apart)} files are not tests of a server:")
-        for name, why in apart.items():
-            print(f"    {name.split('/test/')[-1]}\n      {why}")
+    # files left out of the count, and why -- kept in sight so that setting one
+    # aside stays a decision somebody can argue with rather than a number that
+    # quietly moved
+    for key, heading in (
+        ("not_a_server_test", "are not tests of a server"),
+        ("cannot_hold_for_one_binary", "cannot hold for one binary"),
+    ):
+        apart = manifest.get(key, {})
+        if apart:
+            print(f"\n  {len(apart)} files {heading}:")
+            for name, why in apart.items():
+                print(f"    {name.split('/test/')[-1]}\n      {why}")
     for name, found in passes:
         for f in found["failures"]:
             print(f"    [{name}] {f['file'].split('/test/')[-1]} :: {f['section']}")

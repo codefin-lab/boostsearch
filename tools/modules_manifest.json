@@ -174,7 +174,6 @@
     "plugins/analysis-kuromoji/src/yamlRestTest/resources/rest-api-spec/test/analysis_kuromoji/20_search.yml",
     "plugins/analysis-nori/src/yamlRestTest/resources/rest-api-spec/test/analysis_nori/10_basic.yml",
     "plugins/analysis-nori/src/yamlRestTest/resources/rest-api-spec/test/analysis_nori/20_search.yml",
-    "plugins/analysis-phonenumber/src/yamlRestTest/resources/rest-api-spec/test/analysis-phone/10_basic.yml",
     "plugins/analysis-phonenumber/src/yamlRestTest/resources/rest-api-spec/test/analysis-phone/20_search.yml",
     "plugins/analysis-phonetic/src/yamlRestTest/resources/rest-api-spec/test/analysis_phonetic/10_metaphone.yml",
     "plugins/analysis-phonetic/src/yamlRestTest/resources/rest-api-spec/test/analysis_phonetic/20_double_metaphone.yml",
@@ -202,6 +201,9 @@
     "qa/smoke-test-ingest-with-all-dependencies/src/test/resources/rest-api-spec/test/ingest/60_pipeline_timestamp_date_mapping.yml",
     "test/framework/src/test/resources/rest-api-spec/test/suite1/10_basic.yml"
   ],
+  "cannot_hold_for_one_binary": {
+    "plugins/analysis-phonenumber/src/yamlRestTest/resources/rest-api-spec/test/analysis-phone/10_basic.yml": "asserts the whole of `_cat/plugins?h=component&local=true` is the single line `analysis-phonenumber`, which is true only of the throwaway cluster its build starts with that one plugin installed and nothing else. One binary that answers for every module and plugin cannot report exactly one component: OpenSearch 3.1.0 itself answers 26 lines to the same request, and the other suites depend on their own plugin being reported, so there is no set of names that satisfies this section and them at once"
+  },
   "not_a_server_test": {
     "test/framework/src/test/resources/rest-api-spec/test/suite1/20_another_test.yml": "a fixture for testing the test framework, not the server: it asserts a `_type` that OpenSearch 3.x does not return, and OpenSearch 3.1.0 fails it too",
     "test/framework/src/test/resources/rest-api-spec/test/suite2/10_basic.yml": "the same fixture, the same `_type`; OpenSearch 3.1.0 refuses the request outright",
