@@ -16,6 +16,30 @@ use crate::store::Store;
 /// How many times an action is tried before the index is left alone.
 const RETRIES: i64 = 3;
 
+/// When the sweeper last finished a pass over every managed index, in
+/// milliseconds since the epoch, or zero before it has finished one.
+///
+/// A caller asking after the scheduled jobs wants to know the sweeper is
+/// still coming round -- a pass that stopped is jobs that stopped running --
+/// and this is the only record of when it last did.
+static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Start the sweeper's clock, so that "how long since the last pass" is
+/// measured from when the loop began rather than from the epoch.
+pub fn sweeper_started() {
+    LAST_SWEEP.store(crate::store::now_millis(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// When the last pass finished, or `None` on a node whose sweeper has not
+/// started -- one that is not the cluster manager, or has index management
+/// switched off.
+pub fn last_sweep_millis() -> Option<i64> {
+    match LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        at => Some(at),
+    }
+}
+
 /// Look at every index under a policy, once.
 pub fn tick(store: &Store) {
     if !super::enabled(store) {
@@ -44,6 +68,7 @@ pub fn tick(store: &Store) {
             let _ = put(store, &managed_id(&index), next);
         }
     }
+    LAST_SWEEP.store(crate::store::now_millis(), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Indices that match a policy's template and are not managed yet.

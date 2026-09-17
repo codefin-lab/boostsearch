@@ -660,6 +660,12 @@ pub fn due(kind: &str, id: &str, schedule: &Value, enabled_at: i64, now: i64) ->
     true
 }
 
+/// When a job is next due, where it has been scheduled at all: a job nothing
+/// has looked at yet has no place in the table and no time to report.
+pub fn next_due(kind: &str, id: &str) -> Option<i64> {
+    due_table().lock().get(&format!("{kind}:{id}")).map(|(_, next)| *next)
+}
+
 /// Forget a job's place in the schedule, when it is deleted.
 pub fn forget(kind: &str, id: &str) {
     due_table().lock().remove(&format!("{kind}:{id}"));

@@ -7,6 +7,11 @@ stands in for it: a policy is written, an index is put under it, and the thing
 is watched actually happening -- states entered, actions run, the index rolled
 over and in the end deleted by the policy rather than by anyone.
 
+The read surfaces the plugins publish beside it are checked here too -- the
+scheduler's job list, the long-running-operation notifications, the sweeper's
+own statistics -- because they answer out of the same configuration index and
+the same sweeps, and an index under a policy is what puts anything in them.
+
 Run against a node started with a short job interval, which is what
 `VELOSEARCH_ISM_INTERVAL_MS` is for:
 
@@ -312,6 +317,132 @@ def retry_after_failure():
     req("DELETE", "/_plugins/_ism/policies/failing-policy")
 
 
+def scheduled_job_surface():
+    """The scheduler's own read surface lists the jobs that are really there."""
+    req("DELETE", "/ism-scheduled")
+    req(
+        "PUT",
+        "/_plugins/_ism/policies/scheduled-policy",
+        {
+            "policy": {
+                "description": "nothing to do, only to be scheduled",
+                "default_state": "only",
+                "states": [{"name": "only", "actions": [], "transitions": []}],
+            }
+        },
+    )
+    req("PUT", "/ism-scheduled")
+    req("POST", "/_plugins/_ism/add/ism-scheduled", {"policy_id": "scheduled-policy"})
+    jobs = req("GET", "/_plugins/_job_scheduler/api/jobs")
+    mine = [j for j in jobs.get("jobs", []) if j.get("name") == "ism-scheduled"]
+    expect("the index under a policy is listed as a job", len(mine), 1)
+    if mine:
+        job = mine[0]
+        expect("under the job type index management registers", job.get("job_type"),
+                "opendistro-index-management")
+        expect("out of the configuration index", job.get("index_name"), ".opendistro-ism-config")
+        expect("scheduled", (job.get("enabled"), job.get("descheduled")), (True, False))
+        expect("on an interval", (job.get("schedule") or {}).get("type"), "interval")
+    expect("the count matches the list", jobs.get("total_jobs"), len(jobs.get("jobs", [])))
+    expect("no job holds a lock", req("GET", "/_plugins/_job_scheduler/api/locks"),
+            {"total_locks": 0, "locks": {}})
+    # the sweeper is running, so the node reports itself on schedule
+    stats = req("GET", "/_plugins/_alerting/stats")
+    expect("the node is on schedule", stats.get("nodes_on_schedule"), 1)
+    expect("and none is not", stats.get("nodes_not_on_schedule"), 0)
+    node = next(iter((stats.get("nodes") or {}).values()), {})
+    expect("its schedule status is green", node.get("schedule_status"), "green")
+    expect(
+        "the sweep is on time",
+        (node.get("job_scheduling_metrics") or {}).get("full_sweep_on_time"),
+        True,
+    )
+    expect("no alerting job is registered", node.get("jobs_info"), {})
+    expect(
+        "no notification is set on a long-running operation",
+        req("GET", "/_plugins/_im/lron"),
+        {"lron_configs": [], "total_number": 0},
+    )
+    req("DELETE", "/ism-scheduled")
+    req("DELETE", "/_plugins/_ism/policies/scheduled-policy")
+
+
+def plugin_read_surface():
+    """The plugin read surfaces answer, in the shape a client reads them in.
+
+    Each of these reports a subsystem that is not run here, so what is checked
+    is that the answer is the empty or zero one rather than a refusal: a
+    dashboard that asks for any of them must get a body it can parse.
+    """
+    empty = {
+        "/_insights/top_queries": {"top_queries": []},
+        "/_insights/live_queries": {"live_queries": []},
+        "/_plugins/_query/_datasources": [],
+        "/_plugins/_flow_framework/workflow/_steps": {},
+        "/_plugins/_replication/autofollow_stats": {
+            "num_success_start_replication": 0,
+            "num_failed_start_replication": 0,
+            "num_failed_leader_calls": 0,
+            "failed_indices": [],
+            "autofollow_stats": [],
+        },
+    }
+    for path, want in empty.items():
+        expect(f"GET {path}", req("GET", path), want)
+    # the ones whose bodies carry a node id or the cluster's name are checked
+    # by the keys they must hold
+    for path, keys in [
+        ("/_insights/health_stats", ["TopQueriesHealthStats", "FieldTypeCacheStats"]),
+        ("/_insights/settings", []),
+        ("/_plugins/_ltr/stats", ["cache", "request_total_count"]),
+        ("/_plugins/_ltr/stats/", ["cache", "request_total_count"]),
+        ("/_plugins/_knn/stats/", []),
+    ]:
+        body = req("GET", path)
+        expect(f"GET {path} answers", body.get("error"), None)
+        under = body.get("nodes", body)
+        one = next(iter(under.values()), {}) if isinstance(under, dict) else {}
+        for key in keys:
+            expect(f"GET {path} reports {key}", key in one, True)
+    expect(
+        "the query insights collectors are reported off",
+        (req("GET", "/_insights/settings").get("persistent") or {}).get("latency", {}).get(
+            "enabled"
+        ),
+        False,
+    )
+    expect(
+        "no notification channel type may be configured",
+        req("GET", "/_plugins/_notifications/features").get("allowed_config_type_list"),
+        [],
+    )
+    # the follower and leader counters are zero, and zero for every index
+    for path in ("follower_stats", "leader_stats"):
+        body = req("GET", f"/_plugins/_replication/{path}")
+        expect(f"cross-cluster {path} are empty", body.get("index_stats"), {})
+        expect(f"cross-cluster {path} read nothing", body.get("operations_read"), 0)
+    # the performance analyzer reports its switches off, on every path it
+    # takes a read on
+    for feature in ("", "rca/", "logging/", "batch/", "threadContentionMonitoring/"):
+        node = req("GET", f"/_plugins/_performanceanalyzer/{feature}config")
+        expect(f"the {feature or 'plugin'} switch is off",
+                node.get("performanceAnalyzerEnabled"), False)
+        cluster = req("GET", f"/_plugins/_performanceanalyzer/{feature}cluster/config")
+        expect(f"the cluster holds no {feature or 'plugin'} state",
+                cluster.get("currentPerformanceAnalyzerClusterState"), 0)
+    overrides = req("GET", "/_plugins/_performanceanalyzer/override/cluster/config").get(
+        "overrides"
+    )
+    expect(
+        "nothing is overridden",
+        json.loads(overrides or "{}"),
+        {
+            "enable": {"rcas": [], "deciders": [], "actions": [], "collectors": []},
+            "disable": {"rcas": [], "deciders": [], "actions": [], "collectors": []},
+        },
+    )
+
+
 if __name__ == "__main__":
     for name, check in [
         ("policies can be written, read and deleted", policy_crud),
@@ -320,6 +451,8 @@ if __name__ == "__main__":
         ("a policy claims the indices it names", templates),
         ("a policy can be changed and removed", change_and_remove),
         ("a failed action is retried", retry_after_failure),
+        ("the scheduler lists the jobs it holds", scheduled_job_surface),
+        ("the plugin read surfaces answer", plugin_read_surface),
     ]:
         before = len(failures)
         check()

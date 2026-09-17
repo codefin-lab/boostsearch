@@ -312,3 +312,14 @@ fn each_index(
         }),
     )
 }
+
+/// `GET _plugins/_im/lron` -- the notifications set on long-running
+/// operations.
+///
+/// An LRON configuration says who to tell when a reindex, a resize or a force
+/// merge finishes. None can be written on this node -- there is nothing here
+/// that would send the notification -- so none is configured and the list is
+/// empty.
+pub async fn lron(Query(p): Query<Params>) -> Response {
+    respond(&p, json!({"lron_configs": [], "total_number": 0}))
+}
