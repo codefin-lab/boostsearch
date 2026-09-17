@@ -202,8 +202,10 @@ that need them find no words.
 Three more sets of data are **not** vendored, because they are somebody else's
 to redistribute: the MaxMind GeoLite2 databases (`docs/geoip.md`), the
 Beider-Morse rule files for the phonetic filter (`docs/phonetic.md`), and the
-Polish and Ukrainian stemmers' dictionaries. Without them those filters say so
-rather than guessing.
+Ukrainian dictionary the `ukrainian` analyzer lemmatises with
+(`docs/ukrainian.md`). Without them those filters say so rather than guessing.
+The Polish stemmer's table is vendored, because without it there is no
+stemmer at all rather than one that finds nothing (`docs/polish.md`).
 
 ## Checking a workload you already have
 
@@ -281,7 +283,8 @@ passes and adds them up.
 | [docs/settings.md](docs/settings.md) | every setting, the server's and the console's |
 | [docs/upgrading.md](docs/upgrading.md) | moving an existing workload onto it, and moving between versions of this |
 | [docs/console.md](docs/console.md) | the console's server: what it serves, what it pins, what it leaves out |
-| [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md) | the two processors that read data this does not ship |
+| [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md), [docs/ukrainian.md](docs/ukrainian.md) | the three that read data this does not ship |
+| [docs/polish.md](docs/polish.md) | Polish, and the stemmer table this one does ship |
 | [docs/performance.md](docs/performance.md) | both engines measured on the same machine, and what to read into it |
 | [docs/velocore.md](docs/velocore.md) | what was changed in the fork of tantivy, and why |
 | [docs/adr/](docs/adr/) | the eight decisions that were hard to reverse |

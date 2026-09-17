@@ -14,6 +14,7 @@
 
 mod korean_number;
 mod kstem;
+mod morfologik;
 mod morph;
 mod phone;
 mod phonetic;
@@ -21,6 +22,7 @@ mod romaji;
 mod rslp;
 mod snowball;
 mod stem;
+mod stempel;
 mod unicode_set;
 
 use std::collections::HashMap;
@@ -184,6 +186,13 @@ pub enum Step {
     /// English, cut the way `kstem` cuts it: gently, and only where the word
     /// stays a word
     KStem,
+    /// `polish_stem`: Polish, cut down by the patch commands the Stempel
+    /// table holds for the ending the word has
+    PolishStem,
+    /// Ukrainian, as the words it may be: a form is looked up in a dictionary
+    /// and every word it is the form of stands in its place, so that a search
+    /// for any of them finds it
+    UkrainianLemma,
     /// the tokens a pattern matches, in place of the ones it was given
     PatternCapture {
         patterns: Vec<String>,
@@ -309,7 +318,15 @@ impl Step {
     ///
     /// A `keyword_repeat` before it means the word itself is kept as well.
     fn stems(&self) -> bool {
-        matches!(self, Step::Stem(_) | Step::KStem | Step::StemmerOverride(_) | Step::Decompound(_))
+        matches!(
+            self,
+            Step::Stem(_)
+                | Step::KStem
+                | Step::PolishStem
+                | Step::UkrainianLemma
+                | Step::StemmerOverride(_)
+                | Step::Decompound(_)
+        )
     }
 }
 
@@ -1679,6 +1696,25 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
         Step::KStem => {
             tokens.into_iter().map(|(t, p, a, b, l)| (kstem::stem(&t), p, a, b, l)).collect()
         }
+        Step::PolishStem => {
+            tokens.into_iter().map(|(t, p, a, b, l)| (stempel::stem(&t), p, a, b, l)).collect()
+        }
+        Step::UkrainianLemma => {
+            let Some(dictionary) = morfologik::ukrainian() else { return tokens };
+            let mut out = Vec::with_capacity(tokens.len());
+            for (t, p, a, b, l) in tokens {
+                let lemmas = dictionary.lemmas(&t);
+                // a word the dictionary has nothing to say about stands for
+                // itself; one it knows stands for each word it may be, all in
+                // the one place, so that a search for any of them finds it
+                if lemmas.is_empty() {
+                    out.push((t, p, a, b, l));
+                } else {
+                    out.extend(lemmas.into_iter().map(|lemma| (lemma, p, a, b, l)));
+                }
+            }
+            out
+        }
         Step::Phonetic { encoder, replace, languages, max_code_len, name_type, rule_type } => {
             let how = phonetic::How {
                 encoder,
@@ -2733,9 +2769,23 @@ fn stop_words(language: &str) -> Vec<String> {
         "_arabic_" | "arabic" => {
             &["من", "في", "على", "و", "أن", "إلى", "عن", "ما", "هذا", "هذه", "التي", "الذي"]
         }
+        // the two lists that are a file of somebody else's rather than a
+        // dozen words are vendored whole and read out of it
+        "_polish_" | "polish" => return word_file(include_str!("polish_stopwords.txt")),
+        "_ukrainian_" | "ukrainian" => return word_file(include_str!("ukrainian_stopwords.txt")),
         _ => &[],
     };
     list.iter().map(|s| s.to_string()).collect()
+}
+
+/// A vendored stop word list as its file holds it: one word to a line, with
+/// the comments and the blank lines left out the way Lucene reads one.
+fn word_file(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(String::from)
+        .collect()
 }
 
 /// The analyzers an index can name, whether or not it defined any.
@@ -3349,6 +3399,7 @@ fn filter_of_spec(spec: &Value, defined: &Value) -> Option<Vec<Step>> {
             vec![Step::Elision]
         }
         "kstem" => vec![Step::KStem],
+        "polish_stem" => vec![Step::PolishStem],
         "porter_stem" => vec![Step::Stem("porter".into())],
         "fingerprint" => vec![Step::Fingerprint(one("separator", ' '))],
         "apostrophe" => vec![Step::Apostrophe],
@@ -3517,6 +3568,7 @@ fn filter_of_name(name: &str) -> Option<Vec<Step>> {
         "delimited_term_freq" => vec![Step::DelimitedTermFreq('|')],
         "stop" => vec![Step::Stop(stop_words("_english_"))],
         "kstem" => vec![Step::KStem],
+        "polish_stem" => vec![Step::PolishStem],
         "porter_stem" | "porterStem" => vec![Step::Stem("porter".into())],
         "snowball" => vec![Step::Stem("english".into())],
         "fingerprint" => vec![Step::Fingerprint(' ')],
@@ -3904,6 +3956,38 @@ pub fn builtin(name: &str) -> Option<Chain> {
             annotated: false,
         },
         "romanian" => normalized("romanian", Step::RomanianNormalize),
+        // Polish is stemmed by a table rather than by an algorithm, which is
+        // what the analysis-stempel plugin installs
+        "polish" => Chain {
+            pre: Vec::new(),
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::Stop(stop_words("polish")), Step::PolishStem],
+            annotated: false,
+        },
+        // Ukrainian is written with several apostrophes and with a stress
+        // mark that is not part of any word, and `ґ` is written `г` in the
+        // dictionary; all of that comes off the text before it is cut
+        "ukrainian" => Chain {
+            pre: vec![CharFilter::Mapping(
+                [
+                    ("\u{2019}", "'"),
+                    ("\u{2018}", "'"),
+                    ("\u{02BC}", "'"),
+                    ("`", "'"),
+                    ("\u{00B4}", "'"),
+                    ("\u{0301}", ""),
+                    ("\u{00AD}", ""),
+                    ("ґ", "г"),
+                    ("Ґ", "Г"),
+                ]
+                .iter()
+                .map(|(from, to)| ((*from).to_string(), (*to).to_string()))
+                .collect(),
+            )],
+            source: Source::Standard,
+            steps: vec![Step::Lowercase, Step::Stop(stop_words("ukrainian")), Step::UkrainianLemma],
+            annotated: false,
+        },
         "turkish" => Chain {
             pre: Vec::new(),
             source: Source::Standard,
