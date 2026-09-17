@@ -515,6 +515,118 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_knn/warmup", get(api::knn::warmup))
         .route("/_plugins/_knn/warmup/{index}", get(api::knn::warmup))
         .route("/_plugins/_ism/explain/{index}", get(api::ism::explain))
+        // --- the analytics plugins' read surface ---
+        // each of these takes the stat in the path and the node before it, and
+        // a path that stops short -- or leaves a trailing slash behind -- asks
+        // for all of them
+        .route("/_plugins/_ml/stats", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/stats/", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/stats/{stat}", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/{node}/stats", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/{node}/stats/", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/{node}/stats/{stat}", get(api::plugins::ml::stats))
+        .route("/_plugins/_ml/profile", get(api::plugins::ml::profile))
+        .route("/_plugins/_ml/profile/models", get(api::plugins::ml::profile))
+        .route("/_plugins/_ml/profile/tasks", get(api::plugins::ml::profile))
+        .route("/_plugins/_ml/memory", get(api::plugins::ml::memory))
+        .route("/_plugins/_ml/context_management", get(api::plugins::ml::context_management))
+        .route("/_plugins/_ml/tools", get(api::plugins::ml::tools))
+        .route("/_plugins/_anomaly_detection/stats", get(api::plugins::anomaly::detector_stats_api))
+        .route(
+            "/_plugins/_anomaly_detection/stats/",
+            get(api::plugins::anomaly::detector_stats_api),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/stats/{stat}",
+            get(api::plugins::anomaly::detector_stats_api),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/{node}/stats",
+            get(api::plugins::anomaly::detector_stats_api),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/{node}/stats/",
+            get(api::plugins::anomaly::detector_stats_api),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/{node}/stats/{stat}",
+            get(api::plugins::anomaly::detector_stats_api),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/detectors/count",
+            get(api::plugins::anomaly::detector_count),
+        )
+        .route(
+            "/_plugins/_anomaly_detection/detectors/match",
+            get(api::plugins::anomaly::detector_match),
+        )
+        .route("/_plugins/_forecast/stats", get(api::plugins::anomaly::forecast_stats_api))
+        .route("/_plugins/_forecast/stats/", get(api::plugins::anomaly::forecast_stats_api))
+        .route("/_plugins/_forecast/stats/{stat}", get(api::plugins::anomaly::forecast_stats_api))
+        .route("/_plugins/_forecast/{node}/stats", get(api::plugins::anomaly::forecast_stats_api))
+        .route("/_plugins/_forecast/{node}/stats/", get(api::plugins::anomaly::forecast_stats_api))
+        .route(
+            "/_plugins/_forecast/{node}/stats/{stat}",
+            get(api::plugins::anomaly::forecast_stats_api),
+        )
+        .route(
+            "/_plugins/_forecast/forecasters/count",
+            get(api::plugins::anomaly::forecaster_count),
+        )
+        .route(
+            "/_plugins/_forecast/forecasters/match",
+            get(api::plugins::anomaly::forecaster_match),
+        )
+        .route(
+            "/_plugins/_search_relevance/query_sets",
+            get(api::plugins::search_relevance::query_sets),
+        )
+        .route(
+            "/_plugins/_search_relevance/search_configurations",
+            get(api::plugins::search_relevance::search_configurations),
+        )
+        .route(
+            "/_plugins/_search_relevance/judgments",
+            get(api::plugins::search_relevance::judgments),
+        )
+        .route(
+            "/_plugins/_search_relevance/experiments",
+            get(api::plugins::search_relevance::experiments),
+        )
+        .route(
+            "/_plugins/_search_relevance/experiments/schedule",
+            get(api::plugins::search_relevance::scheduled_experiments),
+        )
+        .route("/_plugins/_search_relevance/stats", get(api::plugins::search_relevance::stats))
+        .route("/_plugins/_search_relevance/stats/", get(api::plugins::search_relevance::stats))
+        .route(
+            "/_plugins/_search_relevance/stats/{stat}",
+            get(api::plugins::search_relevance::stats),
+        )
+        .route(
+            "/_plugins/_security_analytics/correlations",
+            get(api::plugins::security_analytics::correlations),
+        )
+        .route(
+            "/_plugins/_security_analytics/correlationAlerts",
+            get(api::plugins::security_analytics::correlation_alerts),
+        )
+        .route(
+            "/_plugins/_security_analytics/rules/categories",
+            get(api::plugins::security_analytics::rule_categories),
+        )
+        .route(
+            "/_plugins/_security_analytics/threat_intel/alerts",
+            get(api::plugins::security_analytics::threat_intel_alerts),
+        )
+        .route(
+            "/_plugins/_security_analytics/threat_intel/findings/_search",
+            get(api::plugins::security_analytics::threat_intel_findings),
+        )
+        .route(
+            "/_plugins/_security_analytics/threat_intel/iocs",
+            get(api::plugins::security_analytics::threat_intel_iocs),
+        )
         .route("/_plugins/_security/authinfo", get(security::api::authinfo))
         .route("/_plugins/_security/health", get(security::api::health))
         .route("/_plugins/_security/api/permissionsinfo", get(security::api::permissions_info))

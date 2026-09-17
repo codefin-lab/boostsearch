@@ -46,6 +46,7 @@ pub mod knn;
 pub mod ltr;
 pub mod notifications;
 pub mod perf_analyzer;
+pub mod plugins;
 pub mod replication;
 pub mod rollup;
 pub mod sql;
