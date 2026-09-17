@@ -537,6 +537,7 @@ const SERVED: &[&str] = &[
     "_forcemerge",
     "_index_template",
     "_ingest",
+    "_insights",
     "_list",
     "_mapping",
     "_mget",
@@ -836,6 +837,23 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
                 (Some(_), _) => "cluster:admin/opendistro/asynchronous_search/get",
             }
             .to_string(),
+            // the plugins whose shipped roles name an action exactly: judged
+            // under that action, so a role written for the reference grants
+            // the same reads here. The rest fall through to the arm below,
+            // which judges a plugin under its own name.
+            ("_ltr", "GET" | "HEAD") => "cluster:admin/ltr/stats".to_string(),
+            ("_im", "GET" | "HEAD") => {
+                "cluster:admin/opensearch/controlcenter/lron/get".to_string()
+            }
+            ("_notifications", "GET" | "HEAD") if rest.get(2) == Some(&"features") => {
+                "cluster:admin/opensearch/notifications/features".to_string()
+            }
+            ("_flow_framework", "GET" | "HEAD") => {
+                "cluster:admin/opensearch/flow_framework/workflow_step/get".to_string()
+            }
+            ("_alerting", "GET" | "HEAD") if rest.get(2) == Some(&"stats") => {
+                "cluster:admin/opendistro/alerting/stats".to_string()
+            }
             ("_query", "GET" | "HEAD") => {
                 "cluster:admin/opensearch/ql/datasources/read".to_string()
             }
@@ -995,6 +1013,10 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
         (false, "_snapshot", "GET") => "cluster:admin/snapshot/get",
         (false, "_snapshot", "DELETE") => "cluster:admin/snapshot/delete",
         (false, "_snapshot", _) => "cluster:admin/snapshot/create",
+        // query insights answers on a path of its own rather than under
+        // `_plugins`, and its shipped role grants the top-queries actions;
+        // without an arm here the reads would have run unjudged
+        (false, "_insights", _) => "cluster:admin/opensearch/insights/top_queries/get",
         (false, "_render", _) => "cluster:admin/script/get",
         (false, "_resolve", _) => "indices:admin/resolve/index",
         _ => return None,

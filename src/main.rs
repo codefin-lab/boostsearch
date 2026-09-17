@@ -455,8 +455,63 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_ppl", post(api::sql::pipeline))
         .route("/_plugins/_ppl/_explain", post(api::sql::explain_ppl))
         .route("/_plugins/_ppl/stats", get(api::sql::stats).post(api::sql::stats))
+        .route("/_plugins/_query/_datasources", get(api::sql::datasources))
+        // the trailing-slash form of a stats path is the same read: the
+        // plugins register both, and a client that builds the path by joining
+        // segments sends it
         .route("/_plugins/_knn/stats", get(api::knn::stats))
+        .route("/_plugins/_knn/stats/", get(api::knn::stats))
         .route("/_plugins/_knn/{node}/stats", get(api::knn::stats))
+        .route("/_plugins/_ltr/stats", get(api::ltr::stats))
+        .route("/_plugins/_ltr/stats/", get(api::ltr::stats))
+        .route("/_plugins/_im/lron", get(api::ism::lron))
+        .route("/_plugins/_alerting/stats", get(api::alerting::stats))
+        .route("/_plugins/_notifications/features", get(api::notifications::features))
+        .route("/_plugins/_flow_framework/workflow/_steps", get(api::flow_framework::steps))
+        .route("/_plugins/_job_scheduler/api/jobs", get(api::job_scheduler::jobs))
+        .route("/_plugins/_job_scheduler/api/locks", get(api::job_scheduler::locks))
+        .route("/_plugins/_replication/autofollow_stats", get(api::replication::autofollow_stats))
+        .route("/_plugins/_replication/follower_stats", get(api::replication::follower_stats))
+        .route("/_plugins/_replication/leader_stats", get(api::replication::leader_stats))
+        .route("/_insights/top_queries", get(api::insights::top_queries))
+        .route("/_insights/live_queries", get(api::insights::live_queries))
+        .route("/_insights/health_stats", get(api::insights::health_stats))
+        .route("/_insights/settings", get(api::insights::settings))
+        // the performance analyzer answers the same body on its own path and
+        // on each feature's, so the switches can be read whichever one a
+        // client has been told to use
+        .route("/_plugins/_performanceanalyzer/config", get(api::perf_analyzer::config))
+        .route("/_plugins/_performanceanalyzer/rca/config", get(api::perf_analyzer::config))
+        .route("/_plugins/_performanceanalyzer/logging/config", get(api::perf_analyzer::config))
+        .route("/_plugins/_performanceanalyzer/batch/config", get(api::perf_analyzer::config))
+        .route(
+            "/_plugins/_performanceanalyzer/threadContentionMonitoring/config",
+            get(api::perf_analyzer::config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/cluster/config",
+            get(api::perf_analyzer::cluster_config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/rca/cluster/config",
+            get(api::perf_analyzer::cluster_config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/logging/cluster/config",
+            get(api::perf_analyzer::cluster_config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/batch/cluster/config",
+            get(api::perf_analyzer::cluster_config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/threadContentionMonitoring/cluster/config",
+            get(api::perf_analyzer::cluster_config),
+        )
+        .route(
+            "/_plugins/_performanceanalyzer/override/cluster/config",
+            get(api::perf_analyzer::override_cluster_config),
+        )
         .route("/_plugins/_knn/warmup", get(api::knn::warmup))
         .route("/_plugins/_knn/warmup/{index}", get(api::knn::warmup))
         .route("/_plugins/_ism/explain/{index}", get(api::ism::explain))
@@ -583,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
     // both deleting the same index on the same tick is not twice as helpful.
     {
         let store = store.clone();
+        ism::engine::sweeper_started();
         tokio::spawn(async move {
             loop {
                 let wait = ism::job_interval_ms(&store);

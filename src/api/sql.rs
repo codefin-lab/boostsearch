@@ -402,3 +402,13 @@ pub async fn stats(Query(p): Query<Params>) -> Response {
         }),
     )
 }
+
+/// `GET _plugins/_query/_datasources` -- the catalogues a query may name.
+///
+/// A datasource is somewhere other than this cluster that a query can read
+/// from: a Spark catalogue, an S3 table, a Prometheus server. A query here is
+/// answered from the cluster's own indices and nothing else, so no datasource
+/// is registered and the list is empty.
+pub async fn datasources(Query(p): Query<Params>) -> Response {
+    respond(&p, json!([]))
+}
