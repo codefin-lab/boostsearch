@@ -9,8 +9,39 @@ pub use settings::*;
 mod state;
 pub use state::*;
 
+mod awareness;
+pub use awareness::*;
+
+/// `_cluster/stats/nodes/{node_id}` -- the same page, counting only the nodes
+/// the path names.
+///
+/// A selector that names no node of this cluster counts nothing: the
+/// reference answers with every total at zero rather than refusing.
+pub async fn cluster_stats_nodes(
+    state: State<Store>,
+    Path(selector): Path<String>,
+    p: Query<Params>,
+) -> Response {
+    if crate::api::selected_nodes(Some(&selector)).is_empty() {
+        let none = json!({"total": 0, "cluster_manager": 0, "coordinating_only": 0, "data": 0,
+                          "ingest": 0, "master": 0, "remote_cluster_client": 0, "search": 0,
+                          "warm": 0});
+        let mut out = cluster_stats_value(&state);
+        out["_nodes"] = json!({"total": 0, "successful": 0, "failed": 0});
+        out["nodes"] = json!({"count": none});
+        out["indices"] = json!({"count": 0});
+        return respond(&p, out);
+    }
+    cluster_stats(state, p).await
+}
+
 /// `_cluster/stats` -- the cluster in one page.
 pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let out = cluster_stats_value(&store);
+    respond(&p, out)
+}
+
+fn cluster_stats_value(store: &Store) -> Value {
     let names = store.names();
     let mut docs = 0u64;
     let mut on_disk = 0u64;
@@ -24,9 +55,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
         .iter()
         .filter_map(|n| store.get(n))
         .any(|st| st.read().numeric_setting("number_of_replicas").unwrap_or(0) > 0);
-    respond(
-        &p,
-        json!({
+    json!({
             "_nodes": {"total": 1, "successful": 1, "failed": 0},
             "cluster_name": "velosearch",
             "cluster_uuid": "_na_",
@@ -60,7 +89,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
                     "max_unsafe_auto_id_timestamp": -1, "file_sizes": {},
                 },
                 "mappings": {"field_types": []},
-                "analysis": analysis_stats(&store),
+                "analysis": analysis_stats(store),
             },
             "nodes": {
                 "count": {"total": 1, "cluster_manager": 1, "coordinating_only": 0,
@@ -100,8 +129,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
                 "packaging_types": [],
                 "ingest": {"number_of_pipelines": 0, "processor_stats": {}},
             },
-        }),
-    )
+    })
 }
 
 /// `_cluster/pending_tasks` -- work the cluster manager has queued, of which

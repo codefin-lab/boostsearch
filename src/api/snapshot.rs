@@ -859,17 +859,43 @@ pub async fn delete_snapshot(
     respond(&p, json!({"acknowledged": true}))
 }
 
-pub async fn snapshot_status(
-    State(store): State<Store>,
-    path: Option<Path<(String, String)>>,
+/// `/_snapshot/_status` and `/_snapshot/{repo}/_status` -- the snapshots
+/// running now, of which there are never any: a snapshot here finishes before
+/// its request answers.
+pub async fn snapshot_status_running(
+    _repo: Option<Path<String>>,
     Query(p): Query<Params>,
 ) -> Response {
-    let Some(Path((repo, name))) = path else {
-        return respond(&p, json!({"snapshots": []}));
-    };
-    let (found, missing) = pick_snapshots(&store, &repo, &name);
+    respond(&p, json!({"snapshots": []}))
+}
+
+pub async fn snapshot_status(
+    State(store): State<Store>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    status_answer(&store, &p, &repo, &name, None)
+}
+
+/// The same, with the indices of the snapshot to report named.
+pub async fn snapshot_status_index(
+    State(store): State<Store>,
+    Path((repo, name, indices)): Path<(String, String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    status_answer(&store, &p, &repo, &name, Some(&indices))
+}
+
+fn status_answer(
+    store: &Store,
+    p: &Params,
+    repo: &str,
+    name: &str,
+    indices: Option<&str>,
+) -> Response {
+    let (found, missing) = pick_snapshots(store, repo, name);
     if let Some(gone) = missing
-        && !ignore_unavailable(&p)
+        && !ignore_unavailable(p)
     {
         return err(
             StatusCode::NOT_FOUND,
@@ -877,17 +903,57 @@ pub async fn snapshot_status(
             format!("[{repo}:{gone}] is missing"),
         );
     }
-    let from = store.repositories().get(&repo).and_then(crate::snapshot::Source::of);
+    // the indices are named exactly: a pattern is not expanded against a
+    // snapshot, so one that names nothing in it is a missing index
+    let only: Option<Vec<String>> =
+        indices.map(|e| e.split(',').map(|s| s.trim().to_string()).collect());
+    if let Some(only) = &only
+        && !ignore_unavailable(p)
+    {
+        for s in &found {
+            let held: Vec<String> = s["indices"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                .unwrap_or_default();
+            if let Some(gone) = only.iter().find(|n| !held.contains(n)) {
+                let snapshot = s["snapshot"].as_str().unwrap_or("");
+                // the reason names the first one and says there may be more,
+                // which is how the reference names a set it stopped checking
+                let named = format!("{gone} and possibly more indices");
+                let reason = format!("no such index [{named}]");
+                let about = json!({
+                    "type": "index_not_found_exception", "reason": reason,
+                    "index": named, "index_uuid": "_na_",
+                });
+                let mut error = about.clone();
+                error["root_cause"] = json!([about]);
+                error["caused_by"] = json!({
+                    "type": "illegal_argument_exception",
+                    "reason": format!(
+                        "indices [{named}] missing in snapshot [{snapshot}] of repository [{repo}]"
+                    ),
+                });
+                return (StatusCode::NOT_FOUND, axum::Json(json!({"error": error, "status": 404})))
+                    .into_response();
+            }
+        }
+    }
+    let from = store.repositories().get(repo).and_then(crate::snapshot::Source::of);
     let out: Vec<Value> = off_the_runtime(|| {
-        found.into_iter().map(|s| status_of(&repo, from.as_ref(), &s)).collect()
+        found.into_iter().map(|s| status_of(repo, from.as_ref(), &s, only.as_deref())).collect()
     });
-    respond(&p, json!({"snapshots": out}))
+    respond(p, json!({"snapshots": out}))
 }
 
 /// The status of a finished snapshot, shard by shard, from what its
 /// repository holds: each shard wrote one file, and a shard that could not be
 /// written is counted failed with the reason it gave.
-fn status_of(repo: &str, from: Option<&crate::snapshot::Source>, s: &Value) -> Value {
+fn status_of(
+    repo: &str,
+    from: Option<&crate::snapshot::Source>,
+    s: &Value,
+    only: Option<&[String]>,
+) -> Value {
     let started = s["start_time_in_millis"].as_u64().unwrap_or(0);
     let took = s["duration_in_millis"].as_u64().unwrap_or(0);
     let stats = |files: u64, bytes: u64, start: u64, time: u64| {
@@ -903,10 +969,13 @@ fn status_of(repo: &str, from: Option<&crate::snapshot::Source>, s: &Value) -> V
                "done": done, "failed": failed, "total": done + failed})
     };
     let snapshot = s["snapshot"].as_str().unwrap_or("");
-    let names: Vec<String> = s["indices"]
+    let mut names: Vec<String> = s["indices"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    if let Some(only) = only {
+        names.retain(|n| only.iter().any(|o| o == n));
+    }
     let (mut all_done, mut all_failed, mut all_files, mut all_bytes) = (0u64, 0u64, 0u64, 0u64);
     let mut indices = serde_json::Map::new();
     for index in &names {

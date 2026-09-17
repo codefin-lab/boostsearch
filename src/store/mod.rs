@@ -656,6 +656,13 @@ pub struct Store {
     /// nodes excluded from the voting configuration, which this engine records
     /// and reports without having a vote to hold
     voting_exclusions: Arc<RwLock<Vec<Value>>>,
+    /// The awareness metadata the cluster keeps: the search-replica weights
+    /// per awareness attribute, and the zone a decommission was asked for.
+    /// Neither places a shard here -- there are no zones to spread copies
+    /// over -- but both are cluster metadata a client writes and reads back,
+    /// so they are kept whole, published with the rest of the customs, and
+    /// written down so a restart answers what was put.
+    awareness: Arc<RwLock<Value>>,
     /// component templates: settings and mappings named once and composed
     /// into whichever index templates ask for them
     components: Arc<RwLock<HashMap<String, Value>>>,

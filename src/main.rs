@@ -149,7 +149,7 @@ fn app(store: Store) -> Router {
             get(api::get_all_pits).delete(api::delete_all_pits).fallback(api::pit_list_or_delete),
         )
         .route("/_cluster/stats", get(api::cluster_stats))
-        .route("/_cluster/stats/{*rest}", get(api::cluster_stats))
+        .route("/_cluster/stats/nodes/{node_id}", get(api::cluster_stats_nodes))
         .route("/_shard_stores", get(api::shard_stores))
         .route("/{index}/_shard_stores", get(api::shard_stores))
         .route("/_resolve/index/{name}", get(api::resolve_index))
@@ -160,7 +160,8 @@ fn app(store: Store) -> Router {
         .route("/{index}/_termvectors/{id}", get(api::termvectors).post(api::termvectors))
         .route("/{index}/_termvectors", get(api::termvectors).post(api::termvectors))
         .route("/_cluster/state", get(api::cluster_state))
-        .route("/_cluster/state/{*rest}", get(api::cluster_state_filtered))
+        .route("/_cluster/state/{metric}", get(api::cluster_state_filtered))
+        .route("/_cluster/state/{metric}/{index}", get(api::cluster_state_of_indices))
         .route("/_cluster/settings", get(api::cluster_settings_get).put(api::cluster_settings_put))
         // --- aliases ---
         .route(
@@ -192,7 +193,7 @@ fn app(store: Store) -> Router {
         )
         .route("/_snapshot/{repo}/_verify", post(api::verify_repository))
         .route("/_snapshot/{repo}/_cleanup", post(api::cleanup_repository))
-        .route("/_snapshot/_status", get(api::snapshot_status))
+        .route("/_snapshot/_status", get(api::snapshot_status_running))
         .route(
             "/_snapshot/{repo}/{snapshot}",
             put(api::create_snapshot)
@@ -200,7 +201,9 @@ fn app(store: Store) -> Router {
                 .get(api::get_snapshot)
                 .delete(api::delete_snapshot),
         )
+        .route("/_snapshot/{repo}/_status", get(api::snapshot_status_running))
         .route("/_snapshot/{repo}/{snapshot}/_status", get(api::snapshot_status))
+        .route("/_snapshot/{repo}/{snapshot}/{index}/_status", get(api::snapshot_status_index))
         .route("/_snapshot/{repo}/{snapshot}/_restore", post(api::restore_snapshot))
         .route(
             "/_snapshot/{repo}/{snapshot}/_clone/{target}",
@@ -273,6 +276,7 @@ fn app(store: Store) -> Router {
             put(api::put_index_template)
                 .post(api::put_index_template)
                 .get(api::get_index_template)
+                .head(api::exists_index_template)
                 .delete(api::delete_index_template),
         )
         .route("/_index_template", get(api::get_index_template))
@@ -281,6 +285,7 @@ fn app(store: Store) -> Router {
             put(api::put_component_template)
                 .post(api::put_component_template)
                 .get(api::get_component_template)
+                .head(api::exists_component_template)
                 .delete(api::delete_component_template),
         )
         .route("/_component_template", get(api::get_component_template))
@@ -297,13 +302,63 @@ fn app(store: Store) -> Router {
             post(api::simulate_index_template).put(api::simulate_index_template),
         )
         // --- nodes and cluster housekeeping ---
-        .route("/_nodes/usage", get(api::nodes_usage))
-        .route("/_nodes/usage/{*rest}", get(api::nodes_usage))
-        .route("/_nodes/reload_secure_settings", post(api::nodes_reload_secure_settings))
-        .route("/_nodes/stats", get(api::nodes_stats))
-        .route("/_nodes/stats/{*rest}", get(api::nodes_stats))
-        .route("/_nodes", get(api::nodes_info))
-        .route("/_nodes/{*rest}", get(api::nodes_info_scoped).post(api::nodes_post))
+        .route("/_nodes", get(api::nodes_get))
+        .route("/_nodes/usage", get(api::nodes_get))
+        .route("/_nodes/usage/{metric}", get(api::nodes_get))
+        .route("/_nodes/stats", get(api::nodes_get))
+        .route("/_nodes/stats/{metric}", get(api::nodes_get))
+        .route("/_nodes/stats/{metric}/{index_metric}", get(api::nodes_get))
+        .route("/_nodes/hot_threads", get(api::nodes_get))
+        .route("/_nodes/hotthreads", get(api::nodes_get))
+        .route("/_nodes/reload_secure_settings", post(api::nodes_write))
+        .route("/_nodes/{node_id}", get(api::nodes_get))
+        .route("/_nodes/{node_id}/usage", get(api::nodes_get))
+        .route("/_nodes/{node_id}/usage/{metric}", get(api::nodes_get))
+        .route("/_nodes/{node_id}/stats", get(api::nodes_get))
+        .route("/_nodes/{node_id}/stats/{metric}", get(api::nodes_get))
+        .route("/_nodes/{node_id}/stats/{metric}/{index_metric}", get(api::nodes_get))
+        .route("/_nodes/{node_id}/hot_threads", get(api::nodes_get))
+        .route("/_nodes/{node_id}/hotthreads", get(api::nodes_get))
+        .route("/_nodes/{node_id}/reload_secure_settings", post(api::nodes_write))
+        .route("/_nodes/{node_id}/{metric}", get(api::nodes_get))
+        // the older spelling of the same prefix, which the API still names
+        .route("/_cluster/nodes/hot_threads", get(api::nodes_get))
+        .route("/_cluster/nodes/hotthreads", get(api::nodes_get))
+        .route("/_cluster/nodes/{node_id}/hot_threads", get(api::nodes_get))
+        .route("/_cluster/nodes/{node_id}/hotthreads", get(api::nodes_get))
+        // --- weighted routing and decommissioning, by awareness attribute ---
+        .route(
+            "/_cluster/routing/awareness/{attribute}/weights",
+            get(api::get_weighted_routing)
+                .put(api::put_weighted_routing)
+                .delete(api::delete_weighted_routing),
+        )
+        .route(
+            "/_cluster/routing/awareness/weights",
+            axum::routing::delete(api::delete_weighted_routing),
+        )
+        .route(
+            "/_cluster/decommission/awareness",
+            axum::routing::delete(api::delete_decommission_awareness),
+        )
+        .route(
+            "/_cluster/decommission/awareness/{attribute}/_status",
+            get(api::get_decommission_awareness),
+        )
+        .route(
+            "/_cluster/decommission/awareness/{attribute}/{value}",
+            put(api::put_decommission_awareness),
+        )
+        // --- a shard's remote segment store, which nothing here is backed by ---
+        .route("/_remotestore/_restore", post(api::restore_remote_store))
+        .route("/_remotestore/stats/{index}", get(api::remote_store_stats))
+        .route("/_remotestore/stats/{index}/{shard_id}", get(api::remote_store_stats_shard))
+        // --- index data on disk the cluster does not claim ---
+        .route("/_dangling", get(api::list_dangling_indices))
+        .route(
+            "/_dangling/{index_uuid}",
+            post(api::import_dangling_index).delete(api::delete_dangling_index),
+        )
         .route("/_cluster/reroute", post(api::reroute))
         .route("/_velo/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
@@ -317,7 +372,7 @@ fn app(store: Store) -> Router {
         .route("/_tasks/_cancel", post(api::cancel_tasks))
         .route("/_tasks/{id}/_cancel", post(api::cancel_tasks))
         .route("/_tasks", get(api::list_tasks))
-        .route("/_tasks/{id}", get(api::get_task))
+        .route("/_tasks/{id}", get(api::get_task).delete(api::delete_task))
         // --- index housekeeping ---
         .route("/_cat/segments", get(api::cat_segments))
         .route("/_cat/segments/{index}", get(api::cat_segments))

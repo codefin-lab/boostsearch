@@ -30,6 +30,17 @@ which is an operator's decision rather than a client's.
 | `VELOSEARCH_TRANSPORT_INSECURE` | `true` lets a node listen for transport connections on a non-loopback address with transport TLS off. It is an operator saying the network itself is the boundary. |
 | `discovery.seed_hosts` | the nodes this one looks for. |
 
+Two cluster settings say which of those attributes the cluster is aware of.
+They are set through `PUT _cluster/settings` like any other, and are read by
+`_cluster/routing/awareness/<attribute>/weights` and
+`_cluster/decommission/awareness/<attribute>/<value>`: a request naming an
+attribute neither of them knows is refused rather than stored.
+
+| | |
+|---|---|
+| `cluster.routing.allocation.awareness.attributes` | the node attributes the cluster is aware of, comma-separated. Only these may have weights put for them, or be decommissioned. |
+| `cluster.routing.allocation.awareness.force.<attribute>.values` | every value that attribute may take, comma-separated, whether or not a node carries it now. A weight has to be given for each of them, and only a value named here can be decommissioned. |
+
 ## What this node is allowed to reach
 
 Nothing here can be set by a client, and nothing is allowed unless it is named.

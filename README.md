@@ -29,11 +29,11 @@ rather than believed.
 | OpenSearch's core suite | **1,428 of 1,428** not skipped, over all 410 files of it (77 skipped) | `tools/yaml_runner.py --manifest tools/phase3_manifest.json` |
 | its module and plugin suites | **880 of 890**, 4 skipped -- with the geoip databases and the Beider-Morse rules in place; without them 871, the difference being what is on the disk rather than what the code does (`docs/geoip.md`, `docs/phonetic.md`) | `tools/module_gate.py` |
 | the same answer as OpenSearch 3.1.0 | **166 of 183** canonical requests: the answer identical, the bookkeeping around it (timings, ids) scrubbed; `--strict` compares the whole response body rather than only the answer inside it, still scrubbed | `tools/compat_audit.py replay` |
-| REST endpoints routed | **146 of 167** APIs on every path and method they name, 8 more on some of them | `tools/endpoint_gate.py` |
+| REST endpoints routed | **167 of 167** APIs on every path and method they name | `tools/endpoint_gate.py` |
 | the bench matrix | **17 of 18 dimensions quicker or lighter** | `tools/bench_matrix.py` |
 | beside OpenSearch 3.1.0, on the same machine, 34 dimensions | **quicker or lighter on all 34**, the full table with how it was measured in [docs/performance.md](docs/performance.md) | `tools/bench.py`, `tools/bench_gate.py` |
 | this build against this repository's own last numbers | 34 dimensions, nothing allowed to fall more than 5% past the machine's own spread; the run also reports the kept OpenSearch measurement (**34 of 34**) | `tools/bench_gate.py` |
-| who may reach what | **1,587 answers** over 334 routes and five callers | `tools/auth_matrix.py` |
+| who may reach what | **1,882 answers** over 395 routes and five callers | `tools/auth_matrix.py` |
 | a refused write leaves the document alone | **30 refusals** through five write paths, counted as the check makes them rather than written into it | `tools/refusal_check.py` |
 | every acknowledged write survives `kill -9` | **10,001 writes**, five index shapes | `tools/restart_check.py` |
 | one node worked steadily for half an hour | **2.53 million writes** acknowledged over 2.93 million requests; every sampled one there afterwards and after a restart, nothing refused, and an index that does not grow answered in 0.7 ms at the start and 0.7 ms at the end | `tools/soak_check.py` |

@@ -244,18 +244,23 @@ pub async fn allocation_explain(
     respond(&p, out)
 }
 
-/// `/_cluster/state/<metrics>` and `/_cluster/state/<metrics>/<indices>`:
-/// the first path part names which sections to return, the second which
-/// indices the metadata should describe.
+/// `/_cluster/state/<metrics>`: the path part names which sections to return.
 pub async fn cluster_state_filtered(
     State(store): State<Store>,
-    Path(rest): Path<String>,
+    Path(metrics): Path<String>,
     Query(p): Query<Params>,
 ) -> Response {
-    let mut parts = rest.splitn(2, '/');
-    let metrics = parts.next().unwrap_or("_all").to_string();
-    let indices = parts.next().map(|s| s.to_string());
-    cluster_state_inner(&store, &p, Some(&metrics), indices.as_deref())
+    cluster_state_inner(&store, &p, Some(&metrics), None)
+}
+
+/// `/_cluster/state/<metrics>/<indices>`: and the second which indices the
+/// metadata should describe.
+pub async fn cluster_state_of_indices(
+    State(store): State<Store>,
+    Path((metrics, indices)): Path<(String, String)>,
+    Query(p): Query<Params>,
+) -> Response {
+    cluster_state_inner(&store, &p, Some(&metrics), Some(&indices))
 }
 
 pub async fn cluster_state(State(store): State<Store>, Query(p): Query<Params>) -> Response {
@@ -318,8 +323,13 @@ pub(crate) fn cluster_state_value(
                     found.push(name.clone());
                 }
             }
+            // the state is read leniently: a name reaching no index is passed
+            // over unless the caller asked for it to be an error. It was
+            // strict, so naming one index that is not there gave a 404 where
+            // the reference answers with the indices that are
+            let strict = p.get("ignore_unavailable").map(|v| v == "false").unwrap_or(false);
             for part in expr.split(',').map(|n| n.trim()).filter(|n| !n.contains('*')) {
-                if !found.iter().any(|n| n == part) && !ignore_unavailable(p) {
+                if !found.iter().any(|n| n == part) && strict {
                     return Err(no_such_index(part));
                 }
             }
@@ -421,9 +431,7 @@ pub(crate) fn cluster_state_value(
                 Value::Array(live.graveyard.clone())
             }
         };
-        out.insert(
-            "metadata".into(),
-            json!({
+        let mut metadata = json!({
                 "cluster_uuid": live.cluster_uuid,
                 // whether the cluster's name has been agreed on, and by whom:
                 // one node agrees with itself
@@ -441,8 +449,16 @@ pub(crate) fn cluster_state_value(
                 "index-graveyard": {"tombstones": graveyard},
                 "index_template": {"index_template": composable_templates(store)},
                 "ingest": {"pipeline": ingest_pipelines(store)},
-            }),
-        );
+        });
+        // the awareness metadata is part of the state only once something has
+        // been put: an untouched cluster names neither section
+        if let Some(weights) = store.weighted_routing() {
+            metadata["weighted_shard_routing"] = weights;
+        }
+        if let Some(decommission) = store.decommission() {
+            metadata["decommissionedAttribute"] = decommission;
+        }
+        out.insert("metadata".into(), metadata);
     }
     if want("blocks") {
         // an index held still, or closed, is one the cluster is blocking
