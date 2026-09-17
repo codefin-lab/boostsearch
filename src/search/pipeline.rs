@@ -70,9 +70,15 @@ impl PipelineError {
     }
 }
 
-pub const REQUEST_PROCESSORS: &[&str] =
-    &["filter_query", "neural_query_enricher", "oversample", "script"];
+pub const REQUEST_PROCESSORS: &[&str] = &[
+    "filter_query",
+    "neural_query_enricher",
+    "neural_sparse_two_phase_processor",
+    "oversample",
+    "script",
+];
 pub const RESPONSE_PROCESSORS: &[&str] = &[
+    "agentic_context",
     "collapse",
     "hybrid_score_explanation",
     "rename_field",
@@ -426,6 +432,44 @@ fn check(kind: &str, cfg: &mut Config, scorings: &mut Vec<Scoring>) -> Result<()
                 ));
             }
         }
+        "neural_sparse_two_phase_processor" => {
+            cfg.boolean("enabled", true)?;
+            // the parameters are read one at a time and anything else in the
+            // map is left alone, so a name misspelled in here is not refused
+            let tuning = cfg.opt_map("two_phase_parameter")?.unwrap_or_default();
+            let number = |key: &str| match tuning.get(key) {
+                Some(Value::Number(n)) => n.as_f64(),
+                Some(Value::String(s)) => s.trim().parse().ok(),
+                _ => None,
+            };
+            if let Some(ratio) = number("prune_ratio")
+                && !(0.0..1.0).contains(&ratio)
+            {
+                return Err(PipelineError::illegal(format!(
+                    "Illegal prune_ratio {ratio:.6} for prune_type: max_ratio. prune_ratio should \
+                     be in the range [0, 1)."
+                )));
+            }
+            if let Some(rate) = number("expansion_rate")
+                && rate < 1.0
+            {
+                return Err(PipelineError::illegal(format!(
+                    "The two_phase_parameter.expansion_rate must >= 1.0. Received: {rate:.6}"
+                )));
+            }
+            if let Some(window) = number("max_window_size")
+                && window < 50.0
+            {
+                return Err(PipelineError::illegal(format!(
+                    "The two_phase_parameter.max_window_size must >= 50. Received: \n{}",
+                    window as i64
+                )));
+            }
+        }
+        "agentic_context" => {
+            cfg.boolean("agent_steps_summary", false)?;
+            cfg.boolean("dsl_query", false)?;
+        }
         "hybrid_score_explanation" => {}
         "normalization-processor" => {
             scorings.push(crate::search::hybrid::parse_normalization(cfg)?)
@@ -714,7 +758,17 @@ fn request_step(
                 *context = rc.clone();
             }
         }
-        // there is no neural query here for it to fill a model into
+        // `neural_sparse_two_phase_processor` splits a sparse-vector query
+        // in two: the terms whose weights carry most of the score are asked
+        // first, and the long tail of small weights is asked again over the
+        // window the first pass returned. It rewrites a `neural_sparse`
+        // query and nothing else. There is no `neural_sparse` query here --
+        // it needs a `rank_features` field and a sparse encoding model, and
+        // this server has neither -- so there is never a query for it to
+        // rewrite and it leaves every request as it found it, which is what
+        // the reference does with a query the processor does not apply to.
+        //
+        // there is no neural query here for it to fill a model into either
         _ => {}
     }
     Ok(())
@@ -764,6 +818,31 @@ fn response_step(
         return Ok(());
     }
     match spec.kind.as_str() {
+        // What an agent did to arrive at this search is not in the answer:
+        // it is in the context the request processor that translated the
+        // agent's question left behind. This processor puts the parts of it
+        // the pipeline asked for into the answer's `ext`, so a client can
+        // see the query the agent wrote and the steps it took. The memory it
+        // wrote them to always goes in; the other two are asked for by name.
+        //
+        // Nothing here translates an agent's question into a query, so that
+        // context is empty and the answer is left as it was -- which is what
+        // the reference answers for a search no agent asked.
+        "agentic_context" => {
+            let mut ext = Map::new();
+            for (key, asked) in [
+                ("memory_id", true),
+                ("dsl_query", flag_of(spec, "dsl_query")),
+                ("agent_steps_summary", flag_of(spec, "agent_steps_summary")),
+            ] {
+                if let Some(v) = context.get(key).filter(|_| asked) {
+                    ext.insert(key.into(), v.clone());
+                }
+            }
+            if !ext.is_empty() {
+                env["ext"]["agentic"] = Value::Object(ext);
+            }
+        }
         "rename_field" => {
             let field = text_of(spec, "field");
             let target = text_of(spec, "target_field");
@@ -1046,6 +1125,13 @@ mod tests {
         }
     }
 
+    fn taken(def: Value) -> Pipeline {
+        match Pipeline::parse(&Store::scratch(), "p", &def) {
+            Ok(p) => p,
+            Err(e) => panic!("{def} was refused: {}", e.reason),
+        }
+    }
+
     #[test]
     fn every_list_names_only_processors_it_has() {
         let e = refused(json!({"phase_results_processors": [{"not-a-processor": {}}]}));
@@ -1094,5 +1180,83 @@ mod tests {
             ]}),
         );
         assert!(taken.is_ok_and(|p| p.scoring().is_some()));
+    }
+
+    #[test]
+    fn two_phase_tuning_is_checked_where_it_is_written() {
+        let two_phase = |tuning: Value| {
+            json!({"request_processors": [
+                {"neural_sparse_two_phase_processor": {"two_phase_parameter": tuning}}
+            ]})
+        };
+        assert_eq!(
+            refused(two_phase(json!({"prune_ratio": 1.0}))).reason,
+            "Illegal prune_ratio 1.000000 for prune_type: max_ratio. prune_ratio should be in \
+             the range [0, 1)."
+        );
+        assert_eq!(
+            refused(two_phase(json!({"expansion_rate": 0.5}))).reason,
+            "The two_phase_parameter.expansion_rate must >= 1.0. Received: 0.500000"
+        );
+        assert_eq!(
+            refused(two_phase(json!({"max_window_size": -1}))).reason,
+            "The two_phase_parameter.max_window_size must >= 50. Received: \n-1"
+        );
+        // the tuning map is read a name at a time, so a name it does not
+        // know is left where it stands rather than refused
+        taken(two_phase(json!({"prune_ratio": 0.4, "expansion_rate": 5.0, "bogus": 1})));
+        // and the processor itself takes only what it reads
+        assert_eq!(
+            refused(json!({"request_processors": [
+                {"neural_sparse_two_phase_processor": {"prune_ratio": 0.4}}
+            ]}))
+            .reason,
+            "processor [neural_sparse_two_phase_processor] doesn't support one or more provided \
+             configuration parameters: [prune_ratio]"
+        );
+    }
+
+    #[test]
+    fn agentic_context_is_read_as_two_flags() {
+        taken(json!({"response_processors": [
+            {"agentic_context": {"agent_steps_summary": true, "dsl_query": true}}
+        ]}));
+        let e =
+            refused(json!({"response_processors": [{"agentic_context": {"dsl_query": "yes"}}]}));
+        assert_eq!(
+            e.reason,
+            "[dsl_query] property isn't a boolean, but of type [java.lang.String]"
+        );
+        assert_eq!(e.property_name.as_deref(), Some("dsl_query"));
+        assert_eq!(
+            refused(json!({"response_processors": [{"agentic_context": {"memory_id": true}}]}))
+                .reason,
+            "processor [agentic_context] doesn't support one or more provided configuration \
+             parameters: [memory_id]"
+        );
+    }
+
+    #[test]
+    fn agentic_context_answers_with_what_the_pipeline_was_told() {
+        let pipeline =
+            taken(json!({"response_processors": [{"agentic_context": {"dsl_query": true}}]}));
+        let mut answer = json!({"hits": {"hits": []}});
+        // nothing translated an agent's question into this search, so there
+        // is no context to answer with and the answer is left alone
+        let empty = Map::new();
+        assert!(after(&pipeline, &json!({}), &mut answer, &empty).is_ok());
+        assert_eq!(answer, json!({"hits": {"hits": []}}));
+        // given the context, it answers with the parts asked for by name
+        let mut context = Map::new();
+        context.insert("memory_id".into(), json!("m1"));
+        context.insert("dsl_query".into(), json!({"match_all": {}}));
+        context.insert("agent_steps_summary".into(), json!("looked twice"));
+        assert!(after(&pipeline, &json!({}), &mut answer, &context).is_ok());
+        assert_eq!(
+            answer["ext"]["agentic"],
+            json!({
+                "memory_id": "m1", "dsl_query": {"match_all": {}}
+            })
+        );
     }
 }

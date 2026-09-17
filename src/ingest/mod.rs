@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::store::Store;
 
 pub mod attachment;
+mod chunking;
 pub mod dissect;
 pub mod geoip;
 pub mod grok;
@@ -560,7 +561,10 @@ impl IngestError {
         match self.kind.as_str() {
             "resource_not_found_exception" => 404,
             "version_conflict_engine_exception" => 409,
-            "fail_processor_exception" | "illegal_state_exception" => 500,
+            // a processor that throws where the reference does not catch it:
+            // the exception reaches the transport wrapped rather than read as
+            // something the request got wrong
+            "fail_processor_exception" | "illegal_state_exception" | "exception" => 500,
             _ => 400,
         }
     }
@@ -624,6 +628,8 @@ pub const PROCESSOR_TYPES: &[&str] = &[
     "set",
     "sort",
     "split",
+    "split_to_fields",
+    "text_chunking",
     "trim",
     "uppercase",
     "urldecode",
@@ -714,6 +720,8 @@ fn allowed_parameters(kind: &str) -> Option<&'static [&'static str]> {
         "rename" => &["field", "target_field", "ignore_missing", "override_target"],
         "lowercase" | "uppercase" | "trim" | "urldecode" | "html_strip" | "bytes" => ONE_FIELD,
         "split" => &["field", "separator", "target_field", "ignore_missing", "preserve_trailing"],
+        "split_to_fields" => &["field", "separator", "target_fields", "ignore_missing"],
+        "text_chunking" => &["algorithm", "field_map", "ignore_missing"],
         "join" => &["field", "separator", "target_field"],
         "convert" => &["field", "type", "target_field", "ignore_missing"],
         "gsub" => &["field", "pattern", "replacement", "target_field", "ignore_missing"],
