@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 
 use super::ast::*;
 
+/// How many rows a query with no `LIMIT` of its own asks for, which is the
+/// plugin's `plugins.query.size_limit`.
+pub const DEFAULT_ROWS: usize = 200;
+
 /// A statement, as a search and the instructions for reading the answer.
 pub struct Planned {
     pub index: String,
@@ -132,7 +136,7 @@ fn plan_rows(select: &Select) -> Result<Planned, String> {
     }
     // SQL counts from the top of the answer; a search counts from the top of
     // the index, so the offset is asked for as well as the limit
-    let size = select.limit.unwrap_or(200);
+    let size = select.limit.unwrap_or(DEFAULT_ROWS);
     body["size"] = json!(size + select.offset);
     let mut wanted_fields = wanted.clone();
     if let Some(c) = &select.filter {

@@ -665,9 +665,11 @@ pub fn forget(kind: &str, id: &str) {
     due_table().lock().remove(&format!("{kind}:{id}"));
 }
 
-/// Look at every transform and rollup once, and run the ones that are due.
+/// Look at every transform, rollup and snapshot policy once, and run the ones
+/// that are due.
 pub fn tick(store: &Store) {
     let now = crate::store::now_millis();
+    super::sm::tick(store);
     for (id, held) in all(store, "transform") {
         let job = &held.body["transform"];
         if job.get("enabled").and_then(|v| v.as_bool()) != Some(true) {

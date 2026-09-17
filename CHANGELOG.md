@@ -61,7 +61,13 @@ Dashboards' browser application. Recently added:
   throttled, sliced, listed and cancellable through `_tasks`
 - asynchronous search
 - transforms and rollups, including searching a rollup index
-- data streams created from index templates
+- data streams created from index templates, and carried through a snapshot:
+  one taken of a stream records it, and a restore puts the stream back in
+  front of the backing indices it brings home
+- snapshot management policies: `_plugins/_sm/policies`, with the schedule
+  that takes a snapshot, the condition that throws old ones away, and
+  `_explain` to say where each half has got to
+- `fetch_size` on a SQL query, which pages the result through a cursor
 - attachment extraction from HTML, RTF, PDF, Office, OpenDocument and EPUB
 - routing that narrows a search to the shards it names
 - service accounts and on-behalf-of tokens

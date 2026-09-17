@@ -418,6 +418,17 @@ fn app(store: Store) -> Router {
         .route("/_plugins/_ism/change_policy/{index}", post(api::ism::change_policy))
         .route("/_plugins/_ism/retry/{index}", post(api::ism::retry_policy))
         .route("/_plugins/_ism/explain", get(api::ism::explain))
+        .route("/_plugins/_sm/policies", get(api::sm::get_sm_policy))
+        .route(
+            "/_plugins/_sm/policies/{name}",
+            post(api::sm::create_sm_policy)
+                .put(api::sm::update_sm_policy)
+                .get(api::sm::get_sm_policy)
+                .delete(api::sm::delete_sm_policy),
+        )
+        .route("/_plugins/_sm/policies/{name}/_explain", get(api::sm::explain_sm_policy))
+        .route("/_plugins/_sm/policies/{name}/_start", post(api::sm::start_sm_policy))
+        .route("/_plugins/_sm/policies/{name}/_stop", post(api::sm::stop_sm_policy))
         .route("/_plugins/_transform", get(api::transform::get_transform))
         .route("/_plugins/_transform/_preview", post(api::transform::preview_transform))
         .route(
@@ -451,6 +462,7 @@ fn app(store: Store) -> Router {
         .route("/_opendistro/_rollup/jobs/{id}/_explain", get(api::rollup::explain_rollup))
         .route("/_plugins/_sql", post(api::sql::sql))
         .route("/_plugins/_sql/_explain", post(api::sql::explain_sql))
+        .route("/_plugins/_sql/close", post(api::sql::close_cursor))
         .route("/_plugins/_sql/stats", get(api::sql::stats).post(api::sql::stats))
         .route("/_plugins/_ppl", post(api::sql::pipeline))
         .route("/_plugins/_ppl/_explain", post(api::sql::explain_ppl))

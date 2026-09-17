@@ -40,6 +40,7 @@ mod ingest;
 pub mod ism;
 pub mod knn;
 pub mod rollup;
+pub mod sm;
 pub mod sql;
 pub mod transform;
 pub use ingest::*;

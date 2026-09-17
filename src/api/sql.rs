@@ -1,7 +1,12 @@
 //! `_plugins/_sql` and `_plugins/_ppl`.
 
 use super::*;
+use crate::sql::plan::DEFAULT_ROWS;
 use crate::sql::{parser, plan, ppl, rows};
+
+/// How long a cursor's search context is kept waiting for the next page,
+/// which is the plugin's `plugins.sql.cursor.keep_alive`.
+const CURSOR_KEEP_ALIVE_MS: u64 = 60_000;
 
 /// `POST _plugins/_sql`
 pub async fn sql(State(store): State<Store>, Query(p): Query<Params>, body: String) -> Response {
@@ -33,6 +38,153 @@ pub async fn explain_ppl(
     body: String,
 ) -> Response {
     explain(&store, &p, &body, true)
+}
+
+/// `POST _plugins/_sql/close` -- let go of a cursor before it is walked out.
+pub async fn close_cursor(
+    State(store): State<Store>,
+    Query(p): Query<Params>,
+    body: String,
+) -> Response {
+    let parsed: Value = parse_body(&body).unwrap_or(json!({}));
+    // the reference reads the body as a query and reports the field it could
+    // not find, which is what a caller who sent no cursor is told
+    let Some(text) = parsed.get("cursor").and_then(|v| v.as_str()) else {
+        return backend_problem("JSONException", "JSONObject[\"query\"] not found.");
+    };
+    // a cursor already walked out is one there is nothing left to let go of,
+    // and the reference says it succeeded either way
+    if let Some(cursor) = Cursor::decode(text) {
+        store.close_scroll(&cursor.context);
+    }
+    respond(&p, json!({"succeeded": true}))
+}
+
+/// Where a paged query has got to.
+///
+/// The cursor a client is handed is opaque -- the reference's is a compressed
+/// blob of its own plan -- so what is in this one is nobody else's business.
+/// It carries the query, where in the result the next page begins and how much
+/// of the result is left, together with the search context the paging holds
+/// open: a cursor sent back after the last page is then answered the way the
+/// reference answers one, by saying the context is gone rather than by quietly
+/// starting again.
+struct Cursor {
+    query: String,
+    piped: bool,
+    at: usize,
+    left: usize,
+    fetch: usize,
+    context: String,
+}
+
+impl Cursor {
+    /// The prefix the reference writes, kept so that a client which looks at
+    /// the first two characters sees what it expects.
+    const PREFIX: &'static str = "n:";
+
+    fn encode(&self) -> String {
+        use base64::Engine as _;
+        let held = json!({
+            "q": self.query, "p": self.piped, "at": self.at,
+            "left": self.left, "fs": self.fetch, "id": self.context,
+        });
+        let text = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(held.to_string());
+        format!("{}{text}", Self::PREFIX)
+    }
+
+    fn decode(text: &str) -> Option<Cursor> {
+        use base64::Engine as _;
+        let rest = text.strip_prefix(Self::PREFIX)?;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest).ok()?;
+        let held: Value = serde_json::from_slice(&raw).ok()?;
+        Some(Cursor {
+            query: held.get("q")?.as_str()?.to_string(),
+            piped: held.get("p")?.as_bool()?,
+            at: held.get("at")?.as_u64()? as usize,
+            left: held.get("left")?.as_u64()? as usize,
+            fetch: held.get("fs")?.as_u64()? as usize,
+            context: held.get("id")?.as_str()?.to_string(),
+        })
+    }
+}
+
+/// The number a search context is named by in the message a missing one is
+/// reported with. A context here is named by a token rather than numbered, so
+/// the number the client is shown is made from the token.
+fn context_number(id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash % 100_000
+}
+
+/// A fault the plugin reports as its own rather than the query's.
+fn backend_problem(kind: &str, details: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({
+            "error": {
+                "reason": "There was internal problem at backend",
+                "details": details,
+                "type": kind,
+            },
+            "status": 500,
+        })),
+    )
+        .into_response()
+}
+
+/// A search context that is no longer there, reported as the engine reports
+/// it: the shards were asked, and the one holding the context had let it go.
+fn context_missing(id: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(json!({
+            "error": {
+                "reason": "Error occurred in OpenSearch engine: all shards failed",
+                "details": format!(
+                    "Shard[0]: SearchContextMissingException[No search context found for id [{}]]\
+                     \n\nFor more details, please send request for Json format to see the raw \
+                     response from OpenSearch engine.",
+                    context_number(id)
+                ),
+                "type": "SearchPhaseExecutionException",
+            },
+            "status": 404,
+        })),
+    )
+        .into_response()
+}
+
+/// How many rows a page holds, where the caller asked for pages at all.
+fn fetch_size_of(body: &Value) -> Result<usize, Response> {
+    let Some(asked) = body.get("fetch_size") else { return Ok(0) };
+    let size = asked.as_i64().or_else(|| asked.as_str().and_then(|s| s.parse().ok()));
+    match size {
+        Some(n) if n >= 0 => Ok(n as usize),
+        _ => Err(failed(
+            StatusCode::BAD_REQUEST,
+            "IllegalArgumentException",
+            "Fetch_size must be greater or equal to 0",
+        )),
+    }
+}
+
+/// Whether a query's rows can be handed out a page at a time.
+///
+/// Paging reads the result from an offset, so it only works where the order
+/// of the rows is the index's to give. A query whose rows are grouped, made
+/// distinct, filtered by `HAVING` or sorted over a column this server works
+/// out is finished here, over the whole result: the reference does not page
+/// those either, and answers them whole with no cursor.
+fn pageable(planned: &plan::Planned) -> bool {
+    !planned.grouped
+        && !planned.distinct
+        && planned.having.is_none()
+        && planned.order_rows.is_empty()
 }
 
 fn query_of(body: &str) -> Result<String, Response> {
@@ -87,11 +239,47 @@ fn explain(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
 }
 
 fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
-    let text = match query_of(body) {
-        Ok(t) => t,
-        Err(r) => return r,
+    let parsed: Value = parse_body(body).unwrap_or(json!({}));
+    // A request carrying a cursor is asking for the next page of a query it
+    // has already sent, and the cursor is the whole of the request: the
+    // reference reads nothing else in the body, not even a query beside it.
+    let resumed = match parsed.get("cursor").and_then(|v| v.as_str()) {
+        Some(text) => match Cursor::decode(text) {
+            Some(c) => {
+                // the paging holds a search context open, and a cursor sent
+                // back after the last page names one that has been let go of
+                if store.read_scroll(&c.context).is_none() {
+                    return context_missing(&c.context);
+                }
+                Some(c)
+            }
+            None => {
+                return backend_problem("UnsupportedOperationException", "Unsupported cursor");
+            }
+        },
+        None => None,
     };
-    let planned = match planned_of(&text, piped) {
+    // PPL has no paging: the reference reads `fetch_size` in a SQL body and
+    // answers a piped query whole whatever is asked
+    let fetch = match (&resumed, piped) {
+        (Some(c), _) => c.fetch,
+        (None, true) => 0,
+        (None, false) => match fetch_size_of(&parsed) {
+            Ok(n) => n,
+            Err(r) => return r,
+        },
+    };
+    let (text, piped) = match &resumed {
+        Some(c) => (c.query.clone(), c.piped),
+        None => (
+            match query_of(body) {
+                Ok(t) => t,
+                Err(r) => return r,
+            },
+            piped,
+        ),
+    };
+    let mut planned = match planned_of(&text, piped) {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -123,6 +311,23 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
     {
         return failed(StatusCode::FORBIDDEN, "SecurityException", why);
     }
+    // Where the caller asked for pages, the search is asked for one page of
+    // rows rather than the whole result, counting from where the last page
+    // ended. `LIMIT` and `OFFSET` are the bounds of the result the pages are
+    // cut out of: a query limited to ten rows hands out ten rows however
+    // large `fetch_size` is.
+    let paging = match (&resumed, fetch > 0 && pageable(&planned)) {
+        (Some(c), _) => Some((c.at, c.left)),
+        (None, true) => Some((planned.offset, planned.limit.unwrap_or(DEFAULT_ROWS))),
+        (None, false) => None,
+    };
+    if let Some((at, left)) = paging {
+        planned.body["from"] = json!(at);
+        planned.body["size"] = json!(fetch.min(left));
+        // the offset is spent on the search now, so the rows the answer holds
+        // are the page itself
+        planned.offset = 0;
+    }
     // the search is coordinated from here like any other: the indices held on
     // other nodes are asked of those nodes, and the pages and aggregations
     // reduced over all of them
@@ -131,6 +336,52 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
         Err(r) => return r,
     };
     let table = typed_by_mapping(store, &planned, &targets, rows::shape(&planned, &answer));
+    // The cursor for the page after this one, where there is one. A page that
+    // came back short of what was asked for is the end of the result, and so
+    // is one that used up what `LIMIT` allowed: the reference sends no cursor
+    // with the last page, which is how a client knows to stop.
+    let next = match paging {
+        Some((at, left)) => {
+            let want = fetch.min(left);
+            let more = table.rows.len() == want && left > table.rows.len();
+            match more {
+                true => {
+                    // the context is opened once the first page is known to
+                    // have a successor, and carried through the rest of them
+                    let context =
+                        resumed.as_ref().map(|c| c.context.clone()).unwrap_or_else(|| {
+                            store.open_scroll(
+                                &planned.index,
+                                &planned.body,
+                                want,
+                                None,
+                                false,
+                                CURSOR_KEEP_ALIVE_MS,
+                                String::new(),
+                            )
+                        });
+                    Some(
+                        Cursor {
+                            query: text.clone(),
+                            piped,
+                            at: at + table.rows.len(),
+                            left: left - table.rows.len(),
+                            fetch,
+                            context,
+                        }
+                        .encode(),
+                    )
+                }
+                false => {
+                    if let Some(c) = &resumed {
+                        store.close_scroll(&c.context);
+                    }
+                    None
+                }
+            }
+        }
+        None => None,
+    };
     // the format decides the shape of the answer, not what is in it
     let format = p
         .get("format")
@@ -160,6 +411,11 @@ fn run(store: &Store, p: &Params, body: &str, piped: bool) -> Response {
             // SQL says `status` in its body and PPL does not
             if !piped {
                 answer["status"] = json!(200);
+            }
+            // the cursor comes last, after the status, as the reference
+            // writes it
+            if let Some(next) = next {
+                answer["cursor"] = json!(next);
             }
             respond(p, answer)
         }
@@ -401,4 +657,46 @@ pub async fn stats(Query(p): Query<Params>) -> Response {
             "failed_request_count_cb": 0,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cursor_comes_back_as_it_went_out() {
+        let held = Cursor {
+            query: "SELECT a FROM t".to_string(),
+            piped: false,
+            at: 4,
+            left: 196,
+            fetch: 2,
+            context: "velosearch-scroll-abc.6e6f6465".to_string(),
+        };
+        let text = held.encode();
+        assert!(text.starts_with("n:"), "{text}");
+        let read = Cursor::decode(&text).unwrap();
+        assert_eq!(read.query, held.query);
+        assert_eq!(read.piped, held.piped);
+        assert_eq!((read.at, read.left, read.fetch), (4, 196, 2));
+        assert_eq!(read.context, held.context);
+    }
+
+    #[test]
+    fn a_cursor_that_is_not_one_is_not_read() {
+        assert!(Cursor::decode("garbage").is_none());
+        assert!(Cursor::decode("n:deadbeef").is_none());
+        // the right prefix over something that is not a cursor's contents
+        assert!(Cursor::decode("n:eyJhIjoxfQ").is_none());
+    }
+
+    #[test]
+    fn a_fetch_size_is_a_count_or_a_refusal() {
+        assert_eq!(fetch_size_of(&json!({})).ok(), Some(0));
+        assert_eq!(fetch_size_of(&json!({"fetch_size": 0})).ok(), Some(0));
+        assert_eq!(fetch_size_of(&json!({"fetch_size": 5})).ok(), Some(5));
+        assert_eq!(fetch_size_of(&json!({"fetch_size": "5"})).ok(), Some(5));
+        assert!(fetch_size_of(&json!({"fetch_size": -1})).is_err());
+        assert!(fetch_size_of(&json!({"fetch_size": "many"})).is_err());
+    }
 }
