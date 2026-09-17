@@ -90,7 +90,7 @@ pub(crate) fn search_one_shard(
     query_json: &Option<Value>,
     sort_keys: &[SortKey],
     search_after: &Option<Vec<SortValue>>,
-    pit_ceiling: &std::collections::HashMap<String, u64>,
+    pit_parts: &std::collections::HashMap<String, crate::store::PitPart>,
     agg_json: &Option<Value>,
     filters_aggs: &[(String, Value)],
     page_want: usize,
@@ -115,7 +115,7 @@ pub(crate) fn search_one_shard(
             query_json,
             sort_keys,
             search_after,
-            pit_ceiling,
+            pit_parts,
             agg_json,
             filters_aggs,
             page_want,
@@ -169,7 +169,7 @@ fn query_shard(
     query_json: &Option<Value>,
     sort_keys: &[SortKey],
     search_after: &Option<Vec<SortValue>>,
-    pit_ceiling: &std::collections::HashMap<String, u64>,
+    pit_parts: &std::collections::HashMap<String, crate::store::PitPart>,
     agg_json: &Option<Value>,
     filters_aggs: &[(String, Value)],
     page_want: usize,
@@ -287,24 +287,14 @@ fn query_shard(
         },
         None => q,
     };
-    // a point in time holds the search to what the index had written when
-    // it was opened, which is what makes paging through it stable
-    let q: Box<dyn velocore::query::Query> = match pit_ceiling.get(name) {
-        Some(ceiling) => {
-            let upper = velocore::Term::from_field_u64(g.fields.seq, *ceiling);
-            let below = velocore::query::FastFieldRangeQuery::new(
-                std::ops::Bound::Unbounded,
-                std::ops::Bound::Excluded(upper),
-            );
-            Box::new(velocore::query::BooleanQuery::new(vec![
-                (velocore::query::Occur::Must, q),
-                (velocore::query::Occur::Must, Box::new(below) as Box<dyn velocore::query::Query>),
-            ]))
-        }
-        None => q,
+    // a point in time holds the search to the reader it was opened over, which
+    // still has every document as it was then -- an update or a delete since
+    // took the old version out of the index, not out of that reader
+    let pit_part = pit_parts.get(name);
+    let searcher = match pit_part {
+        Some(part) => part.searcher.clone(),
+        None => g.reader.searcher(),
     };
-
-    let searcher = g.reader.searcher();
 
     // the peeled aggregations never reach the parser, so their fields are
     // checked here rather than alongside the ones that do
@@ -443,6 +433,9 @@ fn query_shard(
                 // sort value was null, and `search_after` handed back the
                 // same page for ever -- a client paging a whole index by id
                 // saw the first thousand documents again and again
+                "_shard_doc" => {
+                    SortSource::ShardDoc { base: pit_part.map(|p| p.shard_doc_base).unwrap_or(0) }
+                }
                 "_id" => SortSource::Column {
                     name: "_id".to_string(),
                     desc: k.desc,

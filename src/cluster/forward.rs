@@ -1254,7 +1254,7 @@ async fn run_local_bulk(
 }
 
 /// Send the request to the node, whole, and hand back its answer, whole.
-async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Response {
+pub(crate) async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Response {
     let caller = crate::security::layer::current_caller().unwrap_or_default();
     let (parts, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, crate::api::max_content_bytes() as usize).await {

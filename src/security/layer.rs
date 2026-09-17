@@ -188,12 +188,15 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
                 && !a.starts_with("indices:admin/aliases/get")
         })
         .unwrap_or(false);
-    let (mut req, body_text) =
-        if audit.quotes_bodies(admin_action, path_now.starts_with("/_plugins/_security/api/")) {
-            buffered(req).await
-        } else {
-            (req, String::new())
-        };
+    // a search over no index in its path may be held to a point in time,
+    // whose indices are named in the body and have to be read to be judged
+    let names_no_index = path_now.trim_end_matches('/') == "/_search";
+    let quoted =
+        audit.quotes_bodies(admin_action, path_now.starts_with("/_plugins/_security/api/"));
+    let (mut req, read_body) =
+        if names_no_index || quoted { buffered(req).await } else { (req, String::new()) };
+    // the record quotes a body only where it would have quoted it anyway
+    let body_text = if quoted { read_body.clone() } else { String::new() };
     let info = request_info(&req, &query, &remote, &body_text);
     audit.authenticated(&caller, &info);
     let path = req.uri().path().to_string();
@@ -263,6 +266,16 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         return run_as(caller, req, next).await;
     }
     let named = indices_of(&path);
+    // a search held to a point in time names no index in its path: the
+    // indices are the ones the point in time was opened over, and those are
+    // what the caller needs to be allowed to read
+    let pit_indices: Option<Vec<String>> = (action == "indices:data/read/search"
+        && named.is_empty())
+    .then(|| serde_json::from_str::<serde_json::Value>(&read_body).ok())
+    .flatten()
+    .and_then(|b| b.pointer("/pit/id").and_then(|i| i.as_str()).map(String::from))
+    .and_then(|id| crate::store::PitId::decode(&id))
+    .map(|id| id.indices());
     // every index the request turns out to touch, which the audit log records
     // and which is only known once the request has been classified
     let mut resolved: Vec<String>;
@@ -304,7 +317,9 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
             }
         } else {
             // an index action naming no index is over every index there is
-            let indices = if named.is_empty() || named.iter().any(|n| n == "_all") {
+            let indices = if let Some(held) = &pit_indices {
+                held.clone()
+            } else if named.is_empty() || named.iter().any(|n| n == "_all") {
                 let mut all = store.resolve("*");
                 all.sort();
                 all
@@ -319,6 +334,9 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
                     // narrowed to those before it runs, which is what
                     // do_not_fail_on_forbidden means -- not that the rest is
                     // reached anyway
+                    // a point in time cannot be narrowed to part of what it
+                    // holds: the id names every index it reads
+                    Verdict::Partial(_) if pit_indices.is_some() => Some(action.clone()),
                     Verdict::Partial(granted) => {
                         resolved = granted.clone();
                         narrowed = Some(granted);

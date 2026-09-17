@@ -28,6 +28,8 @@ pub mod mapping;
 mod net;
 pub use net::*;
 mod objects;
+mod pit;
+pub use pit::{PitId, PitPart, PitState};
 mod registry;
 mod settings;
 mod translog;
@@ -655,8 +657,8 @@ pub struct Store {
     /// component templates: settings and mappings named once and composed
     /// into whichever index templates ask for them
     components: Arc<RwLock<HashMap<String, Value>>>,
-    /// open points in time, each remembering where every index it covers had
-    /// got to when it was opened
+    /// this node's parts of the open points in time, by the token their id
+    /// carries, each holding the readers it was opened over
     pits: Arc<RwLock<HashMap<String, PitState>>>,
     /// What a search over an unchanged index already answered.
     pub request_cache: Arc<crate::search::RequestCache>,
@@ -697,38 +699,6 @@ impl Store {
         }
     }
 
-    /// Open a point in time over an expression: what each index it reaches
-    /// had written by now, so a later search can be held to that.
-    pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
-        self.sweep_contexts();
-        let id = format!("velosearch-pit-{}", random_token());
-        let mut ceiling = HashMap::new();
-        for name in self.resolve(expr) {
-            if let Some(st) = self.get(&name) {
-                ceiling.insert(name, st.read().seq_no);
-            }
-        }
-        self.pits.write().insert(
-            id.clone(),
-            PitState {
-                expr: expr.to_string(),
-                owner: current_owner(),
-                expires_at: std::time::Instant::now() + keep_for(keep_alive_ms),
-                ceiling,
-                keep_alive_ms,
-            },
-        );
-        id
-    }
-
-    pub fn read_pit(&self, id: &str) -> Option<PitState> {
-        let held = self.pits.read().get(id).cloned()?;
-        if held.expires_at <= std::time::Instant::now() || !owner_matches(&held.owner) {
-            return None;
-        }
-        Some(held)
-    }
-
     /// Search contexts nobody came back for: dropped when the next one is
     /// opened, which is when their memory is wanted.
     pub fn sweep_contexts(&self) {
@@ -740,14 +710,6 @@ impl Store {
     /// How many scrolls are open, which is what the ceiling counts.
     pub fn open_scrolls(&self) -> usize {
         self.scrolls.read().len()
-    }
-
-    pub fn all_pits(&self) -> Vec<(String, PitState)> {
-        self.pits.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    }
-
-    pub fn close_pit(&self, id: &str) -> bool {
-        self.pits.write().remove(id).is_some()
     }
 
     pub fn put_component(&self, name: &str, body: Value) {
@@ -836,20 +798,6 @@ impl Store {}
 
 /// A scroll is a cursor over a search: the request that opened it plus how far
 /// the client has read.
-/// A point in time: which indices it covers, and how far each had got.
-#[derive(Clone)]
-pub struct PitState {
-    pub expr: String,
-    /// the caller who opened it, if this node knows callers apart
-    pub owner: Option<String>,
-    /// when it may be swept away
-    pub expires_at: std::time::Instant,
-    /// per index, the sequence number the next write will take -- everything
-    /// below it was already there when the point in time was opened
-    pub ceiling: HashMap<String, u64>,
-    pub keep_alive_ms: u64,
-}
-
 #[derive(Clone)]
 pub struct ScrollState {
     pub expr: String,

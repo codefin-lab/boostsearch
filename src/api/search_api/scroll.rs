@@ -10,35 +10,28 @@ pub async fn create_pit(
     Query(p): Query<Params>,
 ) -> Response {
     let expr = index.map(|Path(i)| i).unwrap_or_default();
-    let names = if expr.is_empty() { store.names() } else { store.resolve(&expr) };
-    if names.is_empty() && !expr.is_empty() {
-        return no_such_index(&expr);
-    }
     let keep = p.get("keep_alive").map(|v| keep_alive_millis(v)).unwrap_or(0);
-    let id = store.open_pit(&expr, keep);
-    respond(
-        &p,
-        json!({
-            "pit_id": id,
-            "_shards": shards_over(&store, &names),
-            "creation_time": 0,
-        }),
-    )
+    match crate::cluster::search::open_pit(&store, &expr, keep, false) {
+        Ok(opened) => respond(
+            &p,
+            json!({
+                "pit_id": opened.id,
+                "_shards": {
+                    "total": opened.shards, "successful": opened.shards,
+                    "skipped": 0, "failed": 0,
+                },
+                "creation_time": opened.created_ms,
+            }),
+        ),
+        Err(r) => r,
+    }
 }
 
 pub async fn get_all_pits(State(store): State<Store>, Query(p): Query<Params>) -> Response {
-    // the newest first: the ids are handed out in order, so the one a caller
-    // has just opened is the one it reads about first
-    let mut open = store.all_pits();
-    open.sort_by(|a, b| b.0.cmp(&a.0));
-    let pits: Vec<Value> = open
-        .into_iter()
-        .map(|(id, st)| {
-            json!({
-                "pit_id": id, "creation_time": 0, "keep_alive": st.keep_alive_ms,
-            })
-        })
-        .collect();
+    // the newest first, so the one a caller has just opened is the one it
+    // reads about first
+    let mut pits = crate::cluster::search::list_pits(&store);
+    pits.sort_by_key(|p| std::cmp::Reverse(p.get("creation_time").and_then(|t| t.as_u64())));
     respond(&p, json!({"pits": pits}))
 }
 
@@ -53,17 +46,106 @@ pub async fn delete_pit(
             a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
         }
         Some(Value::String(one)) => vec![one.clone()],
-        // no id names them all
-        _ => store.all_pits().into_iter().map(|(id, _)| id).collect(),
+        _ => Vec::new(),
     };
-    let pits: Vec<Value> = ids
+    if ids.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "action_request_validation_exception",
+            "Validation Failed: 1: no pit ids specified;",
+        );
+    }
+    let mut decoded = Vec::with_capacity(ids.len());
+    for id in &ids {
+        match crate::store::PitId::decode(id) {
+            Some(d) => decoded.push((id.clone(), d)),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    format!("invalid id: [{id}]"),
+                );
+            }
+        }
+    }
+    let pits: Vec<Value> = decoded
         .into_iter()
-        .map(|id| {
-            let gone = store.close_pit(&id);
+        .map(|(id, d)| {
+            let gone = crate::cluster::search::close_pit(&store, &d);
             json!({"pit_id": id, "successful": gone})
         })
         .collect();
     respond(&p, json!({"pits": pits}))
+}
+
+/// `DELETE _search/point_in_time/_all` -- every point in time the caller may
+/// let go of, on every node.
+pub async fn delete_all_pits(State(store): State<Store>, Query(p): Query<Params>) -> Response {
+    let pits: Vec<Value> = crate::cluster::search::close_all_pits(&store)
+        .into_iter()
+        .map(|id| json!({"pit_id": id, "successful": true}))
+        .collect();
+    respond(&p, json!({"pits": pits}))
+}
+
+/// The answer for a method a point-in-time path does not take, as the
+/// reference gives it.
+fn wrong_method(method: &axum::http::Method, uri: &axum::http::Uri, allowed: &str) -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(json!({
+            "error": format!(
+                "Incorrect HTTP method for uri [{uri}] and method [{method}], allowed: [{allowed}]"
+            ),
+            "status": 405,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn pit_create_only(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    wrong_method(&method, &uri, "POST")
+}
+
+pub async fn pit_delete_only(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    wrong_method(&method, &uri, "DELETE")
+}
+
+pub async fn pit_list_or_delete(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    wrong_method(&method, &uri, "GET, DELETE")
+}
+
+/// A request for the node that holds a search context, sent there as the
+/// caller and answered as that node answers it.
+pub(crate) async fn ask_holder(
+    node: &str,
+    method: axum::http::Method,
+    uri: &str,
+    body: &Value,
+) -> Option<Response> {
+    let rt = crate::cluster::runtime()?;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .ok()?;
+    let to = crate::cluster::NodeId(node.to_string());
+    Some(crate::cluster::forward::forward(&rt, &to, req).await)
+}
+
+/// A node other than this one that a scroll id says holds the scroll.
+fn held_elsewhere(id: &str) -> Option<String> {
+    let rt = crate::cluster::runtime()?;
+    let owner = Store::scroll_owner(id)?;
+    (owner != rt.local().as_str()).then_some(owner)
+}
+
+/// The body of an answer, read as JSON.
+async fn json_of(r: Response) -> (StatusCode, Value) {
+    let status = r.status();
+    let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
 pub(crate) fn check_scroll(
@@ -188,6 +270,31 @@ pub async fn scroll(
     if let Some(answer) = remote_scroll(&store, &id, keep.as_deref(), &p) {
         return answer;
     }
+    // a scroll lives on the node that opened it, and the next batch may be
+    // asked of any node: it is answered by the one that has it
+    if let Some(owner) = held_elsewhere(&id) {
+        let mut forwarded = json!({"scroll_id": id});
+        if let Some(k) = &keep {
+            forwarded["scroll"] = json!(k);
+        }
+        let query = if p.get("rest_total_hits_as_int").map(|v| v == "true").unwrap_or(false) {
+            "?rest_total_hits_as_int=true"
+        } else {
+            ""
+        };
+        let uri = format!("/_search/scroll{query}");
+        if let Some(r) = ask_holder(&owner, axum::http::Method::POST, &uri, &forwarded).await {
+            // a holder that is gone took the scroll with it
+            if r.status() == StatusCode::SERVICE_UNAVAILABLE {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "search_context_missing_exception",
+                    format!("No search context found for id [{id}]"),
+                );
+            }
+            return r;
+        }
+    }
     let asked = body
         .get("scroll")
         .and_then(|v| v.as_str())
@@ -231,7 +338,14 @@ pub async fn scroll(
     }
     // the scroll walks the index as it stood when it was opened, so a
     // document written since is not walked into halfway through
-    req["pit"] = json!({"id": state.pit});
+    if state.pit.is_empty() {
+        if state.implicit_sort {
+            req["sort"] = json!([{"_seq": "asc"}]);
+        }
+    } else {
+        let renew = asked.clone().unwrap_or_else(|| "5m".to_string());
+        req["pit"] = json!({"id": state.pit, "keep_alive": renew});
+    }
     // a scroll is how a caller reads past the result window, so the window is
     // not what limits the batch it is reading now; the batch size was checked
     // when the scroll was opened
@@ -280,7 +394,27 @@ pub async fn clear_scroll(
         ids.extend(i.split(',').map(|s| s.to_string()));
     }
     if ids.iter().any(|i| i == "_all") {
-        let n = store.close_all_scrolls();
+        let mut n = store.close_all_scrolls();
+        // every node holds its own scrolls; a node answering another's
+        // request lets go of its own and asks nobody else
+        if !crate::cluster::forward::answering_forward() {
+            let me = crate::cluster::runtime().map(|rt| rt.local());
+            let others: Vec<String> = match &me {
+                Some(me) => crate::cluster::with_state(|s| {
+                    s.nodes.keys().filter(|k| *k != me).map(|k| k.as_str().to_string()).collect()
+                }),
+                None => Vec::new(),
+            };
+            let all = json!({"scroll_id": ["_all"]});
+            for node in others {
+                if let Some(r) =
+                    ask_holder(&node, axum::http::Method::DELETE, "/_search/scroll", &all).await
+                {
+                    let (_, v) = json_of(r).await;
+                    n += v.get("num_freed").and_then(|f| f.as_u64()).unwrap_or(0) as usize;
+                }
+            }
+        }
         return respond(&p, json!({"succeeded": true, "num_freed": n}));
     }
     if ids.is_empty() {
@@ -290,8 +424,27 @@ pub async fn clear_scroll(
             "Validation Failed: 1: no scroll ids specified;",
         );
     }
-    let freed =
-        ids.iter().filter(|i| store.close_scroll(i) || clear_remote_scroll(&store, i)).count();
+    let mut freed = 0usize;
+    let mut elsewhere: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for id in &ids {
+        match held_elsewhere(id) {
+            Some(owner) => elsewhere.entry(owner).or_default().push(id.clone()),
+            None => {
+                if store.close_scroll(id) || clear_remote_scroll(&store, id) {
+                    freed += 1;
+                }
+            }
+        }
+    }
+    for (owner, held) in elsewhere {
+        let asked = json!({"scroll_id": held});
+        if let Some(r) =
+            ask_holder(&owner, axum::http::Method::DELETE, "/_search/scroll", &asked).await
+        {
+            let (_, v) = json_of(r).await;
+            freed += v.get("num_freed").and_then(|f| f.as_u64()).unwrap_or(0) as usize;
+        }
+    }
     // a scroll that was not there is not an error to report: the answer is
     // the ordinary one, with nothing freed, under the status that says so
     let body = json!({"succeeded": freed > 0, "num_freed": freed});

@@ -241,7 +241,17 @@ pub(crate) struct Hit {
 enum SortSource {
     Score,
     Doc,
-    Column { name: String, desc: bool, mode: Option<String> },
+    Column {
+        name: String,
+        desc: bool,
+        mode: Option<String>,
+    },
+    /// `_shard_doc`: the write order inside an index, offset by where the
+    /// point in time puts that index, so the value names one document across
+    /// every index the point in time covers
+    ShardDoc {
+        base: u64,
+    },
 }
 
 /// Top-K collector that evaluates the sort keys while collecting, so a query
@@ -288,6 +298,7 @@ impl velocore::collector::Collector for SortCollector {
             .iter()
             .map(|src| match src {
                 SortSource::Column { name, .. } => Some(SortColumns::for_segment(reader, name)),
+                SortSource::ShardDoc { .. } => Some(SortColumns::for_segment(reader, "_seq")),
                 _ => None,
             })
             .collect();
@@ -345,6 +356,13 @@ impl SortSegmentCollector {
                 .as_ref()
                 .map(|c| c.read(doc, *desc, mode.as_deref()))
                 .unwrap_or(SortValue::Missing),
+            SortSource::ShardDoc { base } => {
+                match self.columns[i].as_ref().map(|c| c.read(doc, false, None)) {
+                    Some(SortValue::U64(seq)) => SortValue::U64(base + seq),
+                    Some(SortValue::I64(seq)) => SortValue::I64(*base as i64 + seq),
+                    _ => SortValue::Missing,
+                }
+            }
         }
     }
 

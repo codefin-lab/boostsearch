@@ -118,6 +118,11 @@ pub fn cacheable(store: &Store, targets: &[String], body: &Value, p: &crate::api
     if p.contains_key("scroll") || p.contains_key("preference") {
         return false;
     }
+    // a point in time answers from readers of its own, and one let go of must
+    // be refused rather than answered from what it said before
+    if body.get("pit").is_some() {
+        return false;
+    }
     // `pre_filter_shard_size` asks which shards could be skipped, and the
     // answer says how many were: a remembered one would report the skipping
     // that a previous request did rather than this one
