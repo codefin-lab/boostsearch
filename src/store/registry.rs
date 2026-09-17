@@ -17,6 +17,26 @@ pub(crate) fn process_millis() -> u64 {
 /// How long an index goes unsearched before it is search-idle.
 const SEARCH_IDLE_AFTER_MS: u64 = 30_000;
 
+/// The allocation ids an index's saved metadata names, by shard. A file
+/// written before the ids were kept per shard names one id, which was one of
+/// the shards' here: it is read as shard zero's, and the manager fills again
+/// whatever copy it does not recognise.
+fn allocation_ids_of(meta: &Value) -> std::collections::BTreeMap<u32, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(o) = meta.get("allocation_ids").and_then(|v| v.as_object()) {
+        for (shard, id) in o {
+            if let (Ok(shard), Some(id)) = (shard.parse::<u32>(), id.as_str()) {
+                out.insert(shard, id.to_string());
+            }
+        }
+        return out;
+    }
+    if let Some(id) = meta.get("allocation_id").and_then(|v| v.as_str()) {
+        out.insert(0, id.to_string());
+    }
+    out
+}
+
 impl IdxState {
     /// The scheduled refresh interval, in milliseconds, and whether it was
     /// set on the index rather than left at the default; `None` when
@@ -217,8 +237,7 @@ impl Store {
             let Some(name) = meta.get("name").and_then(|v| v.as_str()) else { continue };
             let body = meta.get("body").cloned().unwrap_or_else(|| serde_json::json!({}));
             let learned = (meta.get("dynamic_types").cloned(), meta.get("observed_kinds").cloned());
-            let kept_allocation =
-                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let kept_allocation = allocation_ids_of(&meta);
             let kept_seq = meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
             let kept_closed = meta.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
             let kept_doc_count =
@@ -230,7 +249,7 @@ impl Store {
                     if let Some(st) = store.get(name) {
                         {
                             let mut g = st.write();
-                            g.allocation_id = kept_allocation.clone();
+                            g.allocation_ids = kept_allocation.clone();
                             g.seq_no = g.seq_no.max(kept_seq);
                             // an index closed before the node stopped comes
                             // back closed
@@ -339,8 +358,7 @@ impl Store {
             {
                 g.observed_kinds = v;
             }
-            g.allocation_id =
-                meta.get("allocation_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            g.allocation_ids = allocation_ids_of(&meta);
             g.seq_no = g.seq_no.max(meta.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0));
             g.has_doc_count |= meta.get("has_doc_count").and_then(|v| v.as_bool()).unwrap_or(false);
             let (reader, id_field) = (g.realtime.clone(), g.fields.id);
@@ -977,7 +995,7 @@ impl Store {
             meta_dirty: Default::default(),
             routing: HashMap::new(),
             uuid,
-            allocation_id: None,
+            allocation_ids: Default::default(),
             created_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)

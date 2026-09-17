@@ -254,7 +254,11 @@ impl IdxState {
             },
             "dynamic_types": self.dynamic_types,
             "observed_kinds": self.observed_kinds,
-            "allocation_id": self.allocation_id,
+            "allocation_ids": self
+                .allocation_ids
+                .iter()
+                .map(|(shard, id)| (shard.to_string(), serde_json::json!(id)))
+                .collect::<serde_json::Map<String, Value>>(),
             // an index an operator closed stays closed across a restart: it
             // used to come back open and accepting writes, while whatever
             // closed it -- an operator before a snapshot, a policy's `close`

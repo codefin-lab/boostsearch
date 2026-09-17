@@ -1513,6 +1513,41 @@ fn seen_by_resync(index: &str, ops: &[ReplicaOp]) {
     }
 }
 
+/// Note that a fill of this index is about to start, before the task doing
+/// it runs.
+///
+/// The host starts the copies the manager placed here one after another, and
+/// spawns the fill: a second copy of the same index -- another shard of it --
+/// would be looked at before the fill it must wait for had taken hold of
+/// anything. Marking it here, where the copies are started, is what the
+/// second copy sees.
+pub fn mark_filling(index: &str) {
+    arrived().lock().entry(index.to_string()).or_default();
+}
+
+/// Whether a copy of this index is being filled here.
+pub fn filling(index: &str) -> bool {
+    arrived().lock().contains_key(index)
+}
+
+/// Wait for the fill of this index that is already running, and say whether
+/// it left a copy here.
+///
+/// A copy of a shard above zero is the same index under another number, so
+/// there is nothing of its own to fetch: it is ready when the index here is.
+/// While the copy of shard zero is being filled, though, the index here is
+/// the empty one that fill made, and the copy has to wait for the documents
+/// to arrive before it may call itself started.
+pub async fn wait_for_fill(store: &Store, index: &str) -> Result<(), String> {
+    let lock = recovery_lock(index);
+    // the fill holds this while it works
+    let _done = lock.lock().await;
+    if store.get(index).is_some() {
+        return Ok(());
+    }
+    Err(format!("the fill of [{index}] left no copy here"))
+}
+
 /// A write for a copy that is being filled: it waits for the seed. False
 /// when no recovery is running, and the caller applies it itself.
 fn park(index: &str, ops: &[ReplicaOp]) -> bool {
@@ -1542,7 +1577,10 @@ pub async fn seed_replica(
     // filled however lately the last one was -- what is on this node may be
     // a copy the cluster left behind, missing everything written since
     if done.as_deref() == Some(allocation_id) && store.get(index).is_some() {
-        return Ok(());
+        // whatever was parked in the meantime goes in, and the parking ends:
+        // the copy is filled, and a write left waiting for a fill that is not
+        // going to happen is a write answered and never applied
+        return apply_what_waited(store, index).await;
     }
     arrived().lock().insert(index.to_string(), Vec::new());
     // a copy filled now matches the primary it is filled from; a resync

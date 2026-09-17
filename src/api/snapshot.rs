@@ -222,9 +222,15 @@ fn off_the_runtime<R>(f: impl FnOnce() -> R) -> R {
 /// rather than remembered from the moment it was registered.
 fn refresh_readonly(store: &Store, repo: &str) {
     let Some(found) = store.repositories().get(repo).cloned() else { return };
-    // a directory this node writes to is already known; anywhere else may
-    // have been written to by somebody else since it was last looked at
-    if crate::snapshot::location(&found).is_some() {
+    // A directory this node writes to is already known, and anywhere else may
+    // have been written to by somebody else since it was last looked at.
+    //
+    // Unless this node has never read the directory, which is where a
+    // cluster manager that has just taken over from another finds itself: it
+    // has the repository, because that is cluster metadata, and none of the
+    // records of what is in it, because those are the repository's own and
+    // the publication that would have carried them may never have gone out.
+    if crate::snapshot::location(&found).is_some() && !store.snapshots(repo).is_empty() {
         return;
     }
     let Some(from) = crate::snapshot::Source::of(&found) else { return };
@@ -749,6 +755,30 @@ pub(crate) fn pick_snapshots(
     repo: &str,
     want: &str,
 ) -> (Vec<Value>, Option<String>) {
+    let (found, missing) = pick_from_memory(store, repo, want);
+    let Some(gone) = missing else { return (found, None) };
+    // A name this node does not know may still be in the repository: what is
+    // there is the repository's own record of it, and this node may never
+    // have read the directory -- or may have read it before that snapshot was
+    // written, by another node or by the manager that was here before.
+    let Some(from) = store.repositories().get(repo).and_then(crate::snapshot::Source::of) else {
+        return (found, Some(gone));
+    };
+    let mut anything_new = false;
+    for (snap, record) in off_the_runtime(|| from.records()) {
+        if !store.snapshots(repo).contains_key(&snap) {
+            store.put_snapshot(repo, &snap, record);
+            anything_new = true;
+        }
+    }
+    if !anything_new {
+        return (found, Some(gone));
+    }
+    pick_from_memory(store, repo, want)
+}
+
+/// The records this node holds for a repository that the request names.
+fn pick_from_memory(store: &Store, repo: &str, want: &str) -> (Vec<Value>, Option<String>) {
     let held = store.snapshots(repo);
     let mut out = Vec::new();
     let mut missing = None;
@@ -990,6 +1020,8 @@ pub async fn clone_snapshot(
         return refused;
     }
     refresh_readonly(&store, &repo);
+    // named rather than matched, so a record this node has not read is read now
+    let _ = pick_snapshots(&store, &repo, &name);
     let held = store.snapshots(&repo);
     // a restore that names a snapshot which is not there failed to restore,
     // which is not the same as a request that merely asked after it
@@ -1079,6 +1111,8 @@ pub async fn restore_snapshot(
         return refused;
     }
     refresh_readonly(&store, &repo);
+    // named rather than matched, so a record this node has not read is read now
+    let _ = pick_snapshots(&store, &repo, &name);
     let held = store.snapshots(&repo);
     // a restore that names a snapshot which is not there failed to restore,
     // which is not the same as a request that merely asked after it

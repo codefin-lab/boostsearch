@@ -573,9 +573,17 @@ pub struct IdxState {
     kind_path_buf: String,
     /// where this index lives on disk, if it is persisted
     pub path: Option<PathBuf>,
-    /// the allocation id the cluster manager gave this copy of the index,
-    /// which is how a returning node proves its copy is one that was in sync
-    pub allocation_id: Option<String>,
+    /// the allocation ids the cluster manager gave the copies of this index
+    /// held here, by shard, which is how a returning node proves its copy is
+    /// one that was in sync.
+    ///
+    /// One id per shard, not one per index: a copy here is a copy of the whole
+    /// index (ADR 0003), but the manager names each shard's copy separately
+    /// and keeps a separate in-sync set for each. Keeping one id meant the
+    /// last shard's overwrote the first's, so a two-shard index came back from
+    /// a restart naming an id that was in no in-sync set, no copy could be
+    /// made the primary, and the index stayed red with its documents on disk.
+    pub allocation_ids: std::collections::BTreeMap<u32, String>,
     /// how much has been recorded since the last commit spent the record
     translog_bytes_since_commit: u64,
     /// Writes recorded where a crash can still find them.

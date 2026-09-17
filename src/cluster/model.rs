@@ -90,8 +90,8 @@ struct Recovery {
 /// What the coordinator's host and metadata source share with the model.
 struct Shared {
     docs: parking_lot::Mutex<Docs>,
-    /// the allocation id of each copy here
-    alloc: parking_lot::Mutex<BTreeMap<String, String>>,
+    /// the allocation id of each copy here, by index and shard
+    alloc: parking_lot::Mutex<BTreeMap<(String, u32), String>>,
     /// copies the coordinator asked the host to start, waiting for the model
     to_start: parking_lot::Mutex<Vec<(IndexMetadata, ShardRouting)>>,
     /// the index metadata every node reads (the cluster's, held in one map)
@@ -117,18 +117,29 @@ impl MetadataSource for ModelSource {
             .docs
             .lock()
             .keys()
-            .filter_map(|n| {
-                snap.get(n)
-                    .map(|m| (n.clone(), m.uuid.clone(), alloc.get(n).cloned().unwrap_or_default()))
+            .flat_map(|n| {
+                let uuid = snap.get(n).map(|m| m.uuid.clone());
+                let mine: Vec<String> = alloc
+                    .iter()
+                    .filter(|((index, _), _)| index == n)
+                    .map(|(_, id)| id.clone())
+                    .collect();
+                let mine = if mine.is_empty() { vec![String::new()] } else { mine };
+                uuid.into_iter()
+                    .flat_map(move |uuid| {
+                        mine.clone().into_iter().map(move |id| (uuid.clone(), id))
+                    })
+                    .map(|(uuid, id)| (n.clone(), uuid, id))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
-    fn note_allocation(&self, index: &str, allocation_id: &str) {
-        self.0.alloc.lock().insert(index.to_string(), allocation_id.to_string());
+    fn note_allocation(&self, index: &str, shard: u32, allocation_id: &str) {
+        self.0.alloc.lock().insert((index.to_string(), shard), allocation_id.to_string());
     }
     fn drop_local(&self, index: &str) {
         self.0.docs.lock().remove(index);
-        self.0.alloc.lock().remove(index);
+        self.0.alloc.lock().retain(|(name, _), _| name != index);
     }
 }
 
@@ -217,10 +228,13 @@ impl ClusterNode {
     fn persist(&self, durable: &mut Durable) {
         let docs = self.shared.docs.lock();
         durable.entries.insert(D_DOCS.into(), serde_json::to_vec(&*docs).unwrap_or_default());
-        let alloc = self.shared.alloc.lock();
+        // a pair of index and shard is no key JSON can write: the ids are
+        // kept as a list of entries
+        let alloc: Vec<((String, u32), String)> =
+            self.shared.alloc.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         durable
             .entries
-            .insert("model_alloc".into(), serde_json::to_vec(&*alloc).unwrap_or_default());
+            .insert("model_alloc".into(), serde_json::to_vec(&alloc).unwrap_or_default());
     }
 
     fn state(&self) -> &ClusterState {
@@ -794,9 +808,9 @@ impl NodeLogic for ClusterNode {
         let mut out = match input {
             Input::Start => {
                 if let Some(bytes) = durable.entries.get("model_alloc")
-                    && let Ok(a) = serde_json::from_slice::<BTreeMap<String, String>>(bytes)
+                    && let Ok(a) = serde_json::from_slice::<Vec<((String, u32), String)>>(bytes)
                 {
-                    *self.shared.alloc.lock() = a;
+                    *self.shared.alloc.lock() = a.into_iter().collect();
                 }
                 if let Some(bytes) = durable.entries.get(D_DOCS)
                     && let Ok(d) = serde_json::from_slice::<Docs>(bytes)
@@ -1232,7 +1246,7 @@ pub mod tests {
         let cn = ClusterNode::new(c, source.clone(), Arc::default());
         let src = cn.coord.metadata.clone().unwrap();
         cn.shared.docs.lock().entry("solo".into()).or_default();
-        src.note_allocation("solo", "aid-1");
+        src.note_allocation("solo", 0, "aid-1");
         let mut durable = Durable::default();
         cn.persist(&mut durable);
         assert_eq!(

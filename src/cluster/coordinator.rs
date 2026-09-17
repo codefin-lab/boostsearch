@@ -1283,7 +1283,7 @@ impl Coordinator {
                 if let Some(a) = &c.allocation_id
                     && c.state != super::state::ShardState::Unassigned
                 {
-                    src.note_allocation(&c.index, a);
+                    src.note_allocation(&c.index, c.shard, a);
                 }
             }
         }

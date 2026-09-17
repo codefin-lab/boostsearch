@@ -1990,6 +1990,20 @@ pub fn apply_commands(
                     .shards_of(&index)
                     .find(|c| c.shard == shard && c.node.as_ref() == Some(&from_n.id))
                     .cloned();
+                // The shards of an index move together (below), so a second
+                // command for another shard of the same index is asking for a
+                // move that is already under way: that is done, not refused.
+                // `_cluster/reroute` with one command per shard is how a copy
+                // of a several-shard index is taken off a node.
+                let under_way = t.shards_of(&index).any(|c| {
+                    c.shard == shard
+                        && c.relocating_node.as_ref() == Some(&to_n.id)
+                        && c.node.as_ref() == Some(&from_n.id)
+                });
+                if under_way {
+                    accept(&mut explanations, params, &[]);
+                    continue;
+                }
                 let Some(copy) = copy else {
                     refuse(
                         &mut explanations,
@@ -2026,21 +2040,43 @@ pub fn apply_commands(
                     )?;
                     continue;
                 }
-                let copies = t.indices.get_mut(&index).unwrap().get_mut(&shard).unwrap();
-                let pos =
-                    copies.iter().position(|c| c.allocation_id == copy.allocation_id).unwrap();
-                copies[pos].state = ShardState::Relocating;
-                copies[pos].relocating_node = Some(to_n.id.clone());
-                copies.push(ShardRouting {
-                    index: index.clone(),
-                    shard,
-                    primary: copy.primary,
-                    state: ShardState::Initializing,
-                    node: Some(to_n.id.clone()),
-                    relocating_node: Some(from_n.id.clone()),
-                    allocation_id: Some(new_allocation_id()),
-                    unassigned: None,
-                });
+                // Every shard of the index goes, not the one named alone. A
+                // copy here is a copy of the whole index (ADR 0003), and the
+                // routing says so: `reroute` puts every shard where the
+                // first one is. A move of a shard on its own was answered
+                // and then undone by that, so the command was acknowledged
+                // and nothing happened.
+                let shards: Vec<u32> = t
+                    .shards_of(&index)
+                    .filter(|c| {
+                        c.state == ShardState::Started
+                            && c.primary == copy.primary
+                            && c.node.as_ref() == Some(&from_n.id)
+                    })
+                    .map(|c| c.shard)
+                    .collect();
+                for moving in shards {
+                    let copies = t.indices.get_mut(&index).unwrap().get_mut(&moving).unwrap();
+                    let Some(pos) = copies.iter().position(|c| {
+                        c.state == ShardState::Started
+                            && c.primary == copy.primary
+                            && c.node.as_ref() == Some(&from_n.id)
+                    }) else {
+                        continue;
+                    };
+                    copies[pos].state = ShardState::Relocating;
+                    copies[pos].relocating_node = Some(to_n.id.clone());
+                    copies.push(ShardRouting {
+                        index: index.clone(),
+                        shard: moving,
+                        primary: copy.primary,
+                        state: ShardState::Initializing,
+                        node: Some(to_n.id.clone()),
+                        relocating_node: Some(from_n.id.clone()),
+                        allocation_id: Some(new_allocation_id()),
+                        unassigned: None,
+                    });
+                }
                 accept(&mut explanations, params, &vs);
             }
             "allocate_replica" | "allocate_empty_primary" | "allocate_stale_primary" => {
@@ -2709,6 +2745,38 @@ mod tests {
         let commands =
             [json!({"move": {"index": "here", "shard": 0, "from_node": "a", "to_node": "a"}})];
         assert!(apply_commands(&w.ctx(), &w.table, &commands, false).is_err());
+    }
+
+    /// A move of any shard of an index moves the copy, and a second command
+    /// for another shard of it is the same move: the shards of an index are
+    /// held together, so a move of one alone was answered and then undone by
+    /// the placement that keeps them together.
+    #[test]
+    fn a_move_of_any_shard_moves_the_whole_copy() {
+        let mut w = World::new(
+            vec![node("a", &[]), node("b", &[])],
+            vec![index("pair", 2, 0, json!({}))],
+            "a",
+        );
+        w.settle();
+        assert_eq!(w.count("a", "pair"), 2);
+        let commands =
+            [json!({"move": {"index": "pair", "shard": 1, "from_node": "a", "to_node": "b"}})];
+        let (table, _) = apply_commands(&w.ctx(), &w.table, &commands, false).unwrap();
+        w.table = table;
+        w.settle();
+        assert_eq!(w.count("a", "pair"), 0);
+        assert_eq!(w.count("b", "pair"), 2);
+        // and one command per shard, which is how a copy is taken off a node
+        let commands = [
+            json!({"move": {"index": "pair", "shard": 0, "from_node": "b", "to_node": "a"}}),
+            json!({"move": {"index": "pair", "shard": 1, "from_node": "b", "to_node": "a"}}),
+        ];
+        let (table, _) = apply_commands(&w.ctx(), &w.table, &commands, false).unwrap();
+        w.table = table;
+        w.settle();
+        assert_eq!(w.count("a", "pair"), 2);
+        assert_eq!(w.count("b", "pair"), 0);
     }
 
     #[test]
