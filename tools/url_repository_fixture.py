@@ -21,6 +21,10 @@ which is the same arrangement OpenSearch's build gives its own node: a
 every other one by being named. `http://snapshot.test*` is in that list
 because the suite registers a repository there to check that registering one
 works, and never reads from it.
+
+The port is the one thing two gates on a machine cannot share, and it is set
+in two places that have to agree -- the node's allowlist and
+`VELO_URL_FIXTURE_PORT` here -- so a second gate sets both.
 """
 import functools
 import http.client
@@ -39,11 +43,39 @@ SHARED = pathlib.Path(os.environ.get("VELO_URL_REPO", "/tmp/velo-url-repo"))
 PORT = int(os.environ.get("VELO_URL_FIXTURE_PORT", "9280"))
 
 
-def serving():
-    """Whether something already answers on the fixture's port."""
+# What the fixture publishes to say which directory it is serving. The
+# repository root already holds a directory per repository the suites
+# register, so one more, named and hidden, is nothing new to it.
+MARKER = ".fixture/serving"
+
+
+def listening():
+    """Whether anything at all answers on the fixture's port."""
     with socket.socket() as s:
         s.settimeout(0.2)
         return s.connect_ex(("127.0.0.1", PORT)) == 0
+
+
+def serving():
+    """Whether what answers on the port is this fixture, over this directory.
+
+    Two of these can run at once -- a gate per checkout -- and the port is
+    the only thing they cannot share. A port already taken used to be read as
+    "the fixture is up", so the `url` repository was pointed at a stranger's
+    directory: the `http://` restore then failed for want of snapshots that
+    were never there, while the `file://` one, reading the directory itself,
+    passed. That is a failure with nothing wrong behind it, so the identity
+    of the server is checked rather than assumed.
+    """
+    if not listening():
+        return False
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{PORT}/{MARKER}", timeout=2
+        ) as answer:
+            return answer.read().decode().strip() == str(SHARED)
+    except (urllib.error.URLError, OSError):
+        return False
 
 
 def serve():
@@ -127,7 +159,20 @@ def register(repositories):
 
 def main():
     SHARED.mkdir(parents=True, exist_ok=True)
+    marker = SHARED / MARKER
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(SHARED))
     if not serving():
+        # somebody else's fixture holds the port, and nothing here can move it:
+        # the node was started with this port in its allowlist, so the port is
+        # the node's setting as much as the fixture's
+        if listening():
+            print(
+                f"  port {PORT} is held by something that does not serve {SHARED};\n"
+                f"  start the node and this fixture with VELO_URL_FIXTURE_PORT set to a free one",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         serve()
     register(
         [

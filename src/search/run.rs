@@ -983,7 +983,7 @@ pub fn run(
         .as_ref()
         .map(|h| h.parts.iter().map(|part| (part.index.clone(), part.clone())).collect())
         .unwrap_or_default();
-    let targets = match &pit {
+    let mut targets = match &pit {
         Some(held) => held.names(),
         None => store.resolve_open(expr),
     };
@@ -1097,6 +1097,9 @@ pub fn run(
     // error rather than with a result, and the search goes on without it.
     // Here the one that fails is the one holding a value the sketch refuses.
     let mut failures: Vec<Value> = Vec::new();
+    // shards that were counted as searched and then refused the query, which
+    // no shard of the remaining targets can account for
+    let mut refused_shards: u64 = 0;
     let mut excluded_ids: Vec<String> = Vec::new();
     if let Some(field) =
         body.get("aggs").or_else(|| body.get("aggregations")).and_then(hdr_percentiles_field)
@@ -1183,20 +1186,48 @@ pub fn run(
         // that turns a relation into two passes quietly left the clause
         // alone and nothing downstream knew the name.
         let has_join = join_field(store, &targets).is_some();
-        if let Some(index) = targets.first()
-            && let Some(st) = store.get(index)
-        {
+        // The complaint belongs to the index that raised it, and every target
+        // is asked in turn: a `percolate` over several indices is meant for
+        // the one holding the queries, and the others have no such field. Only
+        // where no target can carry the clause has every shard failed; where
+        // one can, the search is answered from it and the rest are reported as
+        // the shard failures they are. Asking only the first target failed the
+        // whole search over what one index could not do.
+        let mut refused: Vec<(String, Value, u64)> = Vec::new();
+        for name in &targets {
+            let Some(st) = store.get(name) else { continue };
             let g = st.read();
-            if let Some((reason, behind)) =
-                crate::search::extras::mapping_complaint(q, index, &g.mapping, has_join)
-            {
-                let uuid = g.setting("uuid").unwrap_or_else(|| crate::store::index_uuid(index));
+            let Some((reason, behind)) =
+                crate::search::extras::mapping_complaint(q, name, &g.mapping, has_join)
+            else {
+                continue;
+            };
+            let uuid = g.setting("uuid").unwrap_or_else(|| crate::store::index_uuid(name));
+            let cause =
+                crate::api::shared::query_shard_cause(name, &uuid, &reason, behind.as_deref());
+            refused.push((name.clone(), cause, g.shard_count()));
+        }
+        if !refused.is_empty() {
+            if refused.len() == targets.len() {
+                let (index, cause, _) = refused.remove(0);
                 return Err(crate::api::shared::all_shards_failed(
                     StatusCode::BAD_REQUEST,
-                    index,
-                    crate::api::shared::query_shard_cause(index, &uuid, &reason, behind.as_deref()),
+                    &index,
+                    cause,
                 ));
             }
+            for (index, cause, count) in &refused {
+                for shard in 0..*count {
+                    failures.push(json!({
+                        "shard": shard,
+                        "index": index,
+                        "node": "node-0",
+                        "reason": cause,
+                    }));
+                }
+                refused_shards += count;
+            }
+            targets.retain(|name| !refused.iter().any(|(refused, _, _)| refused == name));
         }
         collect_join_inner_hits(q, &mut join_inner_hits);
         expand_joins(store, &targets, q);
@@ -1409,7 +1440,7 @@ pub fn run(
     let mut cands: Vec<Cand> = Vec::new();
     let mut searchers: Vec<(String, Searcher, std::sync::Arc<crate::store::IdxLock>)> = Vec::new();
     let mut total: u64 = 0;
-    let mut shards: u64 = 0;
+    let mut shards: u64 = refused_shards;
     let mut empty_shards: u64 = 0;
     let agg_acc: Option<IntermediateAggregationResults>;
     let mut agg_req: Option<Aggregations> = None;
