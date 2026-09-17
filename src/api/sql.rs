@@ -13,6 +13,31 @@ pub async fn sql(State(store): State<Store>, Query(p): Query<Params>, body: Stri
     run(&store, &p, &body, false)
 }
 
+/// `GET _plugins/_ppl/_grammar` is not answered, and is the one read path on
+/// this surface that stays a 501.
+///
+/// The reference answers it with the serialized ANTLR ATN of its two PPL
+/// grammar files, a hash of those files, and the rule, token and channel
+/// tables that go with them -- a quarter of a megabyte describing one
+/// generated parser. Dashboards feeds it to an ANTLR runtime in the browser to
+/// drive completion and to mark a query as invalid before it is sent.
+///
+/// That body is Apache-2.0 and could be carried here as data with attribution,
+/// but carrying it would be a lie about this server rather than a description
+/// of its interface, which is what separates it from the catalogues elsewhere
+/// in this module's neighbours. The PPL here is a hand-written reader of about
+/// a dozen stages (`src/sql/ppl.rs`); the reference's grammar has 262 parser
+/// rules and 517 tokens. An editor driven by that ATN would complete `eventstats`,
+/// `trendline`, `patterns`, `lookup`, `join` and the rest, and would pass a query
+/// using them as valid, and then this node would refuse it -- the client would
+/// be wrong before the request was ever made, which is the opposite of what the
+/// endpoint is for. `grammarHash` makes it worse: it is a hash of grammar files
+/// that are not in this repository, so answering with it asserts an identity
+/// this parser does not have. And an ATN is a compiled artefact of an ANTLR
+/// grammar; a recursive-descent reader has none to serialize and none could be
+/// derived from it. So there is nothing truthful to answer, and the 501 stands
+/// until the PPL here is generated from a grammar of its own.
+///
 /// `POST _plugins/_ppl`
 pub async fn pipeline(
     State(store): State<Store>,

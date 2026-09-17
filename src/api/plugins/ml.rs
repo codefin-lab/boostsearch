@@ -78,9 +78,22 @@ pub async fn context_management(Query(p): Query<Params>) -> Response {
 
 /// `GET _plugins/_ml/tools` -- the tools an agent may be given.
 ///
-/// The reference lists the tool implementations its plugin ships. This engine
-/// ships none, and saying so is the difference between a client finding no
-/// tool and a client being told a tool exists that would never answer.
+/// This is the descriptor list a client reads to find out what a `type` in an
+/// agent's tool list may say and what each tool takes: the name, the type, the
+/// version the plugin stamps on it and, where the tool declares one, the JSON
+/// schema of its input. It describes the vocabulary of the agent API, which is
+/// the same vocabulary here as it is in the reference, so a client that
+/// validates an agent definition against it reaches the same verdict.
+///
+/// It does not describe anything this node would run. There is no
+/// `_plugins/_ml/agents` path here, so an agent naming any of these tools
+/// cannot be registered, let alone executed; every one of these would be
+/// refused if a caller tried to use it. The descriptors are the reference's
+/// own, carried in `ml_tools.json` beside this file -- see the note on
+/// third-party material in the README.
 pub async fn tools(Query(p): Query<Params>) -> Response {
-    respond(&p, json!([]))
+    static TOOLS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("ml_tools.json")).unwrap_or(Value::Null)
+    });
+    respond(&p, TOOLS.clone())
 }
