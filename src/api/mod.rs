@@ -39,6 +39,7 @@ pub use indices::*;
 mod ingest;
 pub mod ism;
 pub mod knn;
+pub mod plugins;
 pub mod rollup;
 pub mod sql;
 pub mod transform;
