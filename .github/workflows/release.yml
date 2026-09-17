@@ -100,6 +100,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # the same image, to Google Artifact Registry, tagged with the version
+  gcp-image:
+    needs: gates
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/image.yml
+    with:
+      version: ${{ github.ref_name }}
+
   publish:
     needs: [binaries, image]
     if: startsWith(github.ref, 'refs/tags/')

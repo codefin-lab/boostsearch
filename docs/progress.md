@@ -7710,3 +7710,28 @@ GeoLite2 files out of OpenSearch's own container) and
 `tools/gate_node.sh` points at them, with `BOOST_FIXTURES` to move them. The
 module gate reads 880 of 890 again: the six left are stempel, ukrainian and
 the analysis-phone plugin listing, as before.
+
+### Images, built from green commits and pushed to Artifact Registry
+
+`.github/workflows/image.yml` builds the container image and pushes it to
+`asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch`. It never
+builds from a commit the gates did not pass on: on `main` it runs when the
+`ci` workflow finishes green and checks out that run's commit rather than
+whatever `main` has become, and for a release tag `release.yml` calls it after
+running the gates on the tag. Before anything is pushed the image is started,
+asked to write a document and find it, and has to report itself healthy
+through its own `HEALTHCHECK`. Tags: the commit's sha, `main` and `latest`
+for main, the version without its `v` for a release.
+
+No key is stored anywhere. GitHub's OIDC token is exchanged through a
+workload identity pool of its own, `github-boostsearch`, whose provider
+accepts this repository only and only `main` or a `v*` tag; the service
+account it becomes, `gh-boostsearch-image`, holds `artifactregistry.writer` on
+this one repository and nothing else. The project's existing `github` pool
+was left alone: it belongs to another repository and is managed elsewhere.
+
+CI itself had been red: it fetches OpenSearch's newest suite, which gained
+`cat.indices/30_system.yml` for 3.9 -- the version this server reports -- and
+`_cat/indices` had no `system` filter. It has one now, with the `system` and
+`system.description` columns, and the file is in the local manifest: 1,428 of
+1,428.

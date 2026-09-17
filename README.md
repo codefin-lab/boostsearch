@@ -132,6 +132,15 @@ docker build -t boostsearch .
 docker run -p 9200:9200 -v boostsearch-data:/var/lib/boostsearch boostsearch
 ```
 
+Or the built image: every commit on `main` the gates pass on is pushed to
+Google Artifact Registry by `.github/workflows/image.yml`, after it has been
+started and asked to write and find a document -- `:latest` is the newest
+such commit, `:<sha>` any of them, and a release tag `v1.2.3` is `:1.2.3`.
+
+```bash
+docker pull asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch:latest
+```
+
 The settings that matter most:
 
 | | |

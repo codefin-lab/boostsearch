@@ -1,0 +1,142 @@
+name: image
+
+# The container image, built and pushed to Google Artifact Registry.
+#
+# An image is only built from a commit the gates passed on: on `main` this
+# waits for the `ci` workflow to finish green on that commit, and for a tag the
+# release workflow calls it after running the same gates on the tag. What is
+# in the registry is therefore always something that was measured.
+#
+# There is no key to leak. GitHub's OIDC token is exchanged for a short-lived
+# Google credential through a workload identity pool that accepts only this
+# repository, and only `main` or a `v*` tag; the service account it becomes
+# may write to this one Artifact Registry repository and nothing else.
+#
+#   asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch:<sha>
+#   ...:main and ...:latest   the newest green commit on main
+#   ...:<version>             a release tag, `v1.2.3` pushed as `1.2.3`
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_call:
+    inputs:
+      version:
+        description: 'the release version the image is tagged with'
+        type: string
+        required: true
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGISTRY: asia-southeast1-docker.pkg.dev
+  IMAGE: asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch
+  WORKLOAD_IDENTITY_PROVIDER: projects/591010045058/locations/global/workloadIdentityPools/github-boostsearch/providers/github
+  SERVICE_ACCOUNT: gh-boostsearch-image@codefin-lab.iam.gserviceaccount.com
+
+concurrency:
+  group: image-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    # a red run of the gates builds nothing
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the commit the gates ran on, not whatever main is by now
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Tags
+        id: tags
+        run: |
+          sha="$(git rev-parse HEAD)"
+          tags="${IMAGE}:${sha}"
+          version="${{ inputs.version }}"
+          if [ -n "$version" ]; then
+            tags="${tags},${IMAGE}:${version#v}"
+          else
+            tags="${tags},${IMAGE}:main,${IMAGE}:latest"
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built for the machines it runs on. The compiled dependencies are cached
+      # between runs, so a change to the source rebuilds the server and not
+      # the three hundred crates under it.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: boostsearch:candidate
+          cache-from: type=gha,scope=image-amd64
+          cache-to: type=gha,scope=image-amd64,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
+            org.opencontainers.image.version=${{ inputs.version || steps.tags.outputs.sha }}
+
+      # An image that does not start, or starts and cannot write and find a
+      # document, is not pushed.
+      - name: The image answers
+        run: |
+          docker run -d --name candidate -p 9200:9200 \
+            -e BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true \
+            -e BOOSTSEARCH_TRANSPORT_INSECURE=true \
+            boostsearch:candidate
+          for i in $(seq 60); do
+            curl -sf localhost:9200/ >/dev/null && break
+            sleep 1
+          done
+          curl -sf localhost:9200/ | head -c 300; echo
+          curl -sf -XPUT 'localhost:9200/smoke/_doc/1?refresh=true' \
+            -H 'content-type: application/json' -d '{"said":"hello"}' >/dev/null
+          found=$(curl -sf 'localhost:9200/smoke/_search?q=said:hello' | python3 -c 'import json,sys; print(json.load(sys.stdin)["hits"]["total"]["value"])')
+          test "$found" = 1
+          for i in $(seq 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' candidate)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "healthcheck: $status"
+          test "$status" = healthy
+          docker rm -f candidate
+
+      - name: Push
+        run: |
+          for tag in $(echo "${{ steps.tags.outputs.tags }}" | tr ',' ' '); do
+            docker tag boostsearch:candidate "$tag"
+            docker push "$tag"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image pushed"
+            echo
+            for tag in $(echo "${{ steps.tags.outputs.tags }}" | tr ',' ' '); do echo "- \`$tag\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
