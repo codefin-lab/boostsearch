@@ -37,15 +37,30 @@ pub(crate) async fn cat_by_name(
         "aliases" => cat_aliases(State(store), None, Query(p)).await,
         "count" => cat_count(State(store), None, Query(p)).await,
         "health" => cat_health(State(store), Query(p)).await,
-        "master" | "cluster_manager" => cat_render(
-            vec![vec![
-                ("id", crate::cluster::identity().id.as_str().into()),
-                ("host", "127.0.0.1".into()),
-                ("ip", "127.0.0.1".into()),
-                ("node", crate::cluster::identity().name.clone()),
-            ]],
-            &p,
-        ),
+        "master" | "cluster_manager" => {
+            // the node the cluster has elected, which is not this node unless
+            // it happens to be: naming the node the request reached had every
+            // node of a cluster call itself the manager
+            let live = crate::cluster::current_state();
+            let elected = live
+                .cluster_manager
+                .as_ref()
+                .and_then(|id| live.nodes.get(id))
+                .map(|n| (n.id.as_str().to_string(), n.name.clone()))
+                .unwrap_or_else(|| {
+                    let me = crate::cluster::identity();
+                    (me.id.as_str().to_string(), me.name.clone())
+                });
+            cat_render(
+                vec![vec![
+                    ("id", elected.0),
+                    ("host", "127.0.0.1".into()),
+                    ("ip", "127.0.0.1".into()),
+                    ("node", elected.1),
+                ]],
+                &p,
+            )
+        }
         "nodes" => {
             // one row per node the cluster state holds, the manager starred
             let live = crate::cluster::current_state();

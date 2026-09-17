@@ -64,8 +64,9 @@ pub trait MetadataSource: Send + Sync {
     fn held(&self) -> Vec<(String, String, String)> {
         self.snapshot().iter().map(|(n, m)| (n.clone(), m.uuid.clone(), String::new())).collect()
     }
-    /// The manager gave this node's copy of the index an allocation id.
-    fn note_allocation(&self, _index: &str, _allocation_id: &str) {}
+    /// The id the manager gave this node's copy of one shard of an index,
+    /// kept where a restart will read it back.
+    fn note_allocation(&self, _index: &str, _shard: u32, _allocation_id: &str) {}
 }
 
 /// What a data node does with the copies the manager puts on it: the store
@@ -221,14 +222,71 @@ impl StoreSource {
         let index = meta.name.clone();
         let shard = copy.shard;
         let id = aid.clone();
+        // marked before the task runs, so another copy of this index started
+        // in the same pass sees the fill it has to wait for
+        super::replication::mark_filling(&index);
         tokio::spawn(async move {
             let result =
                 super::replication::seed_replica(&store, &index, shard, &id, &primary).await;
+            if result.is_ok() {
+                note_allocations_here(&store, &index);
+            }
             if let Some(rt) = super::runtime() {
                 rt.shard_done(aid, result);
             }
         });
         Ok(false)
+    }
+
+    /// A copy of a shard above zero, which is the index this node already
+    /// holds under another number: ready once the fill of the index is,
+    /// reported failed if that fill leaves nothing here.
+    fn wait_for_the_index(&self, index: &str, allocation_id: String) -> Result<bool, String> {
+        let store = self.store.clone();
+        let name = index.to_string();
+        let aid = allocation_id.clone();
+        tokio::spawn(async move {
+            let result = super::replication::wait_for_fill(&store, &name).await;
+            if result.is_ok() {
+                note_allocations_here(&store, &name);
+            }
+            if let Some(rt) = super::runtime() {
+                rt.shard_done(aid, result);
+            }
+        });
+        Ok(false)
+    }
+}
+
+/// The ids the cluster gave the copies of an index on this node, written
+/// where a restart will read them back.
+///
+/// A fill makes the index here again out of nothing, and the ids the manager
+/// had given the copies went with what was there before. The next
+/// publication writes them again -- but if none follows, a node that
+/// restarts reports a copy the in-sync sets do not name, no copy may be made
+/// the primary, and the index stands red with every document of it on disk.
+fn note_allocations_here(store: &crate::store::Store, index: &str) {
+    let Some(rt) = super::runtime() else { return };
+    let me = rt.local();
+    let mine: Vec<(u32, String)> = super::with_state(|s| {
+        s.routing
+            .shards_of(index)
+            .filter(|c| c.node.as_ref() == Some(&me) && c.state != ShardState::Unassigned)
+            .filter_map(|c| c.allocation_id.clone().map(|a| (c.shard, a)))
+            .collect()
+    });
+    let Some(st) = store.get(index) else { return };
+    let mut g = st.write();
+    let mut changed = false;
+    for (shard, id) in mine {
+        if g.allocation_ids.get(&shard) != Some(&id) {
+            g.allocation_ids.insert(shard, id);
+            changed = true;
+        }
+    }
+    if changed {
+        g.save_meta();
     }
 }
 
@@ -243,6 +301,18 @@ impl ShardHost for StoreSource {
         // is what is made or filled here, and the rest of the shards are that
         // same index under another number
         if copy.shard > 0 && self.store.get(&meta.name).is_some() {
+            // Unless the index here is being filled. The copy of shard zero
+            // makes an empty index and fills it from the primary; saying this
+            // copy is started because that empty index exists handed the
+            // cluster a complete copy that held nothing -- the manager took
+            // the source of the move out of the in-sync set, the empty copy
+            // became the primary, and every acknowledged document of a moved
+            // two-shard index was gone.
+            if super::replication::filling(&meta.name)
+                && let Some(aid) = copy.allocation_id.clone()
+            {
+                return self.wait_for_the_index(&meta.name, aid);
+            }
             return Ok(true);
         }
         if copy.primary && copy.relocating_node.is_none() {
@@ -394,21 +464,27 @@ impl MetadataSource for StoreSource {
         for name in self.store.resolve("*") {
             if let Some(st) = self.store.get(&name) {
                 let g = st.read();
-                out.push((
-                    name.clone(),
-                    g.uuid.clone(),
-                    g.allocation_id.clone().unwrap_or_default(),
-                ));
+                // one entry per allocation id the copy here answers to: the
+                // manager keeps an in-sync set per shard, and the id it looks
+                // for is the one it gave that shard's copy. An index that has
+                // never been placed names none and is still reported as held.
+                if g.allocation_ids.is_empty() {
+                    out.push((name.clone(), g.uuid.clone(), String::new()));
+                    continue;
+                }
+                for id in g.allocation_ids.values() {
+                    out.push((name.clone(), g.uuid.clone(), id.clone()));
+                }
             }
         }
         out
     }
 
-    fn note_allocation(&self, index: &str, allocation_id: &str) {
+    fn note_allocation(&self, index: &str, shard: u32, allocation_id: &str) {
         if let Some(st) = self.store.get(index) {
             let mut g = st.write();
-            if g.allocation_id.as_deref() != Some(allocation_id) {
-                g.allocation_id = Some(allocation_id.to_string());
+            if g.allocation_ids.get(&shard).map(|s| s.as_str()) != Some(allocation_id) {
+                g.allocation_ids.insert(shard, allocation_id.to_string());
                 g.save_meta();
             }
         }

@@ -411,6 +411,14 @@ impl Store {
             "components": self.get_components(),
             "pipelines": {"ingest": self.pipelines("ingest"), "search": self.pipelines("search")},
             "scripts": self.scripts.read().clone(),
+            // A repository is the cluster's, as OpenSearch keeps it in the
+            // cluster metadata, and so are the records of the snapshots in
+            // it: registered on whichever node answered, they lived on that
+            // node alone, and a new cluster manager knew of no repository at
+            // all -- it had to be registered again before anything could be
+            // listed or restored.
+            "repositories": self.repositories.read().clone(),
+            "snapshots": self.snapshots.read().clone(),
         });
         if let Some(security) = self.security.wire() {
             customs["security"] = security;
@@ -435,6 +443,15 @@ impl Store {
             self.any_ingest_pipeline.store(any, std::sync::atomic::Ordering::Relaxed);
         }
         *self.scripts.write() = map(v.get("scripts"));
+        *self.repositories.write() = map(v.get("repositories"));
+        {
+            let mut snapshots = self.snapshots.write();
+            *snapshots = v
+                .get("snapshots")
+                .and_then(|o| o.as_object())
+                .map(|o| o.iter().map(|(repo, held)| (repo.clone(), map(Some(held)))).collect())
+                .unwrap_or_default();
+        }
     }
 }
 
