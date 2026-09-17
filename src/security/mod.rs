@@ -24,7 +24,6 @@ pub mod authc;
 pub mod layer;
 pub mod obo;
 pub mod saml;
-pub mod spread;
 pub mod view;
 
 /// One internal user, as `internal_users.yml` writes it.
@@ -109,6 +108,11 @@ pub struct SecurityConfig {
     pub tenants: BTreeMap<String, Tenant>,
     /// `config.yml`'s dynamic section, kept as JSON
     pub dynamic: Value,
+    /// Which change this is: one more for every change made through the
+    /// security API. The cluster manager's configuration is the cluster's,
+    /// and a manager newly elected over a configuration newer than the one
+    /// it holds takes that one rather than handing the cluster its own.
+    pub generation: u64,
     /// action groups flattened into the action patterns they stand for
     flat_groups: HashMap<String, HashSet<String>>,
 }
@@ -353,9 +357,14 @@ fn entries(doc: &Value) -> Vec<(String, Value)> {
 }
 
 impl SecurityConfig {
-    /// The configuration the plugin ships with: its static roles, action
-    /// groups and tenants, and the demo users and mappings.
-    pub fn defaults() -> SecurityConfig {
+    /// What every configuration starts from: the plugin's static roles,
+    /// action groups and tenants, and its default roles, mappings and
+    /// authentication chain -- with no user in it.
+    ///
+    /// The plugin's demo users are not here. Their passwords are published,
+    /// and a node that fell back to them let `admin:admin` in wherever
+    /// security was switched on and nothing had been configured yet.
+    pub fn builtin() -> SecurityConfig {
         let mut c = SecurityConfig::default();
         for (name, v) in entries(&yaml_to_json(include_str!("defaults/static_action_groups.yml"))) {
             let mut g = ActionGroup::from_json(&v);
@@ -374,13 +383,31 @@ impl SecurityConfig {
             c.tenants.insert(name, t);
         }
         c.merge_documents(&[
-            ("internalusers", yaml_to_json(include_str!("defaults/internal_users.yml"))),
             ("roles", yaml_to_json(include_str!("defaults/roles.yml"))),
             ("rolesmapping", yaml_to_json(include_str!("defaults/roles_mapping.yml"))),
             ("actiongroups", yaml_to_json(include_str!("defaults/action_groups.yml"))),
             ("tenants", yaml_to_json(include_str!("defaults/tenants.yml"))),
             ("config", yaml_to_json(include_str!("defaults/config.yml"))),
         ]);
+        c
+    }
+
+    /// The first configuration of a node, from the administrator's password
+    /// the operator gave it: the built-in configuration and one user, `admin`,
+    /// mapped to `all_access` through its backend role as the plugin's demo
+    /// installer maps it.
+    pub fn seeded(admin_password: &str) -> SecurityConfig {
+        let mut c = SecurityConfig::builtin();
+        c.users.insert(
+            "admin".into(),
+            InternalUser::from_json(&json!({
+                "hash": hash_password(admin_password),
+                "reserved": true,
+                "backend_roles": ["admin"],
+                "description": "Administrator, from the initial admin password",
+            })),
+        );
+        c.generation = 1;
         c
     }
 
@@ -490,6 +517,87 @@ pub fn security_dir() -> PathBuf {
     crate::tls::config_dir().join("security")
 }
 
+/// The files a configuration is written to, by the kind each one holds.
+const FILES: [(&str, &str); 6] = [
+    ("internalusers", "internal_users.yml"),
+    ("roles", "roles.yml"),
+    ("rolesmapping", "roles_mapping.yml"),
+    ("actiongroups", "action_groups.yml"),
+    ("tenants", "tenants.yml"),
+    ("config", "config.yml"),
+];
+
+/// The generation of the files beside it, one number.
+const GENERATION_FILE: &str = "generation";
+
+/// Present while a save is being put in place: every file of the new
+/// generation is on disk whole beside the one it replaces, and only the
+/// renaming is left to do.
+const PENDING: &str = ".pending";
+
+fn tmp_path(dir: &std::path::Path, file: &str) -> PathBuf {
+    dir.join(format!("{file}.tmp"))
+}
+
+/// Every file a save writes, the generation last.
+fn saved_files() -> impl Iterator<Item = &'static str> {
+    FILES.iter().map(|(_, f)| *f).chain(std::iter::once(GENERATION_FILE))
+}
+
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    crate::store::sync_file(&f)
+}
+
+/// A rename is only as durable as the directory that records it.
+fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    crate::store::sync_file(&std::fs::File::open(dir)?)
+}
+
+/// Put a decided generation in place: what is still waiting beside its file
+/// replaces it, and the marker goes last.
+fn finish_save(dir: &std::path::Path) -> std::io::Result<()> {
+    for file in saved_files() {
+        let tmp = tmp_path(dir, file);
+        if tmp.exists() {
+            std::fs::rename(&tmp, dir.join(file))?;
+        }
+    }
+    sync_dir(dir)?;
+    std::fs::remove_file(dir.join(PENDING))?;
+    sync_dir(dir)
+}
+
+/// What a save that was stopped part way left behind, dealt with: finished
+/// when it had got as far as deciding, forgotten when it had not. Either way
+/// the files read afterwards are all of one generation.
+fn recover_save(dir: &std::path::Path) -> std::io::Result<()> {
+    if dir.join(PENDING).exists() {
+        return finish_save(dir);
+    }
+    for file in saved_files() {
+        match std::fs::remove_file(tmp_path(dir, file)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A document as the files hold it, or why it is not one.
+fn parse_document(file: &str, text: &str) -> Result<Value, String> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(text).map_err(|e| format!("{file} is not valid YAML: {e}"))?;
+    match serde_json::to_value(yaml) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        // a file with nothing in it is a kind with nothing in it
+        Ok(Value::Null) => Ok(Value::Object(Map::new())),
+        _ => Err(format!("{file} does not hold a mapping")),
+    }
+}
+
 /// The YAML of one kind, as the plugin writes it (with `_meta`).
 fn document_yaml(kind: &str, body: &Value) -> String {
     let (ty, version) = match kind {
@@ -554,30 +662,53 @@ impl SecurityConfig {
         Value::Object(o)
     }
 
-    /// Write every document to the security directory.
+    /// Write the whole configuration to the security directory, as one
+    /// generation or not at all.
+    ///
+    /// Six files written one after another in place were six chances for a
+    /// failure -- a full disk, a directory the node may not write, the
+    /// process stopped -- to leave users of one generation beside mappings
+    /// of another. Every file of the new generation is written out and
+    /// synced beside the old one first; a marker then says the new
+    /// generation is decided, and only after that are the files renamed
+    /// into place. A load finishes a decided save and forgets an undecided
+    /// one, so what it reads is always one generation.
     pub fn save(&self) -> std::io::Result<()> {
-        let dir = security_dir();
-        std::fs::create_dir_all(&dir)?;
-        for (kind, file) in [
-            ("internalusers", "internal_users.yml"),
-            ("roles", "roles.yml"),
-            ("rolesmapping", "roles_mapping.yml"),
-            ("actiongroups", "action_groups.yml"),
-            ("tenants", "tenants.yml"),
-            ("config", "config.yml"),
-        ] {
-            std::fs::write(dir.join(file), document_yaml(kind, &self.document(kind)))?;
-        }
-        Ok(())
+        self.save_in(&security_dir())
     }
 
-    /// The defaults with these documents laid over them, each document being
-    /// the whole of its kind rather than an addition to it.
-    pub fn from_documents(docs: &[(&str, Value)]) -> SecurityConfig {
-        let mut c = SecurityConfig::defaults();
-        if docs.is_empty() {
-            return c;
+    pub fn save_in(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        recover_save(dir)?;
+        let decided = self.write_undecided(dir).and_then(|_| {
+            write_synced(&dir.join(PENDING), b"")?;
+            sync_dir(dir)
+        });
+        if let Err(e) = decided {
+            // nothing was decided: the old generation stands, and what was
+            // written of the new one is taken away again
+            let _ = std::fs::remove_file(dir.join(PENDING));
+            let _ = recover_save(dir);
+            return Err(e);
         }
+        finish_save(dir)
+    }
+
+    /// Every file of this generation, written and synced beside the files it
+    /// is to replace.
+    fn write_undecided(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        for (kind, file) in FILES {
+            let yaml = document_yaml(kind, &self.document(kind));
+            write_synced(&tmp_path(dir, file), yaml.as_bytes())?;
+        }
+        write_synced(&tmp_path(dir, GENERATION_FILE), format!("{}\n", self.generation).as_bytes())?;
+        sync_dir(dir)
+    }
+
+    /// The built-in configuration with these documents laid over it, each
+    /// document being the whole of its kind rather than an addition to it.
+    pub fn from_documents(docs: &[(&str, Value)]) -> SecurityConfig {
+        let mut c = SecurityConfig::builtin();
         for (kind, _) in docs {
             match *kind {
                 "internalusers" => c.users.clear(),
@@ -592,25 +723,57 @@ impl SecurityConfig {
         c
     }
 
-    /// The configuration on disk laid over the defaults, or the defaults
-    /// alone where nothing was written yet.
-    pub fn load() -> SecurityConfig {
-        let dir = security_dir();
+    /// The configuration on disk: `None` where nothing was ever written, and
+    /// an error where something was and cannot be read whole.
+    ///
+    /// A file that could not be read used to be skipped and the defaults
+    /// stood in for it, demo users and their published passwords among them:
+    /// a users file the node lost permission to read brought back `admin`
+    /// with the password `admin`. A configuration is all six files or it is
+    /// not one.
+    pub fn load() -> Result<Option<SecurityConfig>, String> {
+        SecurityConfig::load_from(&security_dir())
+    }
+
+    pub fn load_from(dir: &std::path::Path) -> Result<Option<SecurityConfig>, String> {
+        recover_save(dir).map_err(|e| {
+            format!(
+                "an interrupted save of the security configuration in {} could not be completed: {e}",
+                dir.display()
+            )
+        })?;
         let mut docs = Vec::new();
-        for (kind, file) in [
-            ("internalusers", "internal_users.yml"),
-            ("roles", "roles.yml"),
-            ("rolesmapping", "roles_mapping.yml"),
-            ("actiongroups", "action_groups.yml"),
-            ("tenants", "tenants.yml"),
-            ("config", "config.yml"),
-        ] {
-            if let Ok(text) = std::fs::read_to_string(dir.join(file)) {
-                docs.push((kind, yaml_to_json(&text)));
+        let mut missing = Vec::new();
+        for (kind, file) in FILES {
+            match std::fs::read_to_string(dir.join(file)) {
+                Ok(text) => docs.push((kind, parse_document(file, &text)?)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(file),
+                Err(e) => return Err(format!("{}: {e}", dir.join(file).display())),
             }
         }
-        // a file on disk is the whole of its kind, not an addition
-        SecurityConfig::from_documents(&docs)
+        if docs.is_empty() {
+            return Ok(None);
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "the security configuration in {} is incomplete: {} missing",
+                dir.display(),
+                missing.join(", ")
+            ));
+        }
+        let path = dir.join(GENERATION_FILE);
+        let generation = match std::fs::read_to_string(&path) {
+            Ok(text) => text
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{} does not hold a number", path.display()))?,
+            // written by hand, or before generations were kept
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let mut c = SecurityConfig::from_documents(&docs);
+        c.generation = generation;
+        Ok(Some(c))
     }
 }
 
@@ -1061,6 +1224,48 @@ pub fn fls_allows(rules: &[String], field: &str) -> bool {
     })
 }
 
+/// What a node with security on starts with: its saved configuration; or,
+/// where it has none, one seeded from the initial admin password; or nothing,
+/// and nobody is let in until it is given one.
+fn first_configuration(refusal: &mut Option<String>) -> Option<SecurityConfig> {
+    match SecurityConfig::load() {
+        Ok(Some(c)) => Some(c),
+        Err(why) => {
+            tracing::error!("{why}; nobody is let in until it is put right");
+            eprintln!("velosearch: {why}; nobody is let in until it is put right");
+            None
+        }
+        Ok(None) => match initial_admin_password() {
+            Ok(Some(password)) => {
+                let c = SecurityConfig::seeded(&password);
+                match c.save() {
+                    Ok(()) => Some(c),
+                    Err(e) => {
+                        *refusal = Some(format!(
+                            "the security configuration seeded from {INITIAL_ADMIN_PASSWORD} could not be saved in {}: {e}",
+                            security_dir().display()
+                        ));
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "velosearch: security is on and {} holds no configuration; nobody is let in \
+                     until one is saved there, {INITIAL_ADMIN_PASSWORD} is set, or the cluster \
+                     manager provides one",
+                    security_dir().display()
+                );
+                None
+            }
+            Err(why) => {
+                *refusal = Some(why);
+                None
+            }
+        },
+    }
+}
+
 /// The security state the server holds: the configuration, and whether it
 /// is switched on.
 pub struct Security {
@@ -1094,13 +1299,100 @@ pub struct Security {
     pub allow_config_rewrite: bool,
     /// `plugins.security.compliance.salt`, for field masking
     pub salt: String,
+    /// whether the node holds a configuration at all: read from its files,
+    /// seeded from the initial admin password, or taken from the cluster
+    configured: std::sync::atomic::AtomicBool,
+    /// whether the configuration held is one to let anybody in by. A node on
+    /// its own is ready once it holds one; a node of a cluster only once it
+    /// holds the one its cluster manager published.
+    ready: std::sync::atomic::AtomicBool,
+    /// whether this node is one of a cluster rather than a cluster of itself
+    clustered: std::sync::atomic::AtomicBool,
+    /// the configuration as the cluster state carries it, by the change it
+    /// was made at
+    wire: parking_lot::Mutex<Option<(u64, Value)>>,
+    /// why the node must not start: an initial admin password too weak to be
+    /// one, or a configuration seeded from it that could not be saved
+    pub refusal: Option<String>,
+}
+
+/// Whether a node may let anybody in by the configuration it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    Ready,
+    /// no configuration, or not yet the cluster's
+    NotInitialized,
+    /// the cluster's, as of when this node last had a cluster manager: what
+    /// has been revoked since, it cannot know
+    NoManager,
+}
+
+/// The environment variable an operator gives the first administrator's
+/// password in, as OpenSearch's `OPENSEARCH_INITIAL_ADMIN_PASSWORD`.
+pub const INITIAL_ADMIN_PASSWORD: &str = "VELOSEARCH_INITIAL_ADMIN_PASSWORD";
+
+/// The initial admin password, if one was given, or why it cannot be one.
+///
+/// OpenSearch's installer refuses a password that is not at least eight
+/// characters with an uppercase letter, a lowercase letter, a digit and a
+/// special character, or that holds the user's name, and so does this: it is
+/// the one credential that opens everything, and `admin` is the first thing
+/// anyone tries.
+pub fn initial_admin_password() -> Result<Option<String>, String> {
+    let Ok(password) = std::env::var(INITIAL_ADMIN_PASSWORD) else { return Ok(None) };
+    if let Err(why) = initial_password_refusal(&password) {
+        return Err(format!("{INITIAL_ADMIN_PASSWORD} failed validation: {why}"));
+    }
+    Ok(Some(password))
+}
+
+fn initial_password_refusal(password: &str) -> Result<(), &'static str> {
+    if password.to_lowercase().contains("admin") {
+        return Err("Password is similar to user name");
+    }
+    let strong = password.chars().count() >= 8
+        && password.chars().any(|c| c.is_uppercase())
+        && password.chars().any(|c| c.is_lowercase())
+        && password.chars().any(|c| c.is_ascii_digit())
+        && password.chars().any(|c| !c.is_alphanumeric());
+    if !strong {
+        return Err("Weak password. It needs at least 8 characters, with an uppercase letter, \
+                    a lowercase letter, a digit and a special character");
+    }
+    Ok(())
+}
+
+/// The kinds a configuration is made of, as the cluster state carries them.
+const KINDS: [&str; 6] =
+    ["internalusers", "roles", "rolesmapping", "actiongroups", "tenants", "config"];
+
+/// A configuration as the cluster state carries it: every document, and the
+/// generation.
+fn to_wire(cfg: &SecurityConfig) -> Value {
+    let mut o = Map::new();
+    for kind in KINDS {
+        o.insert(kind.to_string(), cfg.document(kind));
+    }
+    o.insert("generation".into(), json!(cfg.generation));
+    Value::Object(o)
+}
+
+fn from_wire(v: &Value) -> SecurityConfig {
+    let docs: Vec<(&str, Value)> =
+        KINDS.iter().filter_map(|k| v.get(*k).map(|d| (*k, d.clone()))).collect();
+    let mut c = SecurityConfig::from_documents(&docs);
+    c.generation = v.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
+    c
 }
 
 impl Security {
     pub fn from_settings(settings: &Value) -> Arc<Security> {
         let get = |k: &str| crate::tls::node_setting(settings, k);
         let disabled = get("plugins.security.disabled").map(|v| v != "false").unwrap_or(true);
-        let config = if disabled { SecurityConfig::defaults() } else { SecurityConfig::load() };
+        let mut refusal = None;
+        let config = if disabled { None } else { first_configuration(&mut refusal) };
+        let configured = config.is_some();
+        let config = config.unwrap_or_else(SecurityConfig::builtin);
         let restapi_roles = get("plugins.security.restapi.roles_enabled")
             .map(|v| {
                 v.split(',')
@@ -1187,7 +1479,121 @@ impl Security {
             allow_config_rewrite,
             salt: get("plugins.security.compliance.salt")
                 .unwrap_or_else(|| "e1ukloTsQlOgPquJ".into()),
+            configured: std::sync::atomic::AtomicBool::new(configured),
+            ready: std::sync::atomic::AtomicBool::new(configured),
+            clustered: std::sync::atomic::AtomicBool::new(false),
+            wire: parking_lot::Mutex::new(None),
+            refusal,
         })
+    }
+
+    /// This node is one of a cluster: the configuration it read from its own
+    /// files may be one the cluster has moved on from while it was away, so
+    /// nobody is let in by it until the cluster manager's has been taken.
+    pub fn join_cluster(&self) {
+        use std::sync::atomic::Ordering::Release;
+        self.clustered.store(true, Release);
+        self.ready.store(false, Release);
+    }
+
+    /// Whether anybody may be let in here now, and if not, why.
+    pub fn standing(&self) -> Standing {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.ready.load(Acquire) {
+            return Standing::NotInitialized;
+        }
+        // A node that has lost its cluster manager -- cut off, or stopped
+        // long enough to have been dropped -- cannot know what was revoked
+        // while it was gone, and the moment it is back it may be following a
+        // manager whose configuration it has not been sent yet.
+        if self.clustered.load(Acquire) && !crate::cluster::has_manager() {
+            return Standing::NoManager;
+        }
+        Standing::Ready
+    }
+
+    /// The configuration as the cluster state carries it; nothing where the
+    /// node holds none.
+    pub fn wire(&self) -> Option<Value> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.enabled || !self.configured.load(Acquire) {
+            return None;
+        }
+        let change = self.generation();
+        if let Some((at, v)) = &*self.wire.lock()
+            && *at == change
+        {
+            return Some(v.clone());
+        }
+        let v = to_wire(&self.config.read());
+        *self.wire.lock() = Some((change, v.clone()));
+        Some(v)
+    }
+
+    /// Take the configuration the cluster state carries, as the cluster
+    /// manager (`leading`) or as a node following it.
+    ///
+    /// A follower takes whatever its manager published: the manager is the
+    /// cluster's word, and a node whose own files say otherwise was away when
+    /// they stopped being true. A manager keeps its own configuration unless
+    /// the state holds a newer generation than it does -- it was elected over
+    /// a state it had accepted and not yet applied -- or it holds none.
+    pub fn settle(&self, published: Option<&Value>, leading: bool) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        if !self.enabled || !self.clustered.load(Acquire) {
+            return;
+        }
+        match published {
+            Some(p) => {
+                let newer = p.get("generation").and_then(|g| g.as_u64()).unwrap_or(0)
+                    > self.config.read().generation;
+                let take = if leading {
+                    !self.configured.load(Acquire) || newer
+                } else {
+                    self.wire().as_ref() != Some(p)
+                };
+                if take {
+                    self.take(p);
+                }
+            }
+            // a cluster whose manager holds no configuration lets nobody in
+            // through its other nodes either
+            None if !leading => {
+                self.ready.store(false, Release);
+                return;
+            }
+            None => {}
+        }
+        self.ready.store(self.configured.load(Acquire), Release);
+    }
+
+    fn take(&self, published: &Value) {
+        use std::sync::atomic::Ordering::Release;
+        let next = from_wire(published);
+        let mut cfg = self.config.write();
+        // Saved as well as held, so the node restarts with it; a node that
+        // cannot save it still answers by it, as the cluster's word, and takes
+        // it again from the cluster when it comes back.
+        if let Err(e) = next.save() {
+            tracing::error!(
+                "the security configuration from the cluster manager could not be saved in {}: {e}",
+                security_dir().display()
+            );
+        }
+        *cfg = next;
+        self.configured.store(true, Release);
+        self.touch(&cfg);
+        drop(cfg);
+        *self.wire.lock() = Some((self.generation(), published.clone()));
+    }
+
+    /// The cluster manager is gone: nobody is let in until there is one again
+    /// and its configuration has been taken.
+    pub fn lost_manager(&self) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        if self.clustered.load(Acquire) {
+            self.ready.store(false, Release);
+        }
     }
 
     /// The caller a request stands for, from its basic-auth header.
@@ -1806,5 +2212,126 @@ mod restapi_tests {
         assert!(!security.may_administer_endpoint(&caller, "AUDIT", "GET"));
         // an admin certificate is not delegated access and is not narrowed
         assert!(security.may_administer_endpoint(&Caller::unrestricted(), "AUDIT", "GET"));
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("velo-secsave-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn with_user(generation: u64, name: &str) -> SecurityConfig {
+        let mut c = SecurityConfig::builtin();
+        c.users.insert(name.into(), InternalUser::from_json(&json!({"hash": "$2y$12$x"})));
+        c.generation = generation;
+        c
+    }
+
+    #[test]
+    fn nothing_configured_is_no_configuration_and_no_demo_user() {
+        let dir = fresh_dir("empty");
+        assert!(SecurityConfig::load_from(&dir).unwrap().is_none());
+        let builtin = SecurityConfig::builtin();
+        assert!(builtin.users.is_empty(), "the built-in configuration holds no user");
+        assert!(builtin.roles.contains_key("all_access"));
+        let seeded = SecurityConfig::seeded("Seed-Password-1");
+        assert_eq!(seeded.users.keys().collect::<Vec<_>>(), vec!["admin"]);
+        assert!(seeded.authenticate("admin", "Seed-Password-1").is_some());
+        assert!(seeded.authenticate("admin", "admin").is_none());
+    }
+
+    #[test]
+    fn a_saved_generation_reads_back_whole() {
+        let dir = fresh_dir("roundtrip");
+        with_user(7, "alice").save_in(&dir).unwrap();
+        let back = SecurityConfig::load_from(&dir).unwrap().unwrap();
+        assert_eq!(back.generation, 7);
+        assert!(back.users.contains_key("alice"));
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp") || n == PENDING)
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn a_save_the_directory_refuses_is_an_error_and_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_dir("refused");
+        with_user(1, "alice").save_in(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let second = with_user(2, "bob").save_in(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // root writes where it likes, and has nothing to show here
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        assert!(second.is_err(), "a save into a read-only directory was answered as done");
+        let back = SecurityConfig::load_from(&dir).unwrap().unwrap();
+        assert_eq!(back.generation, 1);
+        assert!(back.users.contains_key("alice") && !back.users.contains_key("bob"));
+    }
+
+    #[test]
+    fn a_save_stopped_before_it_was_decided_leaves_the_old_generation() {
+        let dir = fresh_dir("undecided");
+        with_user(1, "alice").save_in(&dir).unwrap();
+        // every file of the next generation written, and the process stopped
+        // before the marker
+        with_user(2, "bob").write_undecided(&dir).unwrap();
+        let back = SecurityConfig::load_from(&dir).unwrap().unwrap();
+        assert_eq!(back.generation, 1);
+        assert!(back.users.contains_key("alice") && !back.users.contains_key("bob"));
+        assert!(!tmp_path(&dir, "internal_users.yml").exists());
+    }
+
+    #[test]
+    fn a_save_stopped_between_its_files_is_finished_by_the_next_load() {
+        let dir = fresh_dir("between");
+        with_user(1, "alice").save_in(&dir).unwrap();
+        with_user(2, "bob").write_undecided(&dir).unwrap();
+        std::fs::write(dir.join(PENDING), b"").unwrap();
+        // the users file renamed into place, the rest not yet
+        std::fs::rename(tmp_path(&dir, "internal_users.yml"), dir.join("internal_users.yml"))
+            .unwrap();
+        let back = SecurityConfig::load_from(&dir).unwrap().unwrap();
+        assert_eq!(back.generation, 2);
+        assert!(back.users.contains_key("bob") && !back.users.contains_key("alice"));
+        assert!(!dir.join(PENDING).exists());
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_be_read_whole_is_not_one() {
+        let dir = fresh_dir("broken");
+        with_user(1, "alice").save_in(&dir).unwrap();
+        std::fs::remove_file(dir.join("roles_mapping.yml")).unwrap();
+        assert!(SecurityConfig::load_from(&dir).is_err(), "a missing file was read past");
+        with_user(1, "alice").save_in(&dir).unwrap();
+        std::fs::write(dir.join("roles_mapping.yml"), ": : [ not yaml\n").unwrap();
+        assert!(SecurityConfig::load_from(&dir).is_err(), "a file that is not YAML was read past");
+    }
+
+    #[test]
+    fn the_initial_admin_password_must_be_strong() {
+        for weak in [
+            "admin",
+            "password",
+            "Password1",
+            "Pass-1",
+            "ALLUPPER-123",
+            "lower-case-1",
+            "My-Admin-Password-1",
+        ] {
+            assert!(initial_password_refusal(weak).is_err(), "{weak} was taken");
+        }
+        assert!(initial_password_refusal("Velo-Search-2026").is_ok());
     }
 }

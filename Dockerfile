@@ -40,6 +40,11 @@ USER velosearch
 # configured -- or said to be unwanted:
 #   docker run -e VELOSEARCH_PLUGINS_SECURITY_DISABLED=true -p 9200:9200 velosearch
 # Without either, the node refuses to start rather than answer anyone.
+# Security on has no default administrator: the first one's password is given
+# once, as OpenSearch's image takes it,
+#   docker run -e VELOSEARCH_DISABLED=false \
+#       -e VELOSEARCH_INITIAL_ADMIN_PASSWORD=... -p 9200:9200 velosearch
+# and until a node has a configuration it lets nobody in.
 #
 # The transport port is the same choice and a sharper one: whoever reaches it
 # is a node of the cluster. A container that publishes it wants

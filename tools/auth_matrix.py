@@ -38,6 +38,8 @@ import urllib.request
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tools" / "auth_matrix_baseline.json"
 MAIN = ROOT / "src" / "main.rs"
+# the node is given its first administrator's password; there is no default one
+ADMIN = ("admin", "Auth-Matrix-Key-2026")
 
 # the identities, as (name, credentials or None, what they are for)
 PEOPLE = [
@@ -189,7 +191,7 @@ def verdict(status, body):
 
 def fixtures(url):
     """The indices, users and roles the probes are run against."""
-    admin = ("admin", "admin")
+    admin = ADMIN
 
     def put(path, body, who=admin):
         return call(url, "PUT", path, who, body)
@@ -242,13 +244,14 @@ def start_node(binary, port, transport):
             "VELOSEARCH_TRANSPORT_PORT": str(transport),
             "VELOSEARCH_DISABLED": "false",
             "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+            "VELOSEARCH_INITIAL_ADMIN_PASSWORD": ADMIN[1],
         }
     )
     log = open(pathlib.Path(data) / "node.log", "w")
     node = subprocess.Popen([binary], env=env, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
     for _ in range(60):
-        status, _ = call(url, "GET", "/", ("admin", "admin"), None)
+        status, _ = call(url, "GET", "/", ADMIN, None)
         if status:
             return node, data, url
         if node.poll() is not None:

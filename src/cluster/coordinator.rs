@@ -88,6 +88,10 @@ const T_ELECTION: u64 = 5;
 const T_PUBLISH: u64 = 6;
 /// a replica's wait for its departed node is over
 const T_ALLOCATE: u64 = 7;
+/// publish now: the same as the allocation timer, which republishes and
+/// sets no timer of its own, so asking for it any number of times starts
+/// nothing that repeats
+pub const T_REPUBLISH: u64 = T_ALLOCATE;
 
 /// The timings, in milliseconds; OpenSearch's defaults where it has them.
 #[derive(Clone, Debug)]
@@ -519,6 +523,9 @@ impl Coordinator {
             out.push(self.send(&from, e.error(self.me.id.clone(), &msg)));
         }
         self.mode = Mode::Candidate;
+        if let Some(src) = &self.metadata {
+            src.security_lost();
+        }
         self.publishing = None;
         self.followers.clear();
         self.pending_checks.clear();
@@ -1120,6 +1127,11 @@ impl Coordinator {
         }
         s.routing = routing;
         s.cluster_settings = settings;
+        // the security configuration the state already carries is taken
+        // first when it is newer than this manager's own: a manager elected
+        // over a state it had not applied must not hand the cluster back an
+        // older one
+        src.settle_security(&s.customs, true);
         s.customs = src.customs();
         self.last_fingerprint = self.metadata_fingerprint(&own, &s.routing);
         out
@@ -1199,6 +1211,12 @@ impl Coordinator {
     fn apply_metadata(&mut self) -> Vec<Output> {
         let mut out = Vec::new();
         let Some(src) = self.metadata.clone() else { return out };
+        // the security configuration is taken with the state that carried it,
+        // and only from a manager this node is following now: the state a
+        // restarted node read back from its own disk is as old as the files
+        if matches!(self.mode, Mode::Leader | Mode::Follower(_)) {
+            src.settle_security(&self.committed.customs, self.mode == Mode::Leader);
+        }
         let me = self.me.id.clone();
         let routing = &self.committed.routing;
         for (name, m) in &self.committed.indices {

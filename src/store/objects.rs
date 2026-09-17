@@ -403,14 +403,19 @@ impl Store {
 impl Store {
     /// What the cluster manager publishes besides indices, so another node
     /// can take over with them: templates, component templates, pipelines
-    /// and stored scripts.
+    /// and stored scripts -- and the security configuration, which is the
+    /// cluster's as OpenSearch's security index is.
     pub fn customs(&self) -> Value {
-        serde_json::json!({
+        let mut customs = serde_json::json!({
             "templates": self.get_templates(),
             "components": self.get_components(),
             "pipelines": {"ingest": self.pipelines("ingest"), "search": self.pipelines("search")},
             "scripts": self.scripts.read().clone(),
-        })
+        });
+        if let Some(security) = self.security.wire() {
+            customs["security"] = security;
+        }
+        customs
     }
 
     /// Take the manager's customs as this node's own.

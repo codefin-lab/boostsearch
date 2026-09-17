@@ -66,7 +66,10 @@ VELOSEARCH_DATA=/tmp/velo-audit \
 examples/21-service-accounts-and-audit/run.sh
 ```
 
-`AUTH` sets the administrator credentials (default `admin:admin`). Every
+`AUTH` sets the administrator credentials (default
+`admin:Example-Passphrase-2026`, the password `node.sh` gives the node in
+`VELOSEARCH_INITIAL_ADMIN_PASSWORD`; a node with security on has no default
+administrator). Every
 password in the example is an obvious example value; `.env.example` lists them.
 
 ## What to look for

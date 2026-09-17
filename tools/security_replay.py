@@ -25,7 +25,7 @@ files and nothing depends on fixtures made by hand:
 The reference is a security-enabled OpenSearch started for this purpose; its
 password is one this check sets itself (`--ref-password`), not anyone's
 secret. This server is started the same way `docs` describes, with security
-on and the demo administrator.
+on and an initial admin password of its own.
 
     docker run -d --name os-secure -p 9253:9200 \\
         -e discovery.type=single-node \\
@@ -52,6 +52,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PORT = int(os.environ.get("VELO_SEC_PORT", "9368"))
 TRANSPORT = int(os.environ.get("VELO_SEC_TRANSPORT", "9468"))
 LAX = ssl._create_unverified_context()
+# the password this server is given for its first administrator, as the
+# reference is given its own
+OUR_ADMIN_PASSWORD = "Replay-Local-Key-2026"
 
 
 def call(base, path, method="GET", body=None, creds=None, timeout=30):
@@ -104,6 +107,7 @@ class Node:
             "VELOSEARCH_TRANSPORT_INSECURE": "true",
             "VELOSEARCH_DISABLED": "false",
             "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+            "VELOSEARCH_INITIAL_ADMIN_PASSWORD": OUR_ADMIN_PASSWORD,
         })
         self.log = open(log, "ab")
         self.proc = subprocess.Popen([binary], env=env, stdout=self.log, stderr=subprocess.STDOUT)
@@ -265,7 +269,7 @@ def main():
 
     ours = f"http://127.0.0.1:{PORT}"
     ref_admin = ("admin", a.ref_password)
-    our_admin = ("admin", "admin")
+    our_admin = ("admin", OUR_ADMIN_PASSWORD)
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="bssecrep."))
     (work / "data" / "config" / "security").mkdir(parents=True)

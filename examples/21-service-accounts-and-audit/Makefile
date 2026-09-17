@@ -24,7 +24,7 @@ check:
 print('requests and data: valid JSON')"
 
 clean:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; bs=$${VS:-http://127.0.0.1:9281}; auth=$${AUTH:-admin:admin}; \
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; bs=$${VS:-http://127.0.0.1:9281}; auth=$${AUTH:-admin:Example-Passphrase-2026}; \
 for i in $(INDICES); do curl -sS -u "$$auth" -X DELETE "$$bs/$$i" > /dev/null 2>&1 || true; done; \
 for p in $(SECURITY); do curl -sS -u "$$auth" -X DELETE "$$bs/_plugins/_security/api/$$p" > /dev/null 2>&1 || true; done; \
 echo "deleted: $(INDICES) $(SECURITY)"'

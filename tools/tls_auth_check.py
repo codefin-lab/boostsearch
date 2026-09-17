@@ -48,7 +48,7 @@ TRANSPORT = int(os.environ.get("VELO_TLS_TRANSPORT", "9474"))
 OPEN_PORT = int(os.environ.get("VELO_TLS_OPEN_PORT", "9372"))
 OPEN_TRANSPORT = int(os.environ.get("VELO_TLS_OPEN_TRANSPORT", "9472"))
 PROBE = "/_plugins/_security/health"
-ADMIN = ("admin", "admin")
+ADMIN = ("admin", "Tls-Check-Key-2026")
 
 
 def verified_context():
@@ -174,6 +174,7 @@ def main():
     try:
         node = Node(work / "data", f"127.0.0.1:{PORT}", TRANSPORT, config=config,
                     extra={"VELOSEARCH_DISABLED": "false",
+                           "VELOSEARCH_INITIAL_ADMIN_PASSWORD": ADMIN[1],
                            "VELOSEARCH_TRANSPORT_INSECURE": "true",
                            "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access"},
                     log=work / "tls-node.log")

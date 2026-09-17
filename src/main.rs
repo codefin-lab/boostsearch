@@ -547,6 +547,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
     };
+    // an initial admin password too weak to be one is refused before the node
+    // answers anybody, as OpenSearch's installer refuses it
+    if let Some(why) = &store.security.refusal {
+        eprintln!("velosearch: {why}");
+        std::process::exit(2);
+    }
     // anything acknowledged but not committed when the process last stopped is
     // in a translog and nowhere else; it goes back into the index before the
     // first request is answered
@@ -650,6 +656,12 @@ async fn main() -> anyhow::Result<()> {
         let alone = identity.single_node
             || (identity.seed_hosts.is_empty()
                 && identity.initial_cluster_manager_nodes.is_empty());
+        // A node of a cluster lets nobody in until it holds the configuration
+        // its cluster manager published. Said before the coordinator starts,
+        // which may take that configuration the moment it runs.
+        if !alone {
+            store.security.join_cluster();
+        }
         let seeds = cluster::runtime::discover_seeds(transport.clone(), &identity.seed_hosts).await;
         let initial_names = if alone {
             vec![identity.name.clone()]
@@ -686,11 +698,6 @@ async fn main() -> anyhow::Result<()> {
         // requests carried to the node they belong on
         cluster::replication::install(store.clone());
         cluster::search::install(store.clone());
-        // the security configuration is the cluster's, not this node's
-        if let Some(rt) = cluster::runtime() {
-            let me = rt.local();
-            security::spread::install(&rt, &store, &me);
-        }
         cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
