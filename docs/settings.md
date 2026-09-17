@@ -40,6 +40,7 @@ Nothing here can be set by a client, and nothing is allowed unless it is named.
 | `VELOSEARCH_REINDEX_ALLOWLIST` / `reindex.remote.allowlist` | the clusters `_reindex` may read from, as `host:port` where either half may be `*`. |
 | `VELOSEARCH_GEOIP_PATH` | the directory holding the MaxMind databases. See [geoip.md](geoip.md); they are not vendored. |
 | `VELOSEARCH_PHONETIC_RULES` | the directory holding the Beider-Morse rule files. See [phonetic.md](phonetic.md); they are not vendored either. |
+| `VELOSEARCH_UKRAINIAN_DICT` | the directory holding `ukrainian.dict` and `ukrainian.info`. See [ukrainian.md](ukrainian.md); the dictionary is not vendored either. |
 
 ## Security
 

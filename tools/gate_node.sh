@@ -22,8 +22,9 @@
 #     VELO_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh
 set -e
 PORT=${VELO_PORT:-9213}
-# The geoip databases and the Beider-Morse rule files are somebody else's data
-# and are not in this repository (docs/geoip.md, docs/phonetic.md). They used
+# The geoip databases, the Beider-Morse rule files and the Ukrainian
+# dictionary are somebody else's data and are not in this repository
+# (docs/geoip.md, docs/phonetic.md, docs/ukrainian.md). They used
 # to be looked for in /tmp, which a restart empties: the suites that read them
 # then failed for want of a file rather than for anything the code does. They
 # live under the home directory now, and VELO_FIXTURES says where.
@@ -43,6 +44,7 @@ VELOSEARCH_DATA="$DATA" \
 VELOSEARCH_NODE_ATTRS=testattr=test \
 VELOSEARCH_GEOIP_PATH=${VELO_GEOIP:-$FIXTURES/geoip-db} \
 VELOSEARCH_PHONETIC_RULES=${VELO_PHONETIC:-$FIXTURES/phonetic-rules} \
+VELOSEARCH_UKRAINIAN_DICT=${VELO_UKRAINIAN:-$FIXTURES/ukrainian-dict} \
 VELOSEARCH_PATH_REPO="$REPO" \
 VELOSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:$FIXTURE*" \
 VELOSEARCH_REINDEX_ALLOWLIST="127.0.0.1:*" \
