@@ -29,6 +29,7 @@ mod net;
 pub use net::*;
 mod objects;
 mod registry;
+pub use registry::SetAside;
 mod settings;
 mod translog;
 mod writer;
@@ -793,6 +794,17 @@ impl Store {
 
     pub fn cluster_settings(&self) -> Value {
         self.cluster_settings.read().clone()
+    }
+
+    /// Put persistent settings in place of the ones there are, whole: what a
+    /// restore of a snapshot's global state does, as the reference does it.
+    pub fn replace_persistent_settings(&self, persistent: &Value) {
+        let mut g = self.cluster_settings.write();
+        let kept = persistent.as_object().cloned().unwrap_or_default();
+        if !g.is_object() {
+            *g = serde_json::json!({"persistent": {}, "transient": {}});
+        }
+        g["persistent"] = Value::Object(kept);
     }
 
     /// A cluster setting by name; a transient value shadows a persistent one.

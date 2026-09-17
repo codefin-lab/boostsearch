@@ -674,6 +674,8 @@ async fn main() -> anyhow::Result<()> {
         // requests carried to the node they belong on
         cluster::replication::install(store.clone());
         cluster::search::install(store.clone());
+        // a snapshot's shards are written by the nodes holding their primaries
+        api::snapshot_install(store.clone());
         // the security configuration is the cluster's, not this node's
         if let Some(rt) = cluster::runtime() {
             let me = rt.local();

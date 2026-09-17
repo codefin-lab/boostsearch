@@ -243,8 +243,7 @@ fn snapshot(store: &Store, repository: &str, name: &str, index: &str) -> Result<
         "state": "SUCCESS",
         "start_time_in_millis": crate::store::now_millis(),
     });
-    crate::snapshot::write(store, &to, name, &[index.to_string()], &record)
-        .map_err(|e| e.to_string())?;
+    crate::snapshot::write_local(store, &to, name, &[index.to_string()], &record)?;
     store.put_snapshot(repository, name, record);
     Ok(format!("Successfully snapshotted [{index}] into [{repository}:{name}]"))
 }

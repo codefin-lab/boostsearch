@@ -318,6 +318,201 @@ fn bad_snapshot_lookup(repo: &str, names: &str) -> Option<Response> {
         .and_then(|one| bad_snapshot_name(repo, one))
 }
 
+/// The action a node is asked to write shards of a snapshot by.
+pub const SNAPSHOT_SHARDS: &str = "internal:cluster/snapshot/shards";
+
+/// The committed state of a cluster this node is one of several nodes in;
+/// `None` for a node that is the whole of its cluster, whose own store is
+/// everything there is.
+fn clustered() -> Option<crate::cluster::state::ClusterState> {
+    crate::cluster::runtime()?;
+    let state = crate::cluster::current_state();
+    (state.version > 0 && state.nodes.len() > 1).then_some(state)
+}
+
+/// Which node writes which primary shards of a snapshot.
+struct ShardPlan {
+    /// every index in the snapshot, and how many primary shards it has
+    shards: std::collections::BTreeMap<String, u32>,
+    /// the work of each node, by index: `None` is this node
+    work: Vec<(Option<crate::cluster::NodeId>, String, Vec<u32>)>,
+    /// the primaries no node can be asked for, and why
+    unassigned: Vec<(String, u32, String)>,
+}
+
+fn plan_shards(
+    store: &Store,
+    cluster: Option<&crate::cluster::state::ClusterState>,
+    indices: &[String],
+) -> ShardPlan {
+    use crate::cluster::state::ShardState;
+    let mut plan =
+        ShardPlan { shards: Default::default(), work: Vec::new(), unassigned: Vec::new() };
+    let me = crate::cluster::runtime().map(|rt| rt.local());
+    for index in indices {
+        let Some(state) = cluster else {
+            let count = store.get(index).map(|st| st.read().shard_count().max(1) as u32);
+            if let Some(count) = count {
+                plan.shards.insert(index.clone(), count);
+                plan.work.push((None, index.clone(), (0..count).collect()));
+            }
+            continue;
+        };
+        let Some(meta) = state.indices.get(index) else { continue };
+        let count = meta.number_of_shards.max(1);
+        plan.shards.insert(index.clone(), count);
+        let mut by_node: std::collections::BTreeMap<crate::cluster::NodeId, Vec<u32>> =
+            Default::default();
+        for shard in 0..count {
+            // the primary is what a snapshot is taken from; one being moved
+            // still answers from where it is until its target takes over
+            match state.routing.primary(index, shard).and_then(|p| {
+                matches!(p.state, ShardState::Started | ShardState::Relocating)
+                    .then(|| p.node.clone())
+                    .flatten()
+            }) {
+                Some(node) => by_node.entry(node).or_default().push(shard),
+                None => plan.unassigned.push((
+                    index.clone(),
+                    shard,
+                    "primary shard is not allocated".to_string(),
+                )),
+            }
+        }
+        for (node, shards) in by_node {
+            let node = (Some(&node) != me.as_ref()).then_some(node);
+            plan.work.push((node, index.clone(), shards));
+        }
+    }
+    plan
+}
+
+/// Ask every node in a plan to write its shards, this one included, all at
+/// once; what each answered, or why it did not.
+async fn run_shard_plan(
+    store: &Store,
+    to: &crate::snapshot::Source,
+    repo: &Value,
+    snapshot: &str,
+    plan: &ShardPlan,
+) -> Vec<(Option<String>, String, Vec<u32>, Result<Value, String>)> {
+    let mut waits = Vec::new();
+    let mut out = Vec::new();
+    for (node, index, shards) in &plan.work {
+        let (Some(node), Some(rt)) = (node, crate::cluster::runtime()) else { continue };
+        let body =
+            json!({"repository": repo, "snapshot": snapshot, "index": index, "shards": shards});
+        let (node, index, shards) = (node.clone(), index.clone(), shards.clone());
+        waits.push(tokio::spawn(async move {
+            // a large shard is a long write: the wait is for a node that has
+            // stopped answering, not for one that is busy
+            let answer = rt
+                .call(
+                    &node,
+                    SNAPSHOT_SHARDS,
+                    body.to_string().into_bytes(),
+                    std::time::Duration::from_secs(3600),
+                )
+                .await;
+            let result = match answer {
+                None => Err(format!("node [{}] did not answer", node.as_str())),
+                Some(e) if e.kind == crate::cluster::transport::Kind::Error => {
+                    Err(String::from_utf8_lossy(&e.body).into_owned())
+                }
+                Some(e) => serde_json::from_slice::<Value>(&e.body)
+                    .map_err(|_| format!("node [{}] answered nonsense", node.as_str())),
+            };
+            (Some(node.as_str().to_string()), index, shards, result)
+        }));
+    }
+    let me = crate::cluster::runtime().map(|rt| rt.local().as_str().to_string());
+    for (node, index, shards) in &plan.work {
+        if node.is_some() {
+            continue;
+        }
+        let result =
+            off_the_runtime(|| crate::snapshot::write_shards(store, to, snapshot, index, shards));
+        out.push((me.clone(), index.clone(), shards.clone(), result));
+    }
+    for w in waits {
+        if let Ok(answer) = w.await {
+            out.push(answer);
+        }
+    }
+    out
+}
+
+/// A node's side of a snapshot: write the shards it was asked for, from the
+/// primaries it holds, into the repository every node shares.
+pub fn snapshot_install(store: Store) {
+    use crate::cluster::runtime::DataFuture;
+    use crate::cluster::transport::Envelope;
+    let Some(rt) = crate::cluster::runtime() else { return };
+    let me = rt.local();
+    rt.register(
+        SNAPSHOT_SHARDS,
+        std::sync::Arc::new(move |e: Envelope| -> DataFuture {
+            let store = store.clone();
+            let me = me.clone();
+            Box::pin(async move {
+                let state = crate::cluster::current_state();
+                if e.from != me && !state.nodes.contains_key(&e.from) {
+                    return e.error(me, "not a node of this cluster");
+                }
+                let v: Value = serde_json::from_slice(&e.body).unwrap_or(Value::Null);
+                let snapshot = v["snapshot"].as_str().unwrap_or("").to_string();
+                let index = v["index"].as_str().unwrap_or("").to_string();
+                let asked: Vec<u32> = v["shards"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|s| s.as_u64()).map(|s| s as u32).collect())
+                    .unwrap_or_default();
+                let Some(to) = crate::snapshot::Source::of(&v["repository"]) else {
+                    return e.error(
+                        me,
+                        "the repository cannot be reached from this node: its location is not \
+                         under this node's path.repo",
+                    );
+                };
+                // only a primary this node holds is written from here: a copy
+                // that has just stopped being one may be behind the one that is
+                let mut failed = serde_json::Map::new();
+                let mine: Vec<u32> = asked
+                    .into_iter()
+                    .filter(|shard| {
+                        let held = state.routing.primary(&index, *shard).is_some_and(|p| {
+                            p.node.as_ref() == Some(&me)
+                                && matches!(
+                                    p.state,
+                                    crate::cluster::state::ShardState::Started
+                                        | crate::cluster::state::ShardState::Relocating
+                                )
+                        });
+                        if !held {
+                            failed.insert(
+                                shard.to_string(),
+                                json!("this node no longer holds the primary"),
+                            );
+                        }
+                        held
+                    })
+                    .collect();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::snapshot::write_shards(&store, &to, &snapshot, &index, &mine)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("the snapshot of the shards panicked: {e}")));
+                match result {
+                    Ok(mut answer) => {
+                        answer["failed"] = Value::Object(failed);
+                        e.response(me, answer.to_string().into_bytes())
+                    }
+                    Err(why) => e.error(me, &why),
+                }
+            })
+        }),
+    );
+}
+
 pub async fn create_snapshot(
     State(store): State<Store>,
     Path((repo, name)): Path<(String, String)>,
@@ -363,6 +558,20 @@ pub async fn create_snapshot(
         ),
         _ => None,
     };
+    // On a cluster the indices are the cluster's, not whichever of them the
+    // node answering this request happens to hold a copy of: naming an index
+    // kept on other nodes was answered 404, and a snapshot of everything
+    // left it out and said SUCCESS.
+    let cluster = clustered();
+    let resolve = |expr: &str| -> Vec<String> {
+        match &cluster {
+            Some(state) => crate::api::cluster_resolve(&store, expr)
+                .into_iter()
+                .filter(|n| state.indices.contains_key(n))
+                .collect(),
+            None => store.resolve(expr),
+        }
+    };
     let indices = match asked.as_deref() {
         Some(expr) => {
             // an index named outright has to be there to be kept
@@ -371,52 +580,157 @@ pub async fn create_snapshot(
             let lenient = ignore_unavailable(&p)
                 || body.get("ignore_unavailable").and_then(|v| v.as_bool()).unwrap_or(false);
             for part in expr.split(',').map(|s| s.trim()).filter(|s| !s.contains('*')) {
-                if store.resolve(part).is_empty() && !lenient {
+                if resolve(part).is_empty() && !lenient {
                     return no_such_index(part);
                 }
             }
-            store.resolve(expr)
+            resolve(expr)
         }
-        None => store.names(),
+        None => match &cluster {
+            Some(state) => state.indices.keys().cloned().collect(),
+            None => store.names(),
+        },
     };
     let global = body.get("include_global_state").and_then(|v| v.as_bool()).unwrap_or(true);
-    let mut record = snapshot_record(&store, &name, indices, global);
+    let partial = body.get("partial").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut record = snapshot_record(&store, &name, indices.clone(), global);
     // whatever the caller attached to the snapshot travels with it
     if let Some(meta) = body.get("metadata") {
         record["metadata"] = meta.clone();
     }
-    // A repository with somewhere to write gets the documents themselves; one
-    // without keeps the bookkeeping and nothing else, and says so.
-    match store.repositories().get(&repo).and_then(crate::snapshot::Source::of) {
-        Some(to) => {
-            let kept: Vec<String> = record["indices"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            if let Err(e) =
-                off_the_runtime(|| crate::snapshot::write(&store, &to, &name, &kept, &record))
-            {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "repository_exception",
-                    format!("[{repo}] could not write snapshot [{name}]: {e}"),
-                );
+    // a repository nothing can be written to cannot hold a snapshot. It used
+    // to keep the record and warn: the snapshot read back as SUCCESS, and a
+    // restore from it answered 200 having restored nothing at all
+    let Some(to) = store.repositories().get(&repo).and_then(crate::snapshot::Source::of) else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!(
+                "[{repo}] has nowhere to write snapshot [{name}]: the repository has no usable \
+                 location"
+            ),
+        );
+    };
+    let plan = plan_shards(&store, cluster.as_ref(), &indices);
+    // A primary with nowhere to be read from is a snapshot that cannot be
+    // whole, and the reference refuses it before it starts unless it was
+    // asked for what there is.
+    if !partial && !plan.unassigned.is_empty() {
+        let mut missing: Vec<&str> = plan.unassigned.iter().map(|(i, _, _)| i.as_str()).collect();
+        missing.dedup();
+        let uuid = record["uuid"].as_str().unwrap_or("_na_");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "snapshot_exception",
+            format!(
+                "[{repo}:{name}/{uuid}] Indices don't have primary shards [{}]",
+                missing.join(", ")
+            ),
+        );
+    }
+    let started = crate::snapshot::now_millis();
+    let repo_def = store.repositories().get(&repo).cloned().unwrap_or(Value::Null);
+    let answers = run_shard_plan(&store, &to, &repo_def, &name, &plan).await;
+    // every shard is accounted for: written, or failed with the reason
+    let mut failures: Vec<Value> = Vec::new();
+    let mut written_meta: std::collections::BTreeMap<String, Value> = Default::default();
+    let mut written: std::collections::BTreeMap<String, serde_json::Map<String, Value>> =
+        Default::default();
+    let mut failed: std::collections::BTreeMap<String, serde_json::Map<String, Value>> =
+        Default::default();
+    let mut fail = |index: &str, shard: u32, node: Option<&str>, reason: String| {
+        failed.entry(index.to_string()).or_default().insert(shard.to_string(), json!(reason));
+        failures.push(json!({
+            "index": index, "index_uuid": index, "shard_id": shard, "reason": reason,
+            "node_id": node, "status": "INTERNAL_SERVER_ERROR",
+        }));
+    };
+    for (index, shard, why) in &plan.unassigned {
+        fail(index, *shard, None, why.clone());
+    }
+    for (node, index, shards, answer) in answers {
+        match answer {
+            Ok(v) => {
+                let done = v.get("shards").and_then(|s| s.as_object()).cloned().unwrap_or_default();
+                for shard in &shards {
+                    match done.get(&shard.to_string()) {
+                        Some(stats) => {
+                            written
+                                .entry(index.clone())
+                                .or_default()
+                                .insert(shard.to_string(), stats.clone());
+                        }
+                        None => {
+                            let why = v
+                                .pointer(&format!("/failed/{shard}"))
+                                .and_then(|w| w.as_str())
+                                .unwrap_or("the shard was not written")
+                                .to_string();
+                            fail(&index, *shard, node.as_deref(), why);
+                        }
+                    }
+                }
+                if let Some(meta) = v.get("meta") {
+                    written_meta.entry(index.clone()).or_insert_with(|| meta.clone());
+                }
+            }
+            Err(why) => {
+                for shard in &shards {
+                    fail(&index, *shard, node.as_deref(), why.clone());
+                }
             }
         }
-        // a repository nothing can be written to cannot hold a snapshot. It
-        // used to keep the record and warn: the snapshot read back as
-        // SUCCESS, and a restore from it answered 200 having restored
-        // nothing at all
-        None => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "repository_exception",
-                format!(
-                    "[{repo}] has nowhere to write snapshot [{name}]: the repository has no \
-                     usable location"
-                ),
-            );
+    }
+    let write_rest = || -> std::io::Result<()> {
+        for (index, count) in &plan.shards {
+            // an index no shard of which could be written is still described,
+            // so what it is missing can be said -- by `_status`, and by the
+            // restore that refuses it
+            let meta = written_meta
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| json!({"name": index, "number_of_shards": count}));
+            let meta = &meta;
+            let empty = serde_json::Map::new();
+            crate::snapshot::write_index_meta(
+                &to,
+                &name,
+                index,
+                meta,
+                written.get(index).unwrap_or(&empty),
+                failed.get(index).unwrap_or(&empty),
+            )?;
         }
+        if global {
+            crate::snapshot::write_global(&to, &name, &crate::snapshot::global_state(&store))?;
+        }
+        Ok(())
+    };
+    let total: u64 = plan.shards.values().map(|n| *n as u64).sum();
+    let failed_count = failures.len() as u64;
+    record["shards"] =
+        json!({"total": total, "failed": failed_count, "successful": total - failed_count});
+    record["state"] = json!(if failed_count == 0 {
+        "SUCCESS"
+    } else if failed_count == total {
+        "FAILED"
+    } else {
+        "PARTIAL"
+    });
+    failures.sort_by_key(|f| (f["index"].to_string(), f["shard_id"].as_u64()));
+    record["failures"] = json!(failures);
+    let ended = crate::snapshot::now_millis();
+    record["start_time_in_millis"] = json!(started);
+    record["end_time_in_millis"] = json!(ended);
+    record["duration_in_millis"] = json!(ended.saturating_sub(started));
+    if let Err(e) =
+        off_the_runtime(write_rest).and_then(|_| crate::snapshot::write_record(&to, &name, &record))
+    {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "repository_exception",
+            format!("[{repo}] could not write snapshot [{name}]: {e}"),
+        );
     }
     store.put_snapshot(&repo, &name, record.clone());
     // without `wait_for_completion` the caller is told it has begun; with it,
@@ -563,32 +877,105 @@ pub async fn snapshot_status(
             format!("[{repo}:{gone}] is missing"),
         );
     }
-    let out: Vec<Value> = found
-        .into_iter()
-        .map(|s| {
-            let shards = s["shards"]["total"].as_u64().unwrap_or(1);
-            let stats = json!({
-                "incremental": {"file_count": shards, "size_in_bytes": 1024 * shards},
-                "total": {"file_count": shards, "size_in_bytes": 1024 * shards},
-                "start_time_in_millis": 1_577_836_800_000u64,
-                "time_in_millis": 0,
-            });
-            json!({
-                "snapshot": s["snapshot"].clone(),
-                "repository": repo,
-                "uuid": s["uuid"].clone(),
-                "state": "SUCCESS",
-                "include_global_state": s["include_global_state"].clone(),
-                "shards_stats": {
-                    "initializing": 0, "started": 0, "finalizing": 0,
-                    "done": shards, "failed": 0, "total": shards,
-                },
-                "stats": stats,
-                "indices": {},
-            })
-        })
-        .collect();
+    let from = store.repositories().get(&repo).and_then(crate::snapshot::Source::of);
+    let out: Vec<Value> = off_the_runtime(|| {
+        found.into_iter().map(|s| status_of(&repo, from.as_ref(), &s)).collect()
+    });
     respond(&p, json!({"snapshots": out}))
+}
+
+/// The status of a finished snapshot, shard by shard, from what its
+/// repository holds: each shard wrote one file, and a shard that could not be
+/// written is counted failed with the reason it gave.
+fn status_of(repo: &str, from: Option<&crate::snapshot::Source>, s: &Value) -> Value {
+    let started = s["start_time_in_millis"].as_u64().unwrap_or(0);
+    let took = s["duration_in_millis"].as_u64().unwrap_or(0);
+    let stats = |files: u64, bytes: u64, start: u64, time: u64| {
+        json!({
+            "incremental": {"file_count": files, "size_in_bytes": bytes},
+            "total": {"file_count": files, "size_in_bytes": bytes},
+            "start_time_in_millis": start,
+            "time_in_millis": time,
+        })
+    };
+    let counts = |done: u64, failed: u64| {
+        json!({"initializing": 0, "started": 0, "finalizing": 0,
+               "done": done, "failed": failed, "total": done + failed})
+    };
+    let snapshot = s["snapshot"].as_str().unwrap_or("");
+    let names: Vec<String> = s["indices"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let (mut all_done, mut all_failed, mut all_files, mut all_bytes) = (0u64, 0u64, 0u64, 0u64);
+    let mut indices = serde_json::Map::new();
+    for index in &names {
+        let found = from.and_then(|f| crate::snapshot::shard_stats(f, snapshot, index));
+        let described = found.as_ref().map(|(_, n)| *n);
+        let meta = found.map(|(m, _)| m);
+        let count = meta
+            .as_ref()
+            .and_then(|m| m.get("number_of_shards").and_then(|v| v.as_u64()))
+            .unwrap_or(1);
+        let mut shards = serde_json::Map::new();
+        let (mut done, mut failed, mut bytes) = (0u64, 0u64, 0u64);
+        for shard in 0..count {
+            let key = shard.to_string();
+            let written = meta.as_ref().and_then(|m| m.get("shards")?.get(&key));
+            match written {
+                Some(w) => {
+                    let size = w["size_in_bytes"].as_u64().unwrap_or(0);
+                    done += 1;
+                    bytes += size;
+                    shards.insert(
+                        key,
+                        json!({"stage": "DONE", "stats": stats(1, size,
+                        w["start_time_in_millis"].as_u64().unwrap_or(started),
+                        w["time_in_millis"].as_u64().unwrap_or(0))}),
+                    );
+                }
+                None => {
+                    failed += 1;
+                    let reason = meta
+                        .as_ref()
+                        .and_then(|m| m.get("failed_shards")?.get(&key)?.as_str().map(String::from))
+                        .unwrap_or_else(|| "the shard was not written".to_string());
+                    shards.insert(
+                        key,
+                        json!({"stage": "FAILURE", "reason": reason,
+                        "stats": stats(0, 0, started, 0)}),
+                    );
+                }
+            }
+        }
+        // the index's description is one more file, holding its mapping
+        let (files, bytes) = match described {
+            Some(size) => (done + 1, bytes + size),
+            None => (done, bytes),
+        };
+        all_done += done;
+        all_failed += failed;
+        all_files += files;
+        all_bytes += bytes;
+        indices.insert(
+            index.clone(),
+            json!({
+                "shards_stats": counts(done, failed),
+                "stats": stats(files, bytes, started, took),
+                "shards": shards,
+            }),
+        );
+    }
+    json!({
+        "snapshot": s["snapshot"].clone(),
+        "repository": repo,
+        "uuid": s["uuid"].clone(),
+        "state": s.get("state").cloned().unwrap_or(json!("SUCCESS")),
+        "include_global_state": s["include_global_state"].clone(),
+        "shards_stats": counts(all_done, all_failed),
+        "stats": stats(all_files, all_bytes, started, took),
+        "indices": indices,
+    })
 }
 
 pub async fn clone_snapshot(
@@ -709,8 +1096,12 @@ pub async fn restore_snapshot(
         .unwrap_or_default();
     // a record naming no index at all is a repository this node could not
     // read rather than a snapshot of nothing: answering 200 for it is a
-    // restore that says it worked and restored nothing
-    if held_indices.is_empty() {
+    // restore that says it worked and restored nothing. A snapshot of the
+    // cluster's global state alone is a snapshot of something, when that is
+    // what is asked back.
+    let global_only = source.get("include_global_state").and_then(|v| v.as_bool()) == Some(true)
+        && body.get("include_global_state").and_then(|v| v.as_bool()) == Some(true);
+    if held_indices.is_empty() && !global_only {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "repository_exception",
@@ -788,9 +1179,27 @@ pub async fn restore_snapshot(
         }
     };
     let from = store.repositories().get(&repo).and_then(crate::snapshot::Source::of);
-    // an index comes back from a snapshot open, and says so when asked how it
-    // was recovered
-    let mut restored = Vec::new();
+    let cluster = clustered();
+    let restore_failed =
+        |e: String| err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+    let open_exists = |target: &str| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "snapshot_restore_exception",
+            format!(
+                "[{repo}:{name}/{uuid}] cannot restore index [{target}] because an open index \
+                 with same name already exists in the cluster. Either close or delete the \
+                 existing index or restore the index under a different name by providing a \
+                 rename pattern and replacement name"
+            ),
+        )
+    };
+    // First, everything the restore will do is decided and everything it will
+    // read is read and checked, with nothing in the cluster touched. A restore
+    // used to take a closed index out of its way having only looked at the
+    // snapshot's description of it, and then find the documents damaged: it
+    // reported the failure, and the index that had been there was gone.
+    let mut steps: Vec<(String, String, Replaces)> = Vec::new();
     for n in held_indices
         .iter()
         .filter(|n| wanted.iter().any(|w| w == *n || crate::store::glob_match(w, n)))
@@ -836,96 +1245,157 @@ pub async fn restore_snapshot(
                 ),
             );
         }
-        if let Some(st) = store.get(&target) {
-            // an open index is being written to: restoring over it would
-            // mean two sets of documents under one name, so the reference
-            // refuses it and names the two ways out
-            if !st.read().closed {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "snapshot_restore_exception",
-                    format!(
-                        "[{repo}:{name}/{uuid}] cannot restore index [{target}] because an open index \
-                         with same name already exists in the cluster. Either close or delete the \
-                         existing index or restore the index under a different name by providing \
-                         a rename pattern and replacement name"
-                    ),
-                );
+        // an open index is being written to: restoring over it would mean
+        // two sets of documents under one name, so the reference refuses it
+        // and names the two ways out. On a cluster the index may be held
+        // only by other nodes.
+        let replaces = match store.get(&target) {
+            Some(st) if !st.read().closed => return open_exists(&target),
+            Some(_) => Replaces::ClosedHere,
+            None => match cluster.as_ref().and_then(|s| s.indices.get(&target)) {
+                Some(m) if m.state != "close" => return open_exists(&target),
+                Some(m) => Replaces::ClosedElsewhere(m.uuid.clone()),
+                None => Replaces::Nothing,
+            },
+        };
+        match from.as_ref() {
+            Some(source) => {
+                if let Err(e) =
+                    off_the_runtime(|| crate::snapshot::prepare(source, &name, n, &body))
+                {
+                    return restore_failed(e);
+                }
             }
-            // closed: what the snapshot holds replaces it
-            match from.as_ref() {
-                Some(source) => {
-                    // the index that is here goes only once the snapshot has
-                    // been read far enough to replace it. A snapshot that
-                    // holds nothing for this index -- a clone, which records
-                    // a snapshot without writing one -- used to take the
-                    // index with it and then report the failure.
-                    if let Err(e) = crate::snapshot::readable(source, &name, n) {
-                        return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
-                    }
-                    // still closed, or the restore does not happen: the
-                    // repository was read in between, and an index opened and
-                    // written to while it was read is not one to delete
-                    if !store.delete_if_closed(&target) {
-                        return err(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "snapshot_restore_exception",
-                            format!(
-                                "[{repo}:{name}/{uuid}] cannot restore index [{target}] because an open \
-                                 index with same name already exists in the cluster. Either \
-                                 close or delete the existing index or restore the index under a \
-                                 different name by providing a rename pattern and replacement \
-                                 name"
-                            ),
-                        );
-                    }
-                    if let Err(e) = off_the_runtime(|| {
-                        crate::snapshot::restore_index(&store, source, &name, n, &target, &body)
-                    }) {
-                        return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
-                    }
-                    // and open: the index put in its place kept the closed
-                    // mark of the one it replaced, so `_cat` said open and a
-                    // search said `index_closed_exception`
-                    if let Some(st) = store.get(&target) {
-                        let mut g = st.write();
-                        g.closed = false;
-                        g.restored = true;
-                        g.save_meta();
-                    }
-                }
-                // nothing to read it back from: the index is opened again
-                None => {
-                    let mut g = st.write();
-                    g.closed = false;
-                    g.restored = true;
-                    g.save_meta();
-                }
+            // nothing to read an index back from, and none to replace
+            None if matches!(replaces, Replaces::Nothing) => continue,
+            None => {}
+        }
+        steps.push((n.clone(), target, replaces));
+    }
+    // the cluster's templates, pipelines, scripts and settings, where they
+    // were kept and are asked for
+    let restore_global = body.get("include_global_state").and_then(|v| v.as_bool()) == Some(true)
+        && source.get("include_global_state").and_then(|v| v.as_bool()) == Some(true);
+    let global = match (restore_global, from.as_ref()) {
+        (true, Some(f)) => match off_the_runtime(|| crate::snapshot::read_global(f, &name)) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "snapshot_restore_exception", e);
+            }
+        },
+        _ => None,
+    };
+
+    // Then the indices are made. An index being replaced is set aside rather
+    // than deleted, and every index this restore made is taken away and every
+    // one it set aside put back if any of them cannot be made whole: a
+    // restore brings back everything it was asked for, or leaves the cluster
+    // as it found it and says why.
+    let mut made: Vec<(String, Option<crate::store::SetAside>)> = Vec::new();
+    let undo = |made: Vec<(String, Option<crate::store::SetAside>)>| {
+        for (target, aside) in made.into_iter().rev() {
+            store.delete(&target);
+            store.end_restore(&target);
+            if let Some(aside) = aside {
+                store.put_back(aside);
+            }
+        }
+    };
+    let mut restored = Vec::new();
+    for (n, target, replaces) in steps {
+        let Some(source) = from.as_ref() else {
+            // nothing to read it back from: the closed index is opened again
+            if let Some(st) = store.get(&target) {
+                let mut g = st.write();
+                g.closed = false;
+                g.restored = true;
+                g.save_meta();
             }
             restored.push(target);
             continue;
-        }
-        // gone: this is what a snapshot is for
-        let Some(from) = from.as_ref() else {
-            continue;
         };
-        // what the repository holds is looked at before anything is made, so
-        // a repository that cannot be read leaves no half-restored index
-        // standing in the way of the next attempt
-        if let Err(e) = crate::snapshot::readable(from, &name, n) {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
-        }
-        match off_the_runtime(|| {
-            crate::snapshot::restore_index(&store, from, &name, n, &target, &body)
-        }) {
+        // read again, and checked again, right before it is used: the
+        // repository is somebody's directory and may have changed since
+        let prepared = match off_the_runtime(|| crate::snapshot::prepare(source, &name, &n, &body))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                undo(made);
+                return restore_failed(e);
+            }
+        };
+        let aside = match replaces {
+            Replaces::Nothing => None,
+            // still closed, or the restore does not happen: an index opened
+            // and written to while the repository was read is not one to
+            // replace
+            Replaces::ClosedHere => match store.set_aside_if_closed(&target) {
+                Some(a) => Some(a),
+                None => {
+                    undo(made);
+                    return open_exists(&target);
+                }
+            },
+            // held only by other nodes: it is deleted through the cluster,
+            // and the restore waits for the cluster to have let it go before
+            // it makes the index that replaces it
+            Replaces::ClosedElsewhere(old) => {
+                store.tombstone(&target, &old);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while crate::cluster::current_state().indices.get(&target).map(|m| m.uuid == old)
+                    == Some(true)
+                    && std::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                None
+            }
+        };
+        // The documents go into an index no other node has a copy of yet: the
+        // copies the cluster places are filled from this one once it is
+        // published. Written inside the request's replication scope they
+        // were taken for writes to be sent on, to a primary the published
+        // state does not know of, and the restore was answered as a write
+        // this node was no longer the primary for.
+        let unshared = crate::cluster::replication::Writes::default();
+        let result = match store.begin_restore(&target) {
+            Ok(()) => off_the_runtime(|| {
+                crate::cluster::replication::WRITES
+                    .sync_scope(unshared, || crate::snapshot::apply(&store, prepared, &target))
+            }),
+            Err(e) => Err(format!("[{target}] could not be marked as being restored: {e}")),
+        };
+        made.push((target.clone(), aside));
+        match result {
             Ok(docs) => {
                 tracing::info!("restored [{target}] from [{repo}:{name}] with {docs} documents");
                 restored.push(target);
             }
             Err(e) => {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "repository_exception", e);
+                undo(made);
+                return restore_failed(e);
             }
         }
+    }
+    // every index is whole: what was set aside for them goes, and they are
+    // no longer being restored
+    for (target, aside) in made {
+        store.end_restore(&target);
+        if let Some(aside) = aside {
+            store.let_go(aside);
+        }
+        // and open: an index put in the place of a closed one kept the closed
+        // mark of the one it replaced, so `_cat` said open and a search said
+        // `index_closed_exception`
+        if let Some(st) = store.get(&target) {
+            let mut g = st.write();
+            g.closed = false;
+            g.restored = true;
+            g.save_meta();
+        }
+    }
+    if let Some(global) = global {
+        crate::snapshot::apply_global(&store, &global);
     }
     let shards = restored.len().max(1);
     respond(
@@ -936,4 +1406,13 @@ pub async fn restore_snapshot(
             "shards": {"total": shards, "failed": 0, "successful": shards},
         }}),
     )
+}
+
+/// What an index a restore makes takes the place of.
+enum Replaces {
+    Nothing,
+    /// a closed index this node holds
+    ClosedHere,
+    /// a closed index held only by other nodes, by its uuid
+    ClosedElsewhere(String),
 }

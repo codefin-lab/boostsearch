@@ -2,7 +2,8 @@
 //!
 //! A snapshot here is a directory of documents rather than a copy of the
 //! index's own files: one file per index holding its mapping and settings, and
-//! one holding its documents as they were written. It is slower to take and to
+//! one per primary shard holding that shard's documents as they were written,
+//! written by the node that holds the primary. It is slower to take and to
 //! restore than copying segments would be, and it does not care which version
 //! of the engine wrote it -- a restore re-indexes, so a snapshot outlives a
 //! change of format.
@@ -124,7 +125,7 @@ impl Source {
     }
 }
 
-use std::io::Write;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -214,42 +215,180 @@ pub fn location(repo: &Value) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Everything an index needs to come back: what it was, and what was in it.
-pub fn write(
+/// The file one shard's documents are kept in, inside its index's directory.
+fn shard_file(shard: u32) -> String {
+    format!("shard-{shard}.ndjson")
+}
+
+pub(crate) fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Write the documents of some primary shards of one index, as this node
+/// holds them, and say what was written.
+///
+/// A snapshot of a cluster is written shard by shard by the node holding
+/// each primary: the node a snapshot request reaches may hold none of them,
+/// and writing what it happened to hold made a snapshot that said SUCCESS
+/// and was missing every index kept elsewhere. What comes back is how the
+/// index was made and, for each shard, how many documents its file holds and
+/// its digest -- which the node coordinating the snapshot writes into the
+/// index's description once every shard has answered.
+pub fn write_shards(
+    store: &Store,
+    to: &Source,
+    snapshot: &str,
+    index: &str,
+    shards: &[u32],
+) -> Result<Value, String> {
+    let Some(st) = store.get(index) else {
+        return Err(format!("no copy of index [{index}] on this node"));
+    };
+    let started = now_millis();
+    // a snapshot is of what has been written, so what is waiting to be
+    // written is committed first
+    let _ = st.write().refresh();
+    let g = st.read();
+    let count = g.shard_count().max(1) as u32;
+    if let Some(bad) = shards.iter().find(|s| **s >= count) {
+        return Err(format!("index [{index}] has no shard [{bad}]"));
+    }
+    let mut files: BTreeMap<u32, (Vec<u8>, usize)> =
+        shards.iter().map(|s| (*s, (Vec::new(), 0))).collect();
+    dump(&g, |shard, line| {
+        if let Some((bytes, n)) = files.get_mut(&shard) {
+            bytes.extend_from_slice(line);
+            bytes.push(b'\n');
+            *n += 1;
+        }
+    });
+    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
+    let mut written = serde_json::Map::new();
+    for (shard, (bytes, n)) in files {
+        to.write(&format!("{within}/{}", shard_file(shard)), &bytes)
+            .map_err(|e| format!("could not write shard [{shard}] of [{index}]: {e}"))?;
+        written.insert(
+            shard.to_string(),
+            json!({
+                "count": n,
+                "sha256": sha256_hex(&bytes),
+                "size_in_bytes": bytes.len(),
+                "start_time_in_millis": started,
+                "time_in_millis": now_millis().saturating_sub(started),
+            }),
+        );
+    }
+    Ok(json!({
+        "meta": {
+            "name": index,
+            "mappings": g.mapping.raw,
+            "settings": g.settings,
+            "aliases": g.aliases,
+            "number_of_shards": count,
+        },
+        "shards": written,
+    }))
+}
+
+/// Write down what an index in a snapshot is: how it was made, and what
+/// each of its shards' files must be when it is read back. Written after the
+/// shards' files, so a description is only ever of files that are there.
+pub fn write_index_meta(
+    to: &Source,
+    snapshot: &str,
+    index: &str,
+    meta: &Value,
+    shards: &serde_json::Map<String, Value>,
+    failed: &serde_json::Map<String, Value>,
+) -> std::io::Result<()> {
+    let mut meta = meta.clone();
+    meta["shards"] = Value::Object(shards.clone());
+    meta["failed_shards"] = Value::Object(failed.clone());
+    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
+    to.write(&format!("{within}/meta.json"), meta.to_string().as_bytes())
+}
+
+/// Write a whole snapshot of indices this node holds every shard of.
+pub fn write_local(
     store: &Store,
     to: &Source,
     name: &str,
     indices: &[String],
     record: &Value,
-) -> std::io::Result<()> {
+) -> Result<(), String> {
     for index in indices {
-        let Some(st) = store.get(index) else { continue };
-        // a snapshot is of what has been written, so what is waiting to be
-        // written is committed first
-        let _ = st.write().refresh();
-        let g = st.read();
-        let within = format!("{name}/{}", crate::store::dir_name(index));
-        let mut docs = Vec::new();
-        let count = dump(&g, &mut docs)?;
-        // what the documents file must be when it is read back: a restore
-        // checks both before it makes the index
-        to.write(
-            &format!("{within}/meta.json"),
-            json!({
-                "name": index,
-                "mappings": g.mapping.raw,
-                "settings": g.settings,
-                "aliases": g.aliases,
-                "docs": {"count": count, "sha256": sha256_hex(&docs)},
-            })
-            .to_string()
-            .as_bytes(),
-        )?;
-        to.write(&format!("{within}/docs.ndjson"), &docs)?;
+        let Some(count) = store.get(index).map(|st| st.read().shard_count().max(1) as u32) else {
+            return Err(format!("no index [{index}] on this node"));
+        };
+        let shards: Vec<u32> = (0..count).collect();
+        let written = write_shards(store, to, name, index, &shards)?;
+        let done = written["shards"].as_object().cloned().unwrap_or_default();
+        write_index_meta(to, name, index, &written["meta"], &done, &serde_json::Map::new())
+            .map_err(|e| e.to_string())?;
     }
+    write_record(to, name, record).map_err(|e| e.to_string())
+}
+
+/// Write a snapshot's record, which is what makes it a snapshot: it is
+/// written last, once everything it describes is in place.
+pub fn write_record(to: &Source, name: &str, record: &Value) -> std::io::Result<()> {
     to.write(&format!("{name}/snapshot.json"), record.to_string().as_bytes())?;
     to.write_index();
     Ok(())
+}
+
+/// What a snapshot keeps of the cluster besides its indices.
+pub fn global_state(store: &Store) -> Value {
+    json!({
+        "customs": store.customs(),
+        "persistent": store.cluster_settings().get("persistent").cloned().unwrap_or(json!({})),
+    })
+}
+
+pub fn write_global(to: &Source, name: &str, global: &Value) -> std::io::Result<()> {
+    to.write(&format!("{name}/global.json"), global.to_string().as_bytes())
+}
+
+/// The global state a snapshot kept, read and checked before any of it is
+/// put in place.
+pub fn read_global(from: &Source, name: &str) -> Result<Value, String> {
+    let raw = from.read(&format!("{name}/global.json")).ok_or_else(|| {
+        format!("[{name}] was taken with its global state, but the repository holds none of it")
+    })?;
+    let global: Value = serde_json::from_slice(&raw)
+        .map_err(|e| format!("[{name}] cannot restore its global state: it is damaged ({e})"))?;
+    if !global.get("customs").map(|c| c.is_object()).unwrap_or(false)
+        || !global.get("persistent").map(|c| c.is_object()).unwrap_or(false)
+    {
+        return Err(format!("[{name}] cannot restore its global state: it is damaged"));
+    }
+    Ok(global)
+}
+
+/// Put a snapshot's global state in place, the way the reference does: the
+/// legacy templates it holds are written over those of the same name and the
+/// rest are kept; everything else it holds -- composable and component
+/// templates, pipelines of both kinds, stored scripts and the persistent
+/// settings -- replaces what is there, whole.
+pub fn apply_global(store: &Store, global: &Value) {
+    let customs = &global["customs"];
+    let mut templates: serde_json::Map<String, Value> = store
+        .get_templates()
+        .into_iter()
+        .filter(|(_, t)| t.get("__composable").is_none())
+        .collect();
+    if let Some(kept) = customs.get("templates").and_then(|t| t.as_object()) {
+        for (name, t) in kept {
+            templates.insert(name.clone(), t.clone());
+        }
+    }
+    let mut next = customs.clone();
+    next["templates"] = Value::Object(templates);
+    store.replace_customs(&next);
+    store.replace_persistent_settings(&global["persistent"]);
 }
 
 /// Copy what one snapshot holds into another, without reading it back
@@ -267,20 +406,53 @@ pub fn clone_into(
     indices: &[String],
     record: &Value,
 ) -> std::io::Result<()> {
+    let missing =
+        |what: String| std::io::Error::other(format!("[{name}] holds no [{what}] for index"));
     for index in indices {
         let dir = crate::store::dir_name(index);
-        for file in ["meta.json", "docs.ndjson"] {
+        let Some(raw) = from.read(&format!("{name}/{dir}/meta.json")) else {
+            return Err(missing(format!("meta.json] for index [{index}")));
+        };
+        let meta: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+        // the files the description names: one per shard written, or the one
+        // documents file a snapshot from before shards were kept apart holds
+        let files: Vec<String> = match meta.get("shards").and_then(|s| s.as_object()) {
+            Some(shards) => shards.keys().filter_map(|k| k.parse().ok()).map(shard_file).collect(),
+            None => vec!["docs.ndjson".to_string()],
+        };
+        for file in files {
             let Some(bytes) = from.read(&format!("{name}/{dir}/{file}")) else {
-                return Err(std::io::Error::other(format!(
-                    "[{name}] holds no [{file}] for index [{index}]"
-                )));
+                return Err(missing(format!("{file}] for index [{index}")));
             };
             to.write(&format!("{target}/{dir}/{file}"), &bytes)?;
         }
+        to.write(&format!("{target}/{dir}/meta.json"), &raw)?;
     }
-    to.write(&format!("{target}/snapshot.json"), record.to_string().as_bytes())?;
-    to.write_index();
-    Ok(())
+    if let Some(global) = from.read(&format!("{name}/global.json")) {
+        to.write(&format!("{target}/global.json"), &global)?;
+    }
+    write_record(to, target, record)
+}
+
+/// What an index in a snapshot holds, shard by shard, for `_status`: `None`
+/// for a shard that failed, and the bytes of every shard of a snapshot from
+/// before shards were kept apart counted as one.
+///
+/// The size of the index's own description comes back beside it: it is a
+/// file the snapshot wrote too, and the one an index with no documents has
+/// anything in.
+pub fn shard_stats(from: &Source, snapshot: &str, index: &str) -> Option<(Value, u64)> {
+    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
+    let raw = from.read(&format!("{within}/meta.json"))?;
+    let meta: Value = serde_json::from_slice(&raw).ok()?;
+    let described = raw.len() as u64;
+    if meta.get("shards").is_some() {
+        return Some((meta, described));
+    }
+    let size = meta.pointer("/docs/sha256").and(from.read(&format!("{within}/docs.ndjson")));
+    let mut out = meta.clone();
+    out["shards"] = json!({"0": {"size_in_bytes": size.map(|b| b.len()).unwrap_or(0)}});
+    Some((out, described))
 }
 
 /// The digest a snapshot records for a file it wrote.
@@ -289,9 +461,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
-/// Write out every living document, as it was given to us; how many.
-fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<usize> {
-    let mut count = 0usize;
+/// Every living document, as it was given to us, with the shard it is in.
+fn dump(g: &IdxState, mut each: impl FnMut(u32, &[u8])) {
     let searcher = g.reader.searcher();
     for seg in searcher.segment_readers() {
         let Ok(store_reader) = seg.get_store_reader(1) else { continue };
@@ -306,11 +477,9 @@ fn dump(g: &IdxState, out: &mut impl Write) -> std::io::Result<usize> {
                 "_routing": g.routing.get(id),
                 "_source": raw,
             });
-            writeln!(out, "{record}")?;
-            count += 1;
+            each(g.shard_of_doc(id) as u32, record.to_string().as_bytes());
         }
     }
-    Ok(count)
 }
 
 /// The snapshots a repository already holds.
@@ -331,40 +500,30 @@ pub fn read_records(dir: &Path) -> Vec<(String, Value)> {
     out
 }
 
-/// Put an index back the way the snapshot found it.
-///
-/// The mapping and settings are recreated first, then the documents are
-/// written back through the ordinary path -- which is why a snapshot taken by
-/// one version can be restored by another.
-/// Whether the repository holds this index in this snapshot, without
-/// restoring it: what a caller must know before the index that is here is
-/// deleted to make room.
-pub fn readable(from: &Source, snapshot: &str, index: &str) -> Result<(), String> {
-    let within = format!("{snapshot}/{}", crate::store::dir_name(index));
-    match from.read(&format!("{within}/meta.json")) {
-        Some(raw) if serde_json::from_slice::<Value>(&raw).is_ok() => {}
-        _ => return Err(format!("[{snapshot}] holds nothing for index [{index}]")),
-    }
-    // a snapshot always writes the documents, even when there were none of
-    // them: a repository that answers for the mapping and not for the
-    // documents is one that was half written or is half readable, and a
-    // restore from it is an index that comes back empty
-    match from.read(&format!("{within}/docs.ndjson")) {
-        Some(_) => Ok(()),
-        None => {
-            Err(format!("[{snapshot}] holds the mapping of index [{index}] but not its documents"))
-        }
-    }
+/// One document as a snapshot kept it: id, routing, source as sent, and that
+/// source read.
+type Kept = (String, Option<String>, String, Value);
+
+/// An index as a restore will make it, read whole and checked against what
+/// the snapshot recorded of it -- before anything in the cluster is touched.
+pub struct Prepared {
+    body: Value,
+    records: Vec<Kept>,
 }
 
-pub fn restore_index(
-    store: &Store,
+/// Read what a snapshot holds of one index, and check all of it.
+///
+/// Nothing is made or replaced here. A restore reads every index it will
+/// bring back through this first, so a snapshot that cannot be brought back
+/// whole -- a file cut short, a line spoiled, a file missing, a shard that
+/// was never written -- is found before any index is created or any closed
+/// one is taken out of its way.
+pub fn prepare(
     from: &Source,
     snapshot: &str,
     index: &str,
-    as_name: &str,
     request: &Value,
-) -> Result<usize, String> {
+) -> Result<Prepared, String> {
     let within = format!("{snapshot}/{}", crate::store::dir_name(index));
     let meta: Value = from
         .read(&format!("{within}/meta.json"))
@@ -425,42 +584,89 @@ pub fn restore_index(
             settings[format!("index.{k}")] = v;
         }
     }
+    // an index whose analysis cannot be built would be refused when it is
+    // made, which for an index being replaced is after the old one is gone
+    if let Some(complaint) = crate::analysis::Registry::complaint(&settings) {
+        return Err(format!("[{snapshot}] cannot restore index [{index}]: {complaint}"));
+    }
     let body = json!({
         "mappings": meta.get("mappings").cloned().unwrap_or_else(|| json!({})),
         "settings": settings,
         "aliases": aliases,
     });
-    // The documents are written by every snapshot, empty index or not, so
-    // their absence is a repository that cannot be read rather than an index
-    // that held nothing: answering `0` for it is a restore that reports
-    // success and brings nothing back. They are read before the index is
-    // made, so a repository that cannot be read leaves nothing behind -- an
-    // index created and then failed over is one the retry cannot get past.
-    let Some(docs) = from.read(&format!("{within}/docs.ndjson")) else {
-        return Err(format!(
-            "[{snapshot}] holds the mapping of index [{index}] but not its documents"
-        ));
+    let damaged = |what: &str, why: String| {
+        format!("[{snapshot}] cannot restore index [{index}]: {what} is damaged ({why})")
     };
-    // A damaged documents file used to restore as far as it could be read:
-    // a line that did not parse was skipped, a file cut short ended early,
-    // and the restore answered success with fewer documents than the
-    // snapshot took. The file is checked against what the snapshot recorded
-    // of it, and every line read, before the index is made -- a restore that
-    // cannot bring back everything brings back nothing and says why.
-    // Snapshots from before the record was kept are read line by line alone.
-    let damaged = |why: String| {
-        format!(
-            "[{snapshot}] cannot restore index [{index}]: its documents file is damaged ({why})"
-        )
-    };
-    if let Some(want) = meta.pointer("/docs/sha256").and_then(|v| v.as_str()) {
-        let got = sha256_hex(&docs);
-        if got != want {
-            return Err(damaged(format!("sha256 {got}, the snapshot recorded {want}")));
+    let mut records: Vec<Kept> = Vec::new();
+    match meta.get("shards").and_then(|s| s.as_object()) {
+        Some(shards) => {
+            // A snapshot that could not write every shard says so, and an
+            // index missing a shard is not brought back as though it were
+            // whole -- unless the request asked for what there is.
+            let partial = request.get("partial").and_then(|v| v.as_bool()).unwrap_or(false);
+            let count = meta
+                .get("number_of_shards")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(shards.len() as u64) as u32;
+            for shard in 0..count {
+                let Some(recorded) = shards.get(&shard.to_string()) else {
+                    if partial {
+                        continue;
+                    }
+                    return Err(format!(
+                        "[{snapshot}] index [{index}] wasn't fully snapshotted - cannot restore"
+                    ));
+                };
+                let file = shard_file(shard);
+                let Some(bytes) = from.read(&format!("{within}/{file}")) else {
+                    return Err(format!(
+                        "[{snapshot}] holds the mapping of index [{index}] but not the documents \
+                         of its shard [{shard}]"
+                    ));
+                };
+                let what = format!("the documents file of shard [{shard}]");
+                read_documents(&bytes, recorded, &mut records)
+                    .map_err(|why| damaged(&what, why))?;
+            }
+            if shards.is_empty() {
+                return Err(format!(
+                    "[{snapshot}] index [{index}] wasn't fully snapshotted - cannot restore"
+                ));
+            }
+        }
+        None => {
+            // A snapshot from before shards were written apart: one file.
+            // The documents are written by every snapshot, empty index or
+            // not, so their absence is a repository that cannot be read
+            // rather than an index that held nothing.
+            let Some(bytes) = from.read(&format!("{within}/docs.ndjson")) else {
+                return Err(format!(
+                    "[{snapshot}] holds the mapping of index [{index}] but not its documents"
+                ));
+            };
+            let recorded = meta.get("docs").cloned().unwrap_or(Value::Null);
+            read_documents(&bytes, &recorded, &mut records)
+                .map_err(|why| damaged("its documents file", why))?;
         }
     }
-    let mut records: Vec<(String, Option<String>, String, Value)> = Vec::new();
-    for (n, line) in docs.split(|b| *b == b'\n').filter(|l| !l.is_empty()).enumerate() {
+    Ok(Prepared { body, records })
+}
+
+/// Read one documents file, checked against the digest and count the
+/// snapshot recorded for it where it recorded them, every line of it.
+///
+/// A damaged documents file used to restore as far as it could be read: a
+/// line that did not parse was skipped, a file cut short ended early, and the
+/// restore answered success with fewer documents than the snapshot took.
+fn read_documents(bytes: &[u8], recorded: &Value, out: &mut Vec<Kept>) -> Result<(), String> {
+    if let Some(want) = recorded.get("sha256").and_then(|v| v.as_str()) {
+        let got = sha256_hex(bytes);
+        if got != want {
+            return Err(format!("sha256 {got}, the snapshot recorded {want}"));
+        }
+    }
+    let mut read = 0u64;
+    for (n, line) in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()).enumerate() {
         let parsed = std::str::from_utf8(line)
             .ok()
             .and_then(|l| serde_json::from_str::<Value>(l).ok())
@@ -472,31 +678,47 @@ pub fn restore_index(
                 Some((id, routing, raw, source))
             });
         match parsed {
-            Some(r) => records.push(r),
-            None => return Err(damaged(format!("line {} cannot be read", n + 1))),
+            Some(r) => out.push(r),
+            None => return Err(format!("line {} cannot be read", n + 1)),
         }
+        read += 1;
     }
-    if let Some(want) = meta.pointer("/docs/count").and_then(|v| v.as_u64())
-        && records.len() as u64 != want
+    if let Some(want) = recorded.get("count").and_then(|v| v.as_u64())
+        && read != want
     {
-        return Err(damaged(format!("{} documents, the snapshot recorded {want}", records.len())));
+        return Err(format!("{read} documents, the snapshot recorded {want}"));
     }
-    store.create(as_name, &body).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Make an index from what `prepare` read, under the name it is restored as.
+///
+/// Every document is written or the restore has failed: a document the index
+/// would not take is an index that is not what the snapshot held. What this
+/// made is the caller's to take away when it fails.
+pub fn apply(store: &Store, prepared: Prepared, as_name: &str) -> Result<usize, String> {
+    store.create(as_name, &prepared.body).map_err(|e| e.to_string())?;
     let Some(st) = store.get(as_name) else {
         return Err(format!("[{as_name}] could not be created"));
     };
     let mut count = 0usize;
     let mut g = st.write();
-    for (id, routing, raw, source) in records {
+    for (id, routing, raw, source) in prepared.records {
         if let Some(r) = routing {
             g.routing.insert(id.clone(), r);
         }
-        if crate::api::write_doc_internal(&mut g, &id, source, "index", Some(raw), None).is_ok() {
-            count += 1;
+        if let Err(e) =
+            crate::api::write_doc_internal(&mut g, &id, source, "index", Some(raw), None)
+        {
+            return Err(format!(
+                "[{as_name}] could not take document [{id}] back (answered {})",
+                e.status()
+            ));
         }
+        count += 1;
     }
     g.restored = true;
-    let _ = g.refresh();
+    g.refresh().map_err(|e| format!("[{as_name}] could not be committed: {e}"))?;
     Ok(count)
 }
 

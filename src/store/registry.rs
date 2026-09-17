@@ -203,6 +203,7 @@ impl Store {
             scrolls: Arc::new(RwLock::new(HashMap::new())),
             scripts: Arc::new(RwLock::new(HashMap::new())),
         };
+        recover_interrupted_restores(&dir);
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -1076,37 +1077,110 @@ impl Store {
         }));
     }
 
-    /// Delete an index only while it is still closed.
+    /// Take a closed index out of the way of a restore, without deleting it.
     ///
     /// A restore over an existing index refuses unless the index is closed,
-    /// and then reads the repository before deleting it. Between those two
+    /// and then reads the repository before replacing it. Between those two
     /// moments the index can be opened and written to: the refusal that
     /// exists to stop two sets of documents living under one name was made
     /// on a fact that had stopped being true, and acknowledged writes went
-    /// with the delete. The decision and the removal happen together here.
-    pub fn delete_if_closed(&self, name: &str) -> bool {
-        let Some(st) = self.get(name) else { return false };
-        {
-            let g = st.read();
-            if !g.closed {
-                return false;
-            }
+    /// with the replacement. The decision and the removal happen together
+    /// here.
+    ///
+    /// The index is not deleted. It used to be, and a restore that failed
+    /// after that point -- a documents file that did not match what the
+    /// snapshot recorded of it, a disk that filled -- left no index at all
+    /// where there had been one. Its files are moved beside the data instead,
+    /// and the restore either puts it back or lets it go once the index that
+    /// replaces it is whole. A node that stops in between puts it back when
+    /// it starts again.
+    pub fn set_aside_if_closed(&self, name: &str) -> Option<SetAside> {
+        let st = self.get(name)?;
+        if !st.read().closed {
+            return None;
         }
         // the guard is held while the name is taken out of the map, so an
         // `_open` that is about to flip the flag either got there first --
         // and the check above saw it -- or waits for this to finish
         let held = st.write();
         if !held.closed {
-            return false;
+            return None;
         }
-        let removed = { self.inner.write().remove(name) };
+        let handle = { self.inner.write().remove(name) }?;
         drop(held);
-        drop(removed);
         self.request_cache.clear_index(name);
-        if let Some(path) = self.index_path(name) {
-            let _ = std::fs::remove_dir_all(path);
+        let mut moved = None;
+        if let (Some(path), Some(aside)) = (self.index_path(name), self.aside_path(name)) {
+            if let Some(parent) = aside.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_dir_all(&aside);
+            if path.exists() {
+                if let Err(e) = std::fs::rename(&path, &aside) {
+                    // nothing has been lost yet: the index goes back where it was
+                    tracing::warn!("could not set [{name}] aside for a restore: {e}");
+                    self.inner.write().insert(name.to_string(), handle);
+                    return None;
+                }
+                moved = Some((path, aside));
+            }
         }
-        true
+        Some(SetAside { name: name.to_string(), handle, moved })
+    }
+
+    /// Put an index that was set aside back where it was, in place of
+    /// whatever a failed restore left under its name.
+    pub fn put_back(&self, aside: SetAside) {
+        let SetAside { name, handle, moved } = aside;
+        self.drop_local(&name);
+        if let Some((path, aside)) = moved {
+            let _ = std::fs::remove_dir_all(&path);
+            if let Err(e) = std::fs::rename(&aside, &path) {
+                tracing::error!("could not put [{name}] back after a failed restore: {e}");
+            }
+        }
+        self.request_cache.clear_index(&name);
+        self.inner.write().insert(name, handle);
+    }
+
+    /// Let an index that was set aside go, now that what replaced it is whole.
+    pub fn let_go(&self, aside: SetAside) {
+        let SetAside { handle, moved, .. } = aside;
+        let handles = [handle];
+        wait_until_unheld(&handles);
+        drop(handles);
+        if let Some((_, aside)) = moved {
+            let _ = std::fs::remove_dir_all(aside);
+        }
+    }
+
+    /// Say that an index is being restored under this name, before it is
+    /// made: a node that stops before the restore is finished finds the mark
+    /// when it starts and takes the half-restored index away, rather than
+    /// opening it as though it were whole.
+    pub fn begin_restore(&self, name: &str) -> std::io::Result<()> {
+        let Some(mark) = self.restoring_mark(name) else { return Ok(()) };
+        if let Some(parent) = mark.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&mark, name.as_bytes())
+    }
+
+    /// The restore of this index is finished, one way or the other.
+    pub fn end_restore(&self, name: &str) {
+        if let Some(mark) = self.restoring_mark(name) {
+            let _ = std::fs::remove_file(mark);
+        }
+    }
+
+    fn aside_path(&self, name: &str) -> Option<PathBuf> {
+        let dir = dir_name(name);
+        (!dir.is_empty()).then(|| self.data_dir.as_ref().map(|d| d.join(SET_ASIDE).join(dir)))?
+    }
+
+    fn restoring_mark(&self, name: &str) -> Option<PathBuf> {
+        let dir = dir_name(name);
+        (!dir.is_empty()).then(|| self.data_dir.as_ref().map(|d| d.join(RESTORING).join(dir)))?
     }
 
     fn delete_with(&self, name: &str, record: bool) -> bool {
@@ -1157,6 +1231,53 @@ impl Store {
             }
         }
         any
+    }
+}
+
+/// Where an index a restore is replacing waits, beside the data directory's
+/// indices. An index directory's name never starts with a dot, so neither of
+/// these is ever taken for one.
+const SET_ASIDE: &str = ".restore-aside";
+/// Where the mark of an index being restored is kept.
+const RESTORING: &str = ".restoring";
+
+/// A closed index a restore has taken out of its way, to be put back if the
+/// restore fails and let go once it has not.
+pub struct SetAside {
+    name: String,
+    handle: Arc<crate::store::IdxLock>,
+    /// where its files were, and where they are now
+    moved: Option<(PathBuf, PathBuf)>,
+}
+
+/// Finish, the safe way, whatever restore a node stopped in the middle of.
+///
+/// An index that was being restored and has its mark still is half there,
+/// and is taken away. An index that was set aside for it goes back where it
+/// was when nothing whole took its place, and is let go when something did.
+fn recover_interrupted_restores(data: &FsPath) {
+    if let Ok(marks) = std::fs::read_dir(data.join(RESTORING)) {
+        for mark in marks.flatten() {
+            let half = data.join(mark.file_name());
+            tracing::warn!("removing [{}], whose restore did not finish", half.display());
+            let _ = std::fs::remove_dir_all(&half);
+            let _ = std::fs::remove_file(mark.path());
+        }
+    }
+    if let Ok(asides) = std::fs::read_dir(data.join(SET_ASIDE)) {
+        for aside in asides.flatten() {
+            let slot = data.join(aside.file_name());
+            if slot.join("_meta.json").exists() {
+                let _ = std::fs::remove_dir_all(aside.path());
+            } else {
+                tracing::warn!(
+                    "putting [{}] back after a restore that did not finish",
+                    slot.display()
+                );
+                let _ = std::fs::remove_dir_all(&slot);
+                let _ = std::fs::rename(aside.path(), &slot);
+            }
+        }
     }
 }
 
@@ -1225,5 +1346,105 @@ fn codec_settings(body: &Value) -> velocore::IndexSettings {
         }),
         docstore_blocksize: block,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod restore_set_aside_tests {
+    use crate::store::Store;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("velo-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        dir
+    }
+
+    /// A closed index holding three documents.
+    fn closed_with_three(store: &Store, name: &str) {
+        let st = store.ensure(name).expect("an index");
+        let mut g = st.write();
+        for id in ["a", "b", "c"] {
+            let wrote =
+                crate::api::doc::write_doc(&mut g, id, serde_json::json!({"n": 1}), "index");
+            assert!(wrote.is_ok());
+        }
+        g.refresh().expect("a commit");
+        g.closed = true;
+        g.save_meta();
+    }
+
+    fn held(store: &Store, name: &str) -> Option<(u64, bool)> {
+        let st = store.get(name)?;
+        let g = st.read();
+        Some((g.reader.searcher().num_docs(), g.closed))
+    }
+
+    #[test]
+    fn an_index_set_aside_for_a_restore_that_failed_is_put_back_whole() {
+        let dir = scratch("aside-back");
+        let store = Store::on_disk(&dir).expect("a store");
+        closed_with_three(&store, "orig");
+        let aside = store.set_aside_if_closed("orig").expect("a closed index is set aside");
+        assert!(store.get("orig").is_none(), "the name is free for the restore");
+        // what a restore made before it failed
+        store.begin_restore("orig").expect("a mark");
+        store.create("orig", &serde_json::json!({})).expect("the restored index");
+        store.delete("orig");
+        store.end_restore("orig");
+        store.put_back(aside);
+        assert_eq!(
+            held(&store, "orig"),
+            Some((3, true)),
+            "the original, closed, with its documents"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_open_index_is_not_set_aside() {
+        let dir = scratch("aside-open");
+        let store = Store::on_disk(&dir).expect("a store");
+        closed_with_three(&store, "orig");
+        store.get("orig").expect("the index").write().closed = false;
+        assert!(store.set_aside_if_closed("orig").is_none());
+        assert_eq!(held(&store, "orig"), Some((3, false)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_node_stopped_in_the_middle_of_a_restore_starts_with_the_original() {
+        let dir = scratch("aside-crash");
+        {
+            let store = Store::on_disk(&dir).expect("a store");
+            closed_with_three(&store, "orig");
+            let aside = store.set_aside_if_closed("orig").expect("set aside");
+            store.begin_restore("orig").expect("a mark");
+            store.create("orig", &serde_json::json!({})).expect("the half-restored index");
+            // the node stops here: the index is neither put back nor let go
+            std::mem::forget(aside);
+        }
+        let store = Store::on_disk(&dir).expect("the store, again");
+        assert_eq!(held(&store, "orig"), Some((3, true)), "the original is back, closed and whole");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_node_stopped_after_a_restore_finished_keeps_what_it_restored() {
+        let dir = scratch("aside-done");
+        {
+            let store = Store::on_disk(&dir).expect("a store");
+            closed_with_three(&store, "orig");
+            let aside = store.set_aside_if_closed("orig").expect("set aside");
+            store.begin_restore("orig").expect("a mark");
+            store.create("orig", &serde_json::json!({})).expect("the restored index");
+            store.end_restore("orig");
+            // the node stops before the index set aside is let go
+            std::mem::forget(aside);
+        }
+        let store = Store::on_disk(&dir).expect("the store, again");
+        assert_eq!(held(&store, "orig"), Some((0, false)), "the restored index, not the old one");
+        assert!(!dir.join(".restore-aside").join("orig").exists(), "and the old one is gone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -636,7 +636,9 @@ pub(crate) async fn cat_by_name(
                     let indices = snap["indices"].as_array().map(|a| a.len()).unwrap_or(0);
                     rows.push(vec![
                         ("id", name),
-                        ("status", "SUCCESS".into()),
+                        // a snapshot that could not write every shard says
+                        // so here as well as in its record
+                        ("status", snap["state"].as_str().unwrap_or("SUCCESS").to_string()),
                         ("start_epoch", "0".into()),
                         ("start_time", "00:00:00".into()),
                         ("end_epoch", "0".into()),
